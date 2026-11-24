@@ -11,7 +11,6 @@ type Job = {
   source?: string; ref?: string; previous_commit?: string; changed_folders?: string[];
   error?: string | null; warning?: string | null;
   manifest?: { name?: string; version?: string; description?: string; uses?: unknown; services?: unknown; python?: unknown; engine?: unknown; web?: unknown; agents?: unknown; contributes?: unknown; hooks?: unknown; mcp?: unknown };
-  changes?: { added?: string[]; modified?: string[]; removed?: string[]; new_grants?: string[]; new_dependencies?: string[] };
 };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -40,8 +39,8 @@ export function describePluginAdds(manifest: NonNullable<Job["manifest"]>): stri
     ...(manifest.engine ? ["engine routes"] : []),
     ...(manifest.web ? ["browser code"] : []),
     ...(manifest.agents ? ["agent definitions"] : []),
-    ...(manifest.hooks ? ["hooks"] : []),
-    ...(manifest.mcp ? ["MCP servers"] : []),
+    ...(manifest.hooks ? ["hooks"] : ["no hooks"]),
+    ...(manifest.mcp ? ["MCP servers"] : ["no MCP servers"]),
     ...(services.length ? [`${services.length} background process${services.length === 1 ? "" : "es"}`] : []),
   ];
 }
@@ -58,7 +57,15 @@ export function describeUses(value: unknown): { throughKollab: string[]; onItsOw
     const [kind, ...rest] = item.split(":");
     const detail = rest.join(":");
     if (!detail) return [];
-    if (kind === "run") return [`Runs: ${detail}`];
+    if (kind === "run") {
+      const programs = detail.split(",").map((program) => program.trim().toLowerCase());
+      return [
+        `Runs: ${detail}`,
+        ...(programs.some((program) => program === "codex" || program === "claude")
+          ? ["Its coding agents use a shell without asking."]
+          : []),
+      ];
+    }
     if (kind === "net") return [`Talks to: ${detail}.`];
     if (kind === "files") return [`Reads or writes: ${detail}.`];
     return [];
@@ -182,7 +189,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
         {ready && job ? <>
           <p className="text-sm font-semibold">{job.manifest?.name ?? job.plugin_id ?? "Plugin"}</p>
           {job.manifest?.description ? <p className="text-muted-foreground text-sm">{job.manifest.description}</p> : null}
-          {job.source ? <p className="break-all text-sm">From: {job.source}{job.ref ? ` (${job.ref})` : ""}</p> : null}
+          {job.source ? <p className="break-all text-sm">From: {job.source}{job.ref ? ` (${job.ref})` : " (default branch)"}</p> : null}
           {job.previous_commit ? <p className="break-all text-xs">Previous Commit: {job.previous_commit}</p> : null}
           <p className="break-all text-xs">Commit: {job.commit}</p><p className="break-all text-xs">Files SHA-256: {job.files_sha256}</p>
           <DetailsList label="Changed Folders" values={job.changed_folders} />
@@ -190,17 +197,14 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           <DetailsList label="Through Kollab" values={throughKollab} />
           <DetailsList label="On Its Own" values={onItsOwn} />
           <DetailsList label="Other Declarations" values={other} />
-          {uses.includes("agents") ? <DetailsList label="Limits" values={["When available, agent limits cover Kollab runs and usage the plugin reports; unreported spend is not capped."]} /> : null}
           {job.warning ? <p className="text-sm">{job.warning}</p> : null}
           <div className="bg-muted flex gap-3 rounded-lg p-3 text-sm"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" /><p>{PLUGIN_TRUST_NOTICE}</p></div>
-          <DetailsList label="New Grants" values={job.changes?.new_grants} /><DetailsList label="New Dependencies" values={job.changes?.new_dependencies} />
-          <DetailsList label="Added Files" values={job.changes?.added} /><DetailsList label="Changed Files" values={job.changes?.modified} /><DetailsList label="Removed Files" values={job.changes?.removed} />
         </> : null}
         {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
       </div>
       <DialogFooter><Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={close}>Cancel</Button>
                 {form.review ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || !url.trim()} onClick={() => { void start(); }}>Review</Button> : null}
-        {ready ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void confirm(); }}>{action === "install" ? "Install" : "Update"}</Button> : null}
+         {ready ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void confirm(); }}>{action === "install" ? "Add Plugin" : "Update"}</Button> : null}
       </DialogFooter>
     </DialogContent>
   </Dialog>;
