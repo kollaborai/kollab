@@ -145,4 +145,5 @@ def test_service_credential_failure_is_visible_without_leaking_details(tmp_path,
     assert state["error"] == "Could not prepare plugin engine credentials"
     assert "sensitive failure detail" not in json.dumps(state)
     log = (home / "plugin-data" / "hello" / "run" / "worker.log").read_text()
-    assert "sensitive failure detail" in log
+    assert "Could not prepare plugin engine credentials (ValueError)." in log
+    assert "sensitive failure detail" not in log
