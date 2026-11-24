@@ -1,7 +1,7 @@
 /**
- * Where plugin UI mounts: inside `<div data-plugin="<id>">` (plugin CSS scopes to it, and on a touch screen
- * every control in it is at least 44 px tall, styles.css) and an error boundary, so a plugin that throws while
- * drawing shows Failed to Render and the rest of the app keeps working.
+ * Where plugin UI mounts: block surfaces use `<div data-plugin="<id>">`; inline message tags use a scoped
+ * `<span>`. Plugin CSS scopes to either mount and touch controls stay at least 44 px tall. An error boundary
+ * keeps a plugin that throws while drawing from breaking the rest of the app.
  */
 import { Component, useState, type ComponentType, type ErrorInfo, type ReactNode } from "react";
 import {
@@ -56,6 +56,7 @@ export function PluginFailure({
   onRetry,
   initiallyOpen = false,
   inset = true,
+  inline = false,
 }: {
   title?: string;
   error: string;
@@ -63,12 +64,23 @@ export function PluginFailure({
   initiallyOpen?: boolean;
   /** Its own padding; off inside a dialog, which pads its body already. */
   inset?: boolean;
+  /** Phrasing content for an inline message tag. */
+  inline?: boolean;
 }) {
   const [open, setOpen] = useState(initiallyOpen);
+  const Root = inline ? "span" : "div";
+  const Heading = inline ? "span" : "p";
+  const Actions = inline ? "span" : "div";
   return (
-    <div role="alert" className={cn("flex min-w-0 flex-col gap-3 text-sm", inset && "px-4 py-4 sm:px-6")}>
-      {title ? <p className="font-medium">{title}</p> : null}
-      <div className="flex flex-wrap gap-2">
+    <Root
+      role="alert"
+      className={cn(
+        inline ? "inline-flex min-w-0 items-baseline gap-1 text-sm" : "flex min-w-0 flex-col gap-3 text-sm",
+        !inline && inset && "px-4 py-4 sm:px-6",
+      )}
+    >
+      {title ? <Heading className="font-medium">{title}</Heading> : null}
+      <Actions className={inline ? "inline-flex flex-wrap gap-2" : "flex flex-wrap gap-2"}>
         <Button type="button" variant="outline" size="sm" className="pointer-coarse:min-h-11" onClick={onRetry}>
           Retry
         </Button>
@@ -82,18 +94,22 @@ export function PluginFailure({
         >
           View Error
         </Button>
-      </div>
+      </Actions>
       {open ? (
-        <pre className="bg-muted/40 text-muted-foreground max-h-60 overflow-auto rounded-md p-3 text-xs break-words whitespace-pre-wrap">
-          {error || "No error text was given."}
-        </pre>
+        inline ? (
+          <code className="text-muted-foreground break-all whitespace-pre-wrap">{error || "No error text was given."}</code>
+        ) : (
+          <pre className="bg-muted/40 text-muted-foreground max-h-60 overflow-auto rounded-md p-3 text-xs break-words whitespace-pre-wrap">
+            {error || "No error text was given."}
+          </pre>
+        )
       ) : null}
-    </div>
+    </Root>
   );
 }
 
 /** Catches an error a plugin throws while drawing; Retry draws it again. */
-type PluginBoundaryProps = { name: string; resetKey?: unknown; children: ReactNode };
+type PluginBoundaryProps = { name: string; resetKey?: unknown; inline?: boolean; children: ReactNode };
 
 export class PluginBoundary extends Component<PluginBoundaryProps, { error: Error | null }> {
   state: { error: Error | null } = { error: null };
@@ -116,7 +132,14 @@ export class PluginBoundary extends Component<PluginBoundaryProps, { error: Erro
 
   render() {
     if (!this.state.error) return this.props.children;
-    return <PluginFailure title={`${this.props.name} Failed to Render`} error={this.state.error.message} onRetry={this.retry} />;
+    return (
+      <PluginFailure
+        title={`${this.props.name} Failed to Render`}
+        error={this.state.error.message}
+        onRetry={this.retry}
+        inline={this.props.inline}
+      />
+    );
   }
 }
 
@@ -130,27 +153,35 @@ export function PluginMount({
   record,
   renderer = "default",
   resetKey,
+  inline = false,
   children,
 }: {
   record: Pick<PluginRecord, "id" | "name">;
   renderer?: string;
   resetKey?: unknown;
+  inline?: boolean;
   children: ReactNode;
 }) {
-  const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(null);
+  const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
+  const Root = inline ? "span" : "div";
+  const PortalRoot = inline ? "span" : "div";
   return (
-    <div data-plugin={record.id} className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <Root
+      data-plugin={record.id}
+      className={inline ? "inline-flex min-w-0 align-baseline" : "flex min-h-0 min-w-0 flex-1 flex-col"}
+    >
       <PluginPortalScopeContext.Provider value={{ scoped: true, container: portalContainer }}>
         <PluginBoundary
           key={pluginRendererBoundaryKey(record.id, renderer)}
           name={record.name}
           resetKey={resetKey}
+          inline={inline}
         >
           {children}
         </PluginBoundary>
-        <div ref={setPortalContainer} data-plugin-portal-root="" className="contents" />
+        <PortalRoot ref={setPortalContainer} data-plugin-portal-root="" className="contents" />
       </PluginPortalScopeContext.Provider>
-    </div>
+    </Root>
   );
 }
 

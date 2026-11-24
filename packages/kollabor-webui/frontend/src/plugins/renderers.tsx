@@ -115,7 +115,7 @@ export function PluginTaggedText({ text }: { text: string }) {
         if (!found) return <>{`<${tag.name}>${tag.content}</${tag.name}>`}</>;
         const Render = found.spec.render;
         return (
-          <PluginMount record={found.record} renderer={`tag:${tag.name}`} resetKey={tag.content}>
+          <PluginMount record={found.record} renderer={`tag:${tag.name}`} resetKey={tag.content} inline>
             <Render k={found.k} tag={tag} />
           </PluginMount>
         );
