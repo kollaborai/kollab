@@ -244,7 +244,7 @@ as `kollab_plugin_pr_chain` and two packages never collide.
 | `kollab` | version range; `add` refuses a kollab outside it |
 | `python` | a `BasePlugin` class that loads in every agent daemon |
 | `engine` | `make_router(ctx: PluginContext) -> APIRouter`, mounted under `/plugins/{id}/api/` |
-| `services.<name>` | `<name>` matches `^[a-z0-9][a-z0-9-]{0,39}$`; `command` (run from the plugin folder); `autostart`; `restart` (`on-failure` default, `always`, `never`); `stop_timeout_s` (default 30); `heartbeat_s` (optional); `secrets` (granted secrets the wrapper puts in its environment) |
+| `services.<name>` | `<name>` matches `^[a-z0-9][a-z0-9-]{0,39}$`; `command` (run from the plugin folder); `autostart`; `restart` (`on-failure` default, `always`, `never`); `stop_timeout_s` (default 30); `heartbeat_s` (optional); both must be numbers above 0 and at most 86400 seconds; `secrets` (granted secrets the wrapper puts in its environment) |
 | `web` | the entry module and stylesheet, both inside `web/dist/` |
 | `contributes` | everything the plugin adds, by id: `menu` rows, `views`, `pages`, `modals`, `slash` commands and chat `renderers`. The sheet's Adds line and the app's rows come from here, so a row exists even when the bundle fails; the bundle's `k.*` calls bind to these ids, and an undeclared id is ignored with a warning |
 | `version`, `description` | strings |
@@ -292,7 +292,7 @@ follows the ref recorded at add.
 | Path | Holds | Written by |
 |---|---|---|
 | `~/.kollab/plugins/<id>/` | the installed plugin, a clean copy at the pinned commit | `add`, `update` |
-| `~/.kollab/plugins.json` | `{"plugins": {"<id>": {"source", "ref", "commit", "files_sha256", "enabled", "granted": [...], "added", "updated"}}, "dev": {"<id>": "<folder>"}}`; on update `granted` becomes the confirmed `uses` | kollab, under `kollabor_config.file_lock` |
+| `~/.kollab/plugins.json` | `{"plugins": {"<id>": {"source", "ref", "commit", "files_sha256", "enabled", "granted": [...], "added", "updated"}}, "dev": {"<id>": "<folder>"}, "enable_order": {"<id>": <int>}, "enable_counter": <int>}`; the plugin enabled first wins slash-command conflicts | kollab, under `kollabor_config.file_lock` |
 | `~/.kollab/plugin-data/<id>/` | the plugin's own state (`KOLLAB_PLUGIN_DATA`); kept on update and remove | the plugin |
 | `~/.kollab/plugin-data/<id>/values.json` | the plugin's settings values: the only store for them | kollab (see Settings) |
 | `~/.kollab/plugin-data/<id>/run/` | `token` (0600), `<process>.pid`, `<process>.state`, `<process>.log`, `runs.json`, `usage.jsonl`, `usage-<date>.json` | kollab, and `usage.jsonl` appends from the plugin |
@@ -336,7 +336,7 @@ All sit behind the existing bearer-token middleware.
 
 | Route | Does | Plugin token | Remote page |
 |---|---|---|---|
-| `GET /plugins` | `{schema: 1, plugins: [PluginEntry]}` (below) | no | yes |
+| `GET /plugins` | `{schema: 1, plugins: [PluginEntry], server_time}` (below) | no | yes |
 | `GET /plugins/events` | SSE: `plugins-changed` after any install, update, remove, enable or disable | no | yes |
 | `ANY /plugins/{id}/api/{path}` | the plugin's router, through one dispatcher to a per-plugin sub-app, so enable and disable need no engine restart | own id | yes, except routes the plugin marks `@ctx.local_only` (pr-chain marks its config and profile writes, which change the commands its chains run) |
 | `GET`, `POST /plugins/{id}/events` | the plugin's SSE stream of `{topic, data, ts}`; the engine sets `ts`. Topic `heartbeat` with `{service}` feeds the process state; with no engine, heartbeats are dropped and the state reads unknown | own id | yes |
@@ -346,7 +346,8 @@ All sit behind the existing bearer-token middleware.
 | `POST /plugins/{id}/agents` → `{run_id, session_id}` at once; `GET`, `DELETE .../agents/{run_id}` | agent runs | own id | yes |
 | `POST /plugins/{id}/services/{name}/start`, `/stop`, `/restart` | background processes | own id | no |
 | `GET /plugins/{id}/services/{name}/log?tail=200` | the process log, redacted like Agent Output | own id | yes |
-| `POST /plugins/install`, `POST /plugins/{id}/update` → `{job_id}`; `GET /plugins/jobs/{job_id}` | clone or fetch into staging, check, then report the sheet facts | no | no |
+| `POST /plugins/install`, `POST /plugins/{id}/update` → `{job_id}`; `GET /plugins/jobs/{job_id}` | clone or fetch into staging, check, then report the sheet facts; job status is `cancelling` while cancellation cleanup runs | no | no |
+| `DELETE /plugins/jobs/{job_id}` | cancel a staging or ready job; `200` after cleanup, `404` if missing, `409` if it cannot be cancelled, `503` if staged files cannot be removed | no | no |
 | `POST /plugins/jobs/{job_id}/confirm` | `{commit, files_sha256}`: refused unless both match the staged copy; then move into place | no | no |
 | `POST /plugins/{id}/enable`, `/disable`, `/remove` | manage | no | no |
 
@@ -627,10 +628,10 @@ registry replaces it, and `GET /plugins` serves the same entries:
 
 ```
 PluginEntry = {id, name, version, kind: "built-in" | "installed" | "dev", source, commit, enabled, shadowed,
-               state: "ok" | "error" | "off" | "stopping" | "changed-on-disk" | "skipped", error, settings: [make_field fields],
+               state: "ok" | "error" | "off" | "stopping" | "stop-failed" | "changed-on-disk" | "skipped", error, settings: [make_field fields],
                web: {entry, style, hash} | null, contributes: {menu, views, pages, modals, commands},
-               services: [{name, state: "running" | "stopping" | "exited" | "stopped" | "crash-stopped" | "unknown",
-                           desired, pid, since, restarts, heartbeat}], uses, granted}
+               services: [{name, state: "running" | "stopping" | "stop-failed" | "exited" | "stopped" | "crash-stopped" | "unknown",
+                           desired, pid, since, restarts, heartbeat, heartbeat_monitor_since}], uses, granted}
 ```
 
 `kollabor_plugins.registry.plugin_entries()` lists what the loader found: the bundled `plugins/`, loose
