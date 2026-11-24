@@ -94,8 +94,12 @@ export function showFetching(job: Pick<Job, "status"> | null, failed: boolean): 
   return job?.status === "staging" && !failed;
 }
 
+export function shouldPollReview(job: Pick<Job, "status"> | null): boolean {
+  return job?.status === "staging" || job?.status === "installing";
+}
+
 export function shouldRetryPolling(job: Pick<Job, "status"> | null, failed: boolean): boolean {
-  return job?.status === "staging" && failed;
+  return shouldPollReview(job) && failed;
 }
 
 /** Ask the engine to stage a review of the source as it is now typed. */
@@ -147,7 +151,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
     if (action === "update" && !started.current) { started.current = true; void start(); }
   }, [action]);
   useEffect(() => {
-    if (!job || job.status !== "staging") return;
+    if (!job || (job.status !== "staging" && job.status !== "installing")) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
@@ -156,7 +160,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
         const next = await fetchReview(api, job.job_id, controller.signal);
         if (cancelled) return;
         setJob(next);
-        if (next.status === "staging") timer = setTimeout(() => { void poll(); }, 750);
+        if (shouldPollReview(next)) timer = setTimeout(() => { void poll(); }, 750);
       } catch (caught) { if (!cancelled) setError(errorText(caught)); }
     };
     void poll();
@@ -189,7 +193,13 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
       try {
         const current = await fetchReview(api, job.job_id);
         setJob(current);
-        setError(current.error || fallback);
+        if (current.status === "complete") {
+          setError(null);
+          await onApplied();
+          onClose();
+        } else {
+          setError(current.status === "installing" ? null : current.error || fallback);
+        }
       } catch {
         setError(fallback);
       }
@@ -219,6 +229,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Branch or Tag<Input className="pointer-coarse:min-h-11" value={gitRef} onChange={event => setGitRef(event.target.value)} placeholder="Default branch" /></label>
         </div> : null}
         {showFetching(job, error !== null) ? <p role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
+        {job?.status === "installing" && !error ? <p role="status" className="text-muted-foreground text-sm">Installing plugin…</p> : null}
         {job?.status === "error" ? <p role="alert" className="text-destructive text-sm">{job.error || "Plugin review failed."}</p> : null}
         {job?.status === "cancelled" ? <p role="status" className="text-muted-foreground text-sm">Plugin review was cancelled. You can start another review.</p> : null}
         {ready && job ? <>
