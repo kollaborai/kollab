@@ -20,6 +20,14 @@ def write(root: Path, relative: str, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _pull_detail(head_sha: str, files: list[dict[str, str]]) -> dict[str, object]:
+    return {
+        "head": {"sha": head_sha},
+        "base": {"ref": "main"},
+        "changed_files": len(files),
+    }
+
+
 def test_build_import_graph_resolves_python_and_frontend_imports(tmp_path: Path) -> None:
     write(tmp_path, "kollab/__init__.py", "")
     write(tmp_path, "kollab/core.py", "")
@@ -160,17 +168,18 @@ def test_changes_paths_are_ignored_on_both_sides() -> None:
 
 def test_main_with_fake_fetcher_prints_expected_line(tmp_path: Path, capsys) -> None:
     calls: list[tuple[str, bool]] = []
+    pr_files = [{"filename": "scripts/local_tool.py", "status": "modified"}]
 
     def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
         calls.append((endpoint, paginate))
         if endpoint == "repos/example/project/pulls/7":
-            return {"head": {"sha": "head-sha"}, "base": {"ref": "main"}}
+            return _pull_detail("head-sha", pr_files)
         if endpoint == "repos/example/project":
             return {"default_branch": "main"}
         if endpoint == "repos/example/project/compare/main...head-sha":
             return {"behind_by": 1, "merge_base_commit": {"sha": "merge-sha"}}
         if endpoint == "repos/example/project/pulls/7/files?per_page=100":
-            return [{"filename": "scripts/local_tool.py", "status": "modified"}]
+            return pr_files
         if endpoint == "repos/example/project/compare/merge-sha...main":
             return {"files": [{"filename": "docs/guide.md", "status": "modified"}]}
         raise AssertionError(f"unexpected endpoint: {endpoint}")
@@ -269,6 +278,7 @@ def test_status_write_failures_return_nonzero_and_continue(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     status_attempts: list[tuple[str, str]] = []
+    pr_files = {"7": [], "8": []}
 
     def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
         if endpoint == "repos/example/project":
@@ -282,13 +292,19 @@ def test_status_write_failures_return_nonzero_and_continue(
             "repos/example/project/pulls/7",
             "repos/example/project/pulls/8",
         }:
-            head = endpoint.rsplit("/", 1)[-1]
-            return {"head": {"sha": f"head-{head}"}, "base": {"ref": "main"}}
+            pr_number = endpoint.rsplit("/", 1)[-1]
+            return _pull_detail(f"head-{pr_number}", pr_files[pr_number])
+        if "/files?per_page=100" in endpoint:
+            pr_number = endpoint.split("/pulls/", 1)[1].split("/", 1)[0]
+            return pr_files[pr_number]
         if endpoint in {
             "repos/example/project/compare/main...head-7",
             "repos/example/project/compare/main...head-8",
         }:
-            return {"behind_by": 0}
+            return {
+                "behind_by": 0,
+                "merge_base_commit": {"sha": "merge-sha"},
+            }
         raise AssertionError(f"unexpected endpoint: {endpoint}")
 
     def fail_status(
@@ -347,9 +363,14 @@ def test_behind_by_requires_a_nonnegative_integer(
         if endpoint == "repos/example/project":
             return {"default_branch": "main"}
         if endpoint == "repos/example/project/pulls/7":
-            return {"head": {"sha": "head-sha"}, "base": {"ref": "main"}}
+            return _pull_detail("head-sha", [])
         if endpoint == "repos/example/project/compare/main...head-sha":
-            return {"behind_by": behind_by}
+            return {
+                "behind_by": behind_by,
+                "merge_base_commit": {"sha": "merge-sha"},
+            }
+        if endpoint == "repos/example/project/pulls/7/files?per_page=100":
+            return []
         if endpoint == "repos/example/project/statuses/head-sha" and method == "POST":
             status_posts.append(("head-sha", fields["state"]))
             return {}
@@ -647,3 +668,183 @@ def test_empty_head_sha_with_zero_behind_is_stale_and_posts_failure(
     assert comparisons == []
     assert "#7 STALE" in capsys.readouterr().out
     assert status_posts == [("listed-head", "failure")]
+
+
+def test_zero_behind_without_merge_base_is_stale_and_posts_failure(
+    tmp_path: Path, capsys
+) -> None:
+    status_posts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/pulls/7":
+            return {"head": {"sha": "head-sha"}, "base": {"ref": "main"}}
+        if endpoint == "repos/example/project/compare/main...head-sha":
+            return {"behind_by": 0}
+        if endpoint == "repos/example/project/statuses/head-sha" and method == "POST":
+            status_posts.append(("head-sha", fields["state"]))
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--pr",
+            "7",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "#7 STALE" in output
+    assert "rule 5:" in output
+    assert status_posts == [("head-sha", "failure")]
+
+
+def test_short_pr_file_list_is_stale_and_posts_failure(
+    tmp_path: Path, capsys
+) -> None:
+    status_posts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/pulls/7":
+            return {
+                "head": {"sha": "head-sha"},
+                "base": {"ref": "main"},
+                "changed_files": 101,
+            }
+        if endpoint == "repos/example/project/compare/main...head-sha":
+            return {"behind_by": 1, "merge_base_commit": {"sha": "merge-sha"}}
+        if endpoint == "repos/example/project/pulls/7/files?per_page=100":
+            return [
+                {"filename": f"docs/pr-{index}.md", "status": "modified"}
+                for index in range(100)
+            ]
+        if endpoint == "repos/example/project/compare/merge-sha...main":
+            return {"files": [{"filename": "docs/main.md", "status": "modified"}]}
+        if endpoint == "repos/example/project/statuses/head-sha" and method == "POST":
+            status_posts.append(("head-sha", fields["state"]))
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--pr",
+            "7",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "#7 STALE" in output
+    assert "rule 5:" in output
+    assert status_posts == [("head-sha", "failure")]
+
+
+def test_dynamic_directory_glob_loader_tracks_plugin_files(tmp_path: Path) -> None:
+    write(tmp_path, "plugins/demo/mod.py", "VALUE = 1\n")
+    test_path = "tests/unit/test_dynamic_loader.py"
+    module_path = "plugins/demo/mod.py"
+    write(
+        tmp_path,
+        test_path,
+        "from pathlib import Path\n"
+        "import importlib.util\n"
+        "ROOT = Path(__file__).resolve().parents[2]\n"
+        'for p in (ROOT / "plugins" / "demo").glob("*.py"):\n'
+        '    spec = importlib.util.spec_from_file_location(p.stem, p)\n',
+    )
+
+    graph = pr_blast_radius.build_import_graph(tmp_path)
+    stale, reasons = pr_blast_radius.decide({test_path}, {module_path}, graph)
+
+    assert module_path in graph[test_path]
+    assert stale is True
+    assert any(reason.startswith("rule 3:") for reason in reasons)
+
+
+def test_single_pr_repo_lookup_failure_posts_failure_for_fetched_head(
+    tmp_path: Path, capsys
+) -> None:
+    calls: list[str] = []
+    status_posts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        calls.append(endpoint)
+        if endpoint == "repos/example/project/pulls/7":
+            return {"head": {"sha": "head-sha"}, "base": {"ref": "main"}}
+        if endpoint == "repos/example/project":
+            raise RuntimeError("repository lookup unavailable")
+        if endpoint == "repos/example/project/statuses/head-sha" and method == "POST":
+            status_posts.append(("head-sha", fields["state"]))
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--pr",
+            "7",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert calls[:2] == [
+        "repos/example/project/pulls/7",
+        "repos/example/project",
+    ]
+    assert "#7 STALE" in output
+    assert status_posts == [("head-sha", "failure")]
+
+
+def test_all_open_skips_other_base_even_when_head_sha_is_missing(
+    tmp_path: Path, capsys
+) -> None:
+    calls: list[str] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        calls.append(endpoint)
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/pulls?state=open&per_page=100":
+            return [{"number": 7, "base": {"ref": "release"}, "head": {}}]
+        return {}
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--all-open",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == 0
+    assert calls == [
+        "repos/example/project",
+        "repos/example/project/pulls?state=open&per_page=100",
+    ]
+    assert capsys.readouterr().out == ""
