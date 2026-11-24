@@ -11,6 +11,7 @@ const css = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url
 const dialogSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/components/ui/dialog.tsx"), "utf8");
 const sheetSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/components/ui/sheet.tsx"), "utf8");
 const sessionPanelSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/components/shell/SessionPanel.tsx"), "utf8");
+const trajectorySource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/components/trajectory/TrajectoryView.tsx"), "utf8");
 const block = /@media \(pointer: coarse\) \{\s*(\[data-plugin\][^{]+)\{\s*min-height: 44px;/.exec(css);
 
 const escapeRegexText = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -65,5 +66,9 @@ describe("touch close-button spacing", () => {
 
   it("keeps the mobile session sheet content below the enlarged close target", () => {
     expect(sessionPanelSource).toMatch(/<SheetContent[^>]*className="[^"]*pointer-coarse:pt-14/);
+  });
+
+  it("keeps the mobile trajectory content below the enlarged close target", () => {
+    expect(trajectorySource).toMatch(/<SheetContent[^>]*className="[^"]*pointer-coarse:pt-14/);
   });
 });
