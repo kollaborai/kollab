@@ -198,16 +198,22 @@ describe("loading", () => {
     expect(plugin("hello")?.contributions.notices).toEqual([]);
   });
 
-  it("a plugin that throws while loading shows Failed to Load and the others still load", async () => {
+  it("keeps arbitrary setup errors out of plugin UI and logs the original exception", async () => {
+    const original = new Error("secret returned by a plugin API");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const { loader, plugin } = harness([[entry("hello"), entry("pr-chain")]], {
       "/plugins/hello/web/index.js?v=abc": module(() => {
-        throw new Error("boom");
+        throw original;
       }),
       "/plugins/pr-chain/web/index.js?v=abc": module(page),
     });
     await loader.refresh();
     await loader.idle();
-    expect(plugin("hello")).toMatchObject({ status: "failed", error: "boom" });
+    expect(plugin("hello")).toMatchObject({
+      status: "failed",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
+    });
+    expect(logged).toHaveBeenCalledWith("Plugin hello web code failed while loading", original);
     expect(plugin("pr-chain")?.status).toBe("ready");
   });
 
