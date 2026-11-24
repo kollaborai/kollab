@@ -381,3 +381,46 @@ def test_other_folder_list_keeps_a_live_agent_with_an_old_heartbeat(monkeypatch)
     result = asyncio.run(plugin._handle_hub_command("stop all"))
 
     assert "/work/elsewhere: quiet" in result
+
+
+def test_cli_everywhere_stops_a_stuck_agent_whose_start_still_matches(tmp_path, monkeypatch):
+    """Old heartbeat and a dead socket, but the kernel start proves the same live process."""
+    from kollabor_agent.runtime import process_start_token
+
+    stop = _cli(tmp_path, monkeypatch, local=False)
+    stuck = tmp_path / "other" / "stuck.json"
+    stuck.write_text(json.dumps({
+        "agent_id": "stuck", "identity": "stuck", "pid": os.getpid(),
+        "start_token": process_start_token(os.getpid()),
+        "last_heartbeat": time.time() - 600,
+        "socket_path": str(tmp_path / "other" / "missing.sock"), "project": "/work/elsewhere",
+    }))
+
+    asyncio.run(_handle_cli_hub(["stop", "all", "--everywhere"]))
+
+    assert sorted(call.args[0]["identity"] for call in stop.await_args_list) == ["far", "stuck"]
+
+
+def test_cli_stop_binds_the_shutdown_to_the_selected_generation(monkeypatch):
+    from kollabor import cli
+    from plugins.hub.messenger import AgentMessenger
+
+    shutdown = AsyncMock(return_value=True)
+    monkeypatch.setattr(AgentMessenger, "signal_shutdown", shutdown)
+    monkeypatch.setattr(AgentMessenger, "request_status", AsyncMock(return_value={}))
+
+    async def exited(pid, timeout=0):
+        return True
+
+    monkeypatch.setattr(cli, "_wait_for_pid_exit", exited)
+    record = {
+        "agent_id": "a1", "identity": "amethyst", "pid": os.getpid(),
+        "started_at": 1795468911.5, "socket_path": "/tmp/amethyst.sock",
+    }
+
+    asyncio.run(cli.stop_agent_record(record, "test", identity=lambda pid: ("x",)))
+
+    kwargs = shutdown.await_args.kwargs
+    assert kwargs.get("expected_agent_id") == "a1"
+    assert kwargs.get("expected_pid") == os.getpid()
+    assert kwargs.get("expected_started_at") == 1795468911.5
