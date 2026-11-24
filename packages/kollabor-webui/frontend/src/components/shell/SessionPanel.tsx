@@ -131,8 +131,8 @@ function storeOpen(open: boolean) {
   }
 }
 
-// A panel row: small text, the width of the panel.
-const ROW = "h-7 w-full justify-start gap-2 px-2 text-xs font-normal";
+// A panel row: small text, the width of the panel. 44px tall on a touch screen.
+const ROW = "h-7 w-full justify-start gap-2 px-2 text-xs font-normal pointer-coarse:min-h-11";
 
 /**
  * The session's own column: who it is, Chat or Trajectory, and its controls.
@@ -443,7 +443,7 @@ export function SessionPanel({
           }}
           onPick={(choice) => void changeProfile(choice)}
           disabled={!profiles.length}
-          className="h-7 text-xs"
+          className="h-7 text-xs pointer-coarse:min-h-11"
           folder={session.workspace || ""}
         />
       </div>
@@ -452,7 +452,7 @@ export function SessionPanel({
         <Select value={mode} onValueChange={(next) => void changeMode(next)}>
           <SelectTrigger
             size="sm"
-            className="h-7 w-full text-xs"
+            className="h-7 w-full text-xs pointer-coarse:min-h-11"
             aria-label="Approval mode"
             title={formatApprovalMode(mode)}
           >
