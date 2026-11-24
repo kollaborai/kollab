@@ -1054,23 +1054,20 @@ class PluginServiceControls:
         return True
 
     async def _finish_restart(self, context, service_name: str) -> None:
-        from kollabor_plugins.services import _recorded_process_alive, control_service
+        from kollabor_plugins import services
+        from kollabor_plugins.packages import stop_timeout
 
-        service = context.manifest["services"][service_name]
-        timeout = service.get("stop_timeout_s", 10)
-        if type(timeout) is not int or timeout < 0:
-            timeout = 10
-        deadline = time.monotonic() + timeout + 5
+        deadline = time.monotonic() + stop_timeout(context.manifest["services"][service_name]) + 5
         pid = context.data / "run" / f"{service_name}.pid"
         try:
-            while await asyncio.to_thread(_recorded_process_alive, pid):
+            while await asyncio.to_thread(services._recorded_process_alive, pid):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Service did not stop before the restart deadline")
                 await asyncio.sleep(0.25)
             async with self._lock:
                 options = {"engine_url": self.engine_url} if self.engine_url else {}
                 operation = asyncio.create_task(
-                    asyncio.to_thread(control_service, context.id, service_name, "start", **options)
+                    asyncio.to_thread(services.control_service, context.id, service_name, "start", **options)
                 )
                 try:
                     await asyncio.shield(operation)

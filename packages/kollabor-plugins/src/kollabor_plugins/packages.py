@@ -91,6 +91,14 @@ def stop_timeout(service: object) -> float:
     if type(value) not in (int, float) or not 0 < value <= _MAX_SERVICE_SECONDS:
         return 30.0
     return float(value)
+
+
+def heartbeat_seconds(service: object) -> float | None:
+    """A service's heartbeat interval in seconds, or None when absent or out of the manifest bound."""
+    value = service.get("heartbeat_s") if isinstance(service, dict) else None
+    if type(value) not in (int, float) or not 0 < value <= _MAX_SERVICE_SECONDS:
+        return None
+    return float(value)
 _CONTRIBUTION_KEYS = {"menu", "views", "pages", "modals", "slash", "renderers"}
 
 

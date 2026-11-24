@@ -5,7 +5,6 @@ import importlib.util
 import inspect
 import json
 import logging
-import math
 import sys
 import types
 from pathlib import Path
@@ -24,6 +23,7 @@ from .packages import (
     _read_registry,
     _within,
     files_sha256,
+    heartbeat_seconds,
     recover_installs,
     validate_manifest,
 )
@@ -510,13 +510,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
             pass
         status = state.get("status", "stopped")
         definition = declared[name]
-        heartbeat_s = definition.get("heartbeat_s") if isinstance(definition, dict) else None
-        if (
-            type(heartbeat_s) not in (int, float)
-            or heartbeat_s <= 0
-            or (isinstance(heartbeat_s, float) and not math.isfinite(heartbeat_s))
-        ):
-            heartbeat_s = None
+        heartbeat_s = heartbeat_seconds(definition)
         if status == "running" and identity is None:
             status = "unknown"
         if status == "stopping" and identity is None:
