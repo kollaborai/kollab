@@ -424,6 +424,8 @@ describe("PhoneLink lists plugins and loads no code", () => {
     await loader.refresh();
     await loader.idle();
     expect(deps.importModule).not.toHaveBeenCalled();
+    expect(deps.fetchText).not.toHaveBeenCalled();
+    expect(deps.addStyle).not.toHaveBeenCalled();
     expect(listedPluginEntries().map((item) => item.id)).toEqual(["hello", "pr-chain"]);
     expect(registry.getSnapshot()).toMatchObject({ listed: true, plugins: [] });
   });
