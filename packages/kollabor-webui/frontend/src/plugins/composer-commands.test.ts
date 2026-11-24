@@ -78,6 +78,27 @@ describe("pluginCommandEntries", () => {
     expect(entries[0].pluginId).toBe("zulu");
     expect(entries[0].description).toBe("from zulu");
   });
+
+  it("preserves API order when enable order is missing", () => {
+    const entries = pluginCommandEntries(
+      [record("beta", [command("deploy", "from beta")]), record("alpha", [command("deploy", "from alpha")])],
+      new Set(),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ pluginId: "beta", description: "from beta" });
+  });
+
+  it("preserves API order when enable order is tied", () => {
+    const entries = pluginCommandEntries(
+      [
+        record("beta", [command("deploy", "from beta")], true, 1),
+        record("alpha", [command("deploy", "from alpha")], true, 1),
+      ],
+      new Set(),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ pluginId: "beta", description: "from beta" });
+  });
 });
 
 describe("pluginCommandConflicts", () => {

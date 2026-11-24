@@ -58,11 +58,23 @@ describe("findToolRenderer", () => {
     expect(findToolRenderer(plugins, "shell")).toBeNull();
   });
 
-  it("uses plugin name as the tie-break when enable order is missing", () => {
-    const first: RendererSpec = { tool: "shell", render: Render };
-    const second: RendererSpec = { tool: "shell", render: Render };
-    const match = findToolRenderer([record("beta", [second]), record("alpha", [first])], "shell");
-    expect(match?.spec).toBe(first);
+  it("preserves API order when enable order is missing", () => {
+    const beta: RendererSpec = { tag: "card", render: Render };
+    const alpha: RendererSpec = { tag: "card", render: Render };
+    const match = findTagRenderer([record("beta", [beta]), record("alpha", [alpha])], "card");
+    expect(match?.record.id).toBe("beta");
+    expect(match?.spec).toBe(beta);
+  });
+
+  it("preserves API order when enable order is tied", () => {
+    const beta: RendererSpec = { tag: "card", render: Render };
+    const alpha: RendererSpec = { tag: "card", render: Render };
+    const match = findTagRenderer(
+      [record("beta", [beta], true, 1), record("alpha", [alpha], true, 1)],
+      "card",
+    );
+    expect(match?.record.id).toBe("beta");
+    expect(match?.spec).toBe(beta);
   });
 
   it("the first enabled plugin owns both tool and tag renderers", () => {

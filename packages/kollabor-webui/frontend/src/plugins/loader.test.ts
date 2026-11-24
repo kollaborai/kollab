@@ -9,6 +9,7 @@ import {
   type LoaderDeps,
 } from "./loader";
 import { createPluginRegistry } from "./registry";
+import { pluginsByEnableOrder } from "./plugin-order";
 import type { PluginApi, PluginEntry } from "./sdk";
 
 const Tab = () => null;
@@ -114,6 +115,17 @@ describe("which plugins load", () => {
 });
 
 describe("loading", () => {
+  it.each([
+    ["missing", undefined],
+    ["tied", 1],
+  ])("keeps API order through the registry's name sort when enable order is %s", async (_case, rank) => {
+    const extra = rank === undefined ? { web: null } : { web: null, enable_order: rank };
+    const { loader, registry } = harness([[entry("beta", extra), entry("alpha", extra)]], {});
+    await loader.refresh();
+
+    expect(pluginsByEnableOrder(registry.getSnapshot().plugins).map(({ id }) => id)).toEqual(["beta", "alpha"]);
+  });
+
   it("imports every enabled entry in parallel and awaits each plugin function before showing it", async () => {
     const gates = { hello: deferred(), chain: deferred() };
     const { loader, deps, plugin } = harness([[entry("hello"), entry("pr-chain")]], {
