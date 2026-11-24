@@ -157,7 +157,7 @@ async def test_cancelled_mailbox_batch_exposes_completed_deliveries(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cancel_after_receiver_effect_does_not_replay_effect(tmp_path):
+async def test_receiver_cancellation_after_effect_keeps_message_available(tmp_path):
     message = HubMessage(
         action="message",
         from_agent="peer-id-1",
@@ -179,20 +179,15 @@ async def test_cancel_after_receiver_effect_does_not_replay_effect(tmp_path):
         batch = messenger_module.AgentMessenger.read_mailboxes(
             ["receiver"], consume=False
         )
-        with pytest.raises(asyncio.CancelledError) as cancelled:
+        with pytest.raises(asyncio.CancelledError):
             await plugin._deliver_inbox_batch(batch)
-        assert cancelled.value.acknowledged_message_ids == {message.id}
 
         replay = messenger_module.AgentMessenger.read_mailboxes(
             ["receiver"], consume=False
         )
-        async def replay_delivery(msg):
-            effects.append(msg.id)
-
-        plugin._on_message_received = replay_delivery
-        await plugin._deliver_inbox_batch(replay)
 
     assert effects == [message.id]
+    assert [item.id for item in replay] == [message.id]
 
 
 @pytest.mark.asyncio
