@@ -6765,7 +6765,7 @@ class HubPlugin(BasePlugin):
         started = self._locally_started_agent_count() > 0
         help_lines = []
         if started:
-            help_lines.append("To stop all agents you started, submit: /hub stop all")
+            help_lines.append("To stop every agent in this folder, submit: /hub stop all")
         help_lines.append(f"Tip: {choose_startup_tip(include_stop_all=started)}")
         help_lines.append(f"New features:\n{new_features}")
         operator_help = "\n".join(help_lines)

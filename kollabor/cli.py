@@ -1608,7 +1608,8 @@ def _print_hub_help() -> None:
     print("subcommands:")
     print("  status                     show online agents and their state")
     print("  agents | list              alias for status")
-    print("  stop <name|all> [--everywhere]  send shutdown signal; all = this folder")
+    print("  stop <name>                send shutdown signal to an agent")
+    print("  stop all [--everywhere]    stop this folder's agents (--everywhere: every folder)")
     print("  kill <name|all>            alias for stop")
     print("  halt [--reason <text>] [--revoke <device>]   halt the network (a person's terminal only)")
     print("  resume [--confirm <8-hex> | --local]         propose, confirm or lift here only")
@@ -2028,6 +2029,14 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     except (OSError, ProcessLookupError):
                         _drop(f)
                         continue
+                # Pid now runs a process the row's writer is not (#1408)
+                from kollabor_agent.runtime import process_start_token
+
+                recorded = data.get("start_token")
+                current = process_start_token(pid) if recorded else None
+                if current is not None and current != recorded:
+                    _drop(f)
+                    continue
                 # Pid alive but heartbeat stale = recycled pid, clean up
                 heartbeat_age = _time.time() - (data.get("last_heartbeat") or 0)
                 if heartbeat_age > 30:
@@ -2084,10 +2093,10 @@ async def _handle_cli_hub(hub_args: list) -> None:
         folders: dict = {}
         for agent in others:
             folder = agent.get("project") or "unknown folder"
-            folders[folder] = folders.get(folder, 0) + 1
+            folders.setdefault(folder, []).append(agent.get("identity", "?"))
         print(f"\n{len(others)} agent(s) {verb} in other folders:")
-        for folder, count in sorted(folders.items()):
-            print(f"  {folder}  {count}")
+        for folder, names in sorted(folders.items()):
+            print(f"  {folder}: {', '.join(sorted(names))}")
         print("stop those too: kollab --hub stop all --everywhere")
 
     def _find_agent(identity: str) -> Optional[dict]:
