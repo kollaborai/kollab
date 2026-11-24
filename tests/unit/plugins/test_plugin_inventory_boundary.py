@@ -206,19 +206,6 @@ def test_plugin_inventory_boundary_normalizes_every_field_and_bounds_manifest_st
         failures.extend(f"{label}: invalid {problem}" for problem in _type_errors(normalized))
 
 
-def test_dev_metadata_error_survives_inventory_normalization():
-    entry = _entry()
-    entry.update(
-        id="hello@dev",
-        kind="dev",
-        state="error",
-        error="Development plugin metadata could not be loaded",
-    )
-
-    normalized = registry._normalize_plugin_entry(entry)
-
-    assert normalized["error"] == "Development plugin metadata could not be loaded"
-
     too_long = "x" * 4097
     long_manifest_values = [
         ("name", lambda manifest: manifest.update(name=too_long)),
@@ -248,6 +235,20 @@ def test_dev_metadata_error_survives_inventory_normalization():
             failures.append(f"manifest {label}: accepted a string longer than 4096 characters")
 
     assert failures == [], "; ".join(failures)
+
+
+def test_dev_metadata_error_survives_inventory_normalization():
+    entry = _entry()
+    entry.update(
+        id="hello@dev",
+        kind="dev",
+        state="error",
+        error="Development plugin metadata could not be loaded",
+    )
+
+    normalized = registry._normalize_plugin_entry(entry)
+
+    assert normalized["error"] == "Development plugin metadata could not be loaded"
 
 
 def test_normalized_setting_keeps_help_a_string_for_terminal_search():
