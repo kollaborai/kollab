@@ -365,7 +365,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
           {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
           <DialogFooter>
             <Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={() => setConfirmation(null)}>Cancel</Button>
-            <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || operationBusy || !confirmation} onClick={() => { if (confirmation) void perform(confirmation); }}>
+            <Button type="button" variant="destructive" className="pointer-coarse:min-h-11" disabled={busy || operationBusy || !confirmation} onClick={() => { if (confirmation) void perform(confirmation); }}>
               {confirmation === "remove" ? "Remove" : "Turn Off"}
             </Button>
           </DialogFooter>
