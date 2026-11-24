@@ -148,7 +148,11 @@ export function normalizeReviewJob(value: unknown): Job | null {
   const jobId = safePluginText(raw?.job_id, 128);
   if (!raw || !jobId) return null;
   const status = JOB_STATUSES.has(raw.status as Job["status"]) ? raw.status as Job["status"] : "error";
+  const action = raw.action === "install" || raw.action === "update" ? raw.action : undefined;
   const pluginId = typeof raw.plugin_id === "string" && PLUGIN_ID.test(raw.plugin_id) ? raw.plugin_id : undefined;
+  const commit = safeCommit(raw.commit, 40) ?? safeCommit(raw.commit, 64);
+  const filesSha256 = safeCommit(raw.files_sha256, 64);
+  const source = safePluginText(raw.source) ?? undefined;
   const errorText = typeof raw.error === "string" && JOB_ERRORS.has(raw.error)
     ? raw.error
     : status === "error" ? "Plugin review failed. Check the source and manifest, then try again." : null;
@@ -166,17 +170,23 @@ export function normalizeReviewJob(value: unknown): Job | null {
     + (Array.isArray(raw.changed_folders) ? boundedChangedFolders.length - (changedFolders?.length ?? 0) : 0);
   const manifest = normalizeReviewManifest(raw.manifest, pluginId);
   const reviewComplete = manifest !== undefined
+    && status === "ready"
+    && action !== undefined
+    && pluginId !== undefined
+    && commit !== undefined
+    && filesSha256 !== undefined
+    && source !== undefined
     && omittedChangedFolders === 0
     && Object.values(manifest.omitted ?? {}).every((count) => !count)
-    && !(raw.action === "update" && !Array.isArray(raw.changed_folders));
+    && !(action === "update" && !Array.isArray(raw.changed_folders));
   return {
     job_id: jobId,
     status,
-    action: raw.action === "install" || raw.action === "update" ? raw.action : undefined,
+    action,
     plugin_id: pluginId,
-    commit: safeCommit(raw.commit, 40) ?? safeCommit(raw.commit, 64),
-    files_sha256: safeCommit(raw.files_sha256, 64),
-    source: safePluginText(raw.source) ?? undefined,
+    commit,
+    files_sha256: filesSha256,
+    source,
     ref: safePluginText(raw.ref, 256) ?? undefined,
     previous_commit: safeCommit(raw.previous_commit, 40) ?? safeCommit(raw.previous_commit, 64),
     changed_folders: changedFolders,
