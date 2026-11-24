@@ -93,6 +93,10 @@ export function pluginInventoryOmissionSummary(entry: Pick<PluginEntry, "omitted
     [entry.omitted.services, "service"],
     [entry.omitted.uses, "use declaration"],
     [entry.omitted.granted, "granted capability"],
+    [entry.omitted.settings, "setting"],
+    [entry.omitted.setting_options, "setting option"],
+    [entry.omitted.option_labels, "option label"],
+    [entry.omitted.contributions, "contribution declaration"],
     [serviceSecretCount, "service secret"],
   ] as const;
   const details = omitted
@@ -197,7 +201,7 @@ export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" |
 }
 
 function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange, onRemoved, operationBusy, detailRef }: {
-  entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; remote: boolean; now: number; onUpdate: (id: string) => void;
+  entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; remote: boolean; now: number; onUpdate: (id: string, opener: HTMLElement) => void;
   onBusyChange: (busy: boolean) => void; onRemoved: () => void; operationBusy: boolean; detailRef: RefObject<HTMLElement | null>;
 }) {
   const [busy, setBusy] = useState(false);
@@ -260,7 +264,11 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
         <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
         <span className={`text-xs font-medium ${failure !== null || entry.state === "changed-on-disk" || entry.state === "stop-failed" ? "text-destructive" : "text-muted-foreground"}`}>{status}</span>
         {entry.kind !== "dev" ? (
-          <label className="inline-flex pointer-coarse:flex pointer-coarse:size-11 pointer-coarse:items-center pointer-coarse:justify-center">
+          <label className="inline-flex pointer-coarse:flex pointer-coarse:size-11 pointer-coarse:items-center pointer-coarse:justify-center"
+            onPointerDown={(event) => {
+              const trigger = event.currentTarget.querySelector("button");
+              if (trigger) confirmationOpener.current = trigger;
+            }}>
             <Switch
               aria-label={`${entry.name} enabled`}
               checked={entry.enabled}
@@ -269,7 +277,8 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
                 if (checked) void perform("enable");
                 else {
                   const active = document.activeElement;
-                  confirmationOpener.current = active instanceof HTMLElement ? active : null;
+                  confirmationOpener.current = active instanceof HTMLElement && active !== document.body
+                    ? active : confirmationOpener.current;
                   setError(null);
                   setConfirmation("disable");
                 }
@@ -279,7 +288,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
         ) : null}
         {updateRemove ? (
           <div className="ml-auto flex flex-wrap gap-2">
-            <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={() => onUpdate(entry.id)}>Update</Button>
+            <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={(event) => onUpdate(entry.id, event.currentTarget)}>Update</Button>
             <Button type="button" size="xs" variant="ghost" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={(event) => { confirmationOpener.current = event.currentTarget; setError(null); setConfirmation("remove"); }}>Remove</Button>
           </div>
         ) : null}
@@ -494,9 +503,8 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
             onBusyChange={(busy) => reportPluginBusy(entryKey(selected), busy)}
             onRemoved={() => setFocusAfterRemoval(true)}
             detailRef={detailRef}
-            onUpdate={(pluginId) => {
-              const active = document.activeElement;
-              operationOpener.current = active instanceof HTMLElement ? active : null;
+            onUpdate={(pluginId, opener) => {
+              operationOpener.current = opener;
               setOperation({ action: "update", pluginId });
             }}
           />

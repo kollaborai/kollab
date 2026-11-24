@@ -6,9 +6,11 @@ import { Input } from "@/components/ui/input";
 import {
   normalizeBoundedUnique,
   normalizePluginContributes,
+  pluginContributionOmissionCount,
   normalizePluginUses,
   normalizePluginWebPath,
   PLUGIN_INVENTORY_LIMITS,
+  safePluginIdentifier,
   safePluginText,
 } from "./loader";
 
@@ -16,15 +18,18 @@ type Job = {
   job_id: string; status: "staging" | "ready" | "cancelling" | "installing" | "complete" | "error" | "cancelled";
   action?: "install" | "update"; plugin_id?: string; commit?: string; files_sha256?: string;
   source?: string; ref?: string; previous_commit?: string; changed_folders?: string[];
+  omitted_changed_folders: number; review_complete: boolean;
   error?: string | null; warning?: string | null;
   manifest?: { name?: string; version?: string; description?: string; uses?: unknown; services?: unknown;
-    omitted?: { services?: number; uses?: number; service_secrets?: number };
+    omitted?: { services?: number; uses?: number; service_secrets?: number; contributions?: number };
     python?: unknown; engine?: unknown; web?: unknown; agents?: unknown; contributes?: unknown; hooks?: unknown; mcp?: unknown };
 };
-const errorText = (error: unknown) => error instanceof ApiError
+export const errorText = (error: unknown) => error instanceof ApiError
   ? error.status === 404 ? "Plugin review no longer exists."
+    : error.status === 409 && error.message === "Cannot safely update this plugin" ? error.message
     : error.status === 409 ? "Plugin changed during review. Stage it again."
     : error.status === 503 ? "Plugin manager could not complete the request."
+    : error.status === 422 && error.message === "Invalid plugin Git source" ? error.message
     : `Plugin request failed (HTTP ${error.status}).`
   : error instanceof Error && error.message === "Put the branch or tag in one field, not both."
     ? error.message
@@ -36,12 +41,14 @@ const JOB_ERRORS = new Set([
   "Plugin approval, files, or active runs changed; check plugin status and stage again",
   "Cannot install plugin; check the plugin directory and try again",
   "Cannot install plugin; stage it again",
-  "Plugin manifest exceeds the review limits (128 services, 64 secrets per service, 256 uses)",
+  "Plugin review exceeds a display limit; reduce the manifest or changed folders and stage again.",
 ]);
 const JOB_WARNINGS = new Set([
   "Plugin staging files could not be removed",
   "A previously running service could not be restarted; check its status",
   "Plugin installed, but its services could not be started; check their status",
+  "A previously running service could not be restarted; check its status; Plugin staging files could not be removed",
+  "Plugin installed, but its services could not be started; check their status; Plugin staging files could not be removed",
 ]);
 const PLUGIN_ID = /^[a-z0-9][a-z0-9-]{1,39}(?:@dev)?$/;
 const SERVICE_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -65,30 +72,50 @@ function safeCommit(value: unknown, size: 40 | 64): string | undefined {
   return typeof value === "string" && new RegExp(`^[0-9a-f]{${size}}$`, "i").test(value) ? value : undefined;
 }
 
+function safeOmissionCount(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
 function normalizeReviewManifest(value: unknown, pluginId: string | undefined): Job["manifest"] | undefined {
   const raw = objectRecord(value);
   if (!raw) return undefined;
   const services = objectRecord(raw.services);
   const safeServices: Record<string, { secrets: string[]; secrets_omitted: number }> = {};
   let omittedServiceSecrets = 0;
+  let invalidServices = 0;
   if (services) {
-    for (const [name, definition] of boundedObjectEntries(services, PLUGIN_INVENTORY_LIMITS.services)) {
-      const safeName = safePluginText(name, 40);
-      if (!safeName || !SERVICE_ID.test(safeName)) continue;
+    const entries = boundedObjectEntries(services, PLUGIN_INVENTORY_LIMITS.services);
+    for (const [name, definition] of entries) {
+      const safeName = safePluginIdentifier(name, 40);
+      if (!safeName || !SERVICE_ID.test(safeName)) { invalidServices += 1; continue; }
       const service = objectRecord(definition);
       const secretValues = Array.isArray(service?.secrets) ? service.secrets : [];
-      const secretsOmitted = Math.max(0, secretValues.length - PLUGIN_INVENTORY_LIMITS.serviceSecrets);
+      let invalidSecrets = 0;
+      const secrets = normalizeBoundedUnique(service?.secrets, PLUGIN_INVENTORY_LIMITS.serviceSecrets, (item) => {
+        if (typeof item === "string" && SECRET_NAME.test(item)) return item;
+        invalidSecrets += 1;
+        return null;
+      });
+      if (service?.secrets !== undefined && !Array.isArray(service.secrets)) invalidSecrets += 1;
+      const secretsOmitted = safeOmissionCount(service?.secrets_omitted)
+        + Math.max(0, secretValues.length - PLUGIN_INVENTORY_LIMITS.serviceSecrets) + invalidSecrets;
       omittedServiceSecrets += secretsOmitted;
-      const secrets = normalizeBoundedUnique(service?.secrets, PLUGIN_INVENTORY_LIMITS.serviceSecrets, (item) =>
-        typeof item === "string" && SECRET_NAME.test(item) ? item : null,
-      );
       safeServices[safeName] = { secrets, secrets_omitted: secretsOmitted };
     }
   }
   const rawUses = Array.isArray(raw.uses) ? raw.uses : [];
-  const omittedServices = services
-    ? Math.max(0, Object.keys(services).length - PLUGIN_INVENTORY_LIMITS.services)
-    : 0;
+  let invalidUses = 0;
+  const uses = normalizePluginUses(raw.uses, () => { invalidUses += 1; });
+  if (raw.uses !== undefined && !Array.isArray(raw.uses)) invalidUses += 1;
+  const reportedOmissions = objectRecord(raw.omitted);
+  const omittedServices = safeOmissionCount(reportedOmissions?.services)
+    + (services
+      ? Math.max(0, Object.keys(services).length - PLUGIN_INVENTORY_LIMITS.services) + invalidServices
+      : raw.services !== undefined ? 1 : 0);
+  const omittedUses = safeOmissionCount(reportedOmissions?.uses)
+    + Math.max(0, rawUses.length - PLUGIN_INVENTORY_LIMITS.uses) + invalidUses;
+  const omittedContributions = safeOmissionCount(reportedOmissions?.contributions)
+    + pluginContributionOmissionCount(raw.contributes);
   const safeContributions = normalizePluginContributes(raw.contributes);
   const name = safePluginText(raw.name, 256) ?? pluginId ?? "Plugin";
   const version = safePluginText(raw.version, 256) ?? undefined;
@@ -97,12 +124,13 @@ function normalizeReviewManifest(value: unknown, pluginId: string | undefined): 
     name,
     version,
     description,
-    uses: normalizePluginUses(raw.uses),
+    uses,
     services: safeServices,
     omitted: {
       services: omittedServices,
-      uses: Math.max(0, rawUses.length - PLUGIN_INVENTORY_LIMITS.uses),
-      service_secrets: omittedServiceSecrets,
+      uses: omittedUses,
+      service_secrets: safeOmissionCount(reportedOmissions?.service_secrets) + omittedServiceSecrets,
+      contributions: omittedContributions,
     },
     contributes: safeContributions,
     python: Boolean(raw.python),
@@ -127,9 +155,20 @@ export function normalizeReviewJob(value: unknown): Job | null {
   const warningText = typeof raw.warning === "string" && JOB_WARNINGS.has(raw.warning)
     ? raw.warning
     : raw.warning ? "Plugin operation completed with a warning." : null;
+  const rawChangedFolders = Array.isArray(raw.changed_folders) ? raw.changed_folders : [];
+  const boundedChangedFolders = rawChangedFolders.slice(0, PLUGIN_INVENTORY_LIMITS.changedFolders);
   const changedFolders = Array.isArray(raw.changed_folders)
-    ? raw.changed_folders.slice(0, 256).map((folder) => safePluginText(folder, 512)).filter((folder): folder is string => folder !== null)
+    ? boundedChangedFolders.map((folder) => safePluginIdentifier(folder, 512))
+      .filter((folder): folder is string => folder !== null)
     : undefined;
+  const omittedChangedFolders = safeOmissionCount(raw.omitted_changed_folders)
+    + Math.max(0, rawChangedFolders.length - PLUGIN_INVENTORY_LIMITS.changedFolders)
+    + (Array.isArray(raw.changed_folders) ? boundedChangedFolders.length - (changedFolders?.length ?? 0) : 0);
+  const manifest = normalizeReviewManifest(raw.manifest, pluginId);
+  const reviewComplete = manifest !== undefined
+    && omittedChangedFolders === 0
+    && Object.values(manifest.omitted ?? {}).every((count) => !count)
+    && !(raw.action === "update" && !Array.isArray(raw.changed_folders));
   return {
     job_id: jobId,
     status,
@@ -141,9 +180,11 @@ export function normalizeReviewJob(value: unknown): Job | null {
     ref: safePluginText(raw.ref, 256) ?? undefined,
     previous_commit: safeCommit(raw.previous_commit, 40) ?? safeCommit(raw.previous_commit, 64),
     changed_folders: changedFolders,
+    omitted_changed_folders: omittedChangedFolders,
+    review_complete: reviewComplete,
     error: errorText,
     warning: warningText,
-    manifest: normalizeReviewManifest(raw.manifest, pluginId),
+    manifest,
   };
 }
 
@@ -174,6 +215,7 @@ export function describePluginAdds(manifest: NonNullable<Job["manifest"]>): stri
     omitted.services ? `${omitted.services} additional service${omitted.services === 1 ? "" : "s"} omitted from this review` : null,
     omitted.uses ? `${omitted.uses} additional use declaration${omitted.uses === 1 ? "" : "s"} omitted from this review` : null,
     omitted.service_secrets ? `${omitted.service_secrets} additional service secret${omitted.service_secrets === 1 ? "" : "s"} omitted from this review` : null,
+    omitted.contributions ? `${omitted.contributions} additional contribution omitted from this review` : null,
   ].filter((line): line is string => line !== null);
   return [
     ...contributions,
@@ -188,11 +230,28 @@ export function describePluginAdds(manifest: NonNullable<Job["manifest"]>): stri
   ];
 }
 
+export function pluginReviewOmissionSummary(job: Pick<Job, "manifest" | "omitted_changed_folders">): string | null {
+  const omitted = job.manifest?.omitted ?? {};
+  const details = [
+    [omitted.services ?? 0, "service"],
+    [omitted.uses ?? 0, "use declaration"],
+    [omitted.service_secrets ?? 0, "service secret"],
+    [omitted.contributions ?? 0, "contribution"],
+    [job.omitted_changed_folders, "changed folder"],
+  ] as const;
+  const lines = details
+    .filter(([count]) => count > 0)
+    .map(([count, label]) => `${count} additional ${label}${count === 1 ? "" : "s"} omitted from this review`);
+  return lines.length ? `Review omitted: ${lines.join(", ")}.` : null;
+}
+
 /** Describe declared capabilities without implying that plugin code is sandboxed. Shared with the Settings page. */
 export function describeUses(value: unknown): { throughKollab: string[]; onItsOwn: string[]; other: string[] } {
   const uses = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
   const throughKollab = [
     ...(uses.includes("agents") ? ["Can start agent runs through Kollab."] : []),
+    ...(uses.includes("agents") || uses.includes("agents:unattended")
+      ? ["Agent-run limits are not enforced; unreported token use is not capped."] : []),
     ...(uses.includes("agents:unattended") ? ["Can run agent tools without asking; those agents can do anything you can."] : []),
     ...uses.filter(item => item.startsWith("secret:")).map(item => `Can request the secret ${item.slice(7)} through Kollab.`),
   ];
@@ -371,7 +430,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
     onClose();
   };
   const confirm = async () => {
-    if (!job || job.status !== "ready" || !job.commit || !job.files_sha256) return;
+    if (!job || job.status !== "ready" || !job.review_complete || !job.commit || !job.files_sha256) return;
     setBusy(true); setError(null);
     let installed = false;
     try {
@@ -396,7 +455,12 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
         setJob(current);
         if (current.status === "complete") {
           setError(null);
-          await onApplied();
+          try {
+            await onApplied();
+          } catch {
+            setError("Plugin installed, but the plugin list could not be refreshed.");
+            return;
+          }
           if (!current.warning) onClose();
         } else {
           setError(current.status === "installing" ? null : current.error || fallback);
@@ -406,7 +470,8 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
       }
     } finally { setBusy(false); }
   };
-  const ready = job?.status === "ready" && Boolean(job.commit && job.files_sha256);
+  const reviewAvailable = job?.status === "ready" && Boolean(job.commit && job.files_sha256);
+  const ready = job?.status === "ready" && job.review_complete && Boolean(job.commit && job.files_sha256);
   const uses = Array.isArray(job?.manifest?.uses) ? job.manifest.uses : [];
   const { throughKollab: declaredThroughKollab, onItsOwn, other } = describeUses(uses);
   const services = job?.manifest?.services && typeof job.manifest.services === "object" && !Array.isArray(job.manifest.services)
@@ -424,7 +489,12 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   const form = reviewFormState(action, job, error !== null);
   const missingInstallingJob = job?.status === "installing" && error === "Plugin review no longer exists.";
   return <Dialog open onOpenChange={open => { if (!open) close(); }}>
-    <DialogContent onCloseAutoFocus={onRestoreFocus} className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
+    <DialogContent onOpenAutoFocus={(event) => {
+      if (action === "install") {
+        event.preventDefault();
+        event.currentTarget.querySelector<HTMLInputElement>('input[autocomplete="url"]')?.focus();
+      }
+    }} onCloseAutoFocus={onRestoreFocus} className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
         <DialogDescription>Review the exact source and permissions before anything is installed or run.</DialogDescription></DialogHeader>
       <div role="region" tabIndex={0} aria-label="Plugin review details" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
@@ -439,7 +509,10 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
         {job?.warning ? <p role="alert" className="break-words text-sm">{job.warning}</p> : null}
         {job?.status === "error" ? <p role="alert" className="text-destructive break-words text-sm">{job.error || "Plugin review failed."}</p> : null}
         {job?.status === "cancelled" ? <p role="status" className="text-muted-foreground text-sm">Plugin review was cancelled. You can start another review.</p> : null}
-        {ready && job ? <>
+        {reviewAvailable && job && !job.review_complete ? <p role="alert" className="text-destructive break-words text-sm">
+          Plugin review is incomplete. {pluginReviewOmissionSummary(job) ?? "Some consent details could not be verified."} Approval is disabled.
+        </p> : null}
+        {reviewAvailable && job ? <>
           <p className="break-words text-sm font-semibold">{job.manifest?.name ?? job.plugin_id ?? "Plugin"}</p>
           {job.manifest?.description ? <p className="text-muted-foreground break-words text-sm">{job.manifest.description}</p> : null}
           {job.source ? <p className="break-all text-sm">From: {job.source}{job.ref ? ` (${job.ref})` : " (default branch)"}</p> : null}

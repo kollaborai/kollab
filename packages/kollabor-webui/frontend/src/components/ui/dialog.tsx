@@ -83,10 +83,11 @@ function DialogContent({
 }
 
 function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
+  const leftAligned = className?.split(/\s+/).includes("text-left");
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2 text-center sm:text-left pointer-coarse:pr-12 max-sm:pointer-coarse:pl-12", className)}
+      className={cn("flex flex-col gap-2 text-center sm:text-left pointer-coarse:pr-12", !leftAligned && "max-sm:pointer-coarse:pl-12", className)}
       {...props}
     />
   )

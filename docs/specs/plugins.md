@@ -165,8 +165,8 @@ one that fails while drawing shows `Failed to Render`; both open a small kollab-
 View Error and Turn Off, and everything else keeps working. A plugin whose last boot never finished (the
 tab froze or closed during it) is skipped on the next load with the notice `PR Chain was skipped: it
 froze the page last time.  [Turn On Again]`. `?plugins=off` in the page URL loads the web UI with no plugin code and Settings →
-Plugins says `Plugins are off for this page`. When the daily cap is reached, agent runs fail with
-`Daily Token Cap reached. Agent runs start again at 00:00 local time.`
+Plugins says `Plugins are off for this page`. The configured agent-run caps are intended settings; the
+current engine does not enforce them yet.
 
 ### Terminal
 
@@ -256,6 +256,11 @@ as `kollab_plugin_pr_chain` and two packages never collide.
 | `version`, `description` | strings |
 | `agents`, `skills`, `commands`, `hooks`, `mcp`, `settings` | paths inside the plugin, in the formats kollab already reads |
 | `uses` | see the next section |
+
+The review rejects manifests over 1 MiB, strings over 4,096 characters, 256 uses, 256 entries in any
+contribution kind, 128 services, 64 secrets per service, 256 settings widgets, 256 dropdown options or
+256 option labels per widget. A referenced `settings.json` is limited to 1 MiB. Updates with more than
+256 changed folders are refused so the sheet can show the complete change list.
 
 Every path resolves inside the plugin folder (by realpath; a symlink that leads out is refused).
 Unknown keys are refused, so a typo is an error and not a silent no-op. `services` is the manifest key;
@@ -347,8 +352,8 @@ All sit behind the existing bearer-token middleware.
 | `ANY /plugins/{id}/api/{path}` | the plugin's router, through one dispatcher to a per-plugin sub-app, so enable and disable need no engine restart | own id | yes, except routes the plugin marks `@ctx.local_only` (pr-chain marks its config and profile writes, which change the commands its chains run) |
 | `GET`, `POST /plugins/{id}/events` | the plugin's SSE stream of `{topic, data, ts}`; the engine sets `ts`. Topic `heartbeat` with `{service}` feeds the process state; with no engine, heartbeats are dropped and the state reads unknown | own id | yes |
 | `GET /plugins/{id}/usage` | today's `{date, total, cap, remaining}` | own id | yes |
-| `GET /plugins/{id}/settings` | read its settings | own id | yes |
-| `PUT /plugins/{id}/settings` | save its settings (Settings below) | own id | no |
+| `GET /plugins/{id}/settings?kind=...` | read the `built-in`, `installed` or `dev` store; `dev` requires an `@dev` id | own id | yes |
+| `PUT /plugins/{id}/settings?kind=...` | save the `built-in`, `installed` or `dev` store; `dev` requires an `@dev` id | own id | no |
 | `POST /plugins/{id}/agents` → `{run_id, session_id}` at once; `GET`, `DELETE .../agents/{run_id}` | agent runs | own id | yes |
 | `POST /plugins/{id}/services/{name}/start`, `/stop`, `/restart` | background processes (`200` or `202`); `409` for an invalid transition, `503` if Kollab cannot signal a verified wrapper (service state becomes `stop-failed`) | own id | no |
 | `GET /plugins/{id}/services/{name}/log?tail=200` | the process log, redacted like Agent Output | own id | yes |
@@ -442,11 +447,10 @@ Background processes get `KOLLAB_PLUGIN_ID`, `KOLLAB_PLUGIN_ROOT`, `KOLLAB_PLUGI
   secret-looking (the filter the Code terminal uses, #987), `HOME`, `PATH` or start with `KOLLAB_`,
   `PYTHON`, `LD_` or `DYLD_`; then each granted secret. `SSH_AUTH_SOCK` and every other inherited
   variable stay out.
-- The engine starts the daemon through `DaemonPool` with `KOLLAB_USAGE_LANE=plugin:<id>`,
-  `KOLLAB_USAGE_PR=<labels.pr>` (usage ledger, #723), `KOLLAB_RUN_DEADLINE` and `KOLLAB_RUN_MAX_TOKENS`.
-  The daemon refuses provider requests past either limit, at the same dispatch-time gate `/goal` budgets
-  use (`kollabor/goals/`), so the limits hold while the engine is down. The engine sends the brief and
-  stops the daemon at `turn_complete`; the conversation stays on disk.
+- The engine starts the daemon through `DaemonPool` with `KOLLAB_USAGE_LANE=plugin:<id>` and
+  `KOLLAB_USAGE_PR=<labels.pr>` (usage ledger, #723). Plugin agent time, token and concurrency limits
+  are intended settings; the current engine does not enforce them. The engine sends the brief and stops
+  the daemon at `turn_complete`; the conversation stays on disk.
 - Each run is a row in `run/runs.json` (run id, session id, daemon pid and start time, deadline, cap,
   status, tokens so far, and the result when it ends), rewritten whole with the atomic write helper
   under a sibling `runs.json.lock`. The daemon writes its own end state and result when it finishes, is
@@ -456,8 +460,8 @@ Background processes get `KOLLAB_PLUGIN_ID`, `KOLLAB_PLUGIN_ROOT`, `KOLLAB_PLUGI
   A terminal row also has `finished_at` (an ISO-8601 timestamp or Unix seconds) and `result.usage`
   with non-negative integer `input` and `output` counts, including zero when no tokens were used.
   These fields let the daily counter assign and deduplicate a completed run even after a crash.
-- A plugin runs at most 4 agents at once (`max_concurrent_runs`); the next start gets 429. A run is
-  admitted against the day's counted tokens plus the tokens of runs still going.
+- `max_concurrent_runs` is an intended setting. The current engine does not enforce a concurrency limit
+  when starting plugin agent runs.
 - `tools` goes through the agent bundle's tools allowlist. That allowlist has open gaps (#889 to #897),
   so agent runs ship only after those issues close.
 
@@ -468,8 +472,8 @@ The engine keeps one counter per plugin per day in `run/usage-<date>.json` (loca
 far `run/usage.jsonl` has been read. It adds each finished agent run once (by run id) and each complete
 line a plugin appends to `run/usage.jsonl` (`{ts, model, input, output, labels}`) to the day of that
 line's own `ts`; appending works with or without an
-engine. `max_tokens_per_day` (default 2,000,000) refuses the next agent run with 429 once the counter
-reaches it, and resets at 00:00 local time. Tokens a plugin spends without appending them are not
+engine. `max_tokens_per_day` (default 2,000,000) is reported with usage, but does not currently prevent
+new agent runs. It is intended to reset at 00:00 local time. Tokens a plugin spends without appending them are not
 counted; pr-chain appends one line per command stage from the transcript it already reads, and its loop
 reads `GET /plugins/pr-chain/usage` before each stage, sums today's `usage.jsonl` lines itself when no
 engine answers, and starts no stage past the cap or when it cannot tell.
@@ -640,9 +644,10 @@ PluginEntry = {id, name, version, kind: "built-in" | "installed" | "dev", source
                state: "ok" | "error" | "off" | "stopping" | "stop-failed" | "changed-on-disk" | "skipped", error, settings: [make_field fields],
                web: {entry, style, hash} | null, contributes: {menu, views, pages, modals, slash, renderers},
                services: [{name, state: "starting" | "running" | "backoff" | "stopping" | "stop-failed" | "exited" | "stopped"
-                                  | "crash-stopped" | "error" | "unknown",
+                                  | "crash-stopped" | "error" | "unknown" | "failed",
                            desired, pid, since, restarts, heartbeat, heartbeat_s, heartbeat_monitor_since,
-                           stop_deadline, secrets}], uses, granted}
+                           stop_deadline, secrets, secrets_omitted}], uses, granted,
+               omitted: {services, uses, granted, settings, setting_options, option_labels, contributions}}
 ```
 
 `kollabor_plugins.registry.plugin_entries()` lists what the loader found: the bundled `plugins/`, loose
@@ -860,10 +865,10 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
    running, and `/plugins` reports `state: "error"` with the message.
 3. **Background process crash loop.** The wrapper's backoff and five-crash stop, a notice, the menu count
    and the log one click away, with or without an engine.
-4. **Runaway agent spend.** Per-run limits enforced by the daemon itself, at most 4 runs at once, and a
-   Daily Token Cap of 2,000,000 tokens a day by default over runs and reported usage. Every usage ledger
-   row names `plugin:<id>`. Unreported tokens of a plugin's own agents are not capped, and the sheet says
-   so.
+4. **Runaway agent spend.** The configured per-run, concurrency and daily token limits are not enforced
+   by the current engine. Usage reports recorded runs and ledger lines marked `plugin:<id>`; tokens a
+   plugin spends without reporting them are invisible and cannot be capped. The install sheet discloses
+   this before consent.
 5. **Indirect prompt injection.** PR text, diffs and comments are written by PR authors and can carry
    instructions. Kollab agent runs default to `approval: "ask"`, with a scratch HOME and an allowlisted
    environment; unattended runs need `agents:unattended`, which the sheet shows as able to do anything
@@ -880,8 +885,8 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
    `nosniff`. Manifest paths resolve inside the plugin folder.
 9. **Remote callers.** Plugin routes sit behind the engine's token middleware; management routes also
    refuse callers that are not on this computer.
-10. **Engine down.** Background processes and their restarts keep going, agent-run limits hold, usage
-    lines wait in `usage.jsonl`, and plugin views show the app's engine-down state.
+10. **Engine down.** Background processes and their restarts keep going, usage lines wait in
+    `usage.jsonl`, and plugin views show the app's engine-down state.
 11. **Orphaned runs and half-finished steps.** The engine refuses to turn off or remove a plugin while its
     agent runs are active; the user must cancel those runs first. Stopping gives each process `stop_timeout_s` to finish its step. If Kollab
     cannot signal a verified wrapper, the plugin stays off, Settings shows `Failed to Stop`, and the process
@@ -897,7 +902,7 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 | D2 | Web plugins are ES modules loaded with `import()` that share the app's React through an import map. | maintainers, owner-approved | One React instance and no Node at install time. DeepSeek Harness serves each plugin's `client.js` and shares React as one platform module the same way. |
 | D3 | Plugin entries live in the right-hand menu and open as a tab, a modal with tabs or a page with tabs; eight fixed contribution points, each an existing component. | the owner, for the menu and the three targets; maintainers, owner-approved, for the rest | One design system; nothing injects markup into arbitrary places. Chat cards and custom settings stay because the owner asked for plugins that can add anything. |
 | D4 | Background processes run under a kollab wrapper that owns restarts, exit codes and logs. | maintainers, owner-approved | Crash isolation and any language; restarts and exit codes survive engine restarts; the pid file names the wrapper, so nothing is found by guessing. |
-| D5 | Plugin agents are real kollab sessions on the user's loadouts, with limits the daemon enforces. | maintainers, owner-approved | Live Chat and Trajectory, the usage ledger, tool allowlists and approval modes come for free, and limits hold with no engine. |
+| D5 | Plugin agents are real kollab sessions on the user's loadouts; the intended run limits are not enforced yet. | maintainers, owner-approved | Live Chat and Trajectory, the usage ledger, tool allowlists and approval modes come for free. The limits remain future work. |
 | D6 | One settings shape (the `get_config_widgets()` section), one writer, and installed plugins' values in their data folder. | maintainers, owner-approved | `/config` already draws that shape; a separate store keeps saves away from `config.json`, which pr-chain watches. |
 | D7 | Installs come from git, pinned to a resolved commit; folders only run through `dev`. | maintainers, owner-approved | A pinned commit keeps the sheet true; a folder has no commit to pin. |
 | D8 | No new project-folder plugins; today's import of them is bug #1035. | maintainers, owner-approved | They need a folder-trust design the goal does not need. |
