@@ -132,6 +132,7 @@ def _type_errors(entry):
         None,
         "Plugin files changed since approval",
         "Plugin metadata could not be loaded",
+            "Development plugin metadata could not be loaded",
         "Python entry failed while loading; see the process log for details.",
     ):
         errors.append("error is not a fixed message")
@@ -203,6 +204,20 @@ def test_plugin_inventory_boundary_normalizes_every_field_and_bounds_manifest_st
         if CANARY in encoded:
             failures.append(f"{label}: secret-looking text survived normalization")
         failures.extend(f"{label}: invalid {problem}" for problem in _type_errors(normalized))
+
+
+def test_dev_metadata_error_survives_inventory_normalization():
+    entry = _entry()
+    entry.update(
+        id="hello@dev",
+        kind="dev",
+        state="error",
+        error="Development plugin metadata could not be loaded",
+    )
+
+    normalized = registry._normalize_plugin_entry(entry)
+
+    assert normalized["error"] == "Development plugin metadata could not be loaded"
 
     too_long = "x" * 4097
     long_manifest_values = [

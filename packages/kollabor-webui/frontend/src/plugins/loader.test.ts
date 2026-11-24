@@ -8,6 +8,7 @@ import {
   isActive,
   listedPluginEntries,
   LOAD_TIMEOUT_MS,
+  normalizePluginEntry,
   pluginsOff,
   type LoaderDeps,
 } from "./loader";
@@ -444,5 +445,17 @@ describe("PhoneLink lists plugins and loads no code", () => {
     expect(runtimeSource).toContain("loadCode: !inPhoneApp(where.pathname)");
     expect(listedPluginEntries().map((item) => item.id)).toEqual(["hello", "pr-chain"]);
     expect(registry.getSnapshot()).toMatchObject({ listed: true, plugins: [] });
+  });
+});
+
+describe("fixed plugin inventory errors", () => {
+  it("preserves the development manifest error", () => {
+    const normalized = normalizePluginEntry(entry("hello@dev", {
+      kind: "dev",
+      state: "error",
+      error: "Development plugin metadata could not be loaded",
+    }));
+
+    expect(normalized?.error).toBe("Development plugin metadata could not be loaded");
   });
 });
