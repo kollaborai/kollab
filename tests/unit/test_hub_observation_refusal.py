@@ -347,7 +347,7 @@ async def test_cancel_after_coalesced_replay_effect_does_not_redeliver(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_delivery_failure_leaves_message_for_replay_after_restart(
+async def test_delivery_failure_is_held_for_inspection_after_restart(
     tmp_path, caplog
 ):
     message = HubMessage(
@@ -375,11 +375,12 @@ async def test_delivery_failure_leaves_message_for_replay_after_restart(
             ["receiver"], consume=False
         )
         assert [item.id for item in replayed] == [message.id]
+        assert replayed[0].metadata["_mailbox_delivery_uncertain"] is True
         acknowledged = await restarted_plugin._deliver_inbox_batch(replayed)
         messenger_module.AgentMessenger.acknowledge_mailboxes(
             ["receiver"], acknowledged
         )
-        assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 0
+        assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 1
 
 
 @pytest.mark.asyncio
