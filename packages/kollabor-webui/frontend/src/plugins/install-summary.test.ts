@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 // @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
 import { ApiError } from "@/api";
-import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, discardReview, reviewFormState, shouldRetryPolling, showFetching, startReview } from "./install";
+import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, discardReview, reviewFormState, shouldPollReview, shouldRetryPolling, showFetching, startReview } from "./install";
 
 const installSource = readFileSync(new URL("./install.tsx", import.meta.url), "utf8");
 const settingsSource = readFileSync(new URL("./settings.tsx", import.meta.url), "utf8");
@@ -136,6 +136,38 @@ describe("plugin review form state", () => {
     expect(reviewFormState("update", null)).toEqual({ source: false, review: false });
     expect(reviewFormState("update", { status: "error" })).toEqual({ source: false, review: true });
     expect(reviewFormState("update", null, true)).toEqual({ source: false, review: true });
+  });
+});
+
+describe("cancelling a plugin review", () => {
+  it("keeps a cancelling job pollable and retries cleanup after a failed DELETE", async () => {
+    const closeSource = installSource.slice(installSource.indexOf("const close ="), installSource.indexOf("const confirm ="));
+    const api = {
+      json: vi.fn()
+        .mockRejectedValueOnce(new ApiError("Cleanup failed", 503, {}))
+        .mockResolvedValueOnce({ status: "cancelled" }),
+    } as never;
+    const onClose = vi.fn();
+    let job = { job_id: "review-1", status: "staging" as "staging" | "cancelling" };
+    const cancel = async () => {
+      if (job.status === "staging" || job.status === "cancelling") {
+        await discardReview(api, job.job_id);
+        onClose();
+      } else {
+        onClose();
+      }
+    };
+
+    const firstCancel = cancel().catch((error: unknown) => error);
+    job = { ...job, status: "cancelling" };
+    expect(shouldPollReview(job)).toBe(true);
+    expect(closeSource).toMatch(/job\.status === "cancelling"/);
+    expect(await firstCancel).toMatchObject({ status: 503 });
+    expect(onClose).not.toHaveBeenCalled();
+
+    await cancel();
+    expect(api.json).toHaveBeenCalledTimes(2);
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });
 
