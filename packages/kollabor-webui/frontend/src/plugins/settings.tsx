@@ -29,7 +29,7 @@ export function settingsValues(entry: Pick<PluginEntry, "id" | "kind">, draft: D
 }
 
 async function savePluginSettings(api: EngineApi, entry: Pick<PluginEntry, "id" | "kind">, draft: Draft): Promise<void> {
-  await api.json(`/plugins/${encodeURIComponent(entry.id)}/settings`, {
+  await api.json(`/plugins/${encodeURIComponent(entry.id)}/settings?kind=${encodeURIComponent(entry.kind)}`, {
     method: "PUT",
     body: JSON.stringify(settingsValues(entry, draft)),
   });

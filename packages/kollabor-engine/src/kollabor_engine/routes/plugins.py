@@ -342,14 +342,25 @@ def _engine_context(plugin_id: str, hub: PluginEventHub):
 
 
 @router.get("/{plugin_id}/settings")
-def get_plugin_settings(plugin_id: str):
+def get_plugin_settings(plugin_id: str, kind: str | None = None):
     """Read package settings or the public fields of a built-in plugin."""
-    context = _package_context(plugin_id)
+    if kind not in {None, "built-in", "installed", "dev"}:
+        raise HTTPException(status_code=422, detail="Invalid plugin kind")
+    if kind == "dev" and not plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    if kind in {"installed", "built-in"} and plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    context = None if kind == "built-in" else _package_context(plugin_id)
+    if kind in {"installed", "dev"} and context is None:
+        raise HTTPException(status_code=404, detail="Plugin not found")
     if context is not None:
         try:
             return context.settings.get()
         except (OSError, UnicodeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail="Cannot read plugin settings") from exc
+
+    if kind in {"installed", "dev"}:
+        raise HTTPException(status_code=404, detail="Plugin not found")
 
     from kollabor_plugins.registry import plugin_entries
 
@@ -369,17 +380,30 @@ def get_plugin_settings(plugin_id: str):
 
 
 @router.put("/{plugin_id}/settings")
-def put_plugin_settings(request: Request, plugin_id: str, values: dict[str, Any]):
-    context = _package_context(plugin_id)
+def put_plugin_settings(
+    request: Request,
+    plugin_id: str,
+    values: dict[str, Any],
+    kind: str | None = None,
+):
+    if kind not in {None, "built-in", "installed", "dev"}:
+        raise HTTPException(status_code=422, detail="Invalid plugin kind")
+    if kind == "dev" and not plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    if kind in {"installed", "built-in"} and plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    context = None if kind == "built-in" else _package_context(plugin_id)
     if context is None:
         # Verify that this is an actual built-in before invoking the shared writer.
-        get_plugin_settings(plugin_id)
+        get_plugin_settings(plugin_id, kind=kind)
+        if kind in {"installed", "dev"}:
+            raise HTTPException(status_code=404, detail="Plugin not found")
     try:
         if context is None:
             from kollabor_plugins.settings import save
 
             save(plugin_id, values)
-            saved = get_plugin_settings(plugin_id)
+            saved = get_plugin_settings(plugin_id, kind=kind)
         else:
             context.settings.save(values)
             saved = context.settings.get()
