@@ -92,6 +92,17 @@ describe("contribution points", () => {
     expect(String(warn.mock.calls[1][0])).toContain("hello did not declare page secret");
   });
 
+  it("keeps tool and tag renderers with the same name as separate claims", () => {
+    const { k, current } = harness();
+    k.renderer({ tool: "hello_tool", render: Tab });
+    k.renderer({ tag: "hello_tool", render: Tab });
+
+    expect(current().renderers).toEqual([
+      { tool: "hello_tool", render: Tab },
+      { tag: "hello_tool", render: Tab },
+    ]);
+  });
+
   it("rejects command names that are not one slash token with a warning", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const names = ["two words", "/leading", "nested/name"];
