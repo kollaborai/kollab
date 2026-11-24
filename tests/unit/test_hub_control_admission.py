@@ -71,6 +71,7 @@ def test_control_admission_is_idempotent_and_ordinary_limit_is_independent(
 
     stored = AgentMessenger.read_mailbox("receiver", restart_boundary=0)
     assert [message.id for message in stored].count(control.id) == 1
+    AgentMessenger.acknowledge_mailboxes(["receiver"], {control.id})
     assert len(list((tmp_path / "receiver").glob("*.json"))) == 0
 
 
@@ -119,6 +120,7 @@ def test_task_cron_control_survives_restart_boundary_and_capacity_drains(
 
     replayed = AgentMessenger.read_mailbox("receiver", restart_boundary=10**12)
     assert [message.id for message in replayed] == [cron.id]
+    AgentMessenger.acknowledge_mailboxes(["receiver"], {cron.id})
 
     retry = _control("cron-2")
     _send("receiver", retry)
@@ -136,7 +138,6 @@ def test_unreadable_control_is_preserved_and_still_consumes_capacity(
     _send("receiver", _control("accepted"))
     control_path = next((tmp_path / "receiver").glob("*.json"))
     os.utime(control_path, (1, 1))
-    messenger._control_classification_cache.clear()
 
     real_open = builtins.open
 
@@ -169,7 +170,6 @@ def test_malformed_control_is_preserved_and_still_consumes_capacity(
     _send("receiver", _control("accepted"))
     control_path = next((tmp_path / "receiver").glob("*.json"))
     control_path.write_text("{", encoding="utf-8")
-    messenger._control_classification_cache.clear()
 
     ordinary = HubMessage(
         id="ordinary",
