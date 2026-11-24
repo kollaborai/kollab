@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 
 type Job = {
-  job_id: string; status: "staging" | "ready" | "installing" | "complete" | "error" | "cancelled";
+  job_id: string; status: "staging" | "ready" | "cancelling" | "installing" | "complete" | "error" | "cancelled";
   action?: "install" | "update"; plugin_id?: string; commit?: string; files_sha256?: string;
   source?: string; ref?: string; previous_commit?: string; changed_folders?: string[];
   error?: string | null; warning?: string | null;
@@ -95,7 +95,7 @@ export function showFetching(job: Pick<Job, "status"> | null, failed: boolean): 
 }
 
 export function shouldPollReview(job: Pick<Job, "status"> | null): boolean {
-  return job?.status === "staging" || job?.status === "installing";
+  return job?.status === "staging" || job?.status === "installing" || job?.status === "cancelling";
 }
 
 export function shouldRetryPolling(job: Pick<Job, "status"> | null, failed: boolean): boolean {
@@ -123,6 +123,14 @@ export async function discardReview(api: EngineApi, jobId: string): Promise<void
     await api.json(`/plugins/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
   } catch (caught) {
     if (!(caught instanceof ApiError) || (caught.status !== 404 && caught.status !== 409)) throw caught;
+  }
+}
+
+async function discardReviewForDismissal(api: EngineApi, jobId: string): Promise<void> {
+  try {
+    await api.json(`/plugins/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+  } catch (caught) {
+    if (!(caught instanceof ApiError) || caught.status !== 404) throw caught;
   }
 }
 
@@ -155,12 +163,12 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   }, [action]);
   useEffect(() => {
     const status = job?.status ?? null;
-    if ((status === "staging" || status === "installing") && status !== previousStatus.current)
+    if ((status === "staging" || status === "cancelling" || status === "installing") && status !== previousStatus.current)
       requestAnimationFrame(() => progressRef.current?.focus());
     previousStatus.current = status;
   }, [job?.status]);
   useEffect(() => {
-    if (!job || (job.status !== "staging" && job.status !== "installing")) return;
+    if (!job || (job.status !== "staging" && job.status !== "installing" && job.status !== "cancelling")) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
@@ -177,10 +185,13 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   }, [api, job?.job_id, job?.status, pollVersion]);
   const close = () => {
     if (busy || job?.status === "installing") return;
-    if (job && (job.status === "staging" || job.status === "ready")) {
+    if (job && (job.status === "staging" || job.status === "ready" || job.status === "cancelling")) {
       setBusy(true); setError(null);
-      void discardReview(api, job.job_id).then(onClose).catch((caught) => {
-        if (caught instanceof ApiError && caught.status === 409) { onClose(); return; }
+      const cleanup = job.status === "ready"
+        ? discardReview(api, job.job_id)
+        : discardReviewForDismissal(api, job.job_id);
+      void cleanup.then(onClose).catch((caught) => {
+        if (caught instanceof ApiError && caught.status === 409 && job.status === "ready") { onClose(); return; }
         setError(errorText(caught));
       }).finally(() => setBusy(false));
       return;
@@ -240,6 +251,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
         </div> : null}
         {showFetching(job, error !== null) ? <p ref={progressRef} tabIndex={-1} role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
         {job?.status === "installing" && !error ? <p ref={progressRef} tabIndex={-1} role="status" className="text-muted-foreground text-sm">Installing plugin…</p> : null}
+        {job?.status === "cancelling" && !error ? <p ref={progressRef} tabIndex={-1} role="status" className="text-muted-foreground text-sm">Cancelling plugin review…</p> : null}
         {job?.status === "complete" ? <p role="status" className="text-muted-foreground text-sm">Plugin {action === "install" ? "added" : "updated"}.</p> : null}
         {job?.warning ? <p role="alert" className="break-words text-sm">{job.warning}</p> : null}
         {job?.status === "error" ? <p role="alert" className="text-destructive break-words text-sm">{job.error || "Plugin review failed."}</p> : null}
