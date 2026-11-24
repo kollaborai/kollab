@@ -103,18 +103,18 @@ function ServiceRow({ service, api, id, canControl, enabled, onError }: {
       <span className="text-muted-foreground">{serviceStatus(service)}</span>
       {service.error ? <span className="text-destructive break-words">{service.error}</span> : null}
       <div className="ml-auto flex flex-wrap gap-1">
-        <Button type="button" variant="ghost" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void showLog(); }}>View Log</Button>
+        <Button type="button" variant="ghost" size="xs" className="pointer-coarse:min-h-11" aria-label={`View Log ${service.name}`} disabled={busy} onClick={() => { void showLog(); }}>View Log</Button>
         {canControl && service.state === "running" ? (
           <>
-            {enabled ? <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void control("restart"); }}>Restart</Button> : null}
-            <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void control("stop"); }}>Stop</Button>
+            {enabled ? <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Restart ${service.name}`} disabled={busy} onClick={() => { void control("restart"); }}>Restart</Button> : null}
+            <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Stop ${service.name}`} disabled={busy} onClick={() => { void control("stop"); }}>Stop</Button>
           </>
         ) : null}
         {canControl && service.state === "stop-failed" ? (
-          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void control("stop"); }}>Retry Stop</Button>
+          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Retry Stop ${service.name}`} disabled={busy} onClick={() => { void control("stop"); }}>Retry Stop</Button>
         ) : null}
         {canControl && enabled && service.state !== "running" && service.state !== "stopping" && service.state !== "stop-failed" ? (
-          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void control("start"); }}>Start</Button>
+          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Start ${service.name}`} disabled={busy} onClick={() => { void control("start"); }}>Start</Button>
         ) : null}
       </div>
       <Dialog open={log !== null} onOpenChange={(open) => { if (!open) setLog(null); }}>
