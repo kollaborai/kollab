@@ -1,4 +1,7 @@
+// @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { K_POLYS, KollabLogo } from "@/components/icons/kollab-logo";
 import { startGlass } from "@/components/icons/kollab-logo-glass";
@@ -54,6 +57,39 @@ describe("KollabLogo", () => {
     expect(html).not.toContain("invisible");
     expect(html).toContain("<canvas");
     expect(html).toContain("inset-[-40%]");
+  });
+
+  it("stops the glass scene when the component unmounts", async () => {
+    vi.resetModules();
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const stop = vi.fn();
+    vi.doMock("@/components/icons/kollab-logo-glass", () => ({
+      startGlass: vi.fn(() => ({ stop, flare: vi.fn() })),
+    }));
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      const { KollabLogo: MountedKollabLogo } = await import(
+        "@/components/icons/kollab-logo"
+      );
+      await act(async () => {
+        root.render(<MountedKollabLogo glass />);
+      });
+      expect(container.querySelector("canvas")).not.toBeNull();
+
+      await act(async () => {
+        root.unmount();
+      });
+
+      expect(stop).toHaveBeenCalledOnce();
+    } finally {
+      root.unmount();
+      container.remove();
+      vi.doUnmock("@/components/icons/kollab-logo-glass");
+      vi.resetModules();
+    }
   });
 });
 
