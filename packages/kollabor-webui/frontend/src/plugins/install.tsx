@@ -187,7 +187,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
       setJob(result);
       if (result.status !== "complete") throw new Error(result.error || "The plugin manager did not complete the operation.");
       await onApplied();
-      onClose();
+      if (!result.warning) onClose();
     } catch (caught) {
       const fallback = errorText(caught);
       try {
@@ -196,7 +196,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
         if (current.status === "complete") {
           setError(null);
           await onApplied();
-          onClose();
+          if (!current.warning) onClose();
         } else {
           setError(current.status === "installing" ? null : current.error || fallback);
         }
@@ -230,6 +230,8 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
         </div> : null}
         {showFetching(job, error !== null) ? <p role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
         {job?.status === "installing" && !error ? <p role="status" className="text-muted-foreground text-sm">Installing plugin…</p> : null}
+        {job?.status === "complete" ? <p role="status" className="text-muted-foreground text-sm">Plugin {action === "install" ? "added" : "updated"}.</p> : null}
+        {job?.warning ? <p role="alert" className="break-words text-sm">{job.warning}</p> : null}
         {job?.status === "error" ? <p role="alert" className="text-destructive text-sm">{job.error || "Plugin review failed."}</p> : null}
         {job?.status === "cancelled" ? <p role="status" className="text-muted-foreground text-sm">Plugin review was cancelled. You can start another review.</p> : null}
         {ready && job ? <>
@@ -243,13 +245,12 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           <DetailsList label="Through Kollab" values={throughKollab} />
           <DetailsList label="On Its Own" values={onItsOwn} />
           <DetailsList label="Other Declarations" values={other} />
-          {job.warning ? <p className="text-sm">{job.warning}</p> : null}
           <p className="bg-muted rounded-lg p-3 text-sm">{PLUGIN_TRUST_NOTICE}</p>
         </> : null}
         {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
         {shouldRetryPolling(job, error !== null) ? <Button type="button" variant="outline" className="pointer-coarse:min-h-11 self-start" disabled={busy} onClick={() => { setError(null); setPollVersion((version) => version + 1); }}>Check Again</Button> : null}
       </div>
-      <DialogFooter><Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={close}>Cancel</Button>
+      <DialogFooter><Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={close}>{job?.status === "complete" ? "Close" : "Cancel"}</Button>
                 {form.review ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || (action === "install" && !url.trim())} onClick={() => { void start(); }}>{action === "update" ? "Review Again" : "Review"}</Button> : null}
          {ready ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void confirm(); }}>{action === "install" ? "Add Plugin" : "Update"}</Button> : null}
       </DialogFooter>
