@@ -264,15 +264,12 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
         <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
         <span className={`text-xs font-medium ${failure !== null || entry.state === "changed-on-disk" || entry.state === "stop-failed" ? "text-destructive" : "text-muted-foreground"}`}>{status}</span>
         {entry.kind !== "dev" ? (
-          <label className="inline-flex pointer-coarse:flex pointer-coarse:size-11 pointer-coarse:items-center pointer-coarse:justify-center"
-            onPointerDown={(event) => {
-              const trigger = event.currentTarget.querySelector("button");
-              if (trigger) confirmationOpener.current = trigger;
-            }}>
+          <label className="inline-flex pointer-coarse:flex pointer-coarse:size-11 pointer-coarse:items-center pointer-coarse:justify-center">
             <Switch
               aria-label={`${entry.name} enabled`}
               checked={entry.enabled}
               disabled={!switchEnabled || busy || operationBusy}
+              onPointerDown={(event) => { confirmationOpener.current = event.currentTarget; }}
               onCheckedChange={(checked) => {
                 if (checked) void perform("enable");
                 else {

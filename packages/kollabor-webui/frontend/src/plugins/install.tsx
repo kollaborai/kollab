@@ -353,6 +353,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   onRestoreFocus: (event: Event) => void;
 }) {
   const [url, setUrl] = useState("");
+  const urlInputRef = useRef<HTMLInputElement>(null);
   const [gitRef, setGitRef] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
@@ -492,14 +493,14 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
     <DialogContent onOpenAutoFocus={(event) => {
       if (action === "install") {
         event.preventDefault();
-        event.currentTarget.querySelector<HTMLInputElement>('input[autocomplete="url"]')?.focus();
+        urlInputRef.current?.focus();
       }
     }} onCloseAutoFocus={onRestoreFocus} className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
         <DialogDescription>Review the exact source and permissions before anything is installed or run.</DialogDescription></DialogHeader>
       <div role="region" tabIndex={0} aria-label="Plugin review details" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
         {form.source ? <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
-          <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Git URL<Input className="pointer-coarse:min-h-11" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label>
+          <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Git URL<Input ref={urlInputRef} className="pointer-coarse:min-h-11" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label>
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Branch or Tag<Input className="pointer-coarse:min-h-11" value={gitRef} onChange={event => setGitRef(event.target.value)} placeholder="Default branch" /></label>
         </div> : null}
         {showFetching(job, error !== null) ? <p ref={progressRef} tabIndex={-1} role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}

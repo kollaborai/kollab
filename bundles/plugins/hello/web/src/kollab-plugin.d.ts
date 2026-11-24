@@ -86,7 +86,15 @@ export type PluginEntry = {
   settings_section?: { title?: string } | null;
   uses?: string[];
   granted?: string[];
-  omitted: { services: number; uses: number; granted: number };
+  omitted: {
+    services: number;
+    uses: number;
+    granted: number;
+    settings: number;
+    setting_options: number;
+    option_labels: number;
+    contributions: number;
+  };
 };
 
 /** `GET /plugins` response. `server_time` is Unix time in seconds. */
