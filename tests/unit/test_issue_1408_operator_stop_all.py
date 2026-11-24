@@ -696,3 +696,47 @@ def test_typed_stop_all_does_not_count_a_row_whose_pid_was_recycled(monkeypatch)
     assert stopped == ["alive"]
     assert "stopping 1 agent" in result
     assert "ghost" not in result
+
+
+def test_cli_status_keeps_a_replacement_row_published_during_the_scan(tmp_path, monkeypatch):
+    """A row whose pid runs another process is dropped only if it is still the
+    row that was read: a newer agent that replaced the file survives."""
+    _cli(tmp_path, monkeypatch, local=False)
+    current = tmp_path / "current"
+    _write(current, "stale", "/work/here")
+    path = current / "stale.json"
+    row = json.loads(path.read_text())
+    row["start_token"] = "darwin:1.0"  # not this process: the row is recycled
+    path.write_text(json.dumps(row))
+
+    def start_token_then_replace(_pid):
+        path.write_text(json.dumps({**row, "started_at": row["started_at"] + 50,
+                                    "start_token": "darwin:2.0"}))
+        return "darwin:9.9"
+
+    monkeypatch.setattr("kollabor_agent.runtime.process_start_token", start_token_then_replace)
+
+    asyncio.run(_handle_cli_hub(["status"]))
+
+    assert path.exists()
+    assert json.loads(path.read_text())["start_token"] == "darwin:2.0"
+
+
+def test_cli_stop_cleanup_keeps_a_replacement_with_the_same_pid(tmp_path):
+    """Pid reuse between the exit check and cleanup: the row and socket of a
+    newer generation (other start time) stay."""
+    from kollabor.cli import _cleanup_presence_for_pid
+
+    sock = tmp_path / "agent-z.sock"
+    sock.write_text("")
+    row = tmp_path / "agent-z.json"
+    row.write_text(json.dumps({
+        "agent_id": "agent-z", "pid": 4242, "started_at": 200.0, "socket_path": str(sock),
+    }))
+
+    _cleanup_presence_for_pid(
+        tmp_path, 4242, {"agent_id": "agent-z", "pid": 4242, "started_at": 100.0}
+    )
+
+    assert row.exists()
+    assert sock.exists()
