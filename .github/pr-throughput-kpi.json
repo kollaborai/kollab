@@ -1,0 +1,8 @@
+{
+  "kpi": {
+    "enabled": true,
+    "repo": "kollaborai/kollab",
+    "target_per_hour": 12,
+    "windows": [1, 24, 168]
+  }
+}

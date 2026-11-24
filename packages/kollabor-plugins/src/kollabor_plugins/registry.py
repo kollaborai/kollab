@@ -16,7 +16,17 @@ from .base import BasePlugin
 from .collector import PluginStatusCollector
 from .discovery import PluginDiscovery
 from .factory import PluginFactory
-from .packages import _ID, _SYMBOL, _read_registry, _within, files_sha256, recover_installs, validate_manifest
+from .packages import (
+    _ID,
+    _MAX_ENABLE_ORDER,
+    _SYMBOL,
+    _read_registry,
+    _within,
+    files_sha256,
+    heartbeat_seconds,
+    recover_installs,
+    validate_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +124,12 @@ class _RegistryDiscovery(PluginDiscovery):
                 self.plugin_configs[name] = {}
                 return True
         return False
+
+
+def _plugin_code_error(plugin_id: str, exc: Exception) -> ValueError:
+    """Keep text raised by plugin code out of metadata; it can hold secrets (#1401)."""
+    logger.error("Plugin %s raised while loading", plugin_id, exc_info=exc)
+    return ValueError("Python entry failed while loading; see the process log for details.")
 
 
 class PluginRegistry:
@@ -219,6 +235,15 @@ class PluginRegistry:
             for plugin_id, folder in registry["dev"].items()
             if isinstance(plugin_id, str) and isinstance(folder, str)
         )
+        # Earliest-enabled loads first, so it wins slash-command conflicts (docs/specs/plugins.md).
+        order = registry.get("enable_order")
+        order = order if isinstance(order, dict) else {}
+
+        def _enabled_rank(candidate):
+            rank = order.get(f"{candidate[0]}@dev" if candidate[3] else candidate[0])
+            return rank if type(rank) is int else float("inf")
+
+        candidates.sort(key=_enabled_rank)
         for plugin_id, record, root, is_dev in candidates:
             if not _ID.fullmatch(plugin_id):
                 continue
@@ -268,18 +293,28 @@ class PluginRegistry:
                 module = importlib.util.module_from_spec(spec)
                 sys.modules[spec.name] = module
                 previous_bytecode = sys.dont_write_bytecode
+                # Everything in this block can run plugin code (import, module __getattr__,
+                # metaclass checks, descriptors), so any exception raised here is plugin text.
+                # Kollab's own refusals are recorded in `refusal` and raised after the block.
+                refusal = None
                 try:
                     sys.dont_write_bytecode = True
-                    spec.loader.exec_module(module)
-                finally:
-                    sys.dont_write_bytecode = previous_bytecode
-                plugin_class = getattr(module, symbol)
-                if not inspect.isclass(plugin_class) or not issubclass(plugin_class, BasePlugin):
-                    raise ValueError("Python entry must be a BasePlugin subclass")
-                if symbol in self.discovery.loaded_classes:
-                    raise ValueError("Python entry class conflicts with another plugin")
-                get_config = getattr(plugin_class, "get_default_config", None)
-                config = get_config() if callable(get_config) else {}
+                    try:
+                        spec.loader.exec_module(module)
+                    finally:
+                        sys.dont_write_bytecode = previous_bytecode
+                    plugin_class = getattr(module, symbol)
+                    if not inspect.isclass(plugin_class) or not issubclass(plugin_class, BasePlugin):
+                        refusal = "Python entry must be a BasePlugin subclass"
+                    elif symbol in self.discovery.loaded_classes:
+                        refusal = "Python entry class conflicts with another plugin"
+                    else:
+                        get_config = getattr(plugin_class, "get_default_config", None)
+                        config = get_config() if callable(get_config) else {}
+                except Exception as exc:
+                    raise _plugin_code_error(plugin_id, exc) from exc
+                if refusal:
+                    raise ValueError(refusal)
                 self.discovery.loaded_classes[symbol] = plugin_class
                 self.discovery.plugin_configs[symbol] = config
                 loaded.append(plugin_class)
@@ -461,17 +496,25 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
     for name in declared:
         if not isinstance(name, str) or not _SERVICE.fullmatch(name):
             continue
-        state_file = home / "plugin-data" / plugin_id / "run" / f"{name}.state"
+        data_dir = home / "plugin-data"
+        run_dir = data_dir / plugin_id / "run"
+        state_file = run_dir / f"{name}.state"
+        pid_file = run_dir / f"{name}.pid"
+        unsafe_run = any(path.is_symlink() for path in (data_dir, data_dir / plugin_id, run_dir))
         try:
+            if unsafe_run or state_file.is_symlink():
+                raise ValueError("Unsafe service state path")
             state = json.loads(state_file.read_text(encoding="utf-8"))
             if not isinstance(state, dict):
                 state = {}
         except OSError, ValueError:
-            state = {}
+            state = {"status": "unknown"} if unsafe_run or state_file.is_symlink() else {}
         history = state.get("exit_history", [])
         identity = None
         try:
-            recorded = json.loads((state_file.parent / f"{name}.pid").read_text(encoding="utf-8"))
+            if unsafe_run or pid_file.is_symlink():
+                raise ValueError("Unsafe service pid path")
+            recorded = json.loads(pid_file.read_text(encoding="utf-8"))
             if isinstance(recorded, dict):
                 child = recorded.get("child")
                 wrapper = recorded.get("wrapper")
@@ -482,8 +525,14 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
         except (OSError, ValueError):
             pass
         status = state.get("status", "stopped")
+        definition = declared[name]
+        heartbeat_s = heartbeat_seconds(definition)
         if status == "running" and identity is None:
             status = "unknown"
+        if status == "stopping" and identity is None:
+            status = "unknown" if pid_file.exists() or pid_file.is_symlink() else "stopped"
+        if status == "stop-failed" and identity is None and not (pid_file.exists() or pid_file.is_symlink()):
+            status = "stopped"
         result.append(
             {
                 "name": name,
@@ -493,6 +542,8 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
                 "since": identity.get("start_time") if identity else None,
                 "restarts": len(history) if isinstance(history, list) else 0,
                 "heartbeat": None,
+                "heartbeat_s": heartbeat_s,
+                "stop_deadline": state.get("stop_deadline") if status == "stopping" else None,
                 "error": state.get("error"),
             }
         )
@@ -547,12 +598,14 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         entries.append(
             {
                 "id": plugin_id,
-                "name": getattr(cls, "name", plugin_id),
+                "name": getattr(cls, "display_name", None)
+                or " ".join("MCP" if word.lower() == "mcp" else word.capitalize() for word in plugin_id.split("_")),
                 "version": None,
                 "kind": "built-in",
                 "source": inspect.getfile(cls),
                 "commit": None,
                 "enabled": enabled,
+                "enable_order": None,
                 "shadowed": False,
                 "state": "ok" if enabled else "off",
                 "error": None,
@@ -571,6 +624,14 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
     except ValueError as exc:
         logger.warning("Cannot list installed plugins: %s", exc)
         return entries
+    enable_order = data.get("enable_order", {})
+    if not isinstance(enable_order, dict):
+        enable_order = {}
+
+    def order_for(plugin_id: str) -> int | None:
+        value = enable_order.get(plugin_id)
+        return value if type(value) is int and 0 < value <= _MAX_ENABLE_ORDER else None
+
     for plugin_id, record in data["plugins"].items():
         if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id) or not isinstance(record, dict):
             continue
@@ -595,6 +656,11 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         if plugin_id in registry.package_errors and state == "ok":
             state, error = "error", registry.package_errors[plugin_id]
         service_entries = _service_entries(home, plugin_id, manifest)
+        if state in {"ok", "off"}:
+            if any(service["state"] == "stopping" for service in service_entries):
+                state = "stopping"
+            elif any(service["state"] == "stop-failed" for service in service_entries):
+                state = "stop-failed"
         entries.append(
             {
                 "id": plugin_id,
@@ -604,6 +670,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "source": record.get("source"),
                 "commit": record.get("commit"),
                 "enabled": record.get("enabled", False),
+                "enable_order": order_for(plugin_id),
                 "shadowed": plugin_id in data["dev"],
                 "state": state,
                 "error": error,
@@ -641,9 +708,17 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         except (OSError, ValueError) as exc:
             logger.warning("Failed to load development plugin metadata for %s", plugin_id, exc_info=exc)
             manifest, error = {}, "Development plugin metadata could not be loaded"
+        service_entries = _service_entries(home, f"{plugin_id}@dev", manifest)
+        state = "error" if error else "ok"
+        if state == "ok":
+            if any(service["state"] == "stopping" for service in service_entries):
+                state = "stopping"
+            elif any(service["state"] == "stop-failed" for service in service_entries):
+                state = "stop-failed"
         entries.append(
             {
                 "id": f"{plugin_id}@dev",
+                "enable_order": order_for(f"{plugin_id}@dev"),
                 "name": f"{manifest.get('name', plugin_id)}@dev",
                 "version": manifest.get("version"),
                 "kind": "dev",
@@ -651,12 +726,12 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "commit": None,
                 "enabled": True,
                 "shadowed": False,
-                "state": "error" if error else "ok",
+                "state": state,
                 "error": error,
                 "settings": _settings_fields(f"{plugin_id}@dev", dev_settings),
                 "web": _web_entry(root, manifest),
                 "contributes": manifest.get("contributes", {}),
-                "services": _service_entries(home, f"{plugin_id}@dev", manifest),
+                "services": service_entries,
                 "uses": manifest.get("uses", []),
                 "granted": granted,
             }

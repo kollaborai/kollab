@@ -136,6 +136,8 @@ export type ThreadProps = {
   components?: ThreadComponents | undefined;
   agents?: readonly AgentPoolEntry[] | undefined;
   commands?: readonly SlashCommand[] | undefined;
+  commandCatalogStatus?: "loading" | "ready" | "empty" | "unavailable" | "fallback" | undefined;
+  onRetryCommands?: (() => void) | undefined;
   /** Open a Settings tab; called for a bare panel command typed in the composer. */
   onOpenPanel?: ((request: PanelOpenRequest) => void) | undefined;
   onOpenWelcome?: (() => void) | undefined;
@@ -179,6 +181,8 @@ export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   agents = [],
   commands = [],
+  commandCatalogStatus = "ready",
+  onRetryCommands,
   onOpenPanel,
   onOpenWelcome,
   attachmentsEnabled = true,
@@ -196,6 +200,8 @@ export const Thread: FC<ThreadProps> = ({
         isEmpty={isEmpty}
         agents={agents}
         commands={commands}
+        commandCatalogStatus={commandCatalogStatus}
+        onRetryCommands={onRetryCommands}
         onOpenPanel={onOpenPanel}
         onOpenWelcome={onOpenWelcome}
         attachmentsEnabled={attachmentsEnabled}
@@ -213,6 +219,8 @@ const ThreadRoot: FC<{
   isEmpty: boolean;
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
+  commandCatalogStatus: NonNullable<ThreadProps["commandCatalogStatus"]>;
+  onRetryCommands: ThreadProps["onRetryCommands"];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
   onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
@@ -225,6 +233,8 @@ const ThreadRoot: FC<{
   isEmpty,
   agents,
   commands,
+  commandCatalogStatus,
+  onRetryCommands,
   onOpenPanel,
   onOpenWelcome,
   attachmentsEnabled,
@@ -416,6 +426,8 @@ const ThreadRoot: FC<{
               <Composer
                 agents={agents}
                 commands={commands}
+                commandCatalogStatus={commandCatalogStatus}
+                onRetryCommands={onRetryCommands}
                 onOpenPanel={onOpenPanel}
                 onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={attachmentsEnabled}
@@ -509,11 +521,13 @@ const ThreadSuggestionItem: FC = () => {
 const Composer: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
+  commandCatalogStatus: NonNullable<ThreadProps["commandCatalogStatus"]>;
+  onRetryCommands: ThreadProps["onRetryCommands"];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
   onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
-}> = ({ agents, commands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey }) => {
+}> = ({ agents, commands, commandCatalogStatus, onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey }) => {
   const aui = useAui();
   const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
@@ -544,6 +558,10 @@ const Composer: FC<{
   const [orphanTokenNotice, setOrphanTokenNotice] = useState<string | null>(
     null,
   );
+  const [draftRestoreSnapshot, setDraftRestoreSnapshot] = useState<{
+    key: string | null;
+    text: string;
+  } | null>(null);
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
   const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
   const skipEmptyDraftPersist = useRef(false);
@@ -558,7 +576,9 @@ const Composer: FC<{
     if (lastRestoredDraftKey.current === key) return;
     // Token lines belong to attachments, and attachments do not live in the
     // text draft. Strip them first, then restore what the same tab kept.
-    const restored = stripImageTokens(loadComposerDraft(key) ?? "");
+    const draftText = loadComposerDraft(key) ?? "";
+    const restored = stripImageTokens(draftText);
+    setDraftRestoreSnapshot({ key, text: draftText });
     restoredDraft.current = { key, text: restored.text };
     skipEmptyDraftPersist.current = false;
     if (aui.composer.getState().text !== restored.text) {
@@ -1096,6 +1116,24 @@ const Composer: FC<{
           emptyHint="Keep typing to refine the command search."
           onInserted={openPanelForItem}
         />
+        {composerText.trimStart().startsWith("/") && commandCatalogStatus !== "ready" ? (
+          <div role="status" className="bg-muted/50 text-muted-foreground flex items-center justify-between gap-3 px-3 py-2 text-xs">
+            <span className="min-w-0">
+              {commandCatalogStatus === "loading"
+                ? "Loading commands for this session."
+                : commandCatalogStatus === "empty"
+                  ? "No commands are available for this session. You can still type a slash command."
+                  : commandCatalogStatus === "fallback"
+                    ? "This engine does not provide a live command catalog. Showing built-in commands as a compatibility fallback."
+                    : "Commands couldn't be loaded for this session. Your draft is preserved."}
+            </span>
+            {(commandCatalogStatus === "fallback" || commandCatalogStatus === "unavailable") && onRetryCommands ? (
+              <Button type="button" size="sm" variant="outline" onClick={onRetryCommands}>
+                Try Again
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
         <ComposerPalette
           char="@"
           items={agentItems}
@@ -1124,7 +1162,7 @@ const Composer: FC<{
                 {orphanTokenNotice}
               </p>
             ) : null}
-            <ComposerAttachments />
+            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}

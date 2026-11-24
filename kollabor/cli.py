@@ -582,6 +582,14 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
+        "--everywhere",
+        dest="hub_stop_everywhere",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
         "--raw",
         dest="hub_capture_raw",
         action="store_true",
@@ -815,6 +823,12 @@ Telegram bridge setup (run inside interactive mode):
 
     # Parse known args, capture unknown as potential CLI commands
     args, unknown = parser.parse_known_args(argv)
+
+    if args.hub_stop_everywhere:
+        # --hub is nargs='*', so the flag arrives here, not in args.hub (#1408).
+        if not args.hub or args.hub[0].lower() not in ("stop", "kill") or args.hub[1:2] != ["all"]:
+            parser.error("--everywhere is only valid with --hub stop all")
+        args.hub.append("--everywhere")
 
     if args.hub_capture_raw:
         if not args.hub or args.hub[0].lower() != "capture":
@@ -1608,7 +1622,8 @@ def _print_hub_help() -> None:
     print("subcommands:")
     print("  status                     show online agents and their state")
     print("  agents | list              alias for status")
-    print("  stop <name|all>            send shutdown signal to an agent")
+    print("  stop <name>                send shutdown signal to an agent")
+    print("  stop all [--everywhere]    stop this folder's agents (--everywhere: every folder)")
     print("  kill <name|all>            alias for stop")
     print("  halt [--reason <text>] [--revoke <device>]   halt the network (a person's terminal only)")
     print("  resume [--confirm <8-hex> | --local]         propose, confirm or lift here only")
@@ -1630,6 +1645,7 @@ def _print_hub_help() -> None:
     print("  kollab --hub status")
     print("  kollab --hub stop koordinator")
     print("  kollab --hub stop all")
+    print("  kollab --hub stop all --everywhere")
     print("  kollab --hub msg lapis 'hey, got a minute?'")
     print("  kollab --hub broadcast 'rolling to lunch, bbiab'")
     print("  kollab --hub capture koordinator 200")
@@ -1810,24 +1826,40 @@ def _cli_is_hub_agent_context() -> bool:
         return True
 
 
-def _cleanup_presence_for_pid(presence_dir: Path, pid: int) -> None:
-    from plugins.hub.presence import _presence_files
+def _row_is_generation(row: dict, selected: dict) -> bool:
+    """True when presence ``row`` still names the generation ``selected`` was
+    read as: same agent id, pid and start (#1408). A selection missing any of
+    the three cannot prove it, so nothing is removed."""
+    keys = ("agent_id", "pid", "started_at")
+    return all(selected.get(key) is not None for key in keys) and all(
+        row.get(key) == selected[key] for key in keys
+    )
+
+
+def _cleanup_presence_for_pid(
+    presence_dir: Path, pid: int, selected: Optional[dict] = None
+) -> None:
+    """Remove ``pid``'s matching presence row; leave its shared socket alone."""
+    from plugins.hub.presence import _presence_file_lock, _presence_files
 
     if not pid:
         return
     for f in _presence_files(presence_dir):
         try:
-            with open(f) as fh:
-                d = json.load(fh)
-            if d.get("pid") == pid:
-                socket_path = d.get("socket_path", "")
-                f.unlink(missing_ok=True)
-                if socket_path:
-                    try:
-                        Path(socket_path).unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                break
+            # Presence writers use this stable sidecar lock around atomic
+            # replacement. Keep it through validation and unlink so a newer
+            # generation cannot take the pathname between those operations.
+            with _presence_file_lock(f):
+                with open(f) as fh:
+                    d = json.load(fh)
+                if d.get("pid") == pid and (
+                    selected is None or _row_is_generation(d, selected)
+                ):
+                    f.unlink(missing_ok=True)
+                    # The socket path is shared by agent id and can already
+                    # belong to a replacement that has not published its row.
+                    # Leave it for generation-aware stale-socket cleanup.
+                    break
         except Exception:
             pass
 
@@ -1862,12 +1894,20 @@ async def stop_agent_record(
     pid = int(agent.get("pid") or 0)
 
     def cleanup() -> None:
-        _cleanup_presence_for_pid(presence_dir, pid)
+        _cleanup_presence_for_pid(presence_dir, pid, agent)
 
     ident = identity(pid) if pid else None  # captured once, at selection time
 
     def signal_guard() -> str:
         """F15b: "" when the selected process may still be signalled, else the refusal line."""
+        recorded = agent.get("start_token")
+        if pid and recorded:
+            # Bound to the row's writer, not to whatever holds the pid now (#1408).
+            from kollabor_agent.runtime import process_start_token
+
+            current = process_start_token(pid)
+            if current is not None and current != recorded:
+                return f"not killed: {desig} (pid {pid} now runs another process)"
         if pid and ident is None:
             if os.name == "nt":
                 # os.kill(pid, 0) sends Ctrl+C on Windows
@@ -1910,7 +1950,13 @@ async def stop_agent_record(
 
     shutdown_acked = False
     if sock:
-        shutdown_acked = await AgentMessenger.signal_shutdown(sock, reason=reason)
+        shutdown_acked = await AgentMessenger.signal_shutdown(
+            sock,
+            reason=reason,
+            **AgentMessenger.shutdown_generation(
+                agent.get("agent_id"), pid, agent.get("started_at")
+            ),
+        )
 
     if shutdown_acked:
         if await _wait_for_pid_exit(pid, timeout=STOP_GRACE_SECONDS):
@@ -1997,12 +2043,36 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     presence_dir = get_presence_dir()
 
-    def _get_live_agents() -> List[dict]:
+    def _get_live_agents(paths=None, cleanup: bool = True) -> List[dict]:
+        """Live agents in this folder's hub, or in ``paths`` (read-only when
+        ``cleanup`` is False: another folder's dead rows are not ours, #875)."""
         import socket as _socket
         import time as _time
 
+        def _drop(path, snapshot=None) -> None:
+            """Remove a dead row, unless a newer agent replaced the file since
+            ``snapshot`` was read (#1408)."""
+            if not cleanup:
+                return
+            from plugins.hub.presence import _presence_file_lock
+
+            try:
+                with _presence_file_lock(path):
+                    if snapshot is not None:
+                        try:
+                            with open(path) as fh:
+                                if json.load(fh) != snapshot:
+                                    return
+                        except (OSError, ValueError):
+                            return  # gone or unreadable: not provably the row we read
+                    path.unlink(missing_ok=True)
+            except OSError:
+                # Without the stable lock, a pathname check still races with
+                # presence writers, so leave the row for a later scan.
+                return
+
         agents = []
-        for f in _presence_files(presence_dir):
+        for f in _presence_files(presence_dir) if paths is None else paths:
             try:
                 with open(f) as fh:
                     data = json.load(fh)
@@ -2013,17 +2083,26 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     from kollabor_config import proc_ctl
 
                     if not proc_ctl.pid_alive(pid):
-                        f.unlink(missing_ok=True)
+                        _drop(f, data)
                         continue
                 else:
                     try:
                         os.kill(pid, 0)
                     except (OSError, ProcessLookupError):
-                        f.unlink(missing_ok=True)
+                        _drop(f, data)
                         continue
-                # Pid alive but heartbeat stale = recycled pid, clean up
+                # Pid now runs a process the row's writer is not (#1408)
+                from kollabor_agent.runtime import process_start_token
+
+                recorded = data.get("start_token")
+                current = process_start_token(pid) if recorded else None
+                if current is not None and current != recorded:
+                    _drop(f, data)
+                    continue
+                # Pid alive but heartbeat stale = recycled pid, clean up -- unless
+                # the kernel start proves the writer still runs (stuck, #575).
                 heartbeat_age = _time.time() - (data.get("last_heartbeat") or 0)
-                if heartbeat_age > 30:
+                if heartbeat_age > 30 and current is None:
                     sock = data.get("socket_path", "")
                     alive = False
                     if sock:
@@ -2041,13 +2120,51 @@ async def _handle_cli_hub(hub_args: list) -> None:
                         except Exception:
                             pass
                     if not alive:
-                        f.unlink(missing_ok=True)
+                        _drop(f, data)
                         continue
                 data["_presence_path"] = str(f)
                 agents.append(data)
             except Exception:
                 continue
         return agents
+
+    def _other_folder_agents() -> List[dict]:
+        """Live agents in every other folder's hub on this machine (#1408)."""
+        from plugins.hub.presence import all_presence_dirs
+
+        here = {str(Path(f).resolve()) for f in _presence_files(presence_dir)}
+        here_ids = {a.get("agent_id") for a in _get_live_agents(cleanup=False)}
+        paths = []
+        for directory in all_presence_dirs(extra_dirs=[presence_dir]):
+            try:
+                paths += [p for p in directory.glob("*.json") if str(p.resolve()) not in here]
+            except OSError:
+                continue
+        seen: set = set()
+        others = []
+        for agent in _get_live_agents(paths, cleanup=False):
+            agent_id = agent.get("agent_id") or agent.get("identity")
+            if agent_id in here_ids or agent_id in seen:
+                continue
+            seen.add(agent_id)
+            others.append(agent)
+        return others
+
+    def _print_other_folders(others: List[dict], verb: str) -> None:
+        if not others:
+            return
+        folders: dict = {}
+        for agent in others:
+            folder = agent.get("project") or "unknown folder"
+            folders.setdefault(folder, []).append(agent.get("identity", "?"))
+        print(f"\n{len(others)} agent(s) {verb} in other folders:")
+        for folder, names in sorted(folders.items()):
+            print(f"  {folder}: {', '.join(sorted(names))}")
+            print(
+                "    stop those too: KOLLAB_PROJECT_ROOT={} kollab --hub stop all".format(
+                    shlex.quote(folder)
+                )
+            )
 
     def _find_agent(identity: str) -> Optional[dict]:
         for a in _get_live_agents():
@@ -2079,23 +2196,94 @@ async def _handle_cli_hub(hub_args: list) -> None:
         )
 
     # --- config helpers for on/off/user ---
+    from kollabor_config.atomic_write import write_text_atomic
     from kollabor_config.config_utils import get_existing_global_config_path
+    from kollabor_config.file_lock import locked_file
 
     config_path = get_existing_global_config_path()
+    _no_config_snapshot = object()
+    config_snapshot: bytes | None | object = _no_config_snapshot
 
-    def _read_config() -> dict:
-        if config_path.exists():
-            try:
-                with open(config_path) as fh:
-                    return dict(json.load(fh))
-            except Exception:
-                return {}
-        return {}
+    def _read_config() -> dict | None:
+        nonlocal config_snapshot
+        try:
+            contents = config_path.read_bytes()
+        except FileNotFoundError:
+            config_snapshot = None
+            return {}
+        except OSError:
+            config_snapshot = _no_config_snapshot
+            return None
 
-    def _write_config(cfg: dict) -> None:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(config_path, "w") as fh:
-            json.dump(cfg, fh, indent=2)
+        config_snapshot = contents
+        try:
+            config = json.loads(contents.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return config if isinstance(config, dict) else None
+
+    def _write_config(cfg: dict) -> bool:
+        nonlocal config_snapshot
+        try:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            with locked_file(
+                config_path.with_name(config_path.name + ".lock"), private=True
+            ):
+                if config_snapshot is _no_config_snapshot:
+                    print(
+                        "Hub configuration could not be checked; it was left unchanged.",
+                        file=sys.stderr,
+                    )
+                    return False
+                try:
+                    current = config_path.read_bytes()
+                except FileNotFoundError:
+                    current = None
+                if current != config_snapshot:
+                    print(
+                        "Hub configuration changed while this command was running; "
+                        "it was left unchanged. Retry the command.",
+                        file=sys.stderr,
+                    )
+                    return False
+                if current is not None:
+                    try:
+                        existing = json.loads(current.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        print(
+                            "Hub configuration became unreadable; it was left unchanged.",
+                            file=sys.stderr,
+                        )
+                        return False
+                    if not isinstance(existing, dict):
+                        print(
+                            "Hub configuration has an invalid shape; it was left unchanged.",
+                            file=sys.stderr,
+                        )
+                        return False
+
+                contents = json.dumps(cfg, indent=2)
+                try:
+                    latest = config_path.read_bytes()
+                except FileNotFoundError:
+                    latest = None
+                if latest != current:
+                    print(
+                        "Hub configuration changed while this command was running; "
+                        "it was left unchanged. Retry the command.",
+                        file=sys.stderr,
+                    )
+                    return False
+
+                write_text_atomic(config_path, contents)
+                config_snapshot = contents.encode("utf-8")
+                return True
+        except OSError:
+            print(
+                "Hub configuration could not be saved; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return False
 
     def _set_nested(d: dict, dotpath: str, value) -> None:
         keys = dotpath.split(".")
@@ -2117,7 +2305,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
         agents = _get_live_agents()
         if not agents:
-            print("no agents online")
+            print("no agents in this folder")
         else:
             print(f"{len(agents)} agent(s) online:\n")
             for a in sorted(agents, key=lambda x: x.get("identity", "")):
@@ -2137,6 +2325,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 task = a.get("current_task", "")
                 task_str = f"  task: {task[:60]}" if task else ""
                 print(f"  {desig}{coord}  pid={pid}  {state}{task_str}")
+        _print_other_folders(_other_folder_agents(), "online")
 
         # Agent network (docs/specs/agent-network-simple-flow.md, CLI bullet):
         # ask one online local agent for its network section. Never print
@@ -2193,11 +2382,14 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd in ("stop", "kill"):
         if not rest:
-            print("usage: kollab --hub stop <identity|all>")
+            print("usage: kollab --hub stop <identity|all> [--everywhere]")
             sys.exit(1)
         target = rest[0]
 
         if target == "all":
+            # This folder's hub by default (#875); --everywhere adds every
+            # other folder's live agents, which are otherwise named (#1408).
+            everywhere = "--everywhere" in rest[1:]
             # The CLI stop-all path belongs to an operator shell. Environment
             # markers alone are insufficient because background terminal
             # commands filter them, so also check the caller's process tree.
@@ -2210,8 +2402,29 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 )
                 sys.exit(2)
             agents = _get_live_agents()
+            others = _other_folder_agents()
+            unproven: List[dict] = []
+            if everywhere:
+                # Another folder's row is signalled only when its pid still runs
+                # the process that wrote it (start_token matches, #1408).
+                from kollabor_agent.runtime import process_start_token
+
+                proven = [
+                    a for a in others
+                    if a.get("start_token")
+                    and process_start_token(int(a.get("pid") or 0)) == a.get("start_token")
+                    and AgentMessenger.shutdown_generation(
+                        a.get("agent_id"), a.get("pid"), a.get("started_at")
+                    )
+                ]
+                unproven = [a for a in others if a not in proven]
+                agents, others = agents + proven, []
+            skipped = ", ".join(sorted(a.get("identity", "?") for a in unproven))
             if not agents:
-                print("no agents online")
+                print("no agents online" if everywhere else "no agents in this folder")
+                if skipped:
+                    print(f"skipped (cannot prove which process holds the pid): {skipped}")
+                _print_other_folders(others, "still running")
                 return
             stopped = 0
             results = await asyncio.gather(
@@ -2222,6 +2435,9 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 if ok:
                     stopped += 1
             print(f"\n{stopped}/{len(agents)} agent(s) stopped")
+            if skipped:
+                print(f"skipped (cannot prove which process holds the pid): {skipped}")
+            _print_other_folders(others, "still running")
         else:
             agent = _find_agent(target)
             if not agent:
@@ -2548,6 +2764,12 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "user":
         cfg = _read_config()
+        if cfg is None:
+            print(
+                "Hub configuration is unreadable; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return
         if not rest:
             current = _get_nested(cfg, "plugins.hub.user_name")
             if not current:
@@ -2556,20 +2778,32 @@ async def _handle_cli_hub(hub_args: list) -> None:
         else:
             new_name = " ".join(rest)
             _set_nested(cfg, "plugins.hub.user_name", new_name)
-            _write_config(cfg)
-            print(f"hub user set to: {new_name}")
+            if _write_config(cfg):
+                print(f"hub user set to: {new_name}")
 
     elif subcmd == "on":
         cfg = _read_config()
+        if cfg is None:
+            print(
+                "Hub configuration is unreadable; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return
         _set_nested(cfg, "plugins.hub.enabled", True)
-        _write_config(cfg)
-        print("hub enabled")
+        if _write_config(cfg):
+            print("hub enabled")
 
     elif subcmd == "off":
         cfg = _read_config()
+        if cfg is None:
+            print(
+                "Hub configuration is unreadable; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return
         _set_nested(cfg, "plugins.hub.enabled", False)
-        _write_config(cfg)
-        print("hub disabled")
+        if _write_config(cfg):
+            print("hub disabled")
 
     elif subcmd == "org":
         if not rest:
