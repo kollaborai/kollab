@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ComponentType } from "react";
 import { Puzzle } from "lucide-react";
 import { PluginBoundary, PluginFailure, PluginMount, PluginTabs, pluginIcon } from "./mount";
 import { EMPTY_CONTRIBUTIONS, type PluginRecord } from "./registry";
@@ -121,6 +122,20 @@ describe("PluginFailure", () => {
     expect(html).toMatch(/aria-expanded="true"[^>]*>View Error<\/button>/);
     expect(html).toContain("&quot;&gt;&lt;img src=x onerror=alert(1)&gt;");
     expect(html).not.toContain("<img");
+  });
+
+  it("keeps an inline plugin failure in phrasing markup", () => {
+    const InlineFailure = PluginFailure as unknown as ComponentType<{
+      title?: string;
+      error: string;
+      onRetry: () => void;
+      inline: boolean;
+    }>;
+    const html = renderToStaticMarkup(
+      <InlineFailure title="Card Failed" error="bad render" onRetry={() => {}} inline />,
+    );
+    expect(html).toContain('<span role="alert"');
+    expect(html).not.toContain("<div");
   });
 });
 
