@@ -196,6 +196,37 @@ async def test_cancel_after_receiver_effect_does_not_replay_effect(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_receiver_cancel_before_effect_stays_queued(tmp_path):
+    message = HubMessage(
+        action="message",
+        from_agent="peer-id-1",
+        from_identity="peer-1",
+        to="receiver",
+        content="effect has not started",
+    )
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def cancel_before_effect(_msg):
+        raise asyncio.CancelledError
+
+    plugin._on_message_received = cancel_before_effect
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._deliver_inbox_batch(batch)
+
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+
+    assert [item.id for item in replay] == [message.id]
+
+
+@pytest.mark.asyncio
 async def test_task_cancel_after_receiver_effect_finishes_and_acknowledges(tmp_path):
     message = HubMessage(
         action="message",
