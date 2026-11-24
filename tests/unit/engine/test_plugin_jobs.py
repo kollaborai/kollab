@@ -106,8 +106,40 @@ def test_install_reports_manifest_review_limit_refusal(client, managed_repo):
 
     assert job["status"] == "error"
     assert job["error"] == (
-        "Plugin manifest exceeds the review limits (128 services, 64 secrets per service, 256 uses)"
+        "Plugin review exceeds a display limit; reduce the manifest or changed folders and stage again."
     )
+
+
+def test_update_rejects_changed_folder_lists_over_the_review_limit(client, managed_repo):
+    source, bare = managed_repo
+    for index in range(257):
+        folder = source / f"component-{index}"
+        folder.mkdir()
+        (folder / "plugin.txt").write_text("before")
+    _git("add", ".", cwd=source)
+    _git("commit", "-m", "add plugin folders", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+    _install_hello(client)
+
+    for index in range(257):
+        (source / f"component-{index}" / "plugin.txt").write_text("after")
+    _git("add", ".", cwd=source)
+    _git("commit", "-m", "change plugin folders", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+
+    response = client.post("/plugins/hello/update")
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    job = _ready(client, job_id)
+
+    assert job["status"] == "error"
+    assert job["error"] == (
+        "Plugin review exceeds a display limit; reduce the manifest or changed folders and stage again."
+    )
+    assert "changed_folders" not in job
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": job.get("commit"), "files_sha256": job.get("files_sha256"),
+    }).status_code == 409
 
 
 def test_cancel_ready_job_removes_stage_and_rejects_confirmation(client, tmp_path):
