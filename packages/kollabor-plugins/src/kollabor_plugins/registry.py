@@ -229,6 +229,15 @@ class PluginRegistry:
             for plugin_id, folder in registry["dev"].items()
             if isinstance(plugin_id, str) and isinstance(folder, str)
         )
+        # Earliest-enabled loads first, so it wins slash-command conflicts (docs/specs/plugins.md).
+        order = registry.get("enable_order")
+        order = order if isinstance(order, dict) else {}
+
+        def _enabled_rank(candidate):
+            rank = order.get(f"{candidate[0]}@dev" if candidate[3] else candidate[0])
+            return rank if type(rank) is int else float("inf")
+
+        candidates.sort(key=_enabled_rank)
         for plugin_id, record, root, is_dev in candidates:
             if not _ID.fullmatch(plugin_id):
                 continue
