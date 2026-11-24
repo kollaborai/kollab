@@ -402,6 +402,31 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                 "search paths must stay inside the active workspace", result.error
             )
 
+    async def test_terminal_find_refuses_perl_constructed_executable_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True,
+                    stdout="../outside/marker.txt\n",
+                    stderr="",
+                    exit_code=0,
+                )
+            )
+            command = "perl -e 'system(\"fi\" . \"nd ../outside -name marker.txt -print\")'"
+
+            result = await self.executor._execute_terminal_command(
+                {"type": "terminal", "id": "find-perl-constructed", "command": command}
+            )
+
+            self.executor.shell_executor.run.assert_not_awaited()
+            self.assertFalse(result.success)
+            self.assertIn(
+                "search paths must stay inside the active workspace", result.error
+            )
+
     async def test_terminal_find_refuses_awk_system_wrapper(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "project"
