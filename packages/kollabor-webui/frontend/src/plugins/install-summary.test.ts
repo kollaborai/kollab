@@ -71,12 +71,19 @@ describe("declared plugin uses", () => {
     expect(describeUses(["agents", "agents:unattended", "secret:GITHUB_TOKEN"])).toEqual({
       throughKollab: [
         "Can start agent runs through Kollab.",
+        "Agent-run limits are not enforced; unreported token use is not capped.",
         "Can run agent tools without asking; those agents can do anything you can.",
         "Can request the secret GITHUB_TOKEN through Kollab.",
       ],
       onItsOwn: [],
       other: [],
     });
+  });
+
+  it("discloses that agent run limits are not enforced before consent", () => {
+    expect(describeUses(["agents"]).throughKollab).toContain(
+      "Agent-run limits are not enforced; unreported token use is not capped.",
+    );
   });
 
   it("lists network, file and other declarations", () => {
