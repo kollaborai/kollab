@@ -12,6 +12,7 @@ class FakeGh:
         self.closed_issues = []
         self.issue_posts = []
         self.comment_posts = []
+        self.fail_comment_once = False
 
     def __call__(self, args):
         assert args[0] == "api", args
@@ -61,7 +62,12 @@ class FakeGh:
             self.issue_posts.append(created)
             self.issues.append(created)
             return json.dumps(created)
+        if path == "repos/owner/repo/issues/42/comments?per_page=100":
+            return json.dumps([{"body": body} for body in self.comment_posts])
         if path == "repos/owner/repo/issues/42/comments" and "--method" in args:
+            if self.fail_comment_once:
+                self.fail_comment_once = False
+                raise RuntimeError("comment api failed once")
             body = next(
                 args[index + 1].split("=", 1)[1]
                 for index, value in enumerate(args[:-1])
@@ -210,3 +216,21 @@ def test_overlapping_runs_for_one_commit_leave_one_open_issue():
     open_issues = [issue for issue in gh.issues if issue.get("state") != "closed"]
     assert len(open_issues) == 1
     assert open_issues[0]["number"] == min(issue["number"] for issue in gh.issues)
+
+
+def test_retry_after_a_failed_comment_still_posts_the_pr_comment_once():
+    gh = FakeGh([{"number": 42, "html_url": "https://example.test/pull/42"}])
+    gh.fail_comment_once = True
+
+    try:
+        open_main_red_issue("owner/repo", "7", gh=gh)
+    except RuntimeError:
+        pass
+    assert len(gh.issue_posts) == 1
+    assert gh.comment_posts == []
+
+    open_main_red_issue("owner/repo", "7", gh=gh)
+    open_main_red_issue("owner/repo", "7", gh=gh)
+
+    assert len(gh.issue_posts) == 1
+    assert len(gh.comment_posts) == 1
