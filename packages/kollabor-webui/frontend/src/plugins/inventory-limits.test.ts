@@ -105,6 +105,23 @@ describe("plugin inventory collection bounds", () => {
     expect(input.reads()).toBe(limit);
   });
 
+  it("bounds staged service-property reads before copying values", () => {
+    let reads = 0;
+    const source = Object.fromEntries(Array.from({ length: 1000 }, (_, index) => [`worker-${index}`, {}]));
+    const services = new Proxy(source, {
+      get(target, key, receiver) {
+        if (typeof key === "string" && Object.prototype.hasOwnProperty.call(target, key)) reads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+
+    const job = normalizeReviewJob({ job_id: "review-1", status: "ready", manifest: { services } });
+    const normalized = job?.manifest?.services as Record<string, unknown> | undefined;
+
+    expect(Object.keys(normalized ?? {})).toHaveLength(128);
+    expect(reads).toBe(128);
+  });
+
   it("bounds setting option labels", () => {
     const labels = Object.fromEntries(Array.from({ length: 1000 }, (_, index) => [`choice-${index}`, `Label ${index}`]));
     const entry = normalizePluginEntry({
