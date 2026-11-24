@@ -22,6 +22,7 @@ export function findToolRenderer(
   plugins: readonly PluginRecord[],
   tool: string,
 ): RendererMatch | null {
+  if (tool === "request_permission") return null;
   return findRenderer(plugins, (spec) => spec.tool === tool);
 }
 
