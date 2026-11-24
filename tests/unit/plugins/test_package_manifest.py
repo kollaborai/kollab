@@ -210,7 +210,7 @@ def test_manifest_rejects_use_declarations_the_review_cannot_display(use, tmp_pa
 def test_manifest_file_size_is_bounded_before_json_parsing(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
-    from kollabor_plugins.packages import validate_manifest
+    from kollabor_plugins.packages import ManifestReviewLimitError, validate_manifest
 
     root = tmp_path / "package"
     root.mkdir()
@@ -225,5 +225,12 @@ def test_manifest_file_size_is_bounded_before_json_parsing(tmp_path, monkeypatch
     }
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
 
-    with pytest.raises(ValueError, match="Plugin manifest is too large"):
+    with pytest.raises(ManifestReviewLimitError, match="Plugin manifest is too large"):
         validate_manifest(root, "0.23.0")
+
+
+def test_manifest_string_length_uses_the_review_limit_error():
+    from kollabor_plugins.packages import ManifestReviewLimitError, _check_manifest_string_lengths
+
+    with pytest.raises(ManifestReviewLimitError, match="4096"):
+        _check_manifest_string_lengths({"description": "x" * 4097})
