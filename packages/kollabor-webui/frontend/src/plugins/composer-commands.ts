@@ -1,4 +1,5 @@
 import type { ComposerPaletteItem } from "@/components/assistant-ui/composer-palette";
+import { PANEL_COMMAND_NAMES } from "@/components/panels/panel-model";
 import type { PluginRecord } from "./registry";
 import type { CommandSpec, PluginApi } from "./sdk";
 import { pluginsByEnableOrder } from "./plugin-order";
@@ -44,7 +45,7 @@ function resolvePluginCommands(
   plugins: readonly PluginRecord[],
   reserved: ReadonlySet<string>,
 ): PluginCommandResolution {
-  const taken = new Set(reserved);
+  const taken = new Set([...reserved, ...PANEL_COMMAND_NAMES]);
   const owners = new Map<string, PluginRecord>();
   const entries: PluginCommandEntry[] = [];
   const conflicts: PluginCommandConflict[] = [];

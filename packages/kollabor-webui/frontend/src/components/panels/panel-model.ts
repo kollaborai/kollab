@@ -75,6 +75,8 @@ const TAB_FOR_PANEL: Record<string, PanelTab> = {
   prompts: "prompts",
 };
 
+export const PANEL_COMMAND_NAMES = Object.keys(TAB_FOR_PANEL);
+
 const BARE_COMMAND = /^\/([A-Za-z0-9][A-Za-z0-9_-]*)(?:[ \t]+([A-Za-z]+))?$/;
 
 /**
