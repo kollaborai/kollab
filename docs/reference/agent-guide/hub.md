@@ -34,6 +34,12 @@ Peer-to-peer agent mesh with persistent identity.
 - First agent becomes coordinator via `flock()` on `hub.lock`
 - Designations come from the folder's roster (`plugins.hub.roster`, default `gems`: lapis, peridot, ruby with color castes); a persona is a name, look, agent bundle, role and prompt, and `kollab --as [roster/]name` takes one from any roster. Teams are reporting chains of personas; the engine serves `GET /rosters`, `GET /teams`, `POST /teams/{name}/launch`
 - Open channel: all agents see all messages (like Slack)
+- Mailbox delivery claims every source record under the mailbox root's shared
+  file lock before invoking a receiver. Callback cancellation or failure holds
+  the original payload for inspection; it never proves acceptance or permits
+  an automatic retry. Refusal releases the claim, and successful delivery
+  removes the record or atomically replaces it with a receipt. The orphan
+  sweep removes empty directories only. See `docs/specs/hub-message-flow.md`.
 - Off-box mesh: `plugins.hub.endpoint_enabled` binds a TCP/TLS listener sharing the
   same `_handle_connection` handler; remote agents complete the same Ed25519 handshake.
   Default OFF (unix socket only). The endpoint always forces auth and refuses to bind
@@ -124,6 +130,21 @@ kollab service install                           # this folder's agent under sys
 2. LLM emits `<hub_msg>` -> `_parse_hub_messages` -> route + strip tags
 3. Agent receives via socket/mailbox -> display + inject + trigger LLM
 4. Event pipeline: PRE -> MAIN -> POST phase data propagation
+
+Offline task assignments and task-cron controls are kept in a bounded durable
+mailbox until receive classification. If its control capacity is full, Hub
+rejects the new control with a retryable delivery failure instead of deleting
+an earlier accepted control. Ordinary offline messages use a separate limit
+and may be evicted oldest-first when that limit is exceeded.
+If receive refuses a durable control, it stays on disk and continues to count
+against control capacity until a later receive classifies it.
+Admission, pruning and replay share one validated record reader. Only recognized
+ordinary messages permit automatic eviction or consumption. Unreadable files,
+malformed or non-object JSON, and invalid message fields remain on disk and
+consume retained capacity until repaired or explicitly resolved. Even a consuming
+read preserves durable controls until receive classification and acknowledgment.
+Identical durable retries ignore mutable routing evidence and persisted delivery
+claims; different content under the same ID returns a delivery rejection.
 
 The web UI reloads stored Hub notes when they arrive, including observed notes
 that do not wake the receiving agent.
