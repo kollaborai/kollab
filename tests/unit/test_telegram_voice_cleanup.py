@@ -119,6 +119,35 @@ async def test_authorized_voice_poll_uses_successful_transcription():
 
 
 @pytest.mark.asyncio
+async def test_unauthorized_voice_poll_does_not_download_media():
+    bridge = TelegramBridge(token="123:synthetic-secret", chat_id="456", user_id="789")
+    response = Mock()
+    response.json.return_value = {
+        "ok": True,
+        "result": [
+            {
+                "update_id": 10,
+                "message": {
+                    "chat": {"id": 999},
+                    "from": {"id": 789},
+                    "date": 1,
+                    "voice": {"file_id": "unauthorized-file-id"},
+                },
+            }
+        ],
+    }
+    bridge._client = AsyncMock()
+    bridge._client.get.return_value = response
+    bridge._transcribe_voice = AsyncMock(return_value="[voice] private transcript")
+
+    messages = await bridge.poll()
+
+    assert messages == []
+    bridge._client.get.assert_awaited_once()
+    bridge._transcribe_voice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_timeout_removes_audio_and_reaps_child(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     process = _Process("timeout")
