@@ -137,7 +137,12 @@ function ServiceRow({ service, api, id, canControl, enabled, onError }: {
 export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" | "state">, remote = false) {
   const managed = entry.kind !== "built-in";
   const live = !remote && !entry.shadowed && entry.state !== "stopping";
-  return { managed, switchEnabled: live, services: managed && live, updateRemove: managed && live && entry.kind === "installed" };
+  return {
+    managed,
+    switchEnabled: live && entry.state !== "changed-on-disk",
+    services: managed && live,
+    updateRemove: managed && live && entry.kind === "installed",
+  };
 }
 
 function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
