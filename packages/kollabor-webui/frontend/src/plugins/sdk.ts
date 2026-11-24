@@ -62,7 +62,7 @@ export type PluginEntry = {
   commit?: string | null;
   enabled: boolean;
   shadowed: boolean;
-  state: "ok" | "error" | "off" | "stopping" | "changed-on-disk" | "skipped";
+  state: "ok" | "error" | "off" | "stopping" | "stop-failed" | "changed-on-disk" | "skipped";
   error: string | null;
   web: { entry: string; style?: string | null; hash: string } | null;
   contributes: {
