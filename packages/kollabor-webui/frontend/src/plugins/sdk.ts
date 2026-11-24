@@ -212,6 +212,8 @@ const TOAST_MS = 5_000;
 
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 const isLine = (value: unknown): value is string => isText(value) && !/[\r\n]/.test(value);
+const isSlashCommandName = (value: unknown): value is string =>
+  typeof value === "string" && /^[\p{L}\p{N}_-]+$/u.test(value);
 const isComponent = (value: unknown) =>
   typeof value === "function" || (typeof value === "object" && value !== null && "$$typeof" in value);
 const isTabs = (tabs: unknown): tabs is PluginTab[] =>
@@ -453,7 +455,8 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
     },
     settings,
     command(spec) {
-      if (!bound("slash command", declaredIds(declared.slash), spec?.name)) return;
+      if (!isSlashCommandName(spec?.name)) return invalid("command", "name must be a single slash token");
+      if (!bound("slash command", declaredIds(declared.slash), spec.name)) return;
       if (typeof spec.run !== "function") return invalid("command", "run must be a function");
       const command: CommandSpec = { name: spec.name, description: String(spec.description ?? ""), run: spec.run };
       contribute((current) => ({
