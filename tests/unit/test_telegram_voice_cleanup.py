@@ -609,3 +609,46 @@ async def test_success_protects_artifacts_until_detached_writer_exits(tmp_path, 
     finally:
         if not task.done():
             task.cancel()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
+async def test_success_waits_for_detached_transcript_writer(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    whisper = tmp_path / "whisper"
+    writer = tmp_path / "writer.py"
+    started = tmp_path / "writer.started"
+    writer.write_text(
+        textwrap.dedent(
+            f"""\
+            import pathlib, sys, time
+            pathlib.Path({str(started)!r}).write_text("ready")
+            time.sleep(0.25)
+            pathlib.Path(sys.argv[1]).write_text("delayed transcript")
+            """
+        )
+    )
+    whisper.write_text(
+        "#!/usr/bin/env python3\n"
+        + textwrap.dedent(
+            f"""\
+            import pathlib, subprocess, sys, time
+            audio = pathlib.Path(sys.argv[1])
+            subprocess.Popen(
+                [sys.executable, {str(writer)!r}, str(audio.with_suffix(".txt"))],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+            while not pathlib.Path({str(started)!r}).exists():
+                time.sleep(0.005)
+            time.sleep(0.05)
+            """
+        )
+    )
+    whisper.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    result = await _bridge()._transcribe_voice("synthetic-file-id")
+
+    assert result == "[voice] delayed transcript"
+    assert not list(tmp_path.glob("kollab-telegram-voice-*"))
