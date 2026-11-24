@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement, type ReactNode } from "react";
+import type { ThreadMessage } from "@assistant-ui/core";
 import {
   AssistantRuntimeProvider,
   useLocalRuntime,
@@ -323,7 +324,10 @@ function LocalThreadHarness() {
 }
 
 function ThreadHarness() {
-  const host = useExternalStoreRuntime({ messages: [], onNew: async () => {} });
+  const host = useExternalStoreRuntime<ThreadMessage>({
+    messages: [],
+    onNew: async () => {},
+  });
   return createElement(
     AssistantRuntimeProvider,
     { runtime: host },
