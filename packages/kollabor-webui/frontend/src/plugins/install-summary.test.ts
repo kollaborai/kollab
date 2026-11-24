@@ -250,6 +250,10 @@ describe("plugin review after a failure", () => {
     expect(confirm).toContain('current.status === "complete"');
     expect(confirm).toContain("await onApplied()");
   });
+  it("reports a refresh failure after recovering a completed install", () => {
+    const confirm = installSource.slice(installSource.indexOf("const confirm = async"), installSource.indexOf("const ready ="));
+    expect(confirm).toMatch(/current\.status === "complete"[\s\S]*?try\s*\{\s*await onApplied\(\);\s*\} catch \{\s*setError\("Plugin installed, but the plugin list could not be refreshed\."\);\s*return;/);
+  });
   it("keeps the completed review open when the engine returns a warning", () => {
     const confirm = installSource.slice(installSource.indexOf("const confirm = async"), installSource.indexOf("const ready ="));
     expect(confirm).toMatch(/if\s*\(!result\.warning\)\s*onClose\(\)/);
