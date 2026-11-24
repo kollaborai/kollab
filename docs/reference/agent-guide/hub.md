@@ -131,6 +131,21 @@ kollab service install                           # this folder's agent under sys
 3. Agent receives via socket/mailbox -> display + inject + trigger LLM
 4. Event pipeline: PRE -> MAIN -> POST phase data propagation
 
+Offline task assignments and task-cron controls are kept in a bounded durable
+mailbox until receive classification. If its control capacity is full, Hub
+rejects the new control with a retryable delivery failure instead of deleting
+an earlier accepted control. Ordinary offline messages use a separate limit
+and may be evicted oldest-first when that limit is exceeded.
+If receive refuses a durable control, it stays on disk and continues to count
+against control capacity until a later receive classifies it.
+Admission, pruning and replay share one validated record reader. Only recognized
+ordinary messages permit automatic eviction or consumption. Unreadable files,
+malformed or non-object JSON, and invalid message fields remain on disk and
+consume retained capacity until repaired or explicitly resolved. Even a consuming
+read preserves durable controls until receive classification and acknowledgment.
+Identical durable retries ignore mutable routing evidence and persisted delivery
+claims; different content under the same ID returns a delivery rejection.
+
 The web UI reloads stored Hub notes when they arrive, including observed notes
 that do not wake the receiving agent.
 
