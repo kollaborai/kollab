@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
@@ -51,26 +52,96 @@ def _repo_path(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _python_sources(root: Path) -> tuple[set[Path], list[Path]]:
+def _scan_directory(
+    path: Path, *, missing_ok: bool = True
+) -> list[os.DirEntry[str]]:
+    try:
+        with os.scandir(path) as entries:
+            return list(entries)
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return []
+        raise OSError(f"could not scan {path}") from exc
+    except OSError as exc:
+        raise OSError(f"could not scan {path}") from exc
+
+
+def _entry_is_dir(entry: os.DirEntry[str]) -> bool:
+    try:
+        return entry.is_dir()
+    except OSError as exc:
+        raise OSError(f"could not inspect {entry.path}") from exc
+
+
+def _entry_is_file(entry: os.DirEntry[str]) -> bool:
+    try:
+        return entry.is_file()
+    except OSError as exc:
+        raise OSError(f"could not inspect {entry.path}") from exc
+
+
+def _walk_source_files(folder: Path, suffixes: tuple[str, ...]) -> set[Path]:
     paths: set[Path] = set()
-    for name in ("kollab", "plugins", "scripts", "tests"):
-        folder = root / name
-        if folder.is_dir():
-            paths.update(path for path in folder.rglob("*.py") if path.is_file())
 
-    for initializer in root.glob("*/__init__.py"):
-        folder = initializer.parent
-        paths.update(path for path in folder.rglob("*.py") if path.is_file())
+    def on_error(error: OSError) -> None:
+        raise OSError(f"could not scan {error.filename}") from error
 
-    package_src_roots = sorted(path for path in (root / "packages").glob("*/src") if path.is_dir())
-    for folder in package_src_roots:
-        paths.update(path for path in folder.rglob("*.py") if path.is_file())
+    for directory, directories, filenames in os.walk(folder, onerror=on_error):
+        directories.sort()
+        paths.update(
+            Path(directory) / filename
+            for filename in filenames
+            if Path(filename).suffix in suffixes
+        )
+    return paths
 
-    packages = root / "packages"
-    if packages.is_dir():
-        for folder in packages.glob("*/tests"):
-            if folder.is_dir():
-                paths.update(path for path in folder.rglob("*.py") if path.is_file())
+
+def _python_sources(root: Path) -> tuple[set[Path], list[Path]]:
+    root_directories: dict[str, Path] = {}
+    top_level_packages: list[Path] = []
+    package_entries: list[os.DirEntry[str]] = []
+    for entry in _scan_directory(root):
+        if not _entry_is_dir(entry):
+            continue
+        folder = Path(entry.path)
+        children = _scan_directory(folder, missing_ok=False)
+        child_by_name = {child.name: child for child in children}
+        root_directories[entry.name] = folder
+        if entry.name == "packages":
+            package_entries = children
+        initializer = child_by_name.get("__init__.py")
+        if initializer is not None and _entry_is_file(initializer):
+            top_level_packages.append(folder)
+
+    package_src_roots: list[Path] = []
+    package_test_roots: list[Path] = []
+    for package in package_entries:
+        if not _entry_is_dir(package):
+            continue
+        children = {
+            entry.name: entry
+            for entry in _scan_directory(Path(package.path), missing_ok=False)
+        }
+        for name, roots in (
+            ("src", package_src_roots),
+            ("tests", package_test_roots),
+        ):
+            entry = children.get(name)
+            if entry is not None and _entry_is_dir(entry):
+                roots.append(Path(entry.path))
+
+    package_src_roots.sort()
+    source_roots = [
+        root_directories[name]
+        for name in ("kollab", "plugins", "scripts", "tests")
+        if name in root_directories
+    ]
+    source_roots.extend(top_level_packages)
+    source_roots.extend(package_src_roots)
+    source_roots.extend(package_test_roots)
+    paths: set[Path] = set()
+    for folder in sorted(set(source_roots)):
+        paths.update(_walk_source_files(folder, (".py",)))
     return paths, package_src_roots
 
 
@@ -382,13 +453,14 @@ def _existing_repo_targets(root: Path, value: str) -> set[str]:
 
 def _js_sources(root: Path) -> set[Path]:
     paths: set[Path] = set()
-    for folder in (
-        root / "packages" / "kollabor-webui" / "frontend" / "src",
-        root / "packages" / "kollabor-webui" / "frontend" / "tests",
-    ):
-        if folder.is_dir():
-            for suffix in ("*.ts", "*.tsx", "*.js", "*.mjs"):
-                paths.update(path for path in folder.rglob(suffix) if path.is_file())
+    frontend = root / "packages" / "kollabor-webui" / "frontend"
+    folders = [
+        Path(entry.path)
+        for entry in _scan_directory(frontend)
+        if entry.name in {"src", "tests"} and _entry_is_dir(entry)
+    ]
+    for folder in folders:
+        paths.update(_walk_source_files(folder, _JS_SUFFIXES))
     return paths
 
 
@@ -441,8 +513,12 @@ def _build_import_analysis(
     for path in sorted(python_paths):
         relative_path = _repo_path(root, path)
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative_path)
-        except (OSError, UnicodeError, SyntaxError) as exc:
+            source = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise OSError(f"could not read {relative_path}") from exc
+        try:
+            tree = ast.parse(source, filename=relative_path)
+        except (UnicodeError, SyntaxError) as exc:
             raise RuntimeError(f"could not parse {relative_path}") from exc
         name, is_package = module_info[relative_path]
         unresolved: set[str] = set()
@@ -615,30 +691,30 @@ def _top_level_module_for_path(filename: str) -> str | None:
     return parts[0] if parts else None
 
 
-def _removed_main_modules(
+def _main_changed_modules(
     records: list[dict[str, Any]], root: Path, package_src_roots: list[Path]
 ) -> tuple[set[str], set[str]]:
     modules: set[str] = set()
     unmapped_top_levels: set[str] = set()
     for record in records:
         status = record.get("status")
-        if status == "removed":
-            filename = record.get("filename")
-        elif status == "renamed":
-            filename = record.get("previous_filename")
-        else:
+        if status not in {"added", "modified", "removed", "renamed", "copied"}:
             continue
-        if not isinstance(filename, str) or not filename.endswith(".py"):
-            continue
-        module_name = _module_name_for_changed_path(
-            filename, root, package_src_roots
-        )
-        if module_name is not None:
-            modules.add(module_name)
-            continue
-        top_level = _top_level_module_for_path(filename)
-        if top_level is not None:
-            unmapped_top_levels.add(top_level)
+        filenames = [record.get("filename")]
+        if status == "renamed":
+            filenames.append(record.get("previous_filename"))
+        for filename in filenames:
+            if not isinstance(filename, str) or not filename.endswith(".py"):
+                continue
+            module_name = _module_name_for_changed_path(
+                filename, root, package_src_roots
+            )
+            if module_name is not None:
+                modules.add(module_name)
+                continue
+            top_level = _top_level_module_for_path(filename)
+            if top_level is not None:
+                unmapped_top_levels.add(top_level)
     return modules, unmapped_top_levels
 
 
@@ -679,8 +755,8 @@ def decide(
     complete: bool = True,
     dynamic: set[str] | frozenset[str] = frozenset(),
     unresolved_imports: dict[str, set[str]] | None = None,
-    removed_main_modules: set[str] | frozenset[str] = frozenset(),
-    removed_main_top_levels: set[str] | frozenset[str] = frozenset(),
+    main_changed_modules: set[str] | frozenset[str] = frozenset(),
+    main_changed_top_levels: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[bool, list[str]]:
     """Apply the five stale rules to changed paths and their test impact."""
     pr_paths = _without_changes(pr_files)
@@ -701,20 +777,22 @@ def decide(
 
     affected_imports: set[str] = set()
     unresolved_imports = unresolved_imports or {}
-    pr_tests = {path for path in pr_paths if _is_test_file(path)}
-    for test_path in pr_tests:
-        for imported_name in unresolved_imports.get(test_path, set()):
+    for changed_path in (path for path in pr_paths if path.endswith(".py")):
+        changed_path_has_tests = _is_test_file(changed_path) or bool(
+            tests_of(graph, {changed_path})
+        )
+        if not changed_path_has_tests:
+            continue
+        for imported_name in unresolved_imports.get(changed_path, set()):
             if any(
                 imported_name == module_name
                 or imported_name.startswith(f"{module_name}.")
-                for module_name in removed_main_modules
-            ):
-                affected_imports.add(imported_name)
-            elif imported_name.split(".", 1)[0] in removed_main_top_levels:
+                for module_name in main_changed_modules
+            ) or imported_name.split(".", 1)[0] in main_changed_top_levels:
                 affected_imports.add(imported_name)
     if affected_imports:
         reasons.append(
-            "rule 3: unresolved test import may match removed main module "
+            "rule 3: unresolved import may match changed main module "
             f"({_examples(affected_imports)})"
         )
 
@@ -740,6 +818,29 @@ def decide(
         reasons.append(
             f"rule 5: cannot analyze dynamic loading in {sorted(dynamic_changes)[0]}"
         )
+
+    main_python_changes = {
+        path for path in main_paths if path.endswith(".py") and _is_non_docs_change(path)
+    }
+    if main_python_changes:
+        pr_tests = tests_of(graph, pr_paths)
+        if pr_tests:
+            reachable = set(pr_tests)
+            pending = list(pr_tests)
+            while pending:
+                importer = pending.pop()
+                for dependency in graph.get(importer, set()):
+                    if dependency not in reachable:
+                        reachable.add(dependency)
+                        pending.append(dependency)
+            changed_paths = pr_paths | main_paths
+            dynamic_loaders = sorted(dynamic - changed_paths)
+            for path in dynamic_loaders:
+                if path in reachable:
+                    reasons.append(
+                        f"rule 5: cannot analyze dynamic loading in {path}"
+                    )
+                    break
 
     if not complete:
         reasons.append("rule 5: comparison data incomplete")
@@ -1068,7 +1169,7 @@ def _inspect_pr(
         pr_complete = pr_complete and patch_complete
         if patch_dynamic:
             pr_dynamic.add(filename)
-    removed_modules, removed_top_levels = _removed_main_modules(
+    changed_modules, changed_top_levels = _main_changed_modules(
         main_records, root, package_src_roots
     )
     return decide(
@@ -1078,8 +1179,8 @@ def _inspect_pr(
         complete=pr_complete and main_complete,
         dynamic=pr_dynamic,
         unresolved_imports=unresolved_imports,
-        removed_main_modules=removed_modules,
-        removed_main_top_levels=removed_top_levels,
+        main_changed_modules=changed_modules,
+        main_changed_top_levels=changed_top_levels,
     )
 
 
