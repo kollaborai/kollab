@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import sys
 import tempfile
 import textwrap
 import time
@@ -11,8 +12,6 @@ from unittest.mock import AsyncMock, Mock
 import psutil
 import pytest
 
-from kollabor_config import proc_ctl
-from plugins.hub import messaging_bridge
 from plugins.hub.messaging_bridge import TelegramBridge
 
 _REAL_PROCESS_CHILDREN = psutil.Process.children
@@ -37,12 +36,13 @@ class _Process:
     def __init__(self, outcome="success"):
         self.outcome = outcome
         self.pid = 12345
+        self.returncode = 0
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.killed = False
         self.waited = False
 
-    async def communicate(self):
+    async def communicate(self, _input=None):
         self.started.set()
         if self.outcome == "timeout":
             raise asyncio.TimeoutError
@@ -52,7 +52,7 @@ class _Process:
             await self.release.wait()
         return b"synthetic transcript", b""
 
-    def kill(self):
+    def terminate(self):
         self.killed = True
         self.release.set()
 
@@ -65,14 +65,6 @@ def _bridge():
     bridge._client = AsyncMock()
     bridge._client.get = AsyncMock(return_value=_TelegramResponse())
     return bridge
-
-
-def _patch_process_kill(monkeypatch, process):
-    monkeypatch.setattr(
-        proc_ctl,
-        "kill_tree",
-        lambda pid, sig: process.kill(),
-    )
 
 
 @pytest.mark.asyncio
@@ -151,7 +143,6 @@ async def test_unauthorized_voice_poll_does_not_download_media():
 async def test_timeout_removes_audio_and_reaps_child(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     process = _Process("timeout")
-    _patch_process_kill(monkeypatch, process)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
 
     result = await _bridge()._transcribe_voice("synthetic-file-id")
@@ -166,7 +157,6 @@ async def test_subprocess_error_removes_audio_and_reaps_child(tmp_path, monkeypa
     caplog.set_level(logging.ERROR)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     process = _Process("error")
-    _patch_process_kill(monkeypatch, process)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
 
     result = await _bridge()._transcribe_voice("synthetic-file-id")
@@ -181,7 +171,6 @@ async def test_subprocess_error_removes_audio_and_reaps_child(tmp_path, monkeypa
 async def test_cancellation_reaps_child_before_removing_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     process = _Process("cancel")
-    _patch_process_kill(monkeypatch, process)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
 
     task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
@@ -199,7 +188,6 @@ async def test_cancellation_reaps_child_before_removing_artifacts(tmp_path, monk
 async def test_repeated_cancellation_during_spawn_reaps_child(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     process = _Process("cancel")
-    _patch_process_kill(monkeypatch, process)
     spawn_started = asyncio.Event()
     release_spawn = asyncio.Event()
 
@@ -224,9 +212,7 @@ async def test_repeated_cancellation_during_spawn_reaps_child(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_failed_spawn_still_raises_cancelled(
-    tmp_path, monkeypatch
-):
+async def test_cancellation_during_failed_spawn_still_raises_cancelled(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     spawn_started = asyncio.Event()
     release_spawn = asyncio.Event()
@@ -251,6 +237,7 @@ async def test_cancellation_during_failed_spawn_still_raises_cancelled(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux child ownership")
 async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     whisper = tmp_path / "whisper"
@@ -291,10 +278,7 @@ async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeyp
 
     task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
     deadline = time.monotonic() + 5
-    while (
-        (not writer_pid.exists() or not writes.exists())
-        and time.monotonic() < deadline
-    ):
+    while (not writer_pid.exists() or not writes.exists()) and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
     assert writer_pid.exists() and writes.exists(), "transcriber descendant did not start"
     task.cancel()
@@ -308,8 +292,8 @@ async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
-async def test_unknown_descendants_keep_private_artifacts_protected(tmp_path, monkeypatch):
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux child ownership")
+async def test_transcription_does_not_depend_on_descendant_enumeration(tmp_path, monkeypatch):
     private = tmp_path / "private"
     private.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(private))
@@ -362,117 +346,8 @@ async def test_unknown_descendants_keep_private_artifacts_protected(tmp_path, mo
     deadline = time.monotonic() + 2
     while not outcome.exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
-    assert outcome.read_text() == "PermissionError"
-    assert len(list(private.glob("kollab-telegram-voice-*"))) == 1
-
-
-def _install_detached_whisper(tmp_path, temp_root, monkeypatch):
-    whisper = tmp_path / "whisper"
-    descendant_script = tmp_path / "descendant.py"
-    descendant_started = tmp_path / "descendant.started"
-    descendant_script.write_text(
-        textwrap.dedent(
-            f"""\
-            import os, pathlib, sys, time
-            os.setsid()
-            pathlib.Path({str(descendant_started)!r}).write_text("ready")
-            output = pathlib.Path(sys.argv[1]) / "descendant-output.txt"
-            deadline = time.monotonic() + 0.8
-            while time.monotonic() < deadline:
-                with output.open("a") as stream:
-                    stream.write("x\\n")
-                    stream.flush()
-                time.sleep(0.02)
-            """
-        )
-    )
-    whisper.write_text(
-        "#!/usr/bin/env python3\n"
-        + textwrap.dedent(
-            f"""\
-            import pathlib, subprocess, sys, time
-            audio = pathlib.Path(sys.argv[1])
-            subprocess.Popen(
-                [sys.executable, {str(descendant_script)!r}, str(audio.parent)]
-            )
-            time.sleep(0.5)
-            """
-        )
-    )
-    whisper.chmod(0o700)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-    return descendant_started
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group lifecycle")
-async def test_cancellation_defers_cleanup_for_detached_pipe_writer(tmp_path, monkeypatch):
-    temp_root = tmp_path / "temporary"
-    temp_root.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
-    descendant_started = _install_detached_whisper(tmp_path, temp_root, monkeypatch)
-
-    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
-    deadline = time.monotonic() + 5
-    while not descendant_started.exists() and time.monotonic() < deadline:
-        await asyncio.sleep(0.02)
-    assert descendant_started.exists(), "detached descendant did not start"
-    assert not task.done(), "transcriber exited before cancellation"
-    task.cancel()
-    _, pending = await asyncio.wait({task}, timeout=0.25)
-    try:
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert not pending, "cancellation waited for detached descendant pipe EOF"
-        run_dirs = list(temp_root.glob("kollab-telegram-voice-*"))
-        assert len(run_dirs) == 1, "artifact cleanup raced the detached writer"
-        output = run_dirs[0] / "descendant-output.txt"
-        before = output.read_text()
-        await asyncio.sleep(0.1)
-        assert output.read_text() != before, "detached writer exited before its pipe closed"
-    finally:
-        await asyncio.sleep(0.9)
-
-    assert list(temp_root.iterdir()) == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group lifecycle")
-async def test_timeout_defers_cleanup_for_detached_pipe_writer(tmp_path, monkeypatch):
-    temp_root = tmp_path / "temporary"
-    temp_root.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
-    descendant_started = _install_detached_whisper(tmp_path, temp_root, monkeypatch)
-    original_wait_for = asyncio.wait_for
-    timeout_requested = asyncio.Event()
-
-    async def short_timeout(awaitable, timeout):
-        if timeout == 60:
-            deadline = time.monotonic() + 5
-            while not descendant_started.exists() and time.monotonic() < deadline:
-                await asyncio.sleep(0.02)
-            timeout_requested.set()
-            raise asyncio.TimeoutError
-        return await original_wait_for(awaitable, timeout)
-
-    monkeypatch.setattr(asyncio, "wait_for", short_timeout)
-    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
-    await timeout_requested.wait()
-    _, pending = await asyncio.wait({task}, timeout=0.25)
-    try:
-        assert await task == "[voice message - transcription timed out]"
-        assert descendant_started.exists(), "detached descendant did not start"
-        assert not pending, "timeout waited for detached descendant pipe EOF"
-        run_dirs = list(temp_root.glob("kollab-telegram-voice-*"))
-        assert len(run_dirs) == 1, "artifact cleanup raced the detached writer"
-        output = run_dirs[0] / "descendant-output.txt"
-        before = output.read_text()
-        await asyncio.sleep(0.1)
-        assert output.read_text() != before, "detached writer exited before its pipe closed"
-    finally:
-        await asyncio.sleep(0.9)
-
-    assert list(temp_root.iterdir()) == []
+    assert outcome.read_text() == "written"
+    assert list(private.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -490,278 +365,7 @@ async def test_missing_whisper_log_keeps_safe_executable_context(monkeypatch, ca
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
-async def test_cancellation_kills_pipe_holder_after_transcriber_exits(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    whisper = tmp_path / "whisper"
-    child_pid = tmp_path / "child.pid"
-    whisper.write_text(
-        "#!/bin/sh\n"
-        f"sleep 120 & echo $! > {str(child_pid)!r}\n"
-        "exit 0\n"
-    )
-    whisper.chmod(0o700)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-
-    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
-    deadline = time.monotonic() + 5
-    while not child_pid.exists() and time.monotonic() < deadline:
-        await asyncio.sleep(0.02)
-    assert child_pid.exists(), "pipe-holding descendant did not start"
-    task.cancel()
-    try:
-        _, pending = await asyncio.wait({task}, timeout=10)
-        assert not pending, "cancel did not return while a descendant held the pipes"
-        assert task.cancelled()
-        assert not list(tmp_path.glob("kollab-telegram-voice-*"))
-    finally:
-        if child_pid.exists():
-            try:
-                os.kill(int(child_pid.read_text()), 9)
-            except ProcessLookupError:
-                pass
-        if not task.done():
-            await asyncio.wait({task}, timeout=10)
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group lifecycle")
-async def test_cancellation_blocks_detached_writer_before_artifact_cleanup(
-    tmp_path, monkeypatch
-):
-    private = tmp_path / "private"
-    private.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(private))
-    whisper = tmp_path / "whisper"
-    writer_script = tmp_path / "writer.py"
-    whisper_pid = tmp_path / "whisper.pid"
-    writer_started = tmp_path / "writer.started"
-    writer_pid = tmp_path / "writer.pid"
-    outcome = tmp_path / "writer.outcome"
-    writer_script.write_text(
-        textwrap.dedent(
-            f"""\
-            import os, pathlib, sys, time
-            pathlib.Path({str(whisper_pid)!r}).write_text(str(os.getppid()))
-            pathlib.Path({str(writer_started)!r}).write_text("ready")
-            time.sleep(0.3)
-            target = pathlib.Path(sys.argv[1])
-            try:
-                target.write_text("late output")
-            except OSError as exc:
-                pathlib.Path({str(outcome)!r}).write_text(type(exc).__name__)
-            else:
-                pathlib.Path({str(outcome)!r}).write_text("written")
-            """
-        )
-    )
-    whisper.write_text(
-        "#!/usr/bin/env python3\n"
-        + textwrap.dedent(
-            f"""\
-            import pathlib, subprocess, sys, time
-            audio = pathlib.Path(sys.argv[1])
-            child = subprocess.Popen(
-                [sys.executable, {str(writer_script)!r},
-                 str(audio.parent / "late.txt")],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            pathlib.Path({str(writer_pid)!r}).write_text(str(child.pid))
-            time.sleep(0.5)
-            """
-        )
-    )
-    whisper.chmod(0o700)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-
-    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
-    deadline = time.monotonic() + 5
-    while not writer_started.exists() and time.monotonic() < deadline:
-        await asyncio.sleep(0.02)
-    assert writer_started.exists(), "detached writer did not start"
-    assert writer_pid.exists(), "transcriber did not record detached writer"
-    root_pid = int(whisper_pid.read_text())
-    child_pid = int(writer_pid.read_text())
-
-    def children(process, recursive=False):
-        if process.pid == root_pid:
-            return [psutil.Process(child_pid)]
-        return []
-
-    monkeypatch.setattr(psutil.Process, "children", children)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 2)
-
-    await asyncio.sleep(0.45)
-    assert outcome.read_text() == "PermissionError"
-    assert list(private.iterdir()) == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
-async def test_cancellation_stops_indefinite_detached_descendant_and_cleans(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setattr(psutil.Process, "children", _REAL_PROCESS_CHILDREN)
-    private = tmp_path / "private"
-    private.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(private))
-    whisper = tmp_path / "whisper"
-    child_pid = tmp_path / "child.pid"
-    child_started = tmp_path / "child.started"
-    whisper.write_text(
-        "#!/usr/bin/env python3\n"
-        + textwrap.dedent(
-            f"""\
-            import os, pathlib, subprocess, sys, time
-            child = subprocess.Popen([
-                sys.executable, "-c",
-                "import os,pathlib,time; os.setsid(); pathlib.Path({str(child_started)!r}).touch(); time.sleep(120)"
-            ])
-            pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
-            time.sleep(120)
-            """
-        )
-    )
-    whisper.chmod(0o700)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-
-    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
-    deadline = time.monotonic() + 5
-    while (not child_pid.exists() or not child_started.exists()) and time.monotonic() < deadline:
-        await asyncio.sleep(0.02)
-    assert child_pid.exists(), "detached child did not start"
-    child = psutil.Process(int(child_pid.read_text()))
-    wait_for_descendants = messaging_bridge._wait_for_voice_descendants
-
-    async def brief_descendant_wait(descendants, timeout=60):
-        return await wait_for_descendants(descendants, timeout=0.1)
-
-    monkeypatch.setattr(
-        messaging_bridge, "_wait_for_voice_descendants", brief_descendant_wait
-    )
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 3)
-    try:
-        deadline = time.monotonic() + 3
-        while child.is_running() and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
-        assert not child.is_running(), "cancellation left a detached writer alive"
-        while list(private.glob("kollab-telegram-voice-*")) and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
-        assert not list(private.glob("kollab-telegram-voice-*"))
-    finally:
-        if child.is_running():
-            child.kill()
-            child.wait(timeout=2)
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
-async def test_timeout_kills_pipe_holder_after_transcriber_exits(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    whisper = tmp_path / "whisper"
-    child_pid = tmp_path / "child.pid"
-    whisper.write_text(
-        "#!/bin/sh\n"
-        f"sleep 120 & echo $! > {str(child_pid)!r}\n"
-        "exit 0\n"
-    )
-    whisper.chmod(0o700)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-
-    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
-    try:
-        _, pending = await asyncio.wait({task}, timeout=75)
-        assert not pending, "60 s timeout did not return while a descendant held the pipes"
-        assert task.result() == "[voice message - transcription timed out]"
-        assert child_pid.exists(), "pipe-holding descendant did not start"
-        assert not list(tmp_path.glob("kollab-telegram-voice-*"))
-    finally:
-        if child_pid.exists():
-            try:
-                os.kill(int(child_pid.read_text()), 9)
-            except ProcessLookupError:
-                pass
-        if not task.done():
-            await asyncio.wait({task}, timeout=10)
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
-async def test_success_protects_artifacts_until_detached_writer_exits(tmp_path, monkeypatch):
-    monkeypatch.setattr(psutil.Process, "children", _REAL_PROCESS_CHILDREN)
-    temp_root = tmp_path / "temporary"
-    temp_root.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
-    whisper = tmp_path / "whisper"
-    writer = tmp_path / "writer.py"
-    started = tmp_path / "writer.started"
-    outcome = tmp_path / "writer.outcome"
-    writer.write_text(
-        textwrap.dedent(
-            f"""\
-            import pathlib, sys, time
-            pathlib.Path({str(started)!r}).write_text("ready")
-            time.sleep(0.5)
-            try:
-                pathlib.Path(sys.argv[1]).write_text("late output")
-            except OSError as exc:
-                pathlib.Path({str(outcome)!r}).write_text(type(exc).__name__)
-            else:
-                pathlib.Path({str(outcome)!r}).write_text("written")
-            """
-        )
-    )
-    whisper.write_text(
-        "#!/usr/bin/env python3\n"
-        + textwrap.dedent(
-            f"""\
-            import pathlib, subprocess, sys, time
-            audio = pathlib.Path(sys.argv[1])
-            subprocess.Popen(
-                [sys.executable, {str(writer)!r},
-                 str(audio.parent / "late.txt")],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True,
-            )
-            while not pathlib.Path({str(started)!r}).exists():
-                time.sleep(0.005)
-            time.sleep(0.05)
-            """
-        )
-    )
-    whisper.chmod(0o700)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
-    try:
-        result = await task
-        assert result == "[voice] [voice message - whisper returned empty]"
-        run_dirs = list(temp_root.glob("kollab-telegram-voice-*"))
-        assert len(run_dirs) == 1, "successful communication removed artifacts while detached writer ran"
-        deadline = time.monotonic() + 2
-        while not outcome.exists() and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
-        assert outcome.exists(), "detached writer did not finish"
-        assert outcome.read_text() == "PermissionError"
-        deadline = time.monotonic() + 2
-        while list(temp_root.iterdir()) and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
-        assert list(temp_root.iterdir()) == []
-    finally:
-        if not task.done():
-            task.cancel()
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux child ownership")
 async def test_success_waits_for_detached_transcript_writer(tmp_path, monkeypatch):
     monkeypatch.setattr(psutil.Process, "children", _REAL_PROCESS_CHILDREN)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))

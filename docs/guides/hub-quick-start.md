@@ -293,8 +293,10 @@ kollab --agent coder --as lapis
 /hub bridge enable
 ```
 
-Send text or voice messages; Telegram voice notes and audio attachments are
-transcribed locally when Whisper is installed.
+Send text or voice messages; on Linux, Telegram voice notes and audio attachments
+are transcribed locally when `python3` and Whisper are installed and `/proc` is
+mounted. Each run owns its private files and all transcription descendants through
+completion or cancellation.
 See [Telegram Bridge Setup](telegram-bridge-setup.md) for the
 full walkthrough.
 

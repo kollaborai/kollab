@@ -42,128 +42,6 @@ from kollabor_config.file_lock import try_lock, unlock
 logger = logging.getLogger(__name__)
 
 
-_voice_artifact_cleanup_tasks: set[asyncio.Task] = set()
-
-
-async def _remove_voice_artifacts_after_communication(
-    temp_dir: str,
-    communication_task: asyncio.Task,
-    descendants: list[Any] | None,
-) -> None:
-    """Remove a run directory after communication and known descendants finish."""
-    import os
-    import shutil
-
-    try:
-        # A detached Whisper child can keep communicate()'s pipes open after
-        # the direct process exits. Wait for observed writers first, with a
-        # deadline that kills anything that outlives the run.
-        if descendants:
-            try:
-                await _wait_for_voice_descendants(descendants)
-            except asyncio.TimeoutError:
-                logger.warning("Voice descendants exceeded cleanup deadline")
-        if not communication_task.done():
-            await asyncio.wait({communication_task}, timeout=2)
-        if descendants is None:
-            logger.warning(
-                "Voice descendant status unavailable; retaining protected artifacts"
-            )
-            return
-        os.chmod(temp_dir, 0o700)
-        await asyncio.to_thread(shutil.rmtree, temp_dir)
-    except FileNotFoundError:
-        pass
-    except Exception as exc:
-        logger.error("Voice artifact cleanup failed (%s)", type(exc).__name__)
-
-
-def _defer_voice_artifact_cleanup(
-    temp_dir: str,
-    communication_task: asyncio.Task,
-    descendants: list[Any] | None,
-) -> None:
-    cleanup_task = asyncio.create_task(
-        _remove_voice_artifacts_after_communication(
-            temp_dir, communication_task, descendants
-        )
-    )
-    _voice_artifact_cleanup_tasks.add(cleanup_task)
-    cleanup_task.add_done_callback(_voice_artifact_cleanup_tasks.discard)
-
-
-async def _observe_transcriber_descendants(
-    proc, stop_event: asyncio.Event
-) -> list[Any] | None:
-    """Remember descendants before the transcriber exits and reparents them."""
-    import os
-
-    if os.name == "nt" or not hasattr(proc, "returncode"):
-        return []
-    import psutil
-
-    try:
-        parent = psutil.Process(proc.pid)
-    except psutil.Error:
-        return None
-
-    observed: dict[int, Any] = {}
-    while not stop_event.is_set():
-        try:
-            for descendant in parent.children(recursive=True):
-                observed[descendant.pid] = descendant
-        except psutil.Error:
-            if proc.returncode is None:
-                return None
-            break
-        await asyncio.sleep(0.01)
-    return list(observed.values())
-
-
-def _merge_voice_descendants(
-    first: list[Any] | None, second: list[Any] | None
-) -> list[Any] | None:
-    if first is None or second is None:
-        return None
-    return list({descendant.pid: descendant for descendant in (*first, *second)}.values())
-
-
-async def _wait_for_voice_descendants(
-    descendants: list[Any], timeout: float = 60
-) -> None:
-    """Wait for known Whisper descendants so a late transcript is not missed."""
-    import psutil
-
-    deadline = asyncio.get_running_loop().time() + timeout
-    while True:
-        running = []
-        for descendant in descendants:
-            try:
-                if (
-                    descendant.is_running()
-                    and descendant.status() != psutil.STATUS_ZOMBIE
-                ):
-                    running.append(descendant)
-            except psutil.NoSuchProcess:
-                continue
-            except psutil.Error as exc:
-                logger.warning(
-                    "Telegram voice descendant status failed (%s)", type(exc).__name__
-                )
-                running.append(descendant)
-        if not running:
-            return
-        if asyncio.get_running_loop().time() >= deadline:
-            for descendant in running:
-                try:
-                    descendant.kill()
-                except psutil.Error:
-                    pass
-            await asyncio.to_thread(psutil.wait_procs, running, timeout=2)
-            raise asyncio.TimeoutError
-        await asyncio.sleep(0.05)
-
-
 async def _await_shielded_task(task: asyncio.Task):
     """Finish an owned task despite repeated cancellation of its caller."""
     interrupted = False
@@ -176,39 +54,17 @@ async def _await_shielded_task(task: asyncio.Task):
             interrupted = True
 
 
-async def _stop_transcriber(
-    proc, communication_task: asyncio.Task
-) -> list[Any] | None:
-    """Track descendants, stop the transcriber group, and briefly allow pipe EOF."""
-    import os
-
-    from kollabor_config import proc_ctl
-
-    descendants: list[Any] | None = []
-    if os.name != "nt" and hasattr(proc, "returncode") and proc.returncode is None:
-        import psutil
-
-        try:
-            descendants = psutil.Process(proc.pid).children(recursive=True)
-        except psutil.Error as exc:
-            logger.warning("Telegram voice descendant check failed (%s)", type(exc).__name__)
-            descendants = None
-
+async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
+    """Ask the artifact owner to kill/reap every child before it removes files."""
     try:
-        proc_ctl.kill_tree(proc.pid, proc_ctl.HARD)
+        proc.terminate()
     except ProcessLookupError:
-        # Whisper can already be reaped while a descendant still holds its
-        # inherited pipes. Its PID was also the isolated session's process
-        # group ID, so stop remaining members before waiting for pipe EOF.
-        if os.name != "nt":
-            try:
-                os.killpg(proc.pid, proc_ctl.HARD)
-            except ProcessLookupError:
-                pass
+        pass
     await proc.wait()
-    if not communication_task.done():
-        await asyncio.wait({communication_task}, timeout=0.1)
-    return descendants
+    # The owner is the sole holder of its stdout/stderr pipes. Its children use
+    # private regular files, so reaping it also guarantees pipe EOF.
+    await asyncio.gather(communication_task, return_exceptions=True)
+
 
 # Seconds to back off after an inbound poll conflict (e.g. Telegram HTTP 409).
 # The poll inbox is a singleton per token; on conflict we yield hard rather
@@ -475,9 +331,11 @@ class TelegramBridge(MessagingBridge):
 
     async def _transcribe_voice(self, file_id: str) -> str:
         """Download voice file from telegram and transcribe with local whisper."""
-        import os
         import shutil
+        import sys
         import tempfile
+
+        from .voice_transcription import SUPERVISOR
 
         if not self._client:
             return "[voice message - bridge not connected]"
@@ -501,155 +359,52 @@ class TelegramBridge(MessagingBridge):
             audio_resp = await self._client.get(download_url, timeout=30.0)
             audio_resp.raise_for_status()
 
-            # Keep both the downloaded audio and whisper output in one private
-            # directory so every exit path can remove the complete artifact set.
-            temp_dir = tempfile.mkdtemp(prefix="kollab-telegram-voice-")
-            communication_task = None
-            descendants: list[Any] | None = []
-            descendant_stop = None
-            descendant_task = None
-            try:
-                suffix = Path(file_path).suffix or ".ogg"
-                audio_path = Path(temp_dir) / f"voice{suffix}"
-                audio_path.write_bytes(audio_resp.content)
-                transcript_path = audio_path.with_suffix(".txt")
-                transcript_path.touch(mode=0o600, exist_ok=True)
-                transcript_path.chmod(0o600)
-
-                spawn_kwargs = {
-                    "stdout": asyncio.subprocess.PIPE,
-                    "stderr": asyncio.subprocess.PIPE,
-                }
-                if os.name != "nt":
-                    # Keep the CLI's ordinary children in a group we can stop.
-                    spawn_kwargs["start_new_session"] = True
-                spawn_task = asyncio.create_task(
-                    asyncio.create_subprocess_exec(
-                        "whisper",
-                        str(audio_path),
-                        "--model",
-                        "base",
-                        "--language",
-                        "en",
-                        "--output_format",
-                        "txt",
-                        "--output_dir",
-                        temp_dir,
-                        **spawn_kwargs,
-                    )
+            # One isolated process owns both the artifacts and every CLI child.
+            # The stdlib interpreter is separate from Kollab's binary entrypoint.
+            python = shutil.which("python3")
+            if sys.platform != "linux" or python is None:
+                logger.error("Voice transcription requires Linux and python3")
+                return "[voice message - transcription failed]"
+            spawn_task = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    python,
+                    "-I",
+                    "-c",
+                    SUPERVISOR,
+                    tempfile.gettempdir(),
+                    Path(file_path).suffix or ".ogg",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
                 )
+            )
+            try:
+                proc = await asyncio.shield(spawn_task)
+            except asyncio.CancelledError as cancellation:
                 try:
-                    proc = await asyncio.shield(spawn_task)
-                except asyncio.CancelledError as cancellation:
-                    # Shield process creation so cancellation cannot orphan a child
-                    # between spawn and assignment to ``proc``.
-                    try:
-                        proc, _ = await _await_shielded_task(spawn_task)
-                    except BaseException:
-                        # A creation failure must not replace cancellation already
-                        # requested by the caller.
-                        raise cancellation
-                    communication_task = asyncio.create_task(proc.communicate())
-                    cleanup_task = asyncio.create_task(
-                        _stop_transcriber(proc, communication_task)
-                    )
-                    descendants, _ = await _await_shielded_task(cleanup_task)
-                    if descendant_stop is not None:
-                        descendant_stop.set()
-                    if descendant_task is not None:
-                        observed, _ = await _await_shielded_task(descendant_task)
-                        descendants = _merge_voice_descendants(descendants, observed)
-                    raise
+                    proc, _ = await _await_shielded_task(spawn_task)
+                except BaseException:
+                    raise cancellation
+                communication_task = asyncio.create_task(proc.communicate(audio_resp.content))
+                await _await_shielded_task(asyncio.create_task(_stop_transcriber(proc, communication_task)))
+                raise
 
-                descendant_stop = asyncio.Event()
-                if os.name != "nt" and hasattr(proc, "returncode"):
-                    descendant_task = asyncio.create_task(
-                        _observe_transcriber_descendants(proc, descendant_stop)
-                    )
-                communication_task = asyncio.create_task(proc.communicate())
-                try:
-                    stdout_bytes, _stderr_bytes = await asyncio.wait_for(
-                        asyncio.shield(communication_task), timeout=60
-                    )
-                    if descendant_stop is not None:
-                        descendant_stop.set()
-                    if descendant_task is not None:
-                        descendants, _ = await _await_shielded_task(descendant_task)
-                    if descendants:
-                        # Protect the directory while allowing only the expected
-                        # transcript file to be finished by a known descendant.
-                        os.chmod(temp_dir, 0o500)
-                        await _wait_for_voice_descendants(descendants)
-                except asyncio.TimeoutError:
-                    cleanup_task = asyncio.create_task(
-                        _stop_transcriber(proc, communication_task)
-                    )
-                    descendants, interrupted = await _await_shielded_task(cleanup_task)
-                    if descendant_stop is not None:
-                        descendant_stop.set()
-                    if descendant_task is not None:
-                        observed, _ = await _await_shielded_task(descendant_task)
-                        descendants = _merge_voice_descendants(descendants, observed)
-                    if interrupted:
-                        raise asyncio.CancelledError
-                    raise
-                except asyncio.CancelledError:
-                    cleanup_task = asyncio.create_task(
-                        _stop_transcriber(proc, communication_task)
-                    )
-                    descendants, _ = await _await_shielded_task(cleanup_task)
-                    if descendant_stop is not None:
-                        descendant_stop.set()
-                    if descendant_task is not None:
-                        observed, _ = await _await_shielded_task(descendant_task)
-                        descendants = _merge_voice_descendants(descendants, observed)
-                    raise
-                except Exception:
-                    cleanup_task = asyncio.create_task(
-                        _stop_transcriber(proc, communication_task)
-                    )
-                    descendants, interrupted = await _await_shielded_task(cleanup_task)
-                    if descendant_stop is not None:
-                        descendant_stop.set()
-                    if descendant_task is not None:
-                        observed, _ = await _await_shielded_task(descendant_task)
-                        descendants = _merge_voice_descendants(descendants, observed)
-                    if interrupted:
-                        raise asyncio.CancelledError
-                    raise
-
-                result_stdout = stdout_bytes.decode("utf-8", errors="replace")
-                transcription = ""
-                if transcript_path.exists():
-                    transcription = transcript_path.read_text().strip()
-                if not transcription:
-                    # Fallback: parse stdout, skipping whisper debug lines.
-                    for line in result_stdout.split("\n"):
-                        line = line.strip()
-                        if (
-                            line
-                            and not line.startswith("Detecting")
-                            and not line.startswith("[")
-                        ):
-                            transcription = line
-                            break
-                if not transcription:
-                    transcription = "[voice message - whisper returned empty]"
-            finally:
-                # Once Whisper exits, prevent late detached descendants from
-                # creating files before deferred cleanup can remove the directory.
-                os.chmod(temp_dir, 0o500)
-                if communication_task is not None and (
-                    not communication_task.done()
-                    or descendants is None
-                    or descendants
-                ):
-                    _defer_voice_artifact_cleanup(
-                        temp_dir, communication_task, descendants
-                    )
-                else:
-                    os.chmod(temp_dir, 0o700)
-                    shutil.rmtree(temp_dir)
+            communication_task = asyncio.create_task(proc.communicate(audio_resp.content))
+            try:
+                stdout_bytes, _ = await asyncio.wait_for(asyncio.shield(communication_task), timeout=60)
+            except BaseException:
+                _, interrupted = await _await_shielded_task(
+                    asyncio.create_task(_stop_transcriber(proc, communication_task))
+                )
+                if interrupted:
+                    raise asyncio.CancelledError
+                raise
+            if proc.returncode == 124:
+                raise asyncio.TimeoutError
+            if proc.returncode != 0:
+                logger.error("Voice transcription owner failed (exit %s)", proc.returncode)
+                return "[voice message - transcription failed]"
+            transcription = stdout_bytes.decode("utf-8", errors="replace").strip()
 
             logger.info("Telegram voice transcription completed")
             return f"[voice] {transcription}"

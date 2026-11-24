@@ -86,14 +86,15 @@ To check the current state:
 
 ## Voice Messages
 
-The bridge transcribes authorized Telegram voice notes and audio attachments
-locally with OpenAI Whisper. It downloads each audio file into a private
-temporary directory, removes the audio and transcript after processing, and
-does not log transcript text. On timeout or cancellation it stops and reaps the
-transcriber; the directory is made read-only before cleanup so a late detached
-writer cannot recreate artifacts.
+On Linux, the bridge transcribes authorized Telegram voice notes and audio
+attachments locally with OpenAI Whisper. An isolated child subreaper writes each
+downloaded audio file into its own private temporary directory. It waits for all
+transcription descendants before reading the transcript and removing the run's
+files. On timeout or cancellation it kills and reaps those processes before
+cleanup. Diagnostics do not contain transcript text or credentials.
 
-Install the Whisper CLI on the machine running Kollab:
+Install the Whisper CLI on the Linux machine running Kollab, with `/proc` mounted
+and `python3` available on `PATH`:
 
 ```bash
 pip install openai-whisper
@@ -171,10 +172,20 @@ the other instance.
 
 ### Voice Message Transcription Fails
 
-Install `openai-whisper` in the environment used by Kollab and confirm the
-`whisper` executable is available on `PATH`. The bridge forwards a safe failure
-notice to the agent when transcription fails and continues processing text
-messages.
+Local Telegram transcription requires Linux with `/proc` mounted, and `python3`
+and `whisper` on `PATH`. Install `openai-whisper` in the environment used by
+Kollab. An isolated child subreaper owns each private transcription directory;
+it waits for all CLI descendants, including detached writers, before reading the
+transcript. On cancellation or the 60-second deadline, it kills and reaps those
+processes before removing audio and partial output. Concurrent runs have separate
+directories. The bridge forwards a safe failure notice when transcription fails
+and continues processing text messages.
+
+Other platforms receive the failure notice for audio because this CLI path
+requires kernel-backed descendant ownership. If an operating-system error prevents
+the owner from proving all children have exited, it reports failure and retains
+the private run directory. Remove that directory only after verifying the run's
+processes have exited; the bridge never deletes files while a writer may remain.
 
 ### Bridge Stops Working After Restart
 
