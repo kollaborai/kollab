@@ -86,14 +86,22 @@ To check the current state:
 
 ## Voice Messages
 
-Telegram voice notes and audio attachments are not transcribed. The bridge
-forwards `[voice message - transcription unavailable; please send text]` to the
-agent instead. Send a text message to communicate its contents.
+The bridge transcribes authorized Telegram voice notes and audio attachments
+locally with OpenAI Whisper. It downloads each audio file into a private
+temporary directory, removes the audio and transcript after processing, and
+does not log transcript text. On timeout or cancellation it stops and reaps the
+transcriber; the directory is made read-only before cleanup so a late detached
+writer cannot recreate artifacts.
 
-The bridge does not download the audio, create temporary audio or transcript
-files, or launch Whisper. Local CLI transcription was removed because detached
-descendants can keep writing after the parent exits, preventing reliable cleanup
-of private voice artifacts. Installing Whisper does not enable this capability.
+Install the Whisper CLI on the machine running Kollab:
+
+```bash
+pip install openai-whisper
+```
+
+Voice messages appear in the hub as `[voice] transcribed text here` and are
+routed to agents like other messages. The bridge uses the `base` model and
+English by default; no API key or cloud service is needed.
 
 ## Configuration Reference
 
@@ -161,10 +169,12 @@ the other instance.
 - Verify the chat ID matches your user: check with @userinfobot
 - Check that the token is correct: `/hub bridge setup` validates it
 
-### Voice Message Shows Transcription Unavailable
+### Voice Message Transcription Fails
 
-Send the message as text. Telegram audio transcription is unavailable, so the
-bridge forwards a notice to the agent and continues processing text messages.
+Install `openai-whisper` in the environment used by Kollab and confirm the
+`whisper` executable is available on `PATH`. The bridge forwards a safe failure
+notice to the agent when transcription fails and continues processing text
+messages.
 
 ### Bridge Stops Working After Restart
 
