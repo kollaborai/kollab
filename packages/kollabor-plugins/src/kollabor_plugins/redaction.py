@@ -38,6 +38,7 @@ def redact_sensitive_text(
     *,
     replacement: str = "[redacted]",
     url_replacement: str | None = None,
+    redact_paths: bool = True,
 ) -> str:
     """Remove declared credentials, common token forms, URLs, and absolute paths."""
     for value in sorted((value for value in secret_values if value), key=len, reverse=True):
@@ -48,4 +49,4 @@ def redact_sensitive_text(
         lambda match: f"{match.group('key')}: {replacement}", text
     )
     text = _SECRET_VALUE.sub(replacement, text)
-    return _PATH.sub("[path]", text)
+    return _PATH.sub("[path]", text) if redact_paths else text

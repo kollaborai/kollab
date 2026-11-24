@@ -243,7 +243,9 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
     setOperationBusy(true);
     setError(null);
     try {
-      await api.json(`${pathFor(entry.id)}/${action}`, { method: "POST" });
+      const target = `${pathFor(entry.id)}/${action}`;
+      const kindQuery = action === "remove" ? "" : `?kind=${encodeURIComponent(entry.kind)}`;
+      await api.json(`${target}${kindQuery}`, { method: "POST" });
       setConfirmation(null);
       await refreshPlugins();
       if (action === "remove") onRemoved();

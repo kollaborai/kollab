@@ -32,7 +32,7 @@ def _validate(widget: dict, value: object) -> None:
             valid = widget.get("min_value", float("-inf")) <= value <= widget.get("max_value", float("inf"))
     elif kind == "dropdown":
         valid = value in widget.get("options", [])
-    elif kind in {"text_input", "text"}:
+    elif kind in {"text_input", "text", "textarea"}:
         valid = isinstance(value, str)
     else:
         valid = False
@@ -231,21 +231,27 @@ def _save_locked(plugin_id: str, values: dict) -> None:
         write_text_atomic(path, json.dumps(current, indent=2, ensure_ascii=False) + "\n")
 
 
-def set_enabled(plugin_id: str, enabled: bool, *, config_service=None, save_target: str = "global") -> None:
+def set_enabled(
+    plugin_id: str, enabled: bool, *, config_service=None, save_target: str = "global", kind: str | None = None
+) -> None:
     """Set a plugin's enabled state, capturing PATH for packages on enable."""
     if not isinstance(plugin_id, str):
         raise ValueError("Invalid plugin id")
     if type(enabled) is not bool:
         raise ValueError("Enabled state must be a boolean")
+    if kind not in {None, "built-in"}:
+        raise ValueError("Invalid plugin kind")
     home = Path.home() / ".kollab"
     home.mkdir(parents=True, exist_ok=True)
     registry = _read_registry(home / "plugins.json")
-    entry = None if plugin_id in registry["plugins"] else _builtin(plugin_id)
+    entry = _builtin(plugin_id) if kind == "built-in" else (
+        None if plugin_id in registry["plugins"] else _builtin(plugin_id)
+    )
     with locked_file(home / "plugins.json.lock", private=True):
         _recover_locked(home)
         path = home / "plugins.json"
         registry = _read_registry(path)
-        record = registry["plugins"].get(plugin_id)
+        record = None if kind == "built-in" else registry["plugins"].get(plugin_id)
         if entry is not None and record is None:
             _save_builtin(
                 entry, {f"plugins.{plugin_id}.enabled": enabled}, enable=True,

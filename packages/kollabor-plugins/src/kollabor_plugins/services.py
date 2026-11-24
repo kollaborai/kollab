@@ -61,16 +61,19 @@ def _engine_url(value: str | None = None) -> str:
     return value.rstrip("/")
 
 
-def redact_log(text: str, secret_values: list[str] | tuple[str, ...] = ()) -> str:
+def redact_log(
+    text: str, secret_values: list[str] | tuple[str, ...] = (), *, redact_paths: bool = True
+) -> str:
     """Redact declared values and common credential forms from log text."""
-    return redact_sensitive_text(text, secret_values)
+    return redact_sensitive_text(text, secret_values, redact_paths=redact_paths)
 
 
 class _LogFilter:
     """Buffer lines across reads, suppressing output that cannot be safely bounded."""
 
-    def __init__(self, secrets: list[str]):
+    def __init__(self, secrets: list[str], *, redact_paths: bool = False):
         self.secrets = secrets
+        self.redact_paths = redact_paths
         self.pending = bytearray()
         self.discarding = False
         self.suppress = any("\n" in value or "\r" in value for value in secrets)
@@ -93,11 +96,21 @@ class _LogFilter:
                     output.extend(b"[redacted oversized log line]\n")
             if ended:
                 if not self.discarding:
-                    output.extend(redact_log(self.pending.decode("utf-8", "replace"), self.secrets).encode())
+                    output.extend(
+                        redact_log(
+                            self.pending.decode("utf-8", "replace"), self.secrets,
+                            redact_paths=self.redact_paths,
+                        ).encode()
+                    )
                 self.pending.clear()
                 self.discarding = False
         if final and self.pending and not self.discarding:
-            output.extend(redact_log(self.pending.decode("utf-8", "replace"), self.secrets).encode())
+            output.extend(
+                redact_log(
+                    self.pending.decode("utf-8", "replace"), self.secrets,
+                    redact_paths=self.redact_paths,
+                ).encode()
+            )
             self.pending.clear()
         return bytes(output)
 
@@ -145,7 +158,7 @@ def _write_log(path: Path, data: bytes) -> None:
 
 def _write_failure_log(path: Path, detail: str, secret_values: list[str]) -> None:
     """Keep start diagnostics in the service log, with the same redaction and bounds as child output."""
-    log_filter = _LogFilter(secret_values)
+    log_filter = _LogFilter(secret_values, redact_paths=True)
     payload = (detail[:8192] + "\n").encode("utf-8", "replace")
     filtered = log_filter.feed(payload, final=True)
     if filtered:

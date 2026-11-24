@@ -624,18 +624,24 @@ async def _publish_partial_disable(request: Request, plugin_id: str) -> None:
 
 @router.post("/{plugin_id}/enable")
 @router.post("/{plugin_id}/disable")
-async def set_plugin_enabled(request: Request, plugin_id: str):
+async def set_plugin_enabled(request: Request, plugin_id: str, kind: str | None = None):
     from kollabor_plugins.services import ServiceStopError, supervisor_tick
 
-    context = _package_context(plugin_id)
+    if kind not in {None, "built-in", "installed", "dev"}:
+        raise HTTPException(status_code=422, detail="Invalid plugin kind")
+    if kind == "dev" and not plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    if kind in {"installed", "built-in"} and plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    context = None if kind == "built-in" else _package_context(plugin_id)
     if context is None:
-        get_plugin_settings(plugin_id)  # Reject unknown IDs before changing config.
+        get_plugin_settings(plugin_id, kind=kind)  # Reject unknown IDs before changing config.
     enabled = request.scope["path"].rstrip("/").endswith("/enable")
     try:
         if context is None:
             from kollabor_plugins.settings import set_enabled
 
-            await asyncio.to_thread(set_enabled, plugin_id, enabled)
+            await asyncio.to_thread(set_enabled, plugin_id, enabled, kind=kind)
             request.app.state.plugin_events.publish_change()
             return {"enabled": enabled}
         await asyncio.to_thread(_set_package_enabled, context, enabled)
@@ -907,10 +913,19 @@ def get_plugin_usage(plugin_id: str):
     return {"date": today, "total": total, "cap": cap, "remaining": max(0, cap - total)}
 
 
-def _plugin_token_target(method: str, path: str) -> str | None:
+def _plugin_token_target(method: str, path: str, query: bytes | str = b"") -> str | None:
     """Return the own-plugin id only for routes that accept a plugin token."""
+    from urllib.parse import parse_qs
+
     from kollabor_plugins.settings import _valid_data_id
 
+    try:
+        query_text = query.decode("ascii") if isinstance(query, bytes) else query
+        kinds = parse_qs(query_text, keep_blank_values=True).get("kind", [])
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if len(kinds) > 1 or (kinds and kinds != ["installed"]):
+        return None
     if not path.startswith("/") or "\\" in path or "\x00" in path or "%" in path:
         return None
     parts = path.split("/")[1:]
@@ -936,10 +951,12 @@ def _plugin_token_target(method: str, path: str) -> str | None:
 class PluginTokenStore(PluginTokenFiles):
     """Authorize scoped engine requests using the shared private token file."""
 
-    def authorize(self, token: str, method: str, path: str, hub: PluginEventHub) -> bool:
+    def authorize(
+        self, token: str, method: str, path: str, hub: PluginEventHub, query: bytes | str = b""
+    ) -> bool:
         from kollabor_plugins.packages import _read_registry
 
-        plugin_id = _plugin_token_target(method, path)
+        plugin_id = _plugin_token_target(method, path, query)
         if plugin_id is None:
             return False
         try:

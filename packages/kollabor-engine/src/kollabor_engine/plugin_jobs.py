@@ -165,6 +165,9 @@ class PluginJobs:
         if self.closing:
             raise HTTPException(status_code=503, detail="Plugin manager is shutting down")
         self._expire()
+        for job_id, job in list(self.jobs.items()):
+            if job.get("status") in {"error", "complete", "cancelled"} and "base" not in job:
+                self.jobs.pop(job_id, None)
         if len(self.jobs) + len(self.expired_jobs) >= _MAX_JOBS:
             raise HTTPException(status_code=429, detail="Too many plugin jobs; try again later")
         home = Path.home() / ".kollab"

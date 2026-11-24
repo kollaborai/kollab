@@ -826,8 +826,9 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 5. If a plugin starts an agent run with `approval: "trust_all"` without `agents:unattended`, then it gets
    403 `pr-chain did not declare agents:unattended`. With the entries declared and granted, the agent
    shows under PR Chain in the left sidebar while it runs.
-6. If a run passes `timeout_s` or `max_tokens`, then its daemon refuses further provider requests and the
-   run reads `timeout` or `capped`, even while the engine is down. A run that finishes first reads `done`.
+6. After agent-run support ships, if a run passes `timeout_s` or `max_tokens`, then its daemon refuses
+   further provider requests and the run reads `timeout` or `capped`, even while the engine is down. A
+   run that finishes first reads `done`.
 7. If an update is available, then `update` shows the sheet with the commit range and changed folders,
    and nothing changes until the user confirms the commit the sheet showed; the old version keeps running
    meanwhile.
@@ -841,7 +842,8 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
     that page or process.
 12. If a stage agent appends to its transcript, then the Board's Agent Output shows the new text within
     5 s without a page reload, with any token or key in it shown as `[redacted]`.
-13. If a plugin's counted tokens for the day reach its Daily Token Cap, then its next agent run fails
+13. After agent-run support ships, if a plugin's counted tokens for the day reach its Daily Token Cap,
+    then its next agent run fails
     with 429 and the cap message; at 00:00 local time runs start again.
 14. If a plugin is installed, then its settings show in the terminal's `/config` and the web's Settings
     → Plugins with no change to kollab's code; if it is removed, they leave both. A built-in plugin shows
