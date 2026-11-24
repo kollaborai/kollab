@@ -32,6 +32,26 @@ describe("declared plugin uses", () => {
     ]);
   });
 
+  it("explains mediated agent runs and granted secrets", () => {
+    expect(describeUses(["agents", "agents:unattended", "secret:GITHUB_TOKEN"])).toEqual({
+      throughKollab: [
+        "Can start agent runs through Kollab.",
+        "Can run agent tools without asking; those agents can do anything you can.",
+        "Can request the secret GITHUB_TOKEN through Kollab.",
+      ],
+      onItsOwn: [],
+      other: [],
+    });
+  });
+
+  it("lists network, file and other declarations", () => {
+    expect(describeUses(["net:github.com,api.github.com", "files:~/.kollab/cache", "custom:feature"])).toEqual({
+      throughKollab: [],
+      onItsOwn: ["Talks to: github.com,api.github.com.", "Reads or writes: ~/.kollab/cache."],
+      other: ["custom:feature"],
+    });
+  });
+
   it("keeps the trust explanation explicit", () => {
     expect(PLUGIN_TRUST_NOTICE).toContain("they have your files and keys and can do more");
   });
