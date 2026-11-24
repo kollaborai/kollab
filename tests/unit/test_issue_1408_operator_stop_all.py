@@ -618,6 +618,30 @@ def test_stop_cleanup_keeps_a_replacement_registered_under_the_same_id(tmp_path)
     assert sock.exists()
 
 
+def test_stop_cleanup_keeps_replacement_without_started_at(tmp_path):
+    """A missing generation timestamp cannot prove a same-pid row is ours."""
+    from kollabor_agent.runtime import AgentRuntime, process_start_token
+
+    row = tmp_path / "agent-x.json"
+    sock = tmp_path / "agent-x.sock"
+    row.write_text(json.dumps({
+        "agent_id": "agent-x", "identity": "new", "pid": os.getpid(),
+        "socket_path": str(sock),
+    }))
+    sock.write_text("new generation")
+    current = process_start_token(os.getpid())
+    assert current is not None
+    old = AgentRuntime(
+        agent_id="agent-x", identity="old", pid=os.getpid(), started_at=100.0,
+        start_token=f"{current}-old", socket_path=str(sock),
+    )
+
+    _presence_in(tmp_path).cleanup_agent(old)
+
+    assert row.exists()
+    assert sock.exists()
+
+
 def test_stop_cleanup_keeps_an_unreadable_replacement_registered(tmp_path, monkeypatch):
     """An unreadable row is not proof that it still belongs to the stopped agent."""
     from pathlib import Path
