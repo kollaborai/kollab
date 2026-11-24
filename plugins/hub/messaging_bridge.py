@@ -362,9 +362,76 @@ class TelegramBridge(MessagingBridge):
             # One isolated process owns both the artifacts and every CLI child.
             # The stdlib interpreter is separate from Kollab's binary entrypoint.
             python = shutil.which("python3")
-            if sys.platform != "linux" or python is None:
-                logger.error("Voice transcription requires Linux and python3")
+            if python is None:
+                logger.error("Voice transcription requires python3")
                 return "[voice message - transcription failed]"
+            if sys.platform != "linux":
+                # Keep the existing Whisper CLI behavior on platforms without
+                # Linux subreaper support, while isolating all generated files.
+                with tempfile.TemporaryDirectory(
+                    prefix="kollab-telegram-voice-", dir=tempfile.gettempdir()
+                ) as run_dir:
+                    audio_path = Path(run_dir) / ("voice" + (Path(file_path).suffix or ".ogg"))
+                    audio_path.write_bytes(audio_resp.content)
+                    spawn_task = asyncio.create_task(
+                        asyncio.create_subprocess_exec(
+                            "whisper",
+                            str(audio_path),
+                            "--model",
+                            "base",
+                            "--language",
+                            "en",
+                            "--output_format",
+                            "txt",
+                            "--output_dir",
+                            run_dir,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                    )
+                    try:
+                        proc = await asyncio.shield(spawn_task)
+                    except asyncio.CancelledError as cancellation:
+                        try:
+                            proc, _ = await _await_shielded_task(spawn_task)
+                        except BaseException:
+                            raise cancellation
+                        communication_task = asyncio.create_task(proc.communicate())
+                        await _await_shielded_task(
+                            asyncio.create_task(_stop_transcriber(proc, communication_task))
+                        )
+                        raise
+                    communication_task = asyncio.create_task(proc.communicate())
+                    try:
+                        stdout_bytes, _ = await asyncio.wait_for(
+                            asyncio.shield(communication_task), timeout=60
+                        )
+                    except BaseException:
+                        _, interrupted = await _await_shielded_task(
+                            asyncio.create_task(_stop_transcriber(proc, communication_task))
+                        )
+                        if interrupted:
+                            raise asyncio.CancelledError
+                        raise
+                    if proc.returncode == 124:
+                        raise asyncio.TimeoutError
+                    if proc.returncode != 0:
+                        logger.error("Voice transcription CLI failed (exit %s)", proc.returncode)
+                        return "[voice message - transcription failed]"
+                    transcript_path = audio_path.with_suffix(".txt")
+                    transcription = (
+                        transcript_path.read_text().strip() if transcript_path.exists() else ""
+                    )
+                    if not transcription:
+                        for line in stdout_bytes.decode("utf-8", errors="replace").splitlines():
+                            line = line.strip()
+                            if line and not line.startswith(("Detecting", "[")):
+                                transcription = line
+                                break
+                    if not transcription:
+                        transcription = "[voice message - whisper returned empty]"
+                    logger.info("Telegram voice transcription completed")
+                    return f"[voice] {transcription}"
             spawn_task = asyncio.create_task(
                 asyncio.create_subprocess_exec(
                     python,
