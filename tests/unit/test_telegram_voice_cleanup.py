@@ -652,4 +652,7 @@ async def test_success_waits_for_detached_transcript_writer(tmp_path, monkeypatc
     result = await _bridge()._transcribe_voice("synthetic-file-id")
 
     assert result == "[voice] delayed transcript"
+    deadline = time.monotonic() + 2
+    while list(tmp_path.glob("kollab-telegram-voice-*")) and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
     assert not list(tmp_path.glob("kollab-telegram-voice-*"))
