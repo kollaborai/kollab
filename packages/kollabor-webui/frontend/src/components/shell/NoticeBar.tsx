@@ -36,7 +36,7 @@ export function NoticeBar({
       {actions}
       {details}
       {onDismiss ? (
-        <Button type="button" variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={onDismiss}>
+        <Button type="button" variant="ghost" size="icon-xs" aria-label="Dismiss" className="pointer-coarse:size-11" onClick={onDismiss}>
           <X />
         </Button>
       ) : null}
@@ -45,6 +45,6 @@ export function NoticeBar({
 }
 
 /** A notice's button: the way out of what the line says. */
-export function NoticeAction(props: Omit<ComponentProps<typeof Button>, "variant" | "size">) {
-  return <Button type="button" variant="outline" size="xs" className="text-foreground" {...props} />;
+export function NoticeAction({ className, ...props }: Omit<ComponentProps<typeof Button>, "variant" | "size">) {
+  return <Button type="button" variant="outline" size="xs" className={cn("text-foreground pointer-coarse:min-h-11", className)} {...props} />;
 }
