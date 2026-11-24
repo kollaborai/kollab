@@ -1,0 +1,17 @@
+{
+  "name": "kollab-hello-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  }
+}
