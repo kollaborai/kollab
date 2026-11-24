@@ -34,6 +34,12 @@ Peer-to-peer agent mesh with persistent identity.
 - First agent becomes coordinator via `flock()` on `hub.lock`
 - Designations come from the folder's roster (`plugins.hub.roster`, default `gems`: lapis, peridot, ruby with color castes); a persona is a name, look, agent bundle, role and prompt, and `kollab --as [roster/]name` takes one from any roster. Teams are reporting chains of personas; the engine serves `GET /rosters`, `GET /teams`, `POST /teams/{name}/launch`
 - Open channel: all agents see all messages (like Slack)
+- Mailbox delivery claims every source record under the mailbox root's shared
+  file lock before invoking a receiver. Callback cancellation or failure holds
+  the original payload for inspection; it never proves acceptance or permits
+  an automatic retry. Refusal releases the claim, and successful delivery
+  removes the record or atomically replaces it with a receipt. The orphan
+  sweep removes empty directories only. See `docs/specs/hub-message-flow.md`.
 - Off-box mesh: `plugins.hub.endpoint_enabled` binds a TCP/TLS listener sharing the
   same `_handle_connection` handler; remote agents complete the same Ed25519 handshake.
   Default OFF (unix socket only). The endpoint always forces auth and refuses to bind
