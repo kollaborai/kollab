@@ -609,6 +609,7 @@ def control_service(
                 raise ValueError("Enable the plugin before starting its service")
             if _recorded_process_alive(pid_path):
                 raise ValueError("Service is already running or has an unverifiable process")
+            state.pop("error", None)
             state.update({"desired": "running", "status": "starting"})
             _write_state(state_path, state)
         if engine_url is None:
