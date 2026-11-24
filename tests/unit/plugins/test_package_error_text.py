@@ -5,6 +5,7 @@ import json
 import pytest
 
 SECRET = "tok_1401_do_not_show"
+SAFE_ERROR = "Python entry failed while loading; see the process log for details."
 
 
 def _install(tmp_path, entry_source):
@@ -35,8 +36,24 @@ def _install(tmp_path, entry_source):
         "    get_default_config = Raising()\n",
         "from kollabor_plugins import registry\n"
         f"raise getattr(registry, '_LoadError', ValueError)({SECRET!r})\n",
+        f"raise type({SECRET!r}, (RuntimeError,), {{}})(\"ordinary failure\")\n",
+        "class Meta(type):\n"
+        "    @property\n"
+        "    def __name__(cls):\n"
+        f"        raise RuntimeError({SECRET!r})\n"
+        "class Boom(Exception, metaclass=Meta):\n"
+        "    pass\n"
+        "raise Boom('ordinary failure')\n",
     ],
-    ids=["import", "default-config", "module-getattr", "descriptor", "kollab-error-class"],
+    ids=[
+        "import",
+        "default-config",
+        "module-getattr",
+        "descriptor",
+        "kollab-error-class",
+        "exception-class-name",
+        "metaclass-name",
+    ],
 )
 def test_plugin_raised_text_is_not_kept(tmp_path, monkeypatch, entry_source):
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -50,4 +67,4 @@ def test_plugin_raised_text_is_not_kept(tmp_path, monkeypatch, entry_source):
     registry.load_all_plugins()
     error = registry.package_errors["hello"]
     assert SECRET not in error
-    assert "kollab.log" in error
+    assert error == SAFE_ERROR
