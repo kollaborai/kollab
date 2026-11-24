@@ -1,10 +1,20 @@
-import { describe, expect, it } from "vitest";
-import { EMPTY_CONTRIBUTIONS, type PluginRecord } from "./registry";
-import type { PluginApi, RendererSpec } from "./sdk";
+import { createElement, type ComponentProps } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, describe, expect, it } from "vitest";
+import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
+import { PluginToolPart } from "./renderers";
+import type { PluginApi, PluginRendererProps, RendererSpec } from "./sdk";
 import { findTagRenderer, findToolRenderer, tagRendererNames } from "./renderer-select";
 
 const Render = (() => null) as unknown as RendererSpec["render"];
 const k = {} as PluginApi;
+const hostToolUis = ["request_permission", "hub_msg", "hub_reply", "hub_broadcast"] as const;
+
+function PluginToolRenderer({ toolCall }: PluginRendererProps) {
+  return createElement("span", { "data-plugin-tool-ui": toolCall?.name }, "Plugin renderer");
+}
+
+afterEach(() => pluginRegistry.reset());
 
 function record(id: string, renderers: RendererSpec[], withK = true, enableOrder?: number): PluginRecord {
   return {
@@ -82,5 +92,33 @@ describe("findTagRenderer and tagRendererNames", () => {
       record("gamma", [{ tag: "hidden", render: Render }], false),
     ];
     expect(tagRendererNames(plugins)).toEqual(["status-card", "note"]);
+  });
+});
+
+describe("PluginToolPart", () => {
+  it("keeps every registered host tool UI ahead of a plugin renderer", () => {
+    const plugin: PluginRecord = {
+      id: "tool-renderer-test",
+      name: "Tool Renderer Test",
+      entry: {} as PluginRecord["entry"],
+      status: "ready",
+      error: null,
+      retries: 0,
+      k,
+      contributions: {
+        ...EMPTY_CONTRIBUTIONS,
+        renderers: hostToolUis.map((tool): RendererSpec => ({ tool, render: PluginToolRenderer })),
+      },
+    };
+    pluginRegistry.put(plugin);
+
+    for (const toolName of hostToolUis) {
+      const toolUI = createElement("span", { "data-host-tool-ui": toolName }, "Host UI");
+      const part = { toolName, args: {}, toolUI } as ComponentProps<typeof PluginToolPart>["part"];
+      const html = renderToStaticMarkup(createElement(PluginToolPart, { part, fallback: toolUI }));
+
+      expect(html, toolName).toContain(`data-host-tool-ui="${toolName}"`);
+      expect(html, toolName).not.toContain("data-plugin-tool-ui");
+    }
   });
 });
