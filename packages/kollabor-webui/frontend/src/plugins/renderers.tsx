@@ -1,4 +1,4 @@
-import { type ComponentProps, type ComponentType, type ReactNode, useCallback, useId, useMemo } from "react";
+import { type ComponentProps, type ComponentType, type ReactNode, useCallback, useId, useMemo, useRef } from "react";
 
 import {
   MarkdownText,
@@ -90,6 +90,8 @@ export function PluginToolPart({
 /** Message text with plugin tags. With no tag renderers, or no tags in the text, the native markdown part renders it. */
 export function PluginTaggedText({ text }: { text: string }) {
   const { plugins } = usePlugins();
+  const pluginsRef = useRef(plugins);
+  pluginsRef.current = plugins;
   const tags = tagRendererNames(plugins);
   const owner = useId();
   const parts = tags.length === 0 ? [] : splitPluginTags(text, tags);
@@ -109,7 +111,7 @@ export function PluginTaggedText({ text }: { text: string }) {
             <a href={href} target="_blank" rel="noopener noreferrer" {...props} />
           );
         }
-        const found = findTagRenderer(plugins, tag.name);
+        const found = findTagRenderer(pluginsRef.current, tag.name);
         if (!found) return <>{`<${tag.name}>${tag.content}</${tag.name}>`}</>;
         const Render = found.spec.render;
         return (
@@ -119,7 +121,7 @@ export function PluginTaggedText({ text }: { text: string }) {
         );
       },
     };
-  }, [owner, plugins]);
+  }, [owner]);
   const preprocess = useCallback(
     (source: string) => {
       const sourceParts = source === text ? parts : splitPluginTags(source, tags);
