@@ -481,6 +481,7 @@ describe("plugin settings page", () => {
       await act(async () => root.render(<PluginsSettings api={{
         json: async () => {
           entries.splice(0, entries.length, voice);
+          await loader.refresh();
           return {};
         },
       } as never} />));
