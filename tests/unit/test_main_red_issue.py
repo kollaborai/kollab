@@ -142,3 +142,15 @@ def test_workflow_runs_only_for_failed_main_ci_and_checks_out_the_default_branch
     assert checkout["with"]["persist-credentials"] is False
     for step in job["steps"]:
         assert "${{" not in step.get("run", "")
+
+
+def test_workflow_serializes_runs_for_one_commit():
+    from pathlib import Path
+
+    import yaml
+
+    path = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "main-red.yml"
+    wf = yaml.safe_load(path.read_text())
+    group = wf["jobs"]["open-issue"]["concurrency"]
+    assert group["group"] == "main-red-${{ github.event.workflow_run.head_sha }}"
+    assert group["cancel-in-progress"] is False
