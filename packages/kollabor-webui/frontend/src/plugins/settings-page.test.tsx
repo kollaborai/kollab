@@ -506,6 +506,7 @@ describe("plugin settings page", () => {
       const confirmRemove = [...(dialog?.querySelectorAll("button") ?? [])]
         .find((button) => button.textContent?.trim() === "Remove");
       expect(confirmRemove).toBeDefined();
+      expect(confirmRemove?.getAttribute("data-variant")).toBe("destructive");
       await act(async () => {
         confirmRemove?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         await new Promise((resolve) => setTimeout(resolve, 0));
