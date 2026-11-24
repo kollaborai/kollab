@@ -149,6 +149,7 @@ def test_builtin_settings_save_uses_builtin_writer_when_package_id_collides(tmp_
     import json
 
     from kollabor_engine.routes import plugins as plugin_routes
+
     from kollabor_plugins import registry
     from kollabor_plugins import settings as plugin_settings
 
