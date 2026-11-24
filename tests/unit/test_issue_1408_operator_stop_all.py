@@ -69,7 +69,7 @@ def test_typed_stop_all_stops_every_agent_in_this_folder(monkeypatch):
     assert sorted(stopped) == ["amethyst", "ruby"]
     assert "immune" not in result
     assert "/work/elsewhere: koordinator" in result
-    assert "kollab --hub stop all --everywhere" in result
+    assert "KOLLAB_PROJECT_ROOT=/work/elsewhere kollab --hub stop all" in result
 
 
 def test_typed_stop_all_with_nobody_here_names_other_folders(monkeypatch):

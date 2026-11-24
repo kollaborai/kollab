@@ -1,6 +1,6 @@
 {
   "name": "hub-stop-all-operator",
-  "description": "#1408: /hub stop all typed in a session stops agents it did not launch in its own folder, leaves an agent in another folder running, and names that folder with the --everywhere command. Every process pins HOME and KOLLAB_PROJECT_ROOT to the fixture so no step can reach the developer's hubs; never runs --everywhere (the shared socket root would reach the developer's agents).",
+  "description": "#1408: /hub stop all typed in a session stops agents it did not launch in its own folder, leaves an agent in another folder running, and names that folder with its folder-scoped stop command. Every process pins HOME and KOLLAB_PROJECT_ROOT to the fixture so no step can reach the developer's hubs.",
   "config": {
     "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-stop-all\"; PP=\"$R$(printf \":%s\" \"$R\"/packages/*/src)\"; cd \"$H/ws\"; HOME=\"$H\" KOLLAB_PROJECT_ROOT=\"$H/ws\" KOLLAB_NO_KEYRING=1 PYTHONPATH=\"$PP\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
     "app_init_sleep": 12,
@@ -26,7 +26,7 @@
     { "action": "assert_contains", "pattern": "alpha: stopped", "description": "alpha (not launched by this session) stopped" },
     { "action": "assert_contains", "pattern": "beta: stopped", "description": "beta stopped" },
     { "action": "assert_contains", "pattern": "/other: gamma", "description": "gamma in another folder is named, not stopped" },
-    { "action": "assert_contains", "pattern": "kollab --hub stop all --everywhere", "description": "the command that stops other folders is shown" },
+    { "action": "assert_contains", "pattern": "KOLLAB_PROJECT_ROOT=.*other kollab --hub stop all", "description": "the command scopes stop to the listed folder" },
     { "action": "assert_not_contains", "pattern": "immune", "description": "no immune refusal" }
   ],
   "teardown": [
