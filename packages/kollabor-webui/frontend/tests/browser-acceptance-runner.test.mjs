@@ -318,6 +318,7 @@ test("the browser suite list is pinned and every suite script exists", () => {
     { name: "learn-retries", script: "tests/learn-retries-browser-acceptance.mjs" },
     { name: "profile-rows", script: "tests/acceptance/profile-rows.browser.mjs" },
     { name: "profile-copy", script: "tests/acceptance/profile-copy.browser.mjs" },
+    { name: "plugins", script: "tests/acceptance/plugins.browser.mjs" },
     { name: "gallery", script: "tests/gallery-browser-acceptance.mjs" },
     { name: "scrollbar-chrome", script: "tests/scrollbar-chrome-browser-acceptance.mjs" },
     { name: "agent-sidebar", script: "tests/agent-sidebar-glyph-browser-acceptance.mjs" },
@@ -383,6 +384,15 @@ test("the scrollbar chrome browser proof runs in an explicit headed CI lane", as
   assert.match(xvfbBranch[1], /KOLLAB_BROWSER_XVFB=1 xvfb-run -a/);
   assert.match(xvfbBranch[1], /test -n "\$DISPLAY" && test -s "\$XAUTHORITY"/);
   assert.match(xvfbBranch[2], /npm run test:e2e:parallel/);
+});
+
+test("the plugin browser suite is assigned to a CI lane", async () => {
+  const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const workflowPath = path.resolve(frontendRoot, "../../../.github/workflows/ci.yml");
+  const workflow = await readFile(workflowPath, "utf8");
+  const assignedSuites = [...workflow.matchAll(/^\s+suites:\s*(.+)$/gm)]
+    .flatMap((match) => match[1].split(",").map((name) => name.trim()));
+  assert.ok(assignedSuites.includes("plugins"), "CI must assign the Hello plugin browser suite to a lane");
 });
 
 test("the default suite timeout leaves headroom over the slowest observed CI run", () => {

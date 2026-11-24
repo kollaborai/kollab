@@ -25,8 +25,8 @@ import { createPluginApi, followEvents, isOpenTarget, type OpenTarget, type Plug
 export const LOAD_TIMEOUT_MS = 5_000;
 
 const ID = /^[a-z0-9][a-z0-9-]{1,39}(?:@dev)?$/;
-// `stopping`: its background processes finish their step and its page stays until they exit.
-const LOADABLE = new Set<PluginEntry["state"]>(["ok", "error", "stopping"]);
+// `stopping` and `stop-failed`: an enabled plugin keeps its page while services finish or need attention.
+const LOADABLE = new Set<PluginEntry["state"]>(["ok", "error", "stopping", "stop-failed"]);
 // The export React itself assigns. Code that only reads it (a renderer library) never assigns it.
 const OWN_REACT =
   /__(?:CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE|SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED)\s*=(?!=)/;

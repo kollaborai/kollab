@@ -92,11 +92,83 @@ def test_install_job_requires_exact_commit_and_file_hash(client, managed_repo, t
     assert client.post(f"/plugins/jobs/{job_id}/confirm", json=accepted).status_code == 409
 
 
+def test_cancel_ready_job_removes_stage_and_rejects_confirmation(client, tmp_path):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    assert ready["status"] == "ready"
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    response = client.delete(f"/plugins/jobs/{job_id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert not base.exists()
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    }).status_code == 409
+    assert not (tmp_path / ".kollab" / "plugins" / "hello").exists()
+
+
+def test_cancel_reports_cleanup_failure_and_allows_retry(client, monkeypatch):
+    import shutil
+
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    original = shutil.rmtree
+
+    def fail_base(path, *args, **kwargs):
+        if path == base:
+            raise PermissionError("private path")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_base)
+    result = client.delete(f"/plugins/jobs/{job_id}")
+    assert result.status_code == 503
+    assert "private path" not in result.text
+    assert base.exists()
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    }).status_code == 409
+    monkeypatch.setattr(shutil, "rmtree", original)
+    assert client.delete(f"/plugins/jobs/{job_id}").status_code == 200
+    assert not base.exists()
+
+
+def test_cancel_staging_job_stops_worker_and_cleans_stage(client, monkeypatch):
+    import asyncio
+    import threading
+
+    entered = threading.Event()
+    cancelled = threading.Event()
+
+    async def slow_staging(*args):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(client.app.state.plugin_jobs, "_run_staging", slow_staging)
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    assert response.status_code == 202
+    assert entered.wait(2)
+    job_id = response.json()["job_id"]
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    response = client.delete(f"/plugins/jobs/{job_id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert cancelled.wait(2)
+    assert not base.exists()
+    assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "cancelled"
+
+
 def test_job_management_is_local_even_with_user_token(client):
     response = client.post("/plugins/install", headers={"x-kollab-plugin-remote": "1"},
                            json={"source": "https://example.invalid/repo"})
     assert response.status_code == 403
     assert client.get("/plugins/jobs/missing", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
+    assert client.delete("/plugins/jobs/missing", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
 
 
 def test_install_staging_is_background_and_does_not_reveal_errors(client, monkeypatch):
