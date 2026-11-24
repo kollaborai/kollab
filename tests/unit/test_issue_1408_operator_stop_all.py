@@ -314,3 +314,23 @@ def test_typed_stop_all_skips_a_tracked_pid_from_another_generation(monkeypatch)
 
     assert stopped == []
     assert "amethyst" in result
+
+
+def test_cli_parser_forwards_everywhere_to_stop_all():
+    """`kollab --hub stop all --everywhere` must reach the handler with the flag."""
+    from kollabor import cli
+
+    args = cli.parse_arguments(
+        plugin_classes=[], argv=["--hub", "stop", "all", "--everywhere"]
+    )
+
+    assert cli._hub_args_with_org_options(args) == ["stop", "all", "--everywhere"]
+
+
+def test_typed_stop_all_says_the_typing_session_keeps_running(monkeypatch):
+    here = [_peer("amethyst")]
+    plugin, _ = _plugin(monkeypatch, here, here)
+
+    result = asyncio.run(plugin._handle_hub_command("stop all"))
+
+    assert "legal-ops-lead keeps running" in result
