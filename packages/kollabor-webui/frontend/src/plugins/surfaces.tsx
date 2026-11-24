@@ -45,6 +45,9 @@ export function rowCount(record: PluginRecord, fetched: unknown): { text: string
   if (record.entry.state === "error") return { text: "Failed to Load", hint: record.entry.error ?? "" };
   if (record.entry.services.some((service) => service.state === "crash-stopped")) return { text: "Stopped", hint: "" };
   if (record.entry.state === "stopping") return { text: "Stopping", hint: "" };
+  if (record.entry.state === "stop-failed") {
+    return { text: "Stop Failed", hint: record.entry.services.find((service) => service.state === "stop-failed")?.error ?? "" };
+  }
   const badge = (fetched ?? {}) as { text?: unknown; hint?: unknown };
   return {
     text: typeof badge.text === "string" ? badge.text : "",
@@ -180,7 +183,7 @@ export function PluginPage({ pluginId, pageId, onExit }: { pluginId: string; pag
         <h1 ref={titleRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-lg font-semibold outline-none">
           {title}
         </h1>
-        <TooltipIconButton tooltip={`Close ${title}`} className="size-8" onClick={onExit}>
+        <TooltipIconButton tooltip={`Close ${title}`} className="size-8 pointer-coarse:size-11" onClick={onExit}>
           <X className="size-4" aria-hidden="true" />
         </TooltipIconButton>
       </header>
