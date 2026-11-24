@@ -103,4 +103,18 @@ describe("plugin settings page", () => {
     expect(markup).toContain("Development Folder:");
     expect(markup).not.toContain("Development folder:");
   });
+
+  it("names each service action for the process it controls", async () => {
+    const markup = await markupFor([{
+      ...plugin([]),
+      enabled: true,
+      services: [
+        { name: "worker-a", state: "running" },
+        { name: "worker-b", state: "running" },
+      ],
+    }]);
+
+    for (const service of ["worker-a", "worker-b"])
+      expect(markup).toContain(`aria-label="Stop ${service}"`);
+  });
 });
