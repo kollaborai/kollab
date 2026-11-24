@@ -64,6 +64,11 @@ describe("plugin settings page", () => {
     expect(source).toMatch(/api\.json\([^\n]*plugins\/\$\{encodeURIComponent\(entry\.id\)\}\/settings/);
   });
 
+  it("mounts custom plugin settings with the scoped portal root", () => {
+    const settingsView = source.slice(source.indexOf("{SettingsView && record?.k ?"));
+    expect(settingsView).toMatch(/<PluginMount record=\{record\}>\s*<SettingsView/);
+  });
+
   it("uses Title Case for backend service states", async () => {
     const markup = await markupFor([{
       ...plugin([]),
