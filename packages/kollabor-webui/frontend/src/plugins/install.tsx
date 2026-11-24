@@ -215,8 +215,8 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
         <DialogDescription>Review the exact source and permissions before anything is installed or run.</DialogDescription></DialogHeader>
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
         {form.source ? <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
-          <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Git URL<Input value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label>
-          <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Branch or Tag<Input value={gitRef} onChange={event => setGitRef(event.target.value)} placeholder="Default branch" /></label>
+          <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Git URL<Input className="pointer-coarse:min-h-11" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label>
+          <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Branch or Tag<Input className="pointer-coarse:min-h-11" value={gitRef} onChange={event => setGitRef(event.target.value)} placeholder="Default branch" /></label>
         </div> : null}
         {showFetching(job, error !== null) ? <p role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
         {job?.status === "error" ? <p role="alert" className="text-destructive text-sm">{job.error || "Plugin review failed."}</p> : null}
