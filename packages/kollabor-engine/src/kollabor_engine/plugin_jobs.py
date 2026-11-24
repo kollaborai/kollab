@@ -64,7 +64,12 @@ class PluginJobs:
     def _expire(self) -> None:
         cutoff = time.monotonic() - _JOB_TTL
         for job_id, job in list(self.jobs.items()):
-            if job["status"] not in {"staging", "installing", "cancelling"} and job["updated"] < cutoff:
+            cancellation_running = job["status"] == "cancelling" and job.get("cancel_task") is not None
+            if (
+                job["status"] not in {"staging", "installing"}
+                and not cancellation_running
+                and job["updated"] < cutoff
+            ):
                 del self.jobs[job_id]
                 self.expired_jobs[job_id] = job
         for job_id, job in list(self.expired_jobs.items()):
