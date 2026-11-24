@@ -215,7 +215,12 @@ def test_wrapper_cannot_overwrite_stopping_state_during_startup(tmp_path, monkey
     home = tmp_path / ".kollab"
     root = home / "plugins" / "hello"
     root.mkdir(parents=True)
-    paused, proceed, ready, wrote = tmp_path / "paused", tmp_path / "proceed", tmp_path / "ready", tmp_path / "wrote"
+    paused, proceed, ready, running_write = (
+        tmp_path / "paused",
+        tmp_path / "proceed",
+        tmp_path / "ready",
+        tmp_path / "running-write",
+    )
     child_code = (
         "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
         f"open({str(ready)!r},'w').close(); time.sleep(60)"
@@ -234,14 +239,14 @@ from pathlib import Path
 from kollabor_plugins import services
 write = services._write_state
 def pause(path, value):
-    running = path.suffix == ".state" and value.get("status") == "running"
-    if running:
+    child_identity = path.suffix == ".pid" and isinstance(value.get("child"), dict)
+    if child_identity:
         Path({str(paused)!r}).touch()
         while not Path({str(proceed)!r}).exists():
             time.sleep(0.01)
     result = write(path, value)
-    if running:
-        Path({str(wrote)!r}).touch()
+    if path.suffix == ".state" and value.get("status") == "running":
+        Path({str(running_write)!r}).touch()
     return result
 services._write_state = pause
 services.run_service("hello", "worker", "abcd")
@@ -253,21 +258,12 @@ services.run_service("hello", "worker", "abcd")
             time.sleep(0.01)
         assert paused.exists() and ready.exists(), "wrapper did not reach the state-write race"
         settings.set_enabled("hello", False)
-        proceed.touch()
-        deadline = time.monotonic() + 2
-        while not wrote.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert wrote.exists(), "wrapper did not finish its queued running-state write"
-        deadline = time.monotonic() + 1
-        while time.monotonic() < deadline:
-            entry = registry._service_entries(home, "hello", manifest)[0]
-            if entry["state"] == "stopping":
-                break
-            time.sleep(0.02)
+        entry = registry._service_entries(home, "hello", manifest)[0]
         assert entry["state"] == "stopping"
         assert entry["desired"] == "stopped"
-        assert entry["stop_deadline"] > time.time()
+        proceed.touch()
         wrapper.wait(timeout=7)
+        assert not running_write.exists(), "wrapper overwrote the stop with a running state"
     finally:
         proceed.touch()
         if wrapper.poll() is None:
@@ -456,3 +452,75 @@ def test_fallback_stop_publishes_the_shared_default_grace(tmp_path, monkeypatch)
     services._stop_unrecorded(run, pid_path)
     state = json.loads((run / "worker.state").read_text())
     assert 6 <= state["stop_deadline"] - before <= 8
+
+
+def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
+    from kollabor_config import file_lock
+    from kollabor_plugins import services
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    paths = [Path(module.__file__).resolve().parent.parent for module in (services, file_lock)]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(map(str, paths)))
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    ready, waiting = tmp_path / "ready", tmp_path / "waiting-for-registry-lock"
+    child_code = f"from pathlib import Path; import time; Path({str(ready)!r}).touch(); time.sleep(60)"
+    manifest = {"id": "hello", "services": {"worker": {"command": [sys.executable, "-c", child_code]}}}
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {
+        "enabled": True,
+        "enabled_path": "/usr/bin:/bin",
+        "granted": [],
+        "files_sha256": files_sha256(root),
+    }}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    (run / "worker.state").write_text(json.dumps({"desired": "running", "status": "starting"}))
+    (run / "worker.pid").write_text(json.dumps({
+        "wrapper": {"pid": 99999999, "start_time": 0.0, "nonce": "stale"},
+        "child": None,
+    }))
+    source = "\n".join(
+        [
+            "import time",
+            "from contextlib import contextmanager",
+            "from pathlib import Path",
+            "from kollabor_plugins import services",
+            "original = services.locked_file",
+            "@contextmanager",
+            "def gate(path, *args, **kwargs):",
+            '    if Path(path).name == "plugins.json.lock":',
+            f"        Path({str(waiting)!r}).touch()",
+            "    with original(path, *args, **kwargs):",
+            "        yield",
+            "services.locked_file = gate",
+            'services.run_service("hello", "worker", "abcd")',
+        ]
+    )
+    wrapper = None
+    try:
+        with file_lock.locked_file(home / "plugins.json.lock", private=True):
+            wrapper = subprocess.Popen([sys.executable, "-c", source])
+            deadline = time.monotonic() + 8
+            while not waiting.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert waiting.exists(), "wrapper did not wait for the registry lock"
+            services.control_service("hello", "worker", "stop")
+            state = json.loads((run / "worker.state").read_text())
+            assert state["desired"] == "stopped"
+        try:
+            wrapper.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            pytest.fail("wrapper started a service after stop had succeeded")
+        assert not ready.exists(), "child started after stop had succeeded"
+    finally:
+        if wrapper is not None and wrapper.poll() is None:
+            wrapper.terminate()
+            try:
+                wrapper.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                wrapper.kill()
+                wrapper.wait(timeout=3)
