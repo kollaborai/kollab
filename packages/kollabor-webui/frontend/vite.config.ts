@@ -255,6 +255,7 @@ const mainConfig = defineConfig({
       "src/plugins/composer-commands.test.ts",
       "src/plugins/plugin-tag-rendering.test.tsx",
       "src/plugins/tag-renderer-identity.test.tsx",
+      "src/plugins/hello-template.test.ts",
     ],
     environment: "node",
   },
