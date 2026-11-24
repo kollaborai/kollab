@@ -75,6 +75,7 @@ try {
     const read = async () => ({
       assistant: await page.locator("#assistant").innerText(),
       users: await page.locator("#users").innerText(),
+      queued: await page.locator("#queued").innerText(),
       branches: await page.locator("#branches .branched").count(),
       remounts: await page.locator("#remounts").innerText(),
       errors: await page.locator("#errors").innerText(),
