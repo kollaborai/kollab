@@ -2,6 +2,7 @@ export type TaggedTextPart = { type: "text"; text: string } | { type: "tag"; nam
 
 type Open = { name: string; close: number };
 type Mask = { start: number; end: number };
+type BacktickRun = { start: number; end: number; length: number };
 
 const TAG = /<(\/?)([a-z][\w-]*)>/gi;
 const CONTAINER = /(?: {0,3}(?:>[ \t]?|(?:[-*+]|\d{1,9}[.)])[ \t]+))*/y;
@@ -54,6 +55,7 @@ function pairTags(text: string, allowed: ReadonlySet<string>, masked: readonly M
 /** Ranges no tag may open or close in: code blocks, code spans and backslash escapes, in text order. */
 function maskedRanges(text: string): Mask[] {
   const masked: Mask[] = [];
+  const codeSpanClosers = indexCodeSpanClosers(text);
   let index = 0;
   while (index < text.length) {
     if (index === 0 || text[index - 1] === "\n") {
@@ -70,7 +72,7 @@ function maskedRanges(text: string): Mask[] {
       continue;
     }
     if (text[index] === "`") {
-      const end = codeSpanEnd(text, index);
+      const end = codeSpanEnd(text, index, codeSpanClosers);
       masked.push({ start: index, end });
       index = end;
       continue;
@@ -80,23 +82,40 @@ function maskedRanges(text: string): Mask[] {
   return masked;
 }
 
+/** Pair each backtick run with the next run of the same length before a blank line. */
+function indexCodeSpanClosers(text: string): ReadonlyMap<number, number> {
+  const runs: BacktickRun[] = [];
+  for (let index = 0; index < text.length; ) {
+    if (text[index] !== "`") {
+      index++;
+      continue;
+    }
+    const start = index;
+    while (text[index] === "`") index++;
+    runs.push({ start, end: index, length: index - start });
+  }
+
+  const closers = new Map<number, number>();
+  const pending = new Map<number, BacktickRun>();
+  const blankLines = text.matchAll(BLANK_LINE);
+  let blank = blankLines.next();
+  for (const run of runs) {
+    while (!blank.done && blank.value.index < run.start) {
+      pending.clear();
+      blank = blankLines.next();
+    }
+    const opener = pending.get(run.length);
+    if (opener) closers.set(opener.start, run.end);
+    pending.set(run.length, run);
+  }
+  return closers;
+}
+
 /** Index just past the code span that opens at this backtick run. The closer is a run of exactly the same length in the same paragraph; with none, the opening run is literal text. */
-function codeSpanEnd(text: string, index: number): number {
+function codeSpanEnd(text: string, index: number, closers: ReadonlyMap<number, number>): number {
   let runEnd = index;
   while (text[runEnd] === "`") runEnd++;
-  const length = runEnd - index;
-  BLANK_LINE.lastIndex = runEnd;
-  const blank = BLANK_LINE.exec(text);
-  const limit = blank ? blank.index : text.length;
-  // ponytail: each scan stops at the paragraph end, so many unmatched runs in one paragraph still cost O(n) each. Index runs by length if this shows up.
-  let start = text.indexOf("`", runEnd);
-  while (start >= 0 && start < limit) {
-    let end = start;
-    while (text[end] === "`") end++;
-    if (end - start === length) return end;
-    start = text.indexOf("`", end);
-  }
-  return runEnd;
+  return closers.get(index) ?? runEnd;
 }
 
 /** Where the code block that starts at this line start ends, or -1 when none starts here. A fence may follow quote and list markers. */
