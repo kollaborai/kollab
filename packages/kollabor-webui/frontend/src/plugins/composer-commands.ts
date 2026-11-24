@@ -12,6 +12,20 @@ export type PluginCommandEntry = {
   k: PluginApi;
 };
 
+/** A loaded plugin command hidden by another plugin's earlier enable order. */
+export type PluginCommandConflict = {
+  pluginId: string;
+  pluginName: string;
+  commandName: string;
+  winnerPluginId: string;
+  winnerName: string;
+};
+
+type PluginCommandResolution = {
+  entries: PluginCommandEntry[];
+  conflicts: PluginCommandConflict[];
+};
+
 /** Native command names and aliases, lower case, without the slash. */
 export function reservedCommandKeys(
   commands: readonly { name: string; aliases?: readonly string[] }[],
@@ -25,19 +39,37 @@ export function reservedCommandKeys(
   return keys;
 }
 
-/** Commands from loaded plugins. A native name wins, then the first enabled plugin. */
-export function pluginCommandEntries(
+/** Resolve loaded plugin commands: a native name wins, then the first enabled plugin. */
+function resolvePluginCommands(
   plugins: readonly PluginRecord[],
   reserved: ReadonlySet<string>,
-): PluginCommandEntry[] {
+): PluginCommandResolution {
   const taken = new Set(reserved);
+  const owners = new Map<string, PluginRecord>();
   const entries: PluginCommandEntry[] = [];
+  const conflicts: PluginCommandConflict[] = [];
+  const conflictKeys = new Set<string>();
   for (const record of pluginsByEnableOrder(plugins)) {
     if (!record.k) continue;
     for (const command of record.contributions.commands) {
       const key = command.name.toLowerCase();
-      if (taken.has(key)) continue;
+      if (taken.has(key)) {
+        const winner = owners.get(key);
+        const conflictKey = JSON.stringify([record.id, key]);
+        if (winner && winner.id !== record.id && !conflictKeys.has(conflictKey)) {
+          conflicts.push({
+            pluginId: record.id,
+            pluginName: record.name,
+            commandName: command.name,
+            winnerPluginId: winner.id,
+            winnerName: winner.name,
+          });
+          conflictKeys.add(conflictKey);
+        }
+        continue;
+      }
       taken.add(key);
+      owners.set(key, record);
       entries.push({
         name: command.name,
         description: command.description,
@@ -47,7 +79,23 @@ export function pluginCommandEntries(
       });
     }
   }
-  return entries;
+  return { entries, conflicts };
+}
+
+/** Commands from loaded plugins, with native names taking precedence. */
+export function pluginCommandEntries(
+  plugins: readonly PluginRecord[],
+  reserved: ReadonlySet<string>,
+): PluginCommandEntry[] {
+  return resolvePluginCommands(plugins, reserved).entries;
+}
+
+/** Duplicate plugin commands and the enabled-first winner that currently owns each name. */
+export function pluginCommandConflicts(
+  plugins: readonly PluginRecord[],
+  reserved: ReadonlySet<string>,
+): PluginCommandConflict[] {
+  return resolvePluginCommands(plugins, reserved).conflicts;
 }
 
 /** The plugin command a message runs (`/name args`), or null. Whole name, any case. */
