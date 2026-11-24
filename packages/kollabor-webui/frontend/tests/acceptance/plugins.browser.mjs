@@ -246,6 +246,7 @@ async function openApp(width, height, { route = "/", touch = false } = {}) {
     await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
   }
   await page.goto(`${origin}${route}`, { waitUntil: "domcontentloaded" });
+  await page.getByText("Kollab is up to date.", { exact: false }).waitFor({ timeout: 10_000 });
   return { context, page };
 }
 
