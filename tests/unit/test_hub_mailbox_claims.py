@@ -206,6 +206,36 @@ async def test_failed_ack_write_preserves_claimed_payload(inbox, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_refusal_release_retries_transient_replace_failure(inbox, monkeypatch):
+    message = HubMessage(action="message", to="receiver", content="retry me")
+    calls = []
+
+    async def refuse(_msg):
+        calls.append("refused")
+        return False
+
+    await AgentMessenger.send_to_file("receiver", message)
+    original_replace = messenger.os.replace
+    replace_calls = 0
+
+    def fail_first_release(src, dst):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise PermissionError("release denied")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(messenger.os, "replace", fail_first_release)
+    assert await _receiver(refuse)._deliver_inbox_batch(_queued()) == set()
+    monkeypatch.setattr(messenger.os, "replace", original_replace)
+    await _receiver(refuse)._deliver_inbox_batch(_queued())
+
+    assert calls == ["refused", "refused"]
+    record = next((inbox / "receiver").glob("*.json"))
+    assert json.loads(record.read_text()).get("_mailbox_delivery_uncertain") is not True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("after_effect", [False, True])
 async def test_ack_replace_failure_cannot_reopen_cancelled_delivery(
     inbox, monkeypatch, after_effect
