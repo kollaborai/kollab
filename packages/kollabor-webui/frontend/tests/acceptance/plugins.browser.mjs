@@ -38,6 +38,7 @@ const mime = {
 const manifest = JSON.parse(readFileSync(path.join(helloRoot, "kollab-plugin.json"), "utf8"));
 const helloJs = readFileSync(path.join(helloRoot, "web/dist/index.js"));
 const helloCss = readFileSync(path.join(helloRoot, "web/dist/index.css"));
+const brokenJs = Buffer.from("throw new Error();\n");
 const plugin = {
   id: manifest.id,
   name: manifest.name,
@@ -64,6 +65,19 @@ const plugin = {
   uses: manifest.uses ?? [],
   granted: [],
 };
+const brokenPlugin = {
+  ...plugin,
+  id: "broken",
+  name: "Broken Plugin",
+  web: { entry: "web/dist/index.js", style: null, hash: sha256(brokenJs, "hex") },
+  contributes: {
+    menu: [{ id: "broken-page", label: "Broken Plugin", open: { page: "broken-page" } }],
+  },
+  services: [],
+  uses: [],
+};
+let pluginEntries = [plugin];
+const pluginEventStreams = new Set();
 const sessions = {
   sessions: [
     {
@@ -122,6 +136,14 @@ function sendJson(res, body) {
   send(res, 200, "application/json", JSON.stringify(body));
 }
 
+function setPluginEntries(entries) {
+  pluginEntries = entries;
+  const event = `data: ${JSON.stringify({ topic: "plugins-changed" })}\n\n`;
+  for (const stream of pluginEventStreams) {
+    if (!stream.destroyed) stream.write(event);
+  }
+}
+
 /** The routes the app reads at boot and the plugin's own files. Returns false for any other path. */
 function engine(url, req, res) {
   const { pathname } = url;
@@ -137,13 +159,20 @@ function engine(url, req, res) {
     send(res, 200, mime[".css"], helloCss);
     return true;
   }
+  if (pathname === "/plugins/broken/web/index.js") {
+    send(res, 200, mime[".js"], brokenJs);
+    return true;
+  }
   if (pathname === "/engine/plugins" && req.method === "GET") {
     pluginListRequests += 1;
-    sendJson(res, { schema: 1, server_time: Math.floor(Date.now() / 1000), plugins: [plugin] });
+    sendJson(res, { schema: 1, server_time: Math.floor(Date.now() / 1000), plugins: pluginEntries });
     return true;
   }
   if (pathname === "/engine/plugins/events") {
-    send(res, 200, "text/event-stream", ": open\n\n");
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+    res.write(": open\n\n");
+    pluginEventStreams.add(res);
+    res.on("close", () => pluginEventStreams.delete(res));
     return true;
   }
   if (pathname === "/engine/sessions") {
@@ -320,6 +349,80 @@ async function phoneFlow() {
   }
 }
 
+async function livePluginRemovalFlow() {
+  setPluginEntries([plugin]);
+  const { context, page } = await openApp(1440, 900);
+  try {
+    const panel = page.getByRole("complementary", { name: "Session Controls" });
+    await panel.waitFor({ timeout: 10000 });
+    const helloViewTab = panel.getByRole("button", { name: "Hello View", exact: true });
+    await helloViewTab.waitFor({ timeout: 10000 });
+    await page.evaluate(() => {
+      window.__pluginsLiveRemovalMarker = "still here";
+    });
+
+    await helloViewTab.click({ timeout: 5000 });
+    await page.getByText("Hello from your plugin!", { exact: true }).waitFor({ timeout: 5000 });
+    await page.getByRole("button", { name: "Open Hello Dialog", exact: true }).click({ timeout: 5000 });
+    const dialog = page.getByRole("dialog", { name: "Hello Dialog", exact: true });
+    await dialog.waitFor({ timeout: 5000 });
+
+    const originalUrl = page.url();
+    setPluginEntries([]);
+    await dialog.waitFor({ state: "hidden", timeout: 5000 });
+    await helloViewTab.waitFor({ state: "hidden", timeout: 5000 });
+    await panel.getByRole("button", { name: "Hello Page", exact: true }).waitFor({ state: "hidden", timeout: 5000 });
+    const chatTab = panel.getByRole("button", { name: "Chat", exact: true });
+    await chatTab.waitFor({ timeout: 5000 });
+    assert.equal(await chatTab.getAttribute("aria-pressed"), "true", "removing Hello returns its active view tab to Chat");
+    assert.equal(await page.evaluate(() => window.__pluginsLiveRemovalMarker), "still here", "Hello is removed without reloading the page");
+    assert.equal(page.url(), originalUrl, "removing Hello keeps the current URL");
+
+    setPluginEntries([plugin]);
+    await helloViewTab.waitFor({ timeout: 5000 });
+    const helloPageRow = panel.getByRole("button", { name: "Hello Page", exact: true });
+    await helloPageRow.waitFor({ timeout: 5000 });
+    await helloPageRow.click({ timeout: 5000 });
+    await page.getByRole("heading", { name: "Hello Page", exact: true }).waitFor({ timeout: 5000 });
+    await page.getByText("This page is provided by the Hello plugin.", { exact: true }).waitFor({ timeout: 5000 });
+    const helloPageTab = page.getByRole("tab", { name: "Hello", exact: true });
+    await helloPageTab.waitFor({ timeout: 5000 });
+
+    const pageUrl = page.url();
+    setPluginEntries([]);
+    await page.getByText("Hello is off", { exact: true }).waitFor({ timeout: 5000 });
+    await page.getByRole("button", { name: "Back to Chat", exact: true }).waitFor({ timeout: 5000 });
+    await helloPageTab.waitFor({ state: "hidden", timeout: 5000 });
+    assert.equal(
+      await page.getByText("This page is provided by the Hello plugin.", { exact: true }).count(),
+      0,
+      "removing Hello drops its page content",
+    );
+    assert.equal(await page.evaluate(() => window.__pluginsLiveRemovalMarker), "still here", "the open Hello page is updated without reloading");
+    assert.equal(page.url(), pageUrl, "removing Hello keeps the open page URL");
+  } finally {
+    await context.close();
+    setPluginEntries([plugin]);
+  }
+}
+
+async function throwingBundleFlow() {
+  setPluginEntries([plugin, brokenPlugin]);
+  const { context, page } = await openApp(1440, 900);
+  try {
+    const panel = page.getByRole("complementary", { name: "Session Controls" });
+    await panel.waitFor({ timeout: 10000 });
+    const brokenRow = panel.getByRole("button", { name: /Broken Plugin/ });
+    await brokenRow.getByText("Failed to Load", { exact: true }).waitFor({ timeout: 10000 });
+    await showHelloView(page, panel);
+    await page.getByRole("button", { name: "Say Hello", exact: true }).click({ timeout: 5000 });
+    await page.getByText("Hello count: 1", { exact: true }).waitFor({ timeout: 5000 });
+  } finally {
+    await context.close();
+    setPluginEntries([plugin]);
+  }
+}
+
 async function pluginsOffFlow() {
   pluginListRequests = 0;
   const { context, page } = await openApp(1440, 900, { route: "/?plugins=off" });
@@ -356,9 +459,11 @@ try {
   await desktopFlow();
   await tabletFlow();
   await phoneFlow();
+  await livePluginRemovalFlow();
+  await throwingBundleFlow();
   await pluginsOffFlow();
   assert.deepEqual(problems, [], "no page errors or CSP violations");
-  console.log("plugins acceptance: Hello view, page and dialog pass at 1440, 820 and 390 px; plugins=off requests nothing");
+  console.log("plugins acceptance: Hello view, page and dialog pass at 1440, 820 and 390 px; live removal, throwing bundle and plugins=off pass");
 } catch (error) {
   exitCode = 1;
   console.error(error);
