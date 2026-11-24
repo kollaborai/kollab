@@ -60,7 +60,7 @@ const boundedCases: Array<{
     normalize: (items: unknown[]) => normalizePluginEntry({
       id: "example-plugin",
       settings: [{ type: "dropdown", path: "plugins.example.mode", label: "Mode", options: items }],
-    })?.settings[0]?.options ?? [],
+    })?.settings?.[0]?.options ?? [],
   },
   {
     name: "service secrets",
@@ -129,7 +129,7 @@ describe("plugin inventory collection bounds", () => {
       settings: [{ type: "dropdown", path: "plugins.example.mode", label: "Mode", option_labels: labels }],
     });
 
-    expect(Object.keys(entry?.settings[0]?.option_labels ?? {})).toHaveLength(256);
+    expect(Object.keys(entry?.settings?.[0]?.option_labels ?? {})).toHaveLength(256);
   });
 
   it("counts only valid contributions and only declares a real web entry", () => {
