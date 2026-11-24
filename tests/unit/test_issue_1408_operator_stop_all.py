@@ -859,7 +859,10 @@ def test_cli_status_serializes_dead_row_cleanup_with_replacement_publish(
     tmp_path, monkeypatch
 ):
     """A replacement published after validation must survive the cleanup."""
+    import threading
     from pathlib import Path
+
+    from plugins.hub.presence import _atomic_write
 
     _cli(tmp_path, monkeypatch, local=False)
     current = tmp_path / "current"
@@ -872,25 +875,37 @@ def test_cli_status_serializes_dead_row_cleanup_with_replacement_publish(
         "kollabor_agent.runtime.process_start_token", lambda _pid: "darwin:9.9"
     )
     original_unlink = Path.unlink
+    writer_started = threading.Event()
+    writer_done = threading.Event()
 
     def publish_replacement_then_unlink(candidate, *args, **kwargs):
         if candidate == path:
-            path.write_text(
-                json.dumps(
+            def publish():
+                writer_started.set()
+                _atomic_write(
+                    path,
                     {
                         **row,
                         "identity": "replacement",
                         "started_at": row["started_at"] + 50,
                         "start_token": "darwin:9.9",
-                    }
+                    },
                 )
-            )
+                writer_done.set()
+
+            threading.Thread(target=publish).start()
+            assert writer_started.wait(2)
+            # Without cleanup's lock, the writer publishes before the unlink
+            # and this call deletes the replacement. With the shared lock it
+            # waits until cleanup unlinks and releases the lock, then republishes.
+            writer_done.wait(1)
         return original_unlink(candidate, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", publish_replacement_then_unlink)
 
     asyncio.run(_handle_cli_hub(["status"]))
 
+    assert writer_done.wait(2)
     assert path.exists()
     assert json.loads(path.read_text())["identity"] == "replacement"
 
