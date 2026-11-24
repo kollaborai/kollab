@@ -14299,7 +14299,8 @@ class HubPlugin(BasePlugin):
         elif subcmd == "capture":
             return await self._handle_capture_command(rest)
         elif subcmd == "stop":
-            return await self._handle_stop_command(rest)
+            # Typed in this session's chat, so the operator (#1408).
+            return await self._handle_stop_command(rest, operator=True)
         elif subcmd == "agents":
             return await self._handle_agents_command()
         elif subcmd == "cron":
@@ -15424,14 +15425,69 @@ class HubPlugin(BasePlugin):
         lines.append("reject: /hub reject <identity> [reason]")
         return "\n".join(lines)
 
-    async def _handle_stop_command(self, rest: str) -> str:
+    async def _operator_stop_all(self) -> str:
+        """`/hub stop all` typed by the operator (#1408).
+
+        Stops every live agent in this folder's hub through the same per-agent
+        stop as `/hub stop <name>`, and names live agents in other folders
+        (left running) with the terminal command that stops them too.
+        """
+        here = await self._presence.discover_agents_async(include_solo=True)
+        here_ids = {agent.agent_id for agent in here}
+        managed = self._locally_managed_sessions()
+        sessions = []
+        for agent in here:
+            session = managed.get(getattr(agent, "pid", None))
+            # A tracked child keeps its lock-guarded escalation; anything else
+            # takes the named-stop path, as `/hub stop <name>` does.
+            if session is not None and not (
+                getattr(session, "is_alive", True)
+                and self._presence_generation_matches(session, agent)
+            ):
+                session = None
+            sessions.append(session)
+        results = await asyncio.gather(
+            *[
+                self._stop_peer_agent(
+                    agent, reason=f"stopped by {self._identity.identity}", session=session
+                )
+                for agent, session in zip(here, sessions)
+            ]
+        )
+        if here:
+            lines = [f"stopping {len(here)} agent(s) in this folder:"]
+            lines += [f"  {a.identity}: {r}" for a, r in zip(here, results)]
+        else:
+            lines = ["no other agents in this folder"]
+
+        elsewhere: dict = {}
+        now = time.time()
+        for agent in self._presence.scan_machine_presence():
+            if (
+                agent.agent_id in here_ids
+                or now - (getattr(agent, "last_heartbeat", 0) or 0) > 60
+                or not pid_alive(getattr(agent, "pid", 0))
+            ):
+                continue
+            folder = getattr(agent, "project", "") or "unknown folder"
+            elsewhere.setdefault(folder, []).append(agent.identity)
+        if elsewhere:
+            count = sum(len(names) for names in elsewhere.values())
+            lines.append(f"\nstill running: {count} agent(s) in other folders")
+            for folder, names in sorted(elsewhere.items()):
+                lines.append(f"  {folder}: {', '.join(sorted(names))}")
+            lines.append("stop those too from a terminal: kollab --hub stop all --everywhere")
+        return "\n".join(lines)
+
+    async def _handle_stop_command(self, rest: str, operator: bool = False) -> str:
         """Handle /hub stop <name|all>.
 
-        Sends shutdown signals via hub sockets. `stop all` is scoped to
-        the agents the CALLER started (agent_orchestrator-managed
-        sessions matched by PID, issue #669): peers launched by other
-        lanes or the operator are immune. The mesh-wide stop is the
-        operator CLI, `kollab --hub stop all`.
+        Sends shutdown signals via hub sockets. ``operator`` is the person
+        typing `/hub stop all` in this session: every agent in this folder's
+        hub stops (#1408). Otherwise (the agent `hub_stop` tool) `stop all`
+        is scoped to the agents the CALLER started (agent_orchestrator-managed
+        sessions matched by PID, issue #669): peers launched by other lanes
+        or the operator are immune.
         """
         target = rest.strip()
         if not target:
@@ -15442,6 +15498,9 @@ class HubPlugin(BasePlugin):
 
         if not self._presence or not self._identity:
             return "hub not active"
+
+        if target.lower() == "all" and operator:
+            return await self._operator_stop_all()
 
         if target.lower() == "all":
             # Scan machine-wide so owned agents are found even if they're

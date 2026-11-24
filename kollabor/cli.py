@@ -1608,7 +1608,7 @@ def _print_hub_help() -> None:
     print("subcommands:")
     print("  status                     show online agents and their state")
     print("  agents | list              alias for status")
-    print("  stop <name|all>            send shutdown signal to an agent")
+    print("  stop <name|all> [--everywhere]  send shutdown signal; all = this folder")
     print("  kill <name|all>            alias for stop")
     print("  halt [--reason <text>] [--revoke <device>]   halt the network (a person's terminal only)")
     print("  resume [--confirm <8-hex> | --local]         propose, confirm or lift here only")
@@ -1630,6 +1630,7 @@ def _print_hub_help() -> None:
     print("  kollab --hub status")
     print("  kollab --hub stop koordinator")
     print("  kollab --hub stop all")
+    print("  kollab --hub stop all --everywhere")
     print("  kollab --hub msg lapis 'hey, got a minute?'")
     print("  kollab --hub broadcast 'rolling to lunch, bbiab'")
     print("  kollab --hub capture koordinator 200")
@@ -1997,12 +1998,18 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     presence_dir = get_presence_dir()
 
-    def _get_live_agents() -> List[dict]:
+    def _get_live_agents(paths=None, cleanup: bool = True) -> List[dict]:
+        """Live agents in this folder's hub, or in ``paths`` (read-only when
+        ``cleanup`` is False: another folder's dead rows are not ours, #875)."""
         import socket as _socket
         import time as _time
 
+        def _drop(path) -> None:
+            if cleanup:
+                path.unlink(missing_ok=True)
+
         agents = []
-        for f in _presence_files(presence_dir):
+        for f in _presence_files(presence_dir) if paths is None else paths:
             try:
                 with open(f) as fh:
                     data = json.load(fh)
@@ -2013,13 +2020,13 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     from kollabor_config import proc_ctl
 
                     if not proc_ctl.pid_alive(pid):
-                        f.unlink(missing_ok=True)
+                        _drop(f)
                         continue
                 else:
                     try:
                         os.kill(pid, 0)
                     except (OSError, ProcessLookupError):
-                        f.unlink(missing_ok=True)
+                        _drop(f)
                         continue
                 # Pid alive but heartbeat stale = recycled pid, clean up
                 heartbeat_age = _time.time() - (data.get("last_heartbeat") or 0)
@@ -2041,13 +2048,47 @@ async def _handle_cli_hub(hub_args: list) -> None:
                         except Exception:
                             pass
                     if not alive:
-                        f.unlink(missing_ok=True)
+                        _drop(f)
                         continue
                 data["_presence_path"] = str(f)
                 agents.append(data)
             except Exception:
                 continue
         return agents
+
+    def _other_folder_agents() -> List[dict]:
+        """Live agents in every other folder's hub on this machine (#1408)."""
+        from plugins.hub.presence import all_presence_dirs
+
+        here = {str(Path(f).resolve()) for f in _presence_files(presence_dir)}
+        here_ids = {a.get("agent_id") for a in _get_live_agents(cleanup=False)}
+        paths = []
+        for directory in all_presence_dirs(extra_dirs=[presence_dir]):
+            try:
+                paths += [p for p in directory.glob("*.json") if str(p.resolve()) not in here]
+            except OSError:
+                continue
+        seen: set = set()
+        others = []
+        for agent in _get_live_agents(paths, cleanup=False):
+            agent_id = agent.get("agent_id") or agent.get("identity")
+            if agent_id in here_ids or agent_id in seen:
+                continue
+            seen.add(agent_id)
+            others.append(agent)
+        return others
+
+    def _print_other_folders(others: List[dict], verb: str) -> None:
+        if not others:
+            return
+        folders: dict = {}
+        for agent in others:
+            folder = agent.get("project") or "unknown folder"
+            folders[folder] = folders.get(folder, 0) + 1
+        print(f"\n{len(others)} agent(s) {verb} in other folders:")
+        for folder, count in sorted(folders.items()):
+            print(f"  {folder}  {count}")
+        print("stop those too: kollab --hub stop all --everywhere")
 
     def _find_agent(identity: str) -> Optional[dict]:
         for a in _get_live_agents():
@@ -2188,7 +2229,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
         agents = _get_live_agents()
         if not agents:
-            print("no agents online")
+            print("no agents in this folder")
         else:
             print(f"{len(agents)} agent(s) online:\n")
             for a in sorted(agents, key=lambda x: x.get("identity", "")):
@@ -2208,6 +2249,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 task = a.get("current_task", "")
                 task_str = f"  task: {task[:60]}" if task else ""
                 print(f"  {desig}{coord}  pid={pid}  {state}{task_str}")
+        _print_other_folders(_other_folder_agents(), "online")
 
         # Agent network (docs/specs/agent-network-simple-flow.md, CLI bullet):
         # ask one online local agent for its network section. Never print
@@ -2264,11 +2306,14 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd in ("stop", "kill"):
         if not rest:
-            print("usage: kollab --hub stop <identity|all>")
+            print("usage: kollab --hub stop <identity|all> [--everywhere]")
             sys.exit(1)
         target = rest[0]
 
         if target == "all":
+            # This folder's hub by default (#875); --everywhere adds every
+            # other folder's live agents, which are otherwise named (#1408).
+            everywhere = "--everywhere" in rest[1:]
             # The CLI stop-all path belongs to an operator shell. Environment
             # markers alone are insufficient because background terminal
             # commands filter them, so also check the caller's process tree.
@@ -2281,8 +2326,12 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 )
                 sys.exit(2)
             agents = _get_live_agents()
+            others = _other_folder_agents()
+            if everywhere:
+                agents, others = agents + others, []
             if not agents:
-                print("no agents online")
+                print("no agents online" if everywhere else "no agents in this folder")
+                _print_other_folders(others, "still running")
                 return
             stopped = 0
             results = await asyncio.gather(
@@ -2293,6 +2342,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 if ok:
                     stopped += 1
             print(f"\n{stopped}/{len(agents)} agent(s) stopped")
+            _print_other_folders(others, "still running")
         else:
             agent = _find_agent(target)
             if not agent:
