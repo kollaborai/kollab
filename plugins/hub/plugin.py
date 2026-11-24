@@ -15496,6 +15496,7 @@ class HubPlugin(BasePlugin):
                 agent.agent_id in here_ids
                 or now - (getattr(agent, "last_heartbeat", 0) or 0) > 60
                 or not pid_alive(getattr(agent, "pid", 0))
+                or self._pid_recycled(agent)
             ):
                 continue
             folder = getattr(agent, "project", "") or "unknown folder"
@@ -15663,11 +15664,16 @@ class HubPlugin(BasePlugin):
         kernel start differs from the row's ``start_token`` (#1408)."""
         if not self._signal_allowed(session):
             return False
-        if session is not None:
-            return True
+        return session is not None or not self._pid_recycled(agent)
+
+    @staticmethod
+    def _pid_recycled(agent) -> bool:
+        """True when the row's pid now runs another process: its kernel start
+        differs from the row's ``start_token``. No token or no readable start
+        proves nothing."""
         recorded = getattr(agent, "start_token", None)
         current = process_start_token(getattr(agent, "pid", 0)) if recorded else None
-        return current is None or current == recorded
+        return current is not None and current != recorded
 
     def _cleanup_stopped_peer(self, agent, session) -> bool:
         """Clean up a stopped peer without crossing its selected generation.
