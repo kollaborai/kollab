@@ -6,7 +6,7 @@ import { BranchSelector } from "@/components/code/git/branch-selector";
 import { StashSelector } from "@/components/code/git/stash-selector";
 import { Button } from "@/components/ui/button";
 import { codeFetch, OUTDATED_NOTICE, unwrapCodeData } from "@/lib/code-fetch";
-import { DaemonNotice } from "@/components/code/DaemonNotice";
+import { DaemonNotice, type DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import type {
   GitLogEntry,
   GitStatusEntry,
@@ -234,13 +234,14 @@ export interface GitPanelProps {
   sessionId: string;
   /** Absolute path of the folder the chat runs in (the session's workspace). */
   workspace: string;
+  daemonNotice: DaemonNoticeProps;
   /** Open a file (absolute path) in the editor. */
   onOpenFile: (absPath: string) => void;
   /** Open a diff tab: the file's absolute path and its HEAD content (null when the file is new). */
   onOpenDiff: (absPath: string, headContent: string | null) => void;
 }
 
-export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
+export function GitPanel({ sessionId, workspace, daemonNotice, onOpenFile, onOpenDiff }: GitPanelProps) {
   // A commit's patch is a read-only tab with no file on disk behind it, and the diff props
   // cannot open one, so that tab goes to the editor store directly.
   const openVirtualFile = useEditorStore((s) => s.openVirtualFile);
@@ -426,7 +427,7 @@ export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPa
   }
 
   if (error && !status) {
-    if (error === OUTDATED_NOTICE) return <DaemonNotice />;
+    if (error === OUTDATED_NOTICE) return <DaemonNotice {...daemonNotice} />;
     return <div className="px-3 py-4 text-center text-[11px] text-destructive">{error}</div>;
   }
 
