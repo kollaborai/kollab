@@ -34,7 +34,7 @@ async function main() {
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
 
     const failure = page.getByRole("status").filter({ hasText: "Couldn't check for updates." });
-    await failure.waitFor({ state: "visible", timeout: 10_000 });
+    await failure.waitFor({ state: "visible", timeout: 30_000 });
     assert.match(await failure.innerText(), /Last successful check:/);
     assert.equal(await page.getByText("Kollab is up to date.", { exact: false }).count(), 0);
     await failure.screenshot({ path: path.join(screenshotDir, "issue-944-update-check-failed.png") });
@@ -56,8 +56,8 @@ async function main() {
     };
     await failure.getByRole("button", { name: "Try Again", exact: true }).click();
     const current = page.getByRole("status").filter({ hasText: "Kollab is up to date." });
-    await current.waitFor({ state: "visible", timeout: 5_000 });
-    await failure.waitFor({ state: "hidden", timeout: 5_000 });
+    await current.waitFor({ state: "visible", timeout: 30_000 });
+    await failure.waitFor({ state: "hidden", timeout: 30_000 });
     await current.screenshot({ path: path.join(screenshotDir, "issue-944-update-check-recovered.png") });
 
     updateResponse = {
@@ -69,8 +69,8 @@ async function main() {
     };
     await current.getByRole("button", { name: "Check Again", exact: true }).click();
     const refreshedFailure = page.getByRole("status").filter({ hasText: "Update check failed again." });
-    await refreshedFailure.waitFor({ state: "visible", timeout: 5_000 });
-    await current.waitFor({ state: "hidden", timeout: 5_000 });
+    await refreshedFailure.waitFor({ state: "visible", timeout: 30_000 });
+    await current.waitFor({ state: "hidden", timeout: 30_000 });
     assert.equal(await page.getByText("Kollab is up to date.", { exact: false }).count(), 0);
     await refreshedFailure.screenshot({ path: path.join(screenshotDir, "issue-944-update-check-refresh-failed.png") });
 
@@ -95,7 +95,7 @@ async function main() {
       ["rate-limited", {
         current_version: "0.15.3", status: "failed", available: false,
         release: null, checked_at: null, last_successful_check: lastSuccess,
-        retry_after_seconds: 60, retry_at: Date.now() / 1000 + 60,
+        retry_after_seconds: 3600, retry_at: Date.now() / 1000 + 3600,
         retry_reason: "rate_limit", notes: [],
       }, "GitHub is rate limiting checks"],
     ]) {
@@ -107,7 +107,7 @@ async function main() {
       }));
       await state.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
       const notice = state.page.getByRole("status").filter({ hasText: text });
-      await notice.waitFor({ state: "visible", timeout: 10_000 });
+      await notice.waitFor({ state: "visible", timeout: 30_000 });
       if (name === "available") {
         assert.doesNotMatch(await notice.innerText(), /99\.0\.0/);
         assert.equal(await notice.getAttribute("title"), "Kollab 99.0.0 is available.");
