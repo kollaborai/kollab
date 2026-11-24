@@ -19,9 +19,7 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_CORE_PATH ?? "playwright-core");
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const helloRoot = path.resolve(frontendRoot, "../../../bundles/plugins/hello");
-const buildOut = process.env.PLUGIN_BUILD_OUT
-  ? path.resolve(process.env.PLUGIN_BUILD_OUT)
-  : mkdtempSync(path.join(os.tmpdir(), "kollab-plugins-"));
+let buildOut;
 const screenshots = process.env.PLUGIN_SCREENSHOTS ? path.resolve(process.env.PLUGIN_SCREENSHOTS) : null;
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -442,6 +440,9 @@ async function pluginsOffFlow() {
 
 let exitCode = 0;
 try {
+  buildOut = process.env.PLUGIN_BUILD_OUT
+    ? path.resolve(process.env.PLUGIN_BUILD_OUT)
+    : mkdtempSync(path.join(os.tmpdir(), "kollab-plugins-"));
   execFileSync(process.execPath, ["scripts/build.mjs", "--outDir", buildOut], {
     cwd: frontendRoot,
     stdio: "inherit",
@@ -467,9 +468,10 @@ try {
 } catch (error) {
   exitCode = 1;
   console.error(error);
+  for (const problem of problems) console.error(problem);
 } finally {
   await browser?.close();
   if (server) await new Promise((closed) => server.close(closed));
-  if (!process.env.PLUGIN_BUILD_OUT) rmSync(buildOut, { recursive: true, force: true });
+  if (!process.env.PLUGIN_BUILD_OUT && buildOut) rmSync(buildOut, { recursive: true, force: true });
 }
 process.exitCode = exitCode;

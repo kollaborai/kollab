@@ -125,12 +125,17 @@ export default definePlugin(k => {
       cpSync(example, root, { recursive: true });
       rmSync(join(root, "dist"), { recursive: true, force: true });
       const bundle = join(root, "dist/index.js");
+      let spawnError: Error | undefined;
       child = spawn("npm", ["run", "dev"], {
         cwd: root,
         env: { ...process.env, PATH: toolPath },
         stdio: "ignore",
       });
-      await waitFor(() => existsSync(bundle), 8000);
+      child.once("error", (error) => { spawnError = error; });
+      await waitFor(() => {
+        if (spawnError) throw spawnError;
+        return existsSync(bundle);
+      }, 8000);
       appendFileSync(join(root, "src/index.js"), '\nglobalThis.__helloWatchMarker = "hello-watch-marker";\n');
       await waitFor(() => existsSync(bundle) && readFileSync(bundle, "utf8").includes("hello-watch-marker"), 8000);
     } finally {
