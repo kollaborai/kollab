@@ -1,7 +1,2 @@
-/* Plugin styles scope under the plugin's mount, [data-plugin="<id>"]. Kollab already insets page and dialog tabs. */
-[data-plugin="hello"] .hello-plugin {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.75rem;
-}
+[data-plugin=hello] .hello-example{justify-items:start;gap:.75rem;padding:1rem;display:grid}
+/*$vite$:1*/
