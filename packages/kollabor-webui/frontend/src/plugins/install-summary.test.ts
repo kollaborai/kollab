@@ -123,6 +123,12 @@ describe("plugin review after a failure", () => {
     expect(confirm).toContain('current.status === "complete"');
     expect(confirm).toContain("await onApplied()");
   });
+  it("keeps the completed review open when the engine returns a warning", () => {
+    const confirm = installSource.slice(installSource.indexOf("const confirm = async"), installSource.indexOf("const ready ="));
+    expect(confirm).toMatch(/if\s*\(!result\.warning\)\s*onClose\(\)/);
+    expect(installSource).toMatch(/\{job\?\.status === "complete" \? <p role="status"/);
+    expect(installSource).toMatch(/\{job\?\.warning \? <p role="alert"/);
+  });
   it("offers another poll for a staging job after a polling error", () => {
     expect(installSource).toContain("Check Again");
     expect(installSource).toMatch(/\{shouldRetryPolling\(job, error !== null\)\s*\? <Button[\s\S]*?setPollVersion\(\(version\) => version \+ 1\);[\s\S]*>Check Again<\/Button>/);
