@@ -461,6 +461,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
     for name in declared:
         if not isinstance(name, str) or not _SERVICE.fullmatch(name):
             continue
+        declaration = declared.get(name)
         state_file = home / "plugin-data" / plugin_id / "run" / f"{name}.state"
         try:
             state = json.loads(state_file.read_text(encoding="utf-8"))
@@ -492,6 +493,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
                 "pid": identity.get("pid") if identity else None,
                 "since": identity.get("start_time") if identity else None,
                 "restarts": len(history) if isinstance(history, list) else 0,
+                "heartbeat_s": declaration.get("heartbeat_s") if isinstance(declaration, dict) else None,
                 "heartbeat": None,
                 "error": state.get("error"),
             }

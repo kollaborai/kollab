@@ -49,6 +49,7 @@ export type PluginService = {
   pid?: number | null;
   since?: number | null;
   restarts?: number;
+  heartbeat_s?: number | null;
   heartbeat?: number | null;
   error?: string | null;
 };

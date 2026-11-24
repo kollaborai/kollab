@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import type { EngineApi } from "@/api";
 import { FieldRenderer, serializeDraft, type Draft } from "@/components/panels/FieldRenderer";
 import { Button } from "@/components/ui/button";
@@ -41,10 +41,24 @@ function failureOf(entry: PluginEntry, record: PluginRecord | undefined): string
   return entry.state === "changed-on-disk" ? null : entry.error;
 }
 
-function serviceStatus(service: PluginService): string {
+function elapsedLabel(seconds: number): string {
+  const totalMinutes = Math.max(1, Math.floor(seconds / 60));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours ? `${hours} h${minutes ? ` ${minutes} min` : ""}` : `${totalMinutes} min`;
+}
+
+function serviceStatus(service: PluginService, now: number): string {
+  if (service.state === "running") {
+    const since = typeof service.since === "number" ? service.since : null;
+    const heartbeat = typeof service.heartbeat === "number" ? service.heartbeat : since;
+    const interval = service.heartbeat_s;
+    if (typeof interval === "number" && interval > 0 && heartbeat !== null && now - heartbeat > interval)
+      return `Running · No Heartbeat for ${elapsedLabel(now - heartbeat)}`;
+    return since === null ? "Running" : `Running · ${elapsedLabel(now - since)}`;
+  }
   switch (service.state) {
     case "starting": return "Starting";
-    case "running": return "Running";
     case "stopping": return "Stopping";
     case "backoff": return "Restarting";
     case "exited": return "Exited";
@@ -67,8 +81,8 @@ function pluginStatus(entry: PluginEntry, record: PluginRecord | undefined): str
     : entry.enabled ? "On" : "Off";
 }
 
-function ServiceRow({ service, api, id, canControl, enabled, disabled, operationBusy, onBusyChange, onError }: {
-  service: PluginService; api: EngineApi; id: string; canControl: boolean; enabled: boolean; disabled: boolean; operationBusy: boolean;
+function ServiceRow({ service, api, id, now, canControl, enabled, disabled, operationBusy, onBusyChange, onError }: {
+  service: PluginService; api: EngineApi; id: string; now: number; canControl: boolean; enabled: boolean; disabled: boolean; operationBusy: boolean;
   onBusyChange: (busy: boolean) => void; onError: (message: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -107,7 +121,7 @@ function ServiceRow({ service, api, id, canControl, enabled, disabled, operation
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-2 py-1 text-sm">
       <span className="font-medium">{service.name}</span>
-      <span className="text-muted-foreground">{serviceStatus(service)}</span>
+      <span className="text-muted-foreground">{serviceStatus(service, now)}</span>
       {service.error ? <span className="text-destructive break-words">{service.error}</span> : null}
       <div className="ml-auto flex flex-wrap gap-1">
         <Button type="button" variant="ghost" size="xs" className="pointer-coarse:min-h-11" aria-label={`View Log ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void showLog(); }}>View Log</Button>
@@ -152,8 +166,8 @@ export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" |
   };
 }
 
-function PluginDetail({ entry, record, api, remote, onUpdate, onBusyChange, operationBusy, detailRef }: {
-  entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; remote: boolean; onUpdate: (id: string) => void;
+function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange, operationBusy, detailRef }: {
+  entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; remote: boolean; now: number; onUpdate: (id: string) => void;
   onBusyChange: (busy: boolean) => void; operationBusy: boolean; detailRef: RefObject<HTMLElement | null>;
 }) {
   const [busy, setBusy] = useState(false);
@@ -245,7 +259,7 @@ function PluginDetail({ entry, record, api, remote, onUpdate, onBusyChange, oper
           <div>
             <h3 className="text-sm font-semibold">Background Processes</h3>
             {entry.services.map((service) => (
-              <ServiceRow key={service.name} service={service} api={api} id={entry.id} canControl={services && !operationBusy} enabled={entry.enabled} disabled={busy} operationBusy={operationBusy} onBusyChange={onBusyChange} onError={setError} />
+              <ServiceRow key={service.name} service={service} api={api} id={entry.id} now={now} canControl={services && !operationBusy} enabled={entry.enabled} disabled={busy} operationBusy={operationBusy} onBusyChange={onBusyChange} onError={setError} />
             ))}
           </div>
         ) : null}
@@ -324,7 +338,12 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
   const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [busyPluginKey, setBusyPluginKey] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now() / 1000);
   const detailRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now() / 1000), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const reportPluginBusy = (key: string, busy: boolean) => {
     setBusyPluginKey((current) => busy ? key : current === key ? null : current);
   };
@@ -392,7 +411,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
                           {entry.services.map((service) => (
                             <span key={service.name} className="max-w-full break-words">
                               {entry.services.length > 1 ? <span>{service.name}: </span> : null}
-                              <span>{serviceStatus(service)}</span>
+                              <span>{serviceStatus(service, now)}</span>
                             </span>
                           ))}
                         </span>
@@ -411,6 +430,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
             record={records.get(selected.id)}
             api={api}
             remote={remote}
+            now={now}
             operationBusy={busyPluginKey === entryKey(selected)}
             onBusyChange={(busy) => reportPluginBusy(entryKey(selected), busy)}
             detailRef={detailRef}
