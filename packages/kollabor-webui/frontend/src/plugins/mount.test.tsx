@@ -52,6 +52,21 @@ describe("plugin portal scope", () => {
 });
 
 describe("PluginBoundary", () => {
+  it("gives each owner and renderer a distinct boundary identity", async () => {
+    const { pluginRendererBoundaryKey } = (await import("./mount")) as unknown as {
+      pluginRendererBoundaryKey: (ownerPluginId: string, renderer: string) => string;
+    };
+    expect(pluginRendererBoundaryKey("owner-a", "tool:deploy")).not.toBe(
+      pluginRendererBoundaryKey("owner-b", "tool:deploy"),
+    );
+    expect(pluginRendererBoundaryKey("owner-a", "tool:deploy")).not.toBe(
+      pluginRendererBoundaryKey("owner-a", "tag:deploy"),
+    );
+    expect(pluginRendererBoundaryKey("owner-a", "tool:deploy")).toBe(
+      pluginRendererBoundaryKey("owner-a", "tool:deploy"),
+    );
+  });
+
   it("turns an error thrown while drawing into Failed to Render, not a blank app", () => {
     const state = PluginBoundary.getDerivedStateFromError(new Error("bad render"));
     expect(state).toEqual({ error: expect.any(Error) });
