@@ -141,7 +141,7 @@ describe("plugin review form state", () => {
 describe("plugin review after a failure", () => {
   const stagingAfterPollError = { status: "staging" } as const;
   it("keeps the source form closed after a polling error", () => {
-    expect(reviewFormState("install", stagingAfterPollError)).toEqual({ source: false, review: false });
+    expect(reviewFormState("install", stagingAfterPollError, true)).toEqual({ source: false, review: false });
   });
   it("keeps the form closed while a review is staging without an error", () => {
     expect(reviewFormState("install", stagingAfterPollError)).toEqual({ source: false, review: false });
