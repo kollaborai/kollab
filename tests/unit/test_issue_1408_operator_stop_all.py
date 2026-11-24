@@ -618,6 +618,38 @@ def test_stop_cleanup_keeps_a_replacement_registered_under_the_same_id(tmp_path)
     assert sock.exists()
 
 
+def test_stop_cleanup_keeps_an_unreadable_replacement_registered(tmp_path, monkeypatch):
+    """An unreadable row is not proof that it still belongs to the stopped agent."""
+    from pathlib import Path
+
+    from kollabor_agent.runtime import AgentRuntime
+
+    row = tmp_path / "agent-x.json"
+    sock = tmp_path / "agent-x.sock"
+    row.write_text(json.dumps({
+        "agent_id": "agent-x", "identity": "new", "pid": 12345,
+        "started_at": 200.0, "socket_path": str(sock),
+    }))
+    sock.write_text("")
+    old = AgentRuntime(
+        agent_id="agent-x", identity="x", pid=99999999,
+        started_at=100.0, socket_path=str(sock),
+    )
+    read_text = Path.read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == row:
+            raise PermissionError("denied")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+
+    _presence_in(tmp_path).cleanup_agent(old)
+
+    assert row.exists()
+    assert sock.exists()
+
+
 def test_stop_cleanup_keeps_the_row_of_a_process_still_running(tmp_path):
     """A live agent never drops out of discovery because a stop cleaned up."""
     import subprocess
