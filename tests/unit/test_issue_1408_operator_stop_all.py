@@ -250,7 +250,9 @@ def test_cli_other_folder_list_names_the_agents(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_help_ties_everywhere_to_stop_all(capsys):
-    asyncio.run(_handle_cli_hub(["help"]))
+    from kollabor.cli import _print_hub_help
+
+    _print_hub_help()  # what `kollab --hub help` prints
 
     out = capsys.readouterr().out
     assert "stop all [--everywhere]" in out
