@@ -1,35 +1,43 @@
-// The hello plugin's web part: a right-hand menu row that opens a page with two tabs.
-// Hand-written so the bundled fixture needs no build step. A real plugin builds this file into web/dist/
-// with Vite and marks react, react-dom, react/jsx-runtime and @kollab/plugin external, so it runs on the
-// app's own React (docs/specs/plugins.md, "Web plugin API").
-import { createElement as h, useState } from "react";
-import { definePlugin } from "@kollab/plugin";
-
-function Greeting({ k }) {
-  const [count, setCount] = useState(0);
-  return h(
-    "div",
-    { className: "hello-plugin" },
-    h("p", null, "Hello from a plugin. This page is drawn by the hello plugin's own code."),
-    h(k.ui.Button, { type: "button", variant: "outline", size: "sm", onClick: () => setCount(count + 1) }, `Clicked ${count} Times`),
-  );
+import e, { useState as t } from "react";
+import { definePlugin as n } from "@kollab/plugin";
+//#region src/index.js
+function r({ k: n }) {
+	let [r, i] = t(0);
+	return e.createElement("section", { className: "hello-example" }, e.createElement("p", null, "Hello from your plugin!"), e.createElement("p", null, `Hello count: ${r}`), e.createElement(n.ui.Button, {
+		type: "button",
+		onClick: () => i((e) => e + 1)
+	}, "Say Hello"), e.createElement(n.ui.Button, {
+		type: "button",
+		variant: "outline",
+		onClick: () => n.navigate({ modal: "hello-dialog" })
+	}, "Open Hello Dialog"));
 }
-
-function About() {
-  return h(
-    "div",
-    { className: "hello-plugin" },
-    h("p", null, "A plugin can add a row to this menu, a page like this one, chat tabs, dialogs and notices."),
-  );
+function i() {
+	return e.createElement("section", { className: "hello-example" }, e.createElement("p", null, "This page is provided by the Hello plugin."));
 }
-
-export default definePlugin((k) => {
-  k.page({
-    id: "hello",
-    title: "Hello",
-    tabs: [
-      { id: "greeting", label: "Greeting", render: Greeting },
-      { id: "about", label: "About", render: About },
-    ],
-  });
+var a = n(function(t) {
+	t.view({
+		id: "hello-view",
+		label: "Hello View",
+		icon: "box",
+		render: r
+	}), t.menu("hello-page"), t.page({
+		id: "hello-page",
+		title: "Hello Page",
+		tabs: [{
+			id: "hello",
+			label: "Hello",
+			render: i
+		}]
+	}), t.modal({
+		id: "hello-dialog",
+		title: "Hello Dialog",
+		tabs: [{
+			id: "hello",
+			label: "Hello",
+			render: () => e.createElement("p", null, "Hello from the dialog.")
+		}]
+	}), t.notice({ text: "Hello plugin is ready." });
 });
+//#endregion
+export { a as default };
