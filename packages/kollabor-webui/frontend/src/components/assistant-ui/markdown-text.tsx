@@ -11,6 +11,7 @@ import {
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
 import { type FC, memo, useState } from "react";
+import type { TextMessagePartProps } from "@assistant-ui/react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
@@ -20,7 +21,8 @@ import { terminalDialectToMarkdown } from "@/utils/terminal-dialect";
 export type MarkdownTextProps = Pick<
   MarkdownTextPrimitiveProps,
   "components" | "defer" | "preprocess" | "smooth"
->;
+> &
+  Partial<TextMessagePartProps>;
 
 const MarkdownTextImpl = ({
   components = defaultComponents,

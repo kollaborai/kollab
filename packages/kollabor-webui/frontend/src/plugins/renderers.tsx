@@ -1,10 +1,11 @@
-import { type ReactNode, useCallback, useId, useMemo } from "react";
+import { type ComponentProps, type ComponentType, type ReactNode, useCallback, useId, useMemo } from "react";
 
 import {
   MarkdownText,
   defaultComponents,
 } from "@/components/assistant-ui/markdown-text";
 import type { MarkdownTextPrimitiveProps } from "@assistant-ui/react-markdown";
+import type { ExtraProps } from "react-markdown";
 import { terminalDialectToMarkdown } from "@/utils/terminal-dialect";
 
 import { PluginMount } from "./mount";
@@ -82,12 +83,20 @@ export function PluginTaggedText({ text }: { text: string }) {
   const parts = tags.length === 0 ? [] : splitPluginTags(text, tags);
   const hasPluginTags = parts.some((part) => part.type === "tag");
   const components = useMemo<NonNullable<MarkdownTextPrimitiveProps["components"]>>(() => {
-    const NativeAnchor = defaultComponents.a;
+    const NativeAnchor = defaultComponents.a as
+      | ComponentType<ComponentProps<"a"> & ExtraProps>
+      | undefined;
     return {
       ...defaultComponents,
       a: ({ href, ...props }) => {
         const tag = pluginTagFromSlotHref(href, owner);
-        if (!tag) return <NativeAnchor href={href} {...props} />;
+        if (!tag) {
+          return NativeAnchor ? (
+            <NativeAnchor href={href} {...props} />
+          ) : (
+            <a href={href} target="_blank" rel="noopener noreferrer" {...props} />
+          );
+        }
         const found = findTagRenderer(plugins, tag.name);
         if (!found) return <>{`<${tag.name}>${tag.content}</${tag.name}>`}</>;
         const Render = found.spec.render;
