@@ -22,6 +22,10 @@ from .factory import PluginFactory
 from .packages import (
     _ID,
     _MAX_ENABLE_ORDER,
+    _MAX_PLUGIN_CONTRIBUTIONS,
+    _MAX_PLUGIN_OPTION_LABELS,
+    _MAX_PLUGIN_SETTING_OPTIONS,
+    _MAX_PLUGIN_SETTINGS,
     _MAX_PLUGIN_SERVICE_SECRETS,
     _MAX_PLUGIN_SERVICES,
     _MAX_PLUGIN_USES,
@@ -784,7 +788,7 @@ def _normalize_contributes(value: object) -> dict:
         items = value.get(kind)
         if not isinstance(items, list):
             continue
-        for item in items[:256]:
+        for item in items[:_MAX_PLUGIN_CONTRIBUTIONS]:
             if kind != "menu":
                 declared = _normalize_declared(item)
                 if declared is not None:
@@ -858,14 +862,18 @@ def _normalize_setting(value: object) -> dict | None:
 
     raw_options = value.get("options")
     options = (
-        _bounded_values(raw_options, 256, lambda item: _bounded_inventory_text(item, 256))
+        _bounded_values(
+            raw_options,
+            _MAX_PLUGIN_SETTING_OPTIONS,
+            lambda item: _bounded_inventory_text(item, 256),
+        )
         if isinstance(raw_options, list)
         else None
     )
     raw_labels = value.get("option_labels")
     option_labels = {}
     if isinstance(raw_labels, dict):
-        for key, raw_label in islice(raw_labels.items(), 256):
+        for key, raw_label in islice(raw_labels.items(), _MAX_PLUGIN_OPTION_LABELS):
             safe_key = _bounded_inventory_text(key, 256)
             safe_label = _bounded_inventory_text(raw_label, 256)
             if safe_key and safe_label:
@@ -950,27 +958,66 @@ def _normalize_plugin_entry(value: object) -> dict | None:
         omitted_services += max(0, len(raw_services) - _MAX_PLUGIN_SERVICES)
     raw_uses = value.get("uses")
     uses = _bounded_unique(raw_uses, _MAX_PLUGIN_USES, _normalize_capability) if isinstance(raw_uses, list) else []
-    omitted_uses = max(0, len(raw_uses) - _MAX_PLUGIN_USES) if isinstance(raw_uses, list) else 0
+    omitted_uses = _reported_omissions(value, "uses")
+    if isinstance(raw_uses, list):
+        omitted_uses += max(0, len(raw_uses) - _MAX_PLUGIN_USES)
     raw_granted = value.get("granted")
     granted = (
         _bounded_unique(raw_granted, _MAX_PLUGIN_USES, _normalize_capability)
         if isinstance(raw_granted, list)
         else []
     )
-    omitted_granted = max(0, len(raw_granted) - _MAX_PLUGIN_USES) if isinstance(raw_granted, list) else 0
+    omitted_granted = _reported_omissions(value, "granted")
+    if isinstance(raw_granted, list):
+        omitted_granted += max(0, len(raw_granted) - _MAX_PLUGIN_USES)
     raw_settings = value.get("settings")
     settings = (
-        [field for item in raw_settings[:256] if (field := _normalize_setting(item)) is not None]
+        [field for item in raw_settings[:_MAX_PLUGIN_SETTINGS] if (field := _normalize_setting(item)) is not None]
         if isinstance(raw_settings, list)
         else []
     )
     section = value.get("settings_section")
     section_title = _bounded_inventory_text(section.get("title"), 256) if isinstance(section, dict) else None
     section_widgets = (
-        [field for item in section.get("widgets", [])[:256] if (field := _normalize_setting(item)) is not None]
+        [
+            field
+            for item in section.get("widgets", [])[:_MAX_PLUGIN_SETTINGS]
+            if (field := _normalize_setting(item)) is not None
+        ]
         if isinstance(section, dict) and isinstance(section.get("widgets"), list)
         else []
     )
+    raw_section_widgets = section.get("widgets") if isinstance(section, dict) else None
+    omitted_settings = _reported_omissions(value, "settings")
+    omitted_settings += max(0, len(raw_settings) - _MAX_PLUGIN_SETTINGS) if isinstance(raw_settings, list) else 0
+    omitted_settings += (
+        max(0, len(raw_section_widgets) - _MAX_PLUGIN_SETTINGS)
+        if isinstance(raw_section_widgets, list)
+        else 0
+    )
+    all_setting_rows = [
+        *(raw_settings if isinstance(raw_settings, list) else []),
+        *(raw_section_widgets if isinstance(raw_section_widgets, list) else []),
+    ]
+    omitted_setting_options = _reported_omissions(value, "setting_options")
+    omitted_option_labels = _reported_omissions(value, "option_labels")
+    for setting in all_setting_rows:
+        if not isinstance(setting, dict):
+            continue
+        options = setting.get("options")
+        if isinstance(options, list):
+            omitted_setting_options += max(0, len(options) - _MAX_PLUGIN_SETTING_OPTIONS)
+        labels = setting.get("option_labels")
+        if isinstance(labels, dict):
+            omitted_option_labels += max(0, len(labels) - _MAX_PLUGIN_OPTION_LABELS)
+    raw_contributes = value.get("contributes")
+    omitted_contributions = _reported_omissions(value, "contributions")
+    if isinstance(raw_contributes, dict):
+        omitted_contributions += sum(
+            max(0, len(items) - _MAX_PLUGIN_CONTRIBUTIONS)
+            for items in raw_contributes.values()
+            if isinstance(items, list)
+        )
     version = _bounded_inventory_text(value.get("version"), 256)
     source = _bounded_inventory_text(value.get("source"))
     raw_commit = value.get("commit")
@@ -994,7 +1041,7 @@ def _normalize_plugin_entry(value: object) -> dict | None:
         "state": state,
         "error": error,
         "web": web,
-        "contributes": _normalize_contributes(value.get("contributes")),
+        "contributes": _normalize_contributes(raw_contributes),
         "services": services,
         "settings": settings,
         "settings_section": {"title": section_title or "Settings", "widgets": section_widgets}
@@ -1002,8 +1049,22 @@ def _normalize_plugin_entry(value: object) -> dict | None:
         else None,
         "uses": uses,
         "granted": granted,
-        "omitted": {"services": omitted_services, "uses": omitted_uses, "granted": omitted_granted},
+        "omitted": {
+            "services": omitted_services,
+            "uses": omitted_uses,
+            "granted": omitted_granted,
+            "settings": omitted_settings,
+            "setting_options": omitted_setting_options,
+            "option_labels": omitted_option_labels,
+            "contributions": omitted_contributions,
+        },
     }
+
+
+def _reported_omissions(value: dict, key: str) -> int:
+    omitted = value.get("omitted")
+    count = omitted.get(key) if isinstance(omitted, dict) else 0
+    return count if type(count) is int and count > 0 else 0
 
 
 def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
