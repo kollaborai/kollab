@@ -45,10 +45,10 @@ describe("findToolRenderer", () => {
     expect(findToolRenderer(plugins, "shell")).toBeNull();
   });
 
-  it("the first plugin in the list wins when two claim one tool", () => {
+  it("uses plugin name as the tie-break when enable order is missing", () => {
     const first: RendererSpec = { tool: "shell", render: Render };
     const second: RendererSpec = { tool: "shell", render: Render };
-    const match = findToolRenderer([record("alpha", [first]), record("beta", [second])], "shell");
+    const match = findToolRenderer([record("beta", [second]), record("alpha", [first])], "shell");
     expect(match?.spec).toBe(first);
   });
 
