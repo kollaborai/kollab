@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 // @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
 import { ApiError } from "@/api";
-import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, discardReview, reviewFormState, shouldPollReview, shouldRetryPolling, showFetching, startReview } from "./install";
+import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, discardReview, normalizeReviewJob, reviewFormState, shouldPollReview, shouldRetryPolling, showFetching, startReview } from "./install";
 
 const installSource = readFileSync(new URL("./install.tsx", import.meta.url), "utf8");
 const settingsSource = readFileSync(new URL("./settings.tsx", import.meta.url), "utf8");
@@ -22,6 +22,40 @@ describe("plugin review additions", () => {
   });
   it("says when hooks and MCP servers are absent", () => {
     expect(describePluginAdds({})).toEqual(["no hooks", "no MCP servers"]);
+  });
+});
+
+describe("plugin review manifest boundary", () => {
+  const canary = "secret-token-canary-1397";
+  const job = () => ({
+    job_id: "review-1", status: "ready", action: "install", plugin_id: "hello", commit: "a".repeat(40),
+    files_sha256: "b".repeat(64), source: "https://example.invalid/plugin.git", ref: "main",
+    changed_folders: ["plugins/hello"], error: null, warning: null,
+    manifest: {
+      name: "Hello", version: "1.2.3", description: "A plugin", uses: ["run:python3"],
+      services: { worker: { secrets: ["API_TOKEN"] } }, contributes: { views: ["home"] }, hooks: false, mcp: false,
+    },
+  });
+  const cases = [
+    ["manifest name", (value: Record<string, any>) => { value.manifest.name = canary; }],
+    ["manifest version", (value: Record<string, any>) => { value.manifest.version = { token: canary }; }],
+    ["manifest description", (value: Record<string, any>) => { value.manifest.description = canary; }],
+    ["manifest uses", (value: Record<string, any>) => { value.manifest.uses = [`net:${canary}`]; }],
+    ["service name", (value: Record<string, any>) => { value.manifest.services = { [canary]: { secrets: [canary] } }; }],
+    ["service secrets", (value: Record<string, any>) => { value.manifest.services.worker.secrets = [canary]; }],
+    ["manifest contributions", (value: Record<string, any>) => { value.manifest.contributes = { [canary]: [{ id: canary }] }; }],
+    ["source", (value: Record<string, any>) => { value.source = `https://example.invalid/?token=${canary}`; }],
+    ["ref", (value: Record<string, any>) => { value.ref = canary; }],
+    ["changed folders", (value: Record<string, any>) => { value.changed_folders = [canary]; }],
+    ["job error", (value: Record<string, any>) => { value.error = `Failed: ${canary}`; }],
+    ["job warning", (value: Record<string, any>) => { value.warning = `Warning: ${canary}`; }],
+  ] as const;
+  it.each(cases)("normalizes malformed %s before review details render", (_field, mutate) => {
+    const input = job();
+    mutate(input);
+    const normalized = normalizeReviewJob(input);
+    expect(normalized).not.toBeNull();
+    expect(JSON.stringify(normalized)).not.toContain(canary);
   });
 });
 
