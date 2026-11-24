@@ -168,7 +168,7 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
         {canControl && service.state === "stop-failed" ? (
           <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Retry Stop ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void control("stop"); }}>Retry Stop</Button>
         ) : null}
-        {canControl && enabled && ["stopped", "exited", "crash-stopped"].includes(service.state) ? (
+        {canControl && enabled && ["stopped", "exited", "crash-stopped", "error"].includes(service.state) ? (
           <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Start ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void control("start"); }}>Start</Button>
         ) : null}
       </div>
