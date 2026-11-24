@@ -2054,14 +2054,22 @@ async def _handle_cli_hub(hub_args: list) -> None:
             ``snapshot`` was read (#1408)."""
             if not cleanup:
                 return
-            if snapshot is not None:
-                try:
-                    with open(path) as fh:
-                        if json.load(fh) != snapshot:
-                            return
-                except (OSError, ValueError):
-                    return  # gone or unreadable: not provably the row we read
-            path.unlink(missing_ok=True)
+            from plugins.hub.presence import _presence_file_lock
+
+            try:
+                with _presence_file_lock(path):
+                    if snapshot is not None:
+                        try:
+                            with open(path) as fh:
+                                if json.load(fh) != snapshot:
+                                    return
+                        except (OSError, ValueError):
+                            return  # gone or unreadable: not provably the row we read
+                    path.unlink(missing_ok=True)
+            except OSError:
+                # Without the stable lock, a pathname check still races with
+                # presence writers, so leave the row for a later scan.
+                return
 
         agents = []
         for f in _presence_files(presence_dir) if paths is None else paths:
