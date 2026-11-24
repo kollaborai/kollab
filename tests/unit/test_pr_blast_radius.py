@@ -165,12 +165,14 @@ def test_main_with_fake_fetcher_prints_expected_line(tmp_path: Path, capsys) -> 
         calls.append((endpoint, paginate))
         if endpoint == "repos/example/project/pulls/7":
             return {"head": {"sha": "head-sha"}, "base": {"ref": "main"}}
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
         if endpoint == "repos/example/project/compare/main...head-sha":
             return {"behind_by": 1, "merge_base_commit": {"sha": "merge-sha"}}
         if endpoint == "repos/example/project/pulls/7/files?per_page=100":
-            return [{"filename": "scripts/local_tool.py"}]
+            return [{"filename": "scripts/local_tool.py", "status": "modified"}]
         if endpoint == "repos/example/project/compare/merge-sha...main":
-            return {"files": [{"filename": "docs/guide.md"}]}
+            return {"files": [{"filename": "docs/guide.md", "status": "modified"}]}
         raise AssertionError(f"unexpected endpoint: {endpoint}")
 
     result = pr_blast_radius.main(
@@ -185,7 +187,13 @@ def test_main_with_fake_fetcher_prints_expected_line(tmp_path: Path, capsys) -> 
 
 def test_rename_includes_old_path_for_overlap() -> None:
     renamed_paths, complete = pr_blast_radius._changed_paths(
-        [{"filename": "pkg/new.py", "previous_filename": "pkg/old.py"}]
+        [
+            {
+                "filename": "pkg/new.py",
+                "previous_filename": "pkg/old.py",
+                "status": "renamed",
+            }
+        ]
     )
 
     assert complete is True
@@ -336,6 +344,8 @@ def test_behind_by_requires_a_nonnegative_integer(
     status_posts: list[tuple[str, str]] = []
 
     def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
         if endpoint == "repos/example/project/pulls/7":
             return {"head": {"sha": "head-sha"}, "base": {"ref": "main"}}
         if endpoint == "repos/example/project/compare/main...head-sha":
@@ -369,6 +379,8 @@ def test_missing_base_ref_posts_failure_for_head_sha(
     status_posts: list[tuple[str, str]] = []
 
     def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
         if endpoint == "repos/example/project/pulls/7":
             return {"head": {"sha": "head-sha"}}
         if endpoint == "repos/example/project/statuses/head-sha" and method == "POST":
@@ -426,3 +438,212 @@ def test_all_open_missing_base_ref_posts_failure_and_returns_nonzero(
     assert result == 1
     assert "#7 STALE" in capsys.readouterr().out
     assert status_posts == [("head-sha", "failure")]
+
+
+def test_importlib_loaded_test_tracks_script_path_expression(tmp_path: Path) -> None:
+    write(tmp_path, "scripts/tool.py", "VALUE = 1\n")
+    write(
+        tmp_path,
+        "tests/unit/test_dynamic_loader.py",
+        "from pathlib import Path\n"
+        "ROOT = Path(__file__).resolve().parents[2]\n"
+        'spec = importlib.util.spec_from_file_location("tool", ROOT / "scripts" / "tool.py")\n',
+    )
+
+    graph = pr_blast_radius.build_import_graph(tmp_path)
+
+    assert "scripts/tool.py" in graph["tests/unit/test_dynamic_loader.py"]
+
+
+def test_star_import_tracks_initializer_and_direct_package_modules(tmp_path: Path) -> None:
+    write(tmp_path, "sample_pkg/__init__.py", "__all__ = ['public']\n")
+    write(tmp_path, "sample_pkg/public.py", "")
+    write(tmp_path, "sample_pkg/private.py", "")
+    write(tmp_path, "sample_pkg/nested/__init__.py", "")
+    write(tmp_path, "sample_pkg/nested/deeper.py", "")
+    write(tmp_path, "tests/unit/test_star_import.py", "from sample_pkg import *\n")
+
+    graph = pr_blast_radius.build_import_graph(tmp_path)
+
+    assert graph["tests/unit/test_star_import.py"] == {
+        "sample_pkg/__init__.py",
+        "sample_pkg/public.py",
+        "sample_pkg/private.py",
+        "sample_pkg/nested/__init__.py",
+    }
+
+
+def test_empty_changed_filename_marks_the_comparison_incomplete() -> None:
+    paths, complete = pr_blast_radius._changed_paths(
+        [{"filename": "", "status": "modified"}]
+    )
+
+    assert paths == []
+    assert complete is False
+
+
+@pytest.mark.parametrize("status", ["renamed", "copied"])
+def test_renamed_or_copied_file_requires_previous_filename(status: str) -> None:
+    paths, complete = pr_blast_radius._changed_paths(
+        [{"filename": "pkg/new.py", "status": status}]
+    )
+
+    assert paths == ["pkg/new.py"]
+    assert complete is False
+
+
+def test_all_open_empty_default_branch_returns_nonzero(
+    tmp_path: Path, capsys
+) -> None:
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": ""}
+        if endpoint == "repos/example/project/pulls?state=open&per_page=100":
+            return []
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--all-open",
+            "--root",
+            str(tmp_path),
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == 1
+    assert "STALE" not in capsys.readouterr().out
+
+
+def test_all_open_empty_base_ref_is_kept_and_posts_failure(
+    tmp_path: Path, capsys
+) -> None:
+    status_posts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/pulls?state=open&per_page=100":
+            return [
+                {
+                    "number": 7,
+                    "base": {"ref": ""},
+                    "head": {"sha": "listed-head"},
+                }
+            ]
+        if endpoint == "repos/example/project/pulls/7":
+            return {"head": {"sha": "detail-head"}, "base": {"ref": ""}}
+        if endpoint == "repos/example/project/statuses/detail-head" and method == "POST":
+            status_posts.append((endpoint.rsplit("/", 1)[-1], fields["state"]))
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--all-open",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == 1
+    assert "#7 STALE" in capsys.readouterr().out
+    assert status_posts == [("detail-head", "failure")]
+
+
+def test_single_pr_fetches_default_branch_and_rejects_other_base(
+    tmp_path: Path, capsys
+) -> None:
+    default_branch_calls = 0
+    comparisons: list[str] = []
+    status_posts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        nonlocal default_branch_calls
+        if endpoint == "repos/example/project":
+            default_branch_calls += 1
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/pulls/7":
+            return {"head": {"sha": "head-sha"}, "base": {"ref": "release"}}
+        if endpoint.startswith("repos/example/project/compare/"):
+            comparisons.append(endpoint)
+            return {"behind_by": 0}
+        if endpoint == "repos/example/project/statuses/head-sha" and method == "POST":
+            status_posts.append(("head-sha", fields["state"]))
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--pr",
+            "7",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == 1
+    assert default_branch_calls == 1
+    assert comparisons == []
+    assert "#7 STALE" in capsys.readouterr().out
+    assert status_posts == [("head-sha", "failure")]
+
+
+def test_pull_number_rejects_boolean() -> None:
+    with pytest.raises(ValueError):
+        pr_blast_radius._number(True)
+
+
+def test_empty_head_sha_with_zero_behind_is_stale_and_posts_failure(
+    tmp_path: Path, capsys
+) -> None:
+    comparisons: list[str] = []
+    status_posts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/pulls?state=open&per_page=100":
+            return [
+                {
+                    "number": 7,
+                    "base": {"ref": "main"},
+                    "head": {"sha": "listed-head"},
+                }
+            ]
+        if endpoint == "repos/example/project/pulls/7":
+            return {"head": {"sha": ""}, "base": {"ref": "main"}}
+        if endpoint.startswith("repos/example/project/compare/"):
+            comparisons.append(endpoint)
+            return {"behind_by": 0}
+        if endpoint.startswith("repos/example/project/statuses/") and method == "POST":
+            status_posts.append((endpoint.rsplit("/", 1)[-1], fields["state"]))
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--all-open",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == 1
+    assert comparisons == []
+    assert "#7 STALE" in capsys.readouterr().out
+    assert status_posts == [("listed-head", "failure")]
