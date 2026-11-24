@@ -25,7 +25,7 @@ const entry = (id = "hello", extra: Partial<PluginEntry> = {}): PluginEntry => (
   ...extra,
 });
 
-function harness(id = "hello", declaredSlash = ["hello"]) {
+function harness(id = "hello", declaredSlash = ["hello"], declaredRenderers = ["hello_tool"]) {
   let contributions: Contributions = EMPTY_CONTRIBUTIONS;
   const json = (body: unknown) =>
     new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
@@ -43,6 +43,7 @@ function harness(id = "hello", declaredSlash = ["hello"]) {
   } satisfies PluginApiDeps;
   const pluginEntry = entry(id);
   pluginEntry.contributes.slash = declaredSlash;
+  pluginEntry.contributes.renderers = declaredRenderers;
   const { k, dispose } = createPluginApi(pluginEntry, deps);
   return { k, dispose, deps, current: () => contributions };
 }
@@ -101,6 +102,26 @@ describe("contribution points", () => {
       { tool: "hello_tool", render: Tab },
       { tag: "hello_tool", render: Tab },
     ]);
+  });
+
+  it("rejects tag renderer names the message parser cannot match", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["hello"], ["my.card"]);
+    k.renderer({ tag: "my.card", render: Tab });
+
+    expect(current().renderers).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("renderer ignored: tag name must start with a letter"));
+  });
+
+  it("replaces a same-plugin command registration without regard to case", () => {
+    const { k, current } = harness("hello", ["deploy", "Deploy"]);
+    const first = vi.fn();
+    const second = vi.fn();
+    k.command({ name: "deploy", description: "first", run: first });
+    k.command({ name: "Deploy", description: "second", run: second });
+
+    expect(current().commands).toHaveLength(1);
+    expect(current().commands[0]).toMatchObject({ name: "Deploy", description: "second", run: second });
   });
 
   it("rejects command names that are not one slash token with a warning", () => {

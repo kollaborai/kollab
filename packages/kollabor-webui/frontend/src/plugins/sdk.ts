@@ -214,6 +214,8 @@ const isText = (value: unknown): value is string => typeof value === "string" &&
 const isLine = (value: unknown): value is string => isText(value) && !/[\r\n]/.test(value);
 const isSlashCommandName = (value: unknown): value is string =>
   typeof value === "string" && /^[\p{L}\p{N}_-]+$/u.test(value);
+const isRendererTagName = (value: unknown): value is string =>
+  typeof value === "string" && /^[a-z][\w-]*$/i.test(value);
 const isComponent = (value: unknown) =>
   typeof value === "function" || (typeof value === "object" && value !== null && "$$typeof" in value);
 const isTabs = (tabs: unknown): tabs is PluginTab[] =>
@@ -461,12 +463,15 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
       const command: CommandSpec = { name: spec.name, description: String(spec.description ?? ""), run: spec.run };
       contribute((current) => ({
         ...current,
-        commands: [...current.commands.filter((item) => item.name !== command.name), command],
+        commands: [...current.commands.filter((item) => item.name.toLowerCase() !== command.name.toLowerCase()), command],
       }));
     },
     renderer(spec) {
       const name = spec?.tool ?? spec?.tag;
       if (!bound("renderer", declaredIds(declared.renderers), name)) return;
+      if (spec?.tag !== undefined && !isRendererTagName(spec.tag)) {
+        return invalid("renderer", "tag name must start with a letter and use only letters, digits, _ or -");
+      }
       if (!isComponent(spec.render)) return invalid("renderer", "render must be a component");
       const renderer: RendererSpec = spec.tool ? { tool: spec.tool, render: spec.render } : { tag: spec.tag, render: spec.render };
       contribute((current) => ({
