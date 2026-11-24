@@ -27,8 +27,14 @@ def _install(tmp_path, entry_source):
         "class Hello(BasePlugin):\n"
         "    @staticmethod\n"
         f"    def get_default_config():\n        raise ValueError({SECRET!r})\n",
+        f"def __getattr__(name):\n    raise RuntimeError({SECRET!r})\n",
+        "from kollabor_plugins import BasePlugin\n"
+        "class Raising:\n"
+        f"    def __get__(self, obj, owner):\n        raise RuntimeError({SECRET!r})\n"
+        "class Hello(BasePlugin):\n"
+        "    get_default_config = Raising()\n",
     ],
-    ids=["import", "default-config"],
+    ids=["import", "default-config", "module-getattr", "descriptor"],
 )
 def test_plugin_raised_text_is_not_kept(tmp_path, monkeypatch, entry_source):
     monkeypatch.setenv("HOME", str(tmp_path))
