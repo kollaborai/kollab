@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
-import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, reviewFormState, shouldRetryPolling, showFetching, startReview } from "./install";
+import { ApiError } from "@/api";
+import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, discardReview, reviewFormState, shouldRetryPolling, showFetching, startReview } from "./install";
 
 const installSource = readFileSync(new URL("./install.tsx", import.meta.url), "utf8");
 const settingsSource = readFileSync(new URL("./settings.tsx", import.meta.url), "utf8");
@@ -186,6 +187,25 @@ describe("plugin review after a failure", () => {
     const start = installSource.slice(installSource.indexOf("const start ="), installSource.indexOf("useEffect(() =>"));
     expect(close).toContain("discardReview(api, job.job_id)");
     expect(start).toContain("discardReview(api, job.job_id)");
+  });
+  it("does not let a terminal-job release conflict block retry", async () => {
+    const api = { json: async () => { throw new ApiError("Plugin job cannot be cancelled", 409, null); } };
+    await expect(discardReview(api as never, "failed-job")).resolves.toBeUndefined();
+  });
+  it("releases only staging or ready jobs before retrying the edited install URL", () => {
+    const start = installSource.slice(installSource.indexOf("const start ="), installSource.indexOf("useEffect(() =>"));
+    expect(start).toMatch(/job && \(job\.status === "staging" \|\| job\.status === "ready"\)/);
+    expect(start).toMatch(/startReview\(api, \{ action, pluginId, url, gitRef \}\)/);
+  });
+  it("keeps a failed update review retryable through the shared review request path", async () => {
+    expect(reviewFormState("update", { status: "error" }).review).toBe(true);
+    const requests: { path: string; init?: { method?: string; body?: string } }[] = [];
+    const api = { json: async (path: string, init?: { method?: string; body?: string }) => {
+      requests.push({ path, init });
+      return { job_id: "update-job", status: "staging" };
+    } };
+    await startReview(api as never, { action: "update", pluginId: "hello", url: "", gitRef: "" });
+    expect(requests).toEqual([{ path: "/plugins/hello/update", init: { method: "POST", body: "{}" } }]);
   });
   it("closes a stale ready review when cancellation reports that its state changed", () => {
     const close = installSource.slice(installSource.indexOf("const close ="), installSource.indexOf("const confirm ="));
