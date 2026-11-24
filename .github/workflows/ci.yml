@@ -420,6 +420,7 @@ jobs:
     steps:
       - name: Fail unless every required test job passed
         env:
+          CHANGES_RESULT: ${{ needs.supporting_tests.result }}
           UNIT_RESULT: ${{ needs.tests.result }}
           HEAVY_RESULT: ${{ needs.heavy_tests.result }}
           SUPPORT_PYTHON_RESULT: ${{ needs.supporting_tests.result }}
@@ -437,11 +438,11 @@ jobs:
           case "$SUPPORT_WEBUI_RESULT:$RUN_WEBUI" in
             success:*|skipped:false) webui_ok=yes ;;
           esac
-          if [ "$UNIT_RESULT" = success ] && [ "$HEAVY_RESULT" = success ] && [ "$SUPPORT_PYTHON_RESULT" = success ] && [ "$voice_ok" = yes ] && [ "$webui_ok" = yes ]; then
+          if [ "$CHANGES_RESULT" = success ] && [ "$UNIT_RESULT" = success ] && [ "$HEAVY_RESULT" = success ] && [ "$SUPPORT_PYTHON_RESULT" = success ] && [ "$voice_ok" = yes ] && [ "$webui_ok" = yes ]; then
             echo "ci/tests: all required test jobs succeeded"
             exit 0
           fi
-          echo "ci/tests: unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support python '$SUPPORT_PYTHON_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"
+          echo "ci/tests: changes and support python '$CHANGES_RESULT'; unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"
           exit 1
 
   standards-check:
