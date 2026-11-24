@@ -60,6 +60,7 @@ _SERVICE_INVENTORY_STATES = {
 _PLUGIN_INVENTORY_ERRORS = {
     "Plugin files changed since approval",
     "Plugin metadata could not be loaded",
+    "Development plugin metadata could not be loaded",
     "Python entry failed while loading; see the process log for details.",
 }
 _SERVICE_INVENTORY_ERRORS = {

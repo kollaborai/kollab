@@ -55,6 +55,7 @@ const SERVICE_STATES = new Set<PluginService["state"]>([
 const FIXED_PLUGIN_ERRORS = new Set([
   "Plugin files changed since approval",
   "Plugin metadata could not be loaded",
+  "Development plugin metadata could not be loaded",
   "Python entry failed while loading; see the process log for details.",
 ]);
 const FIXED_SERVICE_ERRORS = new Set([
