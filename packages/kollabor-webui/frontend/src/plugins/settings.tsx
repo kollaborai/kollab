@@ -165,11 +165,11 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
  */
 export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" | "state">, remote = false) {
   const managed = entry.kind !== "built-in";
-  const live = !remote && !entry.shadowed && entry.state !== "stopping" && entry.state !== "changed-on-disk";
+  const live = !remote && !entry.shadowed && entry.state !== "stopping";
   return {
     managed,
     switchEnabled: live && entry.kind !== "dev" && entry.state !== "changed-on-disk",
-    services: managed && live,
+    services: managed && live && entry.state !== "changed-on-disk",
     updateRemove: managed && live && entry.kind === "installed",
   };
 }
