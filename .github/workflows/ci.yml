@@ -26,27 +26,54 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides which optional lanes this run needs. A pull request runs only the
+  # lanes its diff touches; every other event runs them all, and so does a
+  # pull request whose diff cannot be read.
+  changes:
+    name: ci/changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      webui: ${{ steps.pick.outputs.webui }}
+      voice: ${{ steps.pick.outputs.voice }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Pick lanes from the changed paths
+        id: pick
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" | python scripts/ci_changed_lanes.py >> "$GITHUB_OUTPUT" || python scripts/ci_changed_lanes.py --all >> "$GITHUB_OUTPUT"
+          else
+            python scripts/ci_changed_lanes.py --all >> "$GITHUB_OUTPUT"
+          fi
+
   tests:
     name: ci/tests (${{ matrix.shard.gem }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # 3.14 is the floor and the launch runtime. Nine gem-named shards
-        # keep every leg under the three-minute run goal (#1022); the names are
-        # cosmetic (the hash split below decides content), the index feeds it,
-        # and SHARD_COUNT must match the list length.
+        # 3.14 is the floor and the launch runtime. Three gem-named shards
+        # split the unit run (#1022); the names are cosmetic (the hash split
+        # below decides content), the index feeds it, and SHARD_COUNT must
+        # match the list length.
         python-version: ["3.14"]
         shard:
           - { index: 0, gem: amber }
           - { index: 1, gem: beryl }
           - { index: 2, gem: coral }
-          - { index: 3, gem: diamond }
-          - { index: 4, gem: garnet }
-          - { index: 5, gem: jade }
-          - { index: 6, gem: opal }
-          - { index: 7, gem: ruby }
-          - { index: 8, gem: sapphire }
 
     steps:
       - uses: actions/checkout@v6
@@ -77,7 +104,7 @@ jobs:
       - name: Run unit test shard
         env:
           SHARD: ${{ matrix.shard.index }}
-          SHARD_COUNT: 9
+          SHARD_COUNT: 3
         run: |
           set -euo pipefail
           selected_files=$(find tests/unit -type f -name 'test_*.py' -print |
@@ -279,6 +306,8 @@ jobs:
   # runtime itself (--no-project), so this lane needs no workspace install.
   support_voice_tests:
     name: ci/tests (support, voice)
+    needs: [changes]
+    if: needs.changes.outputs.voice == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -305,6 +334,8 @@ jobs:
   # uv or workspace install.
   support_webui_tests:
     name: ci/tests (support, webui ${{ matrix.lane }})
+    needs: [changes]
+    if: needs.changes.outputs.webui == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -380,7 +411,8 @@ jobs:
           if-no-files-found: ignore
 
   # Keep the exact required "ci/tests" check name expected by branch
-  # protection. It succeeds only when every unit shard and the support job do.
+  # protection. It succeeds only when change detection, every unit shard, and
+  # every support lane the change needs do; lanes the change skips are allowed.
   # !cancelled() makes the aggregate run after upstream failures or skips so
   # the required check cannot resolve green without all tests running.
   required_tests:
@@ -388,22 +420,36 @@ jobs:
     # is free-form: this resolves as the check "ci/tests", which is the exact
     # name the required rule expects.
     name: ci/tests
-    needs: [tests, heavy_tests, supporting_tests, support_voice_tests, support_webui_tests]
+    needs: [changes, tests, heavy_tests, supporting_tests, support_voice_tests, support_webui_tests]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every required test job passed
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           UNIT_RESULT: ${{ needs.tests.result }}
           HEAVY_RESULT: ${{ needs.heavy_tests.result }}
           SUPPORT_PYTHON_RESULT: ${{ needs.supporting_tests.result }}
+          RUN_VOICE: ${{ needs.changes.outputs.voice }}
           SUPPORT_VOICE_RESULT: ${{ needs.support_voice_tests.result }}
+          RUN_WEBUI: ${{ needs.changes.outputs.webui }}
           SUPPORT_WEBUI_RESULT: ${{ needs.support_webui_tests.result }}
         run: |
-          case "$UNIT_RESULT:$HEAVY_RESULT:$SUPPORT_PYTHON_RESULT:$SUPPORT_VOICE_RESULT:$SUPPORT_WEBUI_RESULT" in
-            success:success:success:success:success) echo "ci/tests: all required test jobs succeeded"; exit 0 ;;
-            *) echo "ci/tests: unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support python '$SUPPORT_PYTHON_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"; exit 1 ;;
+          # A support lane passes when it succeeded, or when the change skipped it.
+          voice_ok=no
+          case "$SUPPORT_VOICE_RESULT:$RUN_VOICE" in
+            success:*|skipped:false) voice_ok=yes ;;
           esac
+          webui_ok=no
+          case "$SUPPORT_WEBUI_RESULT:$RUN_WEBUI" in
+            success:*|skipped:false) webui_ok=yes ;;
+          esac
+          if [ "$CHANGES_RESULT" = success ] && [ "$UNIT_RESULT" = success ] && [ "$HEAVY_RESULT" = success ] && [ "$SUPPORT_PYTHON_RESULT" = success ] && [ "$voice_ok" = yes ] && [ "$webui_ok" = yes ]; then
+            echo "ci/tests: all required test jobs succeeded"
+            exit 0
+          fi
+          echo "ci/tests: changes '$CHANGES_RESULT'; unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support python '$SUPPORT_PYTHON_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"
+          exit 1
 
   standards-check:
     name: ci/standards-check
