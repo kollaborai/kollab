@@ -455,6 +455,9 @@ def test_fallback_stop_publishes_the_shared_default_grace(tmp_path, monkeypatch)
 
 
 def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
+    import threading
+    from contextlib import contextmanager
+
     from kollabor_config import file_lock
     from kollabor_plugins import services
     from kollabor_plugins.packages import files_sha256
@@ -466,7 +469,11 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
     home = tmp_path / ".kollab"
     root = home / "plugins" / "hello"
     root.mkdir(parents=True)
-    ready, waiting = tmp_path / "ready", tmp_path / "waiting-for-registry-lock"
+    ready, waiting, stop_waiting = (
+        tmp_path / "ready",
+        tmp_path / "waiting-for-registry-lock",
+        tmp_path / "stop-waiting-for-registry-lock",
+    )
     child_code = f"from pathlib import Path; import time; Path({str(ready)!r}).touch(); time.sleep(60)"
     manifest = {"id": "hello", "services": {"worker": {"command": [sys.executable, "-c", child_code]}}}
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
@@ -500,7 +507,19 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
             'services.run_service("hello", "worker", "abcd")',
         ]
     )
+    original_lock = services.locked_file
+
+    @contextmanager
+    def wait_for_stop_lock(path, *args, **kwargs):
+        if Path(path).name == "plugins.json.lock":
+            stop_waiting.touch()
+        with original_lock(path, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(services, "locked_file", wait_for_stop_lock)
     wrapper = None
+    stop_thread = None
+    stop_errors = []
     try:
         with file_lock.locked_file(home / "plugins.json.lock", private=True):
             wrapper = subprocess.Popen([sys.executable, "-c", source])
@@ -508,15 +527,30 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
             while not waiting.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert waiting.exists(), "wrapper did not wait for the registry lock"
-            services.control_service("hello", "worker", "stop")
-            state = json.loads((run / "worker.state").read_text())
-            assert state["desired"] == "stopped"
+            def stop():
+                try:
+                    services.control_service("hello", "worker", "stop")
+                except Exception as exc:
+                    stop_errors.append(exc)
+
+            stop_thread = threading.Thread(target=stop)
+            stop_thread.start()
+            deadline = time.monotonic() + 3
+            while not stop_waiting.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert stop_waiting.exists(), "stop did not join the startup lock"
+        stop_thread.join(timeout=5)
+        assert not stop_thread.is_alive(), "stop deadlocked behind startup"
+        assert not stop_errors
         try:
             wrapper.wait(timeout=4)
         except subprocess.TimeoutExpired:
             pytest.fail("wrapper started a service after stop had succeeded")
-        assert not ready.exists(), "child started after stop had succeeded"
+        state = json.loads((run / "worker.state").read_text())
+        assert state["desired"] == "stopped"
     finally:
+        if stop_thread is not None:
+            stop_thread.join(timeout=5)
         if wrapper is not None and wrapper.poll() is None:
             wrapper.terminate()
             try:
