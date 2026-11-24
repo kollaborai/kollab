@@ -30,6 +30,6 @@ spec_or_fix_brief_mode = "warn"
 # the exact occurrence. Active findings also require a current-head approval
 # after their latest revision. This gate does not certify red-first execution.
 [pr_gates.dod.regression_profile]
-finding_id_pattern = "\\bF\\d{1,2}\\b"
+finding_id_pattern = "\\bF\\d+\\b"
 test_paths = ["tests/"]
 trusted_reviewers = ["kollaborai", "maarco"]
