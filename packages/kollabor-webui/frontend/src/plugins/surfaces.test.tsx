@@ -123,6 +123,12 @@ describe("right-hand menu rows", () => {
     const stopping = put("hello", "Hello", {}, { state: "stopping" });
     expect(rowCount(stopping, undefined).text).toBe("Stopping");
     expect(rows()).toContain("Stopping");
+    const stopFailed = put("hello", "Hello", {}, {
+      state: "stop-failed",
+      services: [{ name: "loop", state: "stop-failed", error: "signal failed" }],
+    });
+    expect(rowCount(stopFailed, undefined)).toEqual({ text: "Stop Failed", hint: "signal failed" });
+    expect(rows()).toContain("Stop Failed");
   });
 
   it("otherwise shows the plugin's own count and hover text", () => {

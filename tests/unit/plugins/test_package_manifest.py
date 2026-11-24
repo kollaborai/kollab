@@ -67,3 +67,20 @@ def test_manifest_checks(change, message, tmp_path, monkeypatch):
             validate_manifest(root, "0.23.0")
     else:
         assert validate_manifest(root, "0.23.0") == manifest
+
+
+@pytest.mark.parametrize("key", ["stop_timeout_s", "heartbeat_s"])
+@pytest.mark.parametrize("value", [10**1000, 86401, float("nan"), float("inf"), True])
+def test_service_seconds_must_be_finite_and_bounded(key, value, tmp_path, monkeypatch):
+    """A huge integer passed validation, then raised OverflowError when the service was stopped."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest = {"format": 1, "id": "hello", "name": "Hello", "version": "1.0.0", "description": "Example",
+                "kollab": ">=0.23.0", "uses": [], "services": {"loop": {"command": ["python3"], key: value}}}
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match=key):
+        validate_manifest(root, "0.23.0")
