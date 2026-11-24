@@ -404,7 +404,10 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                         except OSError as exc:
                             # Failure to publish must never prevent the actual stop.
                             logger.warning(
-                                "Could not publish service stopping state for %s/%s: %s", plugin_id, service_name, exc
+                                "Could not publish service stopping state for %s/%s: %s",
+                                plugin_id,
+                                service_name,
+                                redact_sensitive_text(str(exc)),
                             )
                         try:
                             os.killpg(child.pid, signal.SIGTERM)

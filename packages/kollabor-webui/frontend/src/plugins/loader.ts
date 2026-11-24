@@ -46,7 +46,10 @@ export const PLUGIN_INVENTORY_LIMITS = {
   services: 128, serviceSecrets: 64, uses: 256, contributions: 256, settings: 256,
   settingOptions: 256, optionLabels: 256, changedFolders: 256,
 } as const;
-const SENSITIVE_TEXT = /(?:\b(?:secret|token|password|credential|authorization|bearer|api[_-]?key)[-_][A-Za-z0-9_-]{6,}|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|credential|authorization)\s*[:=]\s*\S+)/i;
+const SENSITIVE_ASSIGNMENT = /(?:^|[^A-Za-z0-9])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)(?![A-Za-z0-9])\s*[:=]\s*([^\s,;]+)/gi;
+const AUTH_SCHEME = /\b(?:bearer|basic)\s+[^\s,;]+/i;
+const SECRET_VALUE = /\b(?:secret[-_]token[-_][A-Za-z0-9_-]{6,}|sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]*/i;
+const SAFE_TEXT_VALUES = new Set(["budget", "length", "required"]);
 const INVISIBLE_CONTROLS = /[\u00ad\u200b-\u200d\u202a-\u202e\u2060\u2066-\u2069\ufeff]/;
 const SERVICE_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const DECLARATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -85,10 +88,19 @@ function exceedsCodePointLimit(value: string, limit: number): boolean {
 }
 
 function safeText(value: unknown, limit = INVENTORY_TEXT_LIMIT): string | null {
-  if (typeof value !== "string" || exceedsCodePointLimit(value, limit) || /[\u0000-\u001f\u007f]/.test(value) || INVISIBLE_CONTROLS.test(value) || SENSITIVE_TEXT.test(value))
+  if (typeof value !== "string" || exceedsCodePointLimit(value, limit) || /[\u0000-\u001f\u007f]/.test(value) || INVISIBLE_CONTROLS.test(value) || containsSensitiveText(value))
     return null;
   const clean = value.trim();
   return clean || null;
+}
+
+function containsSensitiveText(value: string): boolean {
+  if (AUTH_SCHEME.test(value) || SECRET_VALUE.test(value)) return true;
+  for (const match of value.matchAll(SENSITIVE_ASSIGNMENT)) {
+    const assigned = match[1].replace(/[.!?]+$/, "").toLowerCase();
+    if (!SAFE_TEXT_VALUES.has(assigned)) return true;
+  }
+  return false;
 }
 
 export function safePluginText(value: unknown, limit = INVENTORY_TEXT_LIMIT): string | null {

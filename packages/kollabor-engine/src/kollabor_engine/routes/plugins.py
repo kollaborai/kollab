@@ -28,6 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
+from kollabor_plugins.redaction import redact_sensitive_text
 from kollabor_plugins.tokens import PluginTokenFiles
 
 logger = logging.getLogger(__name__)
@@ -897,7 +898,11 @@ def get_plugin_usage(plugin_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="Invalid plugin usage data") from exc
     except OSError as exc:
-        logger.warning("Cannot update plugin usage for %s: %s", plugin_id, exc)
+        logger.warning(
+            "Cannot update plugin usage for %s: %s",
+            plugin_id,
+            redact_sensitive_text(str(exc)),
+        )
         raise HTTPException(status_code=503, detail="Cannot update plugin usage") from exc
     return {"date": today, "total": total, "cap": cap, "remaining": max(0, cap - total)}
 
