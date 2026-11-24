@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "ci_changed_lanes.py"
@@ -30,6 +31,35 @@ def test_voice_prefix_turns_on_only_voice():
     assert ci_changed_lanes.lanes_for(paths) == {"webui": False, "voice": True}
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "packages/kollabor-engine/src/kollabor_engine/auth.py",
+        "kollabor/application.py",
+        "plugins/hub/plugin.py",
+    ],
+)
+def test_webui_dependencies_turn_on_webui(path):
+    assert ci_changed_lanes.lanes_for([path]) == {"webui": True, "voice": False}
+
+
+def test_docs_only_changes_turn_on_neither_lane():
+    paths = ["docs/guide.md", "changes/1413.ci.md"]
+    assert ci_changed_lanes.lanes_for(paths) == NEITHER
+
+
+def test_voice_only_change_turns_on_only_voice():
+    paths = ["packages/kollabor-voice/src/kollabor_voice/client.py"]
+    assert ci_changed_lanes.lanes_for(paths) == {"webui": False, "voice": True}
+
+
+def test_webui_unit_test_turns_on_webui():
+    assert ci_changed_lanes.lanes_for(["tests/unit/test_webui_server.py"]) == {
+        "webui": True,
+        "voice": False,
+    }
+
+
 @pytest.mark.parametrize("path", [".github/workflows/ci.yml", "uv.lock", "pyproject.toml"])
 def test_shared_files_turn_on_both_lanes(path):
     assert ci_changed_lanes.lanes_for([path]) == BOTH
@@ -44,10 +74,20 @@ def test_empty_path_list_turns_on_both_lanes():
     assert ci_changed_lanes.lanes_for([]) == BOTH
 
 
-def test_unrelated_paths_turn_on_neither_lane():
-    # The near-miss package name must not match the webui prefix.
+def test_unclassified_paths_turn_on_webui():
     paths = ["kollab/core.py", "docs/guide.md", "packages/kollabor-webui-old/x.ts"]
-    assert ci_changed_lanes.lanes_for(paths) == NEITHER
+    assert ci_changed_lanes.lanes_for(paths) == {"webui": True, "voice": False}
+
+
+def test_changes_job_pick_step_uses_fail_closed_shell():
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    pick_step = next(
+        step for step in workflow["jobs"]["changes"]["steps"] if step.get("id") == "pick"
+    )
+
+    assert pick_step.get("shell") == "bash"
+    assert "set -euo pipefail" in pick_step["run"]
+    assert '| python scripts/ci_changed_lanes.py >> "$GITHUB_OUTPUT"' not in pick_step["run"]
 
 
 def test_main_prints_exactly_two_lane_lines(monkeypatch, capsys):
