@@ -30,5 +30,6 @@ def test_missing_executable_records_error(tmp_path, monkeypatch):
     assert state["status"] == "error"
     assert state["error"] == "Could not start this process. View Log for details."
     log = (home / "plugin-data" / "hello" / "run" / "worker.log").read_text()
-    assert "missing-example-command" in log
-    assert "No such file or directory" in log
+    assert "FileNotFoundError" in log
+    assert "missing-example-command" not in log
+    assert "No such file or directory" not in log

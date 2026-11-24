@@ -256,6 +256,7 @@ const mainConfig = defineConfig({
       "src/plugins/settings-values.test.ts",
       "src/plugins/settings-page.test.tsx",
       "src/plugins/install-summary.test.ts",
+      "src/plugins/inventory-limits.test.ts",
       "src/plugins/inventory.test.ts",
       "src/plugins/surfaces.test.tsx",
       "src/plugins/wiring.test.tsx",
