@@ -14,9 +14,10 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import BinaryIO, Optional
+from typing import BinaryIO, Callable, Optional
 
 from .atomic_write import write_text_atomic
+from .file_lock import locked_file
 
 logger = logging.getLogger(__name__)
 _warned_shadowed_skill_paths: set[tuple[Path, Path]] = set()
@@ -1637,13 +1638,25 @@ def initialize_config(force: bool = False) -> None:
     global_config_dir = get_config_directory()
     global_config_path = global_config_dir / "config.json"
     try:
-        # Step 1: Create global config if it doesn't exist or force=True
-        if not global_config_path.exists() or force:
+        global_config_dir.mkdir(parents=True, exist_ok=True)
+        with locked_file(
+            global_config_path.with_name(global_config_path.name + ".lock"),
+            private=True,
+        ):
+            # Check under the shared config lock so startup cannot overwrite a
+            # config another Kollab writer created after an earlier existence test.
+            if not force:
+                try:
+                    global_config_path.stat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    return
+
             if force:
                 logger.info("Force resetting global config.json with defaults")
             else:
                 logger.info("Creating global config.json with defaults")
-            global_config_dir.mkdir(parents=True, exist_ok=True)
 
             # Build default config structure with profiles
             default_config = _get_minimal_default_config()
@@ -1671,9 +1684,9 @@ def initialize_config(force: bool = False) -> None:
             default_config["plugins"]["hub"]["enabled"] = True
             default_config["plugins"]["hub"]["project_scoped"] = True
 
-            global_config_path.write_text(
+            write_text_atomic(
+                global_config_path,
                 json.dumps(default_config, indent=2, ensure_ascii=False),
-                encoding="utf-8",
             )
             logger.info(f"Created global config: {global_config_path}")
 
@@ -1938,6 +1951,47 @@ def get_default_agent() -> tuple[Optional[str], Optional[str]]:
     return (None, None)
 
 
+def _update_config_file(
+    config_path: Path,
+    update: Callable[[dict], None],
+    *,
+    create_if_missing: bool = True,
+) -> bool:
+    """Update a config file under the lock shared by Kollab config writers."""
+    if create_if_missing:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock_path = config_path.with_name(config_path.name + ".lock")
+    with locked_file(lock_path, private=True):
+        try:
+            contents = config_path.read_bytes()
+        except FileNotFoundError:
+            if not create_if_missing:
+                return True
+            config = {}
+        except OSError as exc:
+            raise OSError(
+                "The config file could not be read; it was left unchanged. "
+                "Check permissions and retry."
+            ) from exc
+        else:
+            try:
+                config = json.loads(contents.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "The config file is malformed; back it up, repair its JSON, "
+                    "then retry."
+                ) from exc
+            if not isinstance(config, dict):
+                raise ValueError(
+                    "The config file must contain a JSON object; it was left unchanged."
+                )
+
+        update(config)
+        write_text_atomic(config_path, json.dumps(config, indent=2, ensure_ascii=False))
+    return True
+
+
 def set_default_agent(agent_name: str, level: str) -> bool:
     """
     Set a default agent in config.
@@ -1949,36 +2003,22 @@ def set_default_agent(agent_name: str, level: str) -> bool:
     Returns:
         True if saved successfully
     """
-    import json
-
     if level == "project":
         config_path = get_local_config_path()
     else:
         config_path = get_global_config_path()
 
-    # Ensure directory exists
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    def update(config: dict) -> None:
+        if "kollabor" not in config:
+            config["kollabor"] = {}
+        if "llm" not in config["kollabor"]:
+            config["kollabor"]["llm"] = {}
+        config["kollabor"]["llm"]["default_agent"] = {
+            "name": agent_name,
+            "level": level,
+        }
 
-    # Load existing config or create new
-    if config_path.exists():
-        with open(config_path) as f:
-            config = json.load(f)
-    else:
-        config = {}
-
-    # Ensure structure exists
-    if "kollabor" not in config:
-        config["kollabor"] = {}
-    if "llm" not in config["kollabor"]:
-        config["kollabor"]["llm"] = {}
-
-    # Set default
-    config["kollabor"]["llm"]["default_agent"] = {"name": agent_name, "level": level}
-
-    # Save
-    write_text_atomic(config_path, json.dumps(config, indent=2, ensure_ascii=False))
-
-    return True
+    return _update_config_file(config_path, update)
 
 
 def clear_default_agent(level: str) -> bool:
@@ -1991,8 +2031,6 @@ def clear_default_agent(level: str) -> bool:
     Returns:
         True if cleared successfully
     """
-    import json
-
     if level == "project":
         config_path = get_existing_local_config_path()
     else:
@@ -2001,17 +2039,11 @@ def clear_default_agent(level: str) -> bool:
     if not config_path.exists():
         return True  # Nothing to clear
 
-    with open(config_path) as f:
-        config = json.load(f)
+    def update(config: dict) -> None:
+        if "kollabor" in config and "llm" in config["kollabor"]:
+            config["kollabor"]["llm"].pop("default_agent", None)
 
-    # Remove default_agent entry
-    if "kollabor" in config and "llm" in config["kollabor"]:
-        config["kollabor"]["llm"].pop("default_agent", None)
-
-    # Save
-    write_text_atomic(config_path, json.dumps(config, indent=2, ensure_ascii=False))
-
-    return True
+    return _update_config_file(config_path, update, create_if_missing=False)
 
 
 def get_all_default_agents() -> dict[str, str]:
@@ -2149,37 +2181,23 @@ def set_default_profile(profile_name: str, level: str) -> bool:
     Returns:
         True if saved successfully
     """
-    import json
-
     if level == "project":
         config_path = get_local_config_path()
     else:
         config_path = get_global_config_path()
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    def update(config: dict) -> None:
+        if "kollabor" not in config:
+            config["kollabor"] = {}
+        if "llm" not in config["kollabor"]:
+            config["kollabor"]["llm"] = {}
+        config["kollabor"]["llm"]["default_profile"] = {
+            "name": profile_name,
+            "level": level,
+        }
+        config["kollabor"]["llm"]["active_profile"] = profile_name
 
-    if config_path.exists():
-        with open(config_path) as f:
-            config = json.load(f)
-    else:
-        config = {}
-
-    if "kollabor" not in config:
-        config["kollabor"] = {}
-    if "llm" not in config["kollabor"]:
-        config["kollabor"]["llm"] = {}
-
-    # Store default marker for display
-    config["kollabor"]["llm"]["default_profile"] = {
-        "name": profile_name,
-        "level": level,
-    }
-    # Also set active_profile at this config level so it loads on startup
-    config["kollabor"]["llm"]["active_profile"] = profile_name
-
-    write_text_atomic(config_path, json.dumps(config, indent=2, ensure_ascii=False))
-
-    return True
+    return _update_config_file(config_path, update)
 
 
 def clear_default_profile(level: str) -> bool:
@@ -2191,8 +2209,6 @@ def clear_default_profile(level: str) -> bool:
     Returns:
         True if cleared successfully
     """
-    import json
-
     if level == "project":
         config_path = get_existing_local_config_path()
     else:
@@ -2201,15 +2217,11 @@ def clear_default_profile(level: str) -> bool:
     if not config_path.exists():
         return True
 
-    with open(config_path) as f:
-        config = json.load(f)
+    def update(config: dict) -> None:
+        if "kollabor" in config and "llm" in config["kollabor"]:
+            config["kollabor"]["llm"].pop("default_profile", None)
 
-    if "kollabor" in config and "llm" in config["kollabor"]:
-        config["kollabor"]["llm"].pop("default_profile", None)
-
-    write_text_atomic(config_path, json.dumps(config, indent=2, ensure_ascii=False))
-
-    return True
+    return _update_config_file(config_path, update, create_if_missing=False)
 
 
 def _get_minimal_default_config() -> dict:
