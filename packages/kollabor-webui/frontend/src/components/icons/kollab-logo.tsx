@@ -51,10 +51,19 @@ export function KollabLogo({
     import("./kollab-logo-glass")
       .then(({ startGlass }) => {
         if (cancelled) return;
-        const handle = startGlass(canvas, K_POLYS);
+        // The flat mark hides only once a frame is really on screen, and returns if the GPU context is lost.
+        const handle = startGlass(canvas, K_POLYS, {
+          onFrame: () => {
+            if (!cancelled) setLive(true);
+          },
+          onLost: () => {
+            glassRef.current?.stop();
+            glassRef.current = null;
+            if (!cancelled) setLive(false);
+          },
+        });
         if (!handle) return;
         glassRef.current = handle;
-        setLive(true);
       })
       .catch(() => {}); // chunk failed to load: the flat mark stays
     return () => {

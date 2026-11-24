@@ -63,10 +63,18 @@ const MIST_VERT =
 const SOFTWARE_GPU = /swiftshader|llvmpipe|softpipe|software|basic render/i;
 const VIEW_HEIGHT = 1.8; // canvas is 180% of the mark's box; the mark is 1 unit tall
 
+export type GlassHooks = {
+  /** Fires once, after the first frame has really been drawn (the canvas had a size). */
+  onFrame?: () => void;
+  /** Fires when the GPU drops the context; the canvas is blank from then on. */
+  onLost?: () => void;
+};
+
 /** Starts the glass K on `canvas`; null means keep the flat mark. */
 export function startGlass(
   canvas: HTMLCanvasElement,
   polys: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
+  hooks: GlassHooks = {},
 ): { stop: () => void; flare: () => void } | null {
   let renderer: WebGLRenderer;
   let context: WebGL2RenderingContext | null = null;
@@ -102,7 +110,7 @@ export function startGlass(
   }
 
   try {
-    return build(renderer, canvas, polys);
+    return build(renderer, canvas, polys, hooks);
   } catch {
     renderer.dispose();
     renderer.forceContextLoss();
@@ -114,6 +122,7 @@ function build(
   renderer: WebGLRenderer,
   canvas: HTMLCanvasElement,
   polys: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
+  hooks: GlassHooks,
 ) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.toneMapping = NeutralToneMapping;
@@ -243,8 +252,10 @@ function build(
   let last = start;
   let frame = 0;
   let stopped = false;
+  let framed = false;
 
   const draw = (now: number) => {
+    if (stopped) return;
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
     if (w && h) {
@@ -272,10 +283,36 @@ function build(
       renderer.render(mistScene, mistCam);
       renderer.setRenderTarget(null);
       renderer.render(scene, camera);
+      if (!framed) {
+        framed = true;
+        hooks.onFrame?.();
+      }
     }
     // Reduced motion renders this frame once; do not keep a GPU render loop alive.
     if (!motion?.matches) frame = requestAnimationFrame(draw);
   };
+  // A lost context leaves a blank canvas: tell the caller so the flat mark returns.
+  const onContextLost = (event: Event) => {
+    event.preventDefault();
+    hooks.onLost?.();
+  };
+  canvas.addEventListener?.("webglcontextlost", onContextLost);
+
+  // Reduced motion draws one still frame, so redraw it when the canvas gets a size,
+  // and restart (or hold) the loop when the preference changes mid-session.
+  const redrawStill = () => {
+    if (motion?.matches) draw(performance.now());
+  };
+  const resizeObserver =
+    typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(redrawStill);
+  resizeObserver?.observe(canvas);
+  const onMotionChange = () => {
+    cancelAnimationFrame(frame);
+    draw(performance.now());
+  };
+  motion?.addEventListener?.("change", onMotionChange);
   draw(start);
 
   return {
@@ -288,6 +325,9 @@ function build(
       cancelAnimationFrame(frame);
       window.clearTimeout(frame);
       window.removeEventListener("pointermove", onPointer);
+      canvas.removeEventListener?.("webglcontextlost", onContextLost);
+      resizeObserver?.disconnect();
+      motion?.removeEventListener?.("change", onMotionChange);
       geo.dispose();
       glass.dispose();
       quad.dispose();
