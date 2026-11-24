@@ -26,7 +26,7 @@ from urllib.parse import quote
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
 from kollabor.user_input_source import UserInputSource
-from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
+from kollabor_agent.runtime import AgentLifecycle, AgentRuntime, process_start_token
 from kollabor_ai.message_content import content_to_text
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.models import (
@@ -6066,14 +6066,11 @@ class HubPlugin(BasePlugin):
                             f"Force-claiming '{preferred}': holder "
                             f"pid={holder.pid} failed async ping"
                         )
-                        # Remove stale presence + socket so it doesn't
-                        # interfere with future discovery either
-                        from .presence import get_presence_dir
-
-                        stale_file = get_presence_dir() / f"{holder.agent_id}.json"
-                        stale_file.unlink(missing_ok=True)
-                        PresenceManager._cleanup_agent_socket(holder)
-                        taken = [t for t in taken if t != preferred]
+                        # A same-id replacement can publish while this stale
+                        # holder is being checked; cleanup revalidates its
+                        # complete generation under the presence-file lock.
+                        if self._presence.cleanup_agent(holder):
+                            taken = [t for t in taken if t != preferred]
                     elif explicit_as:
                         # Spawn guard (issue #38): caller explicitly requested
                         # this identity via --as, but a live process already
@@ -6765,7 +6762,7 @@ class HubPlugin(BasePlugin):
         started = self._locally_started_agent_count() > 0
         help_lines = []
         if started:
-            help_lines.append("To stop all agents you started, submit: /hub stop all")
+            help_lines.append("To stop every agent in this folder, submit: /hub stop all")
         help_lines.append(f"Tip: {choose_startup_tip(include_stop_all=started)}")
         help_lines.append(f"New features:\n{new_features}")
         operator_help = "\n".join(help_lines)
@@ -14299,7 +14296,8 @@ class HubPlugin(BasePlugin):
         elif subcmd == "capture":
             return await self._handle_capture_command(rest)
         elif subcmd == "stop":
-            return await self._handle_stop_command(rest)
+            # Typed in this session's chat, so the operator (#1408).
+            return await self._handle_stop_command(rest, operator=True)
         elif subcmd == "agents":
             return await self._handle_agents_command()
         elif subcmd == "cron":
@@ -14657,9 +14655,12 @@ class HubPlugin(BasePlugin):
         if socket_path_override:
             dial_target, dial_auth = socket_path_override, None
         elif not peer.socket_path:
-            if self._presence:
-                self._presence.cleanup_agent(peer)
-            message = f"agent '{peer.identity}' has no socket path, cleaned up"
+            cleaned = bool(self._presence and self._presence.cleanup_agent(peer))
+            message = (
+                f"agent '{peer.identity}' has no socket path, cleaned up"
+                if cleaned
+                else f"agent '{peer.identity}' has no socket yet (still starting)"
+            )
             return _CaptureOutcome(message, error=message)
         else:
             dial_target, dial_auth = self._resolve_dial_target(
@@ -15424,14 +15425,126 @@ class HubPlugin(BasePlugin):
         lines.append("reject: /hub reject <identity> [reason]")
         return "\n".join(lines)
 
-    async def _handle_stop_command(self, rest: str) -> str:
+    def _under_hub_agent(self) -> bool:
+        """True when another hub agent started this session, e.g. a terminal
+        tool ran `printf '/hub stop all' | kollab`: its typed stop all is not
+        the operator's and keeps the #669 scope (#1408).
+
+        The same deny-only signals the CLI checks: tool-shell markers, then
+        any parent process (never this one) that is a hub agent. Unreadable
+        context fails closed.
+        """
+        from .network_halt import TOOL_SHELL_VARS
+
+        if any(os.environ.get(var) for var in TOOL_SHELL_VARS):
+            return True
+        try:
+            parents = self._parent_pids()
+            agent_pids = {
+                getattr(agent, "pid", 0) for agent in self._presence.scan_machine_presence()
+            }
+        except Exception as exc:  # noqa: BLE001 - uncertainty must not grant a sweep
+            logger.warning(f"cannot verify /hub stop all caller ancestry: {exc}")
+            return True
+        return bool(parents & agent_pids)
+
+    @staticmethod
+    def _parent_pids() -> set:
+        import psutil
+
+        return {process.pid for process in psutil.Process().parents()}
+
+    async def _operator_stop_all(self) -> str:
+        """`/hub stop all` typed by the operator (#1408).
+
+        Stops every live agent in this folder's hub through the same per-agent
+        stop as `/hub stop <name>`, and names live agents in other folders
+        (left running) with the terminal command that stops them too.
+        """
+        # include_busy: a live agent whose socket stopped answering (stuck on
+        # a turn) is the one most worth stopping. The sync scan blocks on
+        # socket checks, so it runs off the event loop.
+        here = await asyncio.to_thread(
+            self._presence.discover_agents, include_solo=True, include_busy=True
+        )
+        here_ids = {agent.agent_id for agent in here}
+        managed = self._locally_managed_sessions()
+        sessions = []
+        skipped = []
+        for agent in list(here):
+            if self._pid_recycled(agent):
+                # A dead agent whose pid another process took: not stopped,
+                # not counted (discovery trusts a fresh heartbeat's pid).
+                here.remove(agent)
+                continue
+            session = managed.get(getattr(agent, "pid", None))
+            # A tracked child keeps its lock-guarded escalation; a pid this
+            # session tracks under another process generation is not the row's
+            # process, so leave it alone. Everything else takes the named-stop
+            # path, as `/hub stop <name>` does.
+            if session is not None and not (
+                getattr(session, "is_alive", True)
+                and self._presence_generation_matches(session, agent)
+            ):
+                here.remove(agent)
+                skipped.append(agent.identity)
+                continue
+            sessions.append(session)
+        results = await asyncio.gather(
+            *[
+                self._stop_peer_agent(
+                    agent, reason=f"stopped by {self._identity.identity}", session=session
+                )
+                for agent, session in zip(here, sessions)
+            ]
+        )
+        if here:
+            lines = [
+                f"stopping {len(here)} agent(s) in this folder "
+                f"({self._identity.identity} keeps running):"
+            ]
+            lines += [f"  {a.identity}: {r}" for a, r in zip(here, results)]
+        else:
+            lines = ["no other agents in this folder"]
+        if skipped:
+            lines.append(
+                f"skipped (process changed since it registered): {', '.join(skipped)}"
+            )
+
+        elsewhere: dict = {}
+        for agent in self._presence.scan_machine_presence():
+            # A quiet heartbeat is not death (#575): a live, unrecycled pid counts.
+            if (
+                agent.agent_id in here_ids
+                or not pid_alive(getattr(agent, "pid", 0))
+                or self._pid_recycled(agent)
+            ):
+                continue
+            folder = getattr(agent, "project", "") or "unknown folder"
+            elsewhere.setdefault(folder, []).append(agent.identity)
+        if elsewhere:
+            import shlex
+
+            count = sum(len(names) for names in elsewhere.values())
+            lines.append(f"\nstill running: {count} agent(s) in other folders")
+            for folder, names in sorted(elsewhere.items()):
+                lines.append(f"  {folder}: {', '.join(sorted(names))}")
+                lines.append(
+                    "    stop those too: KOLLAB_PROJECT_ROOT={} kollab --hub stop all".format(
+                        shlex.quote(folder)
+                    )
+                )
+        return "\n".join(lines)
+
+    async def _handle_stop_command(self, rest: str, operator: bool = False) -> str:
         """Handle /hub stop <name|all>.
 
-        Sends shutdown signals via hub sockets. `stop all` is scoped to
-        the agents the CALLER started (agent_orchestrator-managed
-        sessions matched by PID, issue #669): peers launched by other
-        lanes or the operator are immune. The mesh-wide stop is the
-        operator CLI, `kollab --hub stop all`.
+        Sends shutdown signals via hub sockets. ``operator`` is the person
+        typing `/hub stop all` in this session: every agent in this folder's
+        hub stops (#1408). Otherwise (the agent `hub_stop` tool) `stop all`
+        is scoped to the agents the CALLER started (agent_orchestrator-managed
+        sessions matched by PID, issue #669): peers launched by other lanes
+        or the operator are immune.
         """
         target = rest.strip()
         if not target:
@@ -15442,6 +15555,9 @@ class HubPlugin(BasePlugin):
 
         if not self._presence or not self._identity:
             return "hub not active"
+
+        if target.lower() == "all" and operator and not self._under_hub_agent():
+            return await self._operator_stop_all()
 
         if target.lower() == "all":
             # Scan machine-wide so owned agents are found even if they're
@@ -15548,10 +15664,6 @@ class HubPlugin(BasePlugin):
                 available = [a.identity for a in all_agents]
                 return f"agent '{target}' not found. online: {', '.join(available) or 'none'}"
 
-            if not agent.socket_path:
-                self._presence.cleanup_agent(agent)
-                return f"agent '{target}' has no socket path, cleaned up"
-
             result = await self._stop_peer_agent(
                 agent,
                 reason=f"stopped by {self._identity.identity}",
@@ -15569,13 +15681,44 @@ class HubPlugin(BasePlugin):
         """
         return session is None or bool(getattr(session, "is_alive", False))
 
+    def _may_signal(self, agent, session) -> bool:
+        """``_signal_allowed``, and a raw-PID signal only to a proven process:
+        a session-less stop signals only while the pid's kernel start still
+        equals the row's ``start_token``. A recycled pid, a row without a
+        token or an unreadable start gets no SIGTERM/SIGKILL (#1408)."""
+        if not self._signal_allowed(session):
+            return False
+        if session is not None:
+            return True
+        recorded = getattr(agent, "start_token", None)
+        return bool(recorded) and process_start_token(getattr(agent, "pid", 0)) == recorded
+
+    def _withhold_signal(self, agent, session, guard: str) -> str:
+        """No signal may reach ``agent``'s pid. A session-less row whose pid
+        still runs and is not proven to be another process keeps its presence
+        and socket: the agent may still be running (#1408)."""
+        pid = getattr(agent, "pid", 0)
+        if session is None and not self._pid_recycled(agent) and self._agent_pid_alive(pid):
+            return f"not stopped: pid {pid} cannot be proven to be this agent, so no signal was sent"
+        self._cleanup_stopped_peer(agent, session)
+        return guard
+
+    @staticmethod
+    def _pid_recycled(agent) -> bool:
+        """True when the row's pid now runs another process: its kernel start
+        differs from the row's ``start_token``. No token or no readable start
+        proves nothing."""
+        recorded = getattr(agent, "start_token", None)
+        current = process_start_token(getattr(agent, "pid", 0)) if recorded else None
+        return current is not None and current != recorded
+
     def _cleanup_stopped_peer(self, agent, session) -> bool:
         """Clean up a stopped peer without crossing its selected generation.
 
-        Named operator stops have no tracked session and retain the existing
-        presence-plus-socket cleanup. Caller-owned stop-all defers cleanup to
-        normal presence discovery; it cannot atomically compare-and-unlink a
-        presence row or identity-named socket that may have been replaced.
+        Named operator stops have no tracked session and use the same
+        generation-checked presence-row cleanup. Shared socket paths are left
+        for stale-socket cleanup because a replacement may already have bound
+        the same path. Caller-owned stop-all defers cleanup to presence discovery.
         """
         if not self._presence:
             return False
@@ -15675,13 +15818,21 @@ class HubPlugin(BasePlugin):
             self._cleanup_stopped_peer(agent, session)
             return guard
 
-        if not getattr(agent, "socket_path", ""):
+        socket_path = getattr(agent, "socket_path", "")
+        # A session-less agent whose process runs with no socket yet is still
+        # starting: stop its proven pid below instead of dropping its row (#1408).
+        if not socket_path and (
+            session is not None or not self._agent_pid_alive(getattr(agent, "pid", 0))
+        ):
             cleaned = self._cleanup_stopped_peer(agent, session)
             if session is not None and not cleaned:
                 return "no socket; presence cleanup deferred"
             return "no socket, cleaned up"
 
         try:
+            # Name the selected generation, so a new agent that took over this
+            # socket refuses a stop meant for the old one (#1408). A tracked
+            # child must name it; a session-less row names it when it can.
             generation = (
                 {
                     "expected_agent_id": getattr(agent, "agent_id", None),
@@ -15689,13 +15840,21 @@ class HubPlugin(BasePlugin):
                     "expected_started_at": getattr(agent, "started_at", None),
                 }
                 if session is not None
-                else {}
+                else AgentMessenger.shutdown_generation(
+                    getattr(agent, "agent_id", None),
+                    getattr(agent, "pid", None),
+                    getattr(agent, "started_at", None),
+                )
             )
-            success = await AgentMessenger.signal_shutdown(
-                agent.socket_path,
-                reason=reason,
-                timeout=3.0,
-                **generation,
+            # A session-less row that cannot name its process sends nothing a
+            # replacement on the same socket would also accept (#1408).
+            success = bool(socket_path) and (session is not None or bool(generation)) and await (
+                AgentMessenger.signal_shutdown(
+                    socket_path,
+                    reason=reason,
+                    timeout=3.0,
+                    **generation,
+                )
             )
         except Exception as e:
             success = False
@@ -15706,9 +15865,8 @@ class HubPlugin(BasePlugin):
                 self._cleanup_stopped_peer(agent, session)
                 return "stopped"
 
-            if not self._signal_allowed(session):
-                self._cleanup_stopped_peer(agent, session)
-                return guard
+            if not self._may_signal(agent, session):
+                return self._withhold_signal(agent, session, guard)
 
             killed = self._escalate_agent(agent, session, signal.SIGTERM)
             if session is not None and not killed:
@@ -15721,9 +15879,8 @@ class HubPlugin(BasePlugin):
             ):
                 self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGTERM after graceful timeout)"
-            if not self._signal_allowed(session):
-                self._cleanup_stopped_peer(agent, session)
-                return guard
+            if not self._may_signal(agent, session):
+                return self._withhold_signal(agent, session, guard)
 
             killed = self._escalate_agent(agent, session, signal.SIGKILL)
             if session is not None and not killed:
@@ -15736,9 +15893,8 @@ class HubPlugin(BasePlugin):
                 return "killed (SIGKILL — was unresponsive)"
             return "stop timed out (pid survived SIGKILL)"
 
-        if not self._signal_allowed(session):
-            self._cleanup_stopped_peer(agent, session)
-            return guard
+        if not self._may_signal(agent, session):
+            return self._withhold_signal(agent, session, guard)
 
         killed = self._escalate_agent(agent, session, signal.SIGTERM)
         if session is not None and not killed:
@@ -15754,9 +15910,8 @@ class HubPlugin(BasePlugin):
                 return "already dead; presence cleanup deferred"
             return "already dead, cleaned up"
 
-        if not self._signal_allowed(session):
-            self._cleanup_stopped_peer(agent, session)
-            return guard
+        if not self._may_signal(agent, session):
+            return self._withhold_signal(agent, session, guard)
 
         killed = self._escalate_agent(agent, session, signal.SIGKILL)
         if session is not None and not killed:

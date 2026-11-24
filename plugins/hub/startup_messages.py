@@ -60,7 +60,7 @@ _BASE_TIPS: tuple[str, ...] = (
 # of their own to stop. HUB_STARTUP_TIPS keeps the full owner-inclusive
 # catalog; _BASE_TIPS is the pool for everyone else.
 _STOP_ALL_TIPS: tuple[str, ...] = (
-    "Stop every peer you started with `/hub stop all`.",
+    "Stop every agent in this folder with `/hub stop all`.",
     "Use `/hub stop all` before closing a session that started active peers.",
 )
 
