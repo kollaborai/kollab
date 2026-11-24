@@ -1,7 +1,6 @@
 """Write a file whole, so a reader never sees half of it."""
 
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Union
@@ -35,13 +34,21 @@ def write_text_atomic(path: Union[str, Path], text: str) -> None:
         raise
 
 
-def keep_unreadable_copy(path: Union[str, Path]) -> None:
-    """Copy a config file that could not be parsed to ``<name>.corrupt``.
-
-    Called before a fresh config replaces it, so a typo in a hand edit does not
-    cost the user their profiles and keys.
-    """
+def write_bytes_atomic(path: Union[str, Path], contents: bytes) -> None:
+    """Replace ``path`` with exact bytes using a finished sibling file and rename."""
+    target = Path(os.path.realpath(path))
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
     try:
-        shutil.copy2(path, f"{path}.corrupt")
-    except OSError:
-        pass
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
