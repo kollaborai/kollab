@@ -372,6 +372,7 @@ async function livePluginRemovalFlow() {
     await panel.getByRole("button", { name: "Hello Page", exact: true }).waitFor({ state: "hidden", timeout: 5000 });
     const chatTab = panel.getByRole("button", { name: "Chat", exact: true });
     await chatTab.waitFor({ timeout: 5000 });
+    await page.waitForFunction((button) => button?.getAttribute("aria-pressed") === "true", await chatTab.elementHandle());
     assert.equal(await chatTab.getAttribute("aria-pressed"), "true", "removing Hello returns its active view tab to Chat");
     assert.equal(await page.evaluate(() => window.__pluginsLiveRemovalMarker), "still here", "Hello is removed without reloading the page");
     assert.equal(page.url(), originalUrl, "removing Hello keeps the current URL");
