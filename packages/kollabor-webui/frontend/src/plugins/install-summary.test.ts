@@ -61,6 +61,11 @@ describe("plugin review manifest boundary", () => {
     expect(errorText(new ApiError("Invalid plugin Git source", 422, {}))).toBe("Invalid plugin Git source");
     expect(errorText(new ApiError("Cannot safely update this plugin", 409, {}))).toBe("Cannot safely update this plugin");
   });
+  it("preserves combined allowlisted job warnings", () => {
+    const input = job();
+    input.warning = "A previously running service could not be restarted; check its status; Plugin staging files could not be removed";
+    expect(normalizeReviewJob(input)?.warning).toBe(input.warning);
+  });
 });
 
 describe("declared plugin uses", () => {
