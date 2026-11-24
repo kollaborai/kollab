@@ -438,3 +438,19 @@ def test_unusable_stop_timeout_on_an_approved_manifest_still_stops(tmp_path, mon
     state = json.loads((run / "worker.state").read_text())
     assert signals, "the wrapper must still be signalled"
     assert 29 <= state["stop_deadline"] - before <= 31, "an unusable value falls back to the 30 s default"
+
+
+def test_fallback_stop_publishes_the_shared_default_grace(tmp_path, monkeypatch):
+    """When control_service fails, the fallback stop records the same 30 s grace the wrapper uses."""
+    from kollabor_plugins import services
+
+    run = tmp_path / "run"
+    run.mkdir()
+    pid_path = run / "worker.pid"
+    pid_path.write_text(json.dumps({"wrapper": {"pid": 4321}, "child": None}))
+    monkeypatch.setattr(services, "_verified_wrapper", lambda _identity: True)
+    monkeypatch.setattr(services.os, "kill", lambda *_args: None)
+    before = time.time()
+    services._stop_unrecorded(run, pid_path)
+    state = json.loads((run / "worker.state").read_text())
+    assert 29 <= state["stop_deadline"] - before <= 31
