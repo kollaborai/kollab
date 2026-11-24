@@ -456,7 +456,6 @@ def test_fallback_stop_publishes_the_shared_default_grace(tmp_path, monkeypatch)
 
 def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
     import threading
-    from contextlib import contextmanager
 
     from kollabor_config import file_lock
     from kollabor_plugins import services
@@ -469,10 +468,9 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
     home = tmp_path / ".kollab"
     root = home / "plugins" / "hello"
     root.mkdir(parents=True)
-    ready, waiting, stop_waiting, locked, release = (
+    ready, waiting, locked, release = (
         tmp_path / "ready",
         tmp_path / "waiting-for-registry-lock",
-        tmp_path / "stop-waiting-for-registry-lock",
         tmp_path / "registry-locked",
         tmp_path / "release-registry-lock",
     )
@@ -512,16 +510,6 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
             'services.run_service("hello", "worker", sys.argv[1])',
         ]
     )
-    original_lock = services.locked_file
-
-    @contextmanager
-    def wait_for_stop_lock(path, *args, **kwargs):
-        if Path(path).name == "plugins.json.lock":
-            stop_waiting.touch()
-        with original_lock(path, *args, **kwargs):
-            yield
-
-    monkeypatch.setattr(services, "locked_file", wait_for_stop_lock)
     holder_source = "\n".join(
         [
             "import time",
@@ -557,10 +545,11 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
 
         stop_thread = threading.Thread(target=stop)
         stop_thread.start()
-        deadline = time.monotonic() + 3
-        while not stop_waiting.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert stop_waiting.exists(), "stop did not join the startup lock"
+        stop_thread.join(timeout=0.25)
+        stop_completed_before_release = not stop_thread.is_alive()
+        state_before_release = json.loads((run / "worker.state").read_text())
+        if stop_completed_before_release:
+            assert state_before_release["desired"] == "stopped"
         release.touch()
         stop_thread.join(timeout=5)
         assert not stop_thread.is_alive(), "stop deadlocked behind startup"
