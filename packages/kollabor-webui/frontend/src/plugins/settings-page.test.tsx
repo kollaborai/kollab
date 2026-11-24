@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginsSettings, pluginRowControls } from "./settings";
-import { createPluginLoader } from "./loader";
+import { createPluginLoader, listedPluginEntries } from "./loader";
 import { pluginRegistry } from "./registry";
 import type { PluginEntry } from "./sdk";
 
@@ -27,7 +27,9 @@ const plugin = (settings: unknown[]): PluginEntry => ({
   settings,
 } as PluginEntry);
 
-async function markupFor(entries: PluginEntry[], pathname = "/settings", serverTime?: number): Promise<string> {
+const CANARY = "secret-token-canary-1397";
+
+async function markupFor(entries: unknown[], pathname = "/settings", serverTime?: number): Promise<string> {
   const loader = createPluginLoader(pluginRegistry, {
     list: async () => ({ plugins: entries, server_time: serverTime }),
     importModule: async () => ({}),
@@ -46,6 +48,92 @@ afterEach(() => {
 });
 
 describe("plugin settings page", () => {
+  it.each([
+    ["entry id", (entry: Record<string, unknown>) => ({ ...entry, id: { token: CANARY } })],
+    ["entry name", (entry: Record<string, unknown>) => ({ ...entry, name: CANARY })],
+    ["entry version", (entry: Record<string, unknown>) => ({ ...entry, version: { token: CANARY } })],
+    ["entry kind", (entry: Record<string, unknown>) => ({ ...entry, kind: { token: CANARY } })],
+    ["entry source", (entry: Record<string, unknown>) => ({ ...entry, source: `https://example.invalid/?token=${CANARY}` })],
+    ["entry commit", (entry: Record<string, unknown>) => ({ ...entry, commit: { token: CANARY } })],
+    ["entry enabled", (entry: Record<string, unknown>) => ({ ...entry, enabled: "true" })],
+    ["entry state", (entry: Record<string, unknown>) => ({ ...entry, state: { token: CANARY } })],
+    ["entry error", (entry: Record<string, unknown>) => ({ ...entry, state: "error", error: `Loader failed: ${CANARY}` })],
+    ["entry web", (entry: Record<string, unknown>) => ({ ...entry, web: { entry: { token: CANARY }, style: [CANARY], hash: CANARY } })],
+    ["entry contributes", (entry: Record<string, unknown>) => ({ ...entry, contributes: { menu: [{ id: CANARY, label: CANARY, open: { view: CANARY } }] } })],
+    ["entry enable order", (entry: Record<string, unknown>) => ({ ...entry, enable_order: { token: CANARY } })],
+    ["entry shadowed", (entry: Record<string, unknown>) => ({ ...entry, shadowed: { token: CANARY } })],
+    ["entry services", (entry: Record<string, unknown>) => ({ ...entry, services: { name: CANARY } })],
+    ["entry settings", (entry: Record<string, unknown>) => ({ ...entry, settings: { label: CANARY } })],
+    ["entry settings section", (entry: Record<string, unknown>) => ({ ...entry, settings_section: { title: CANARY } })],
+    ["entry uses", (entry: Record<string, unknown>) => ({ ...entry, uses: [`custom:${CANARY}`] })],
+    ["entry grants", (entry: Record<string, unknown>) => ({ ...entry, granted: { token: CANARY } })],
+    ["service name", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: CANARY, state: "stopped" }] })],
+    ["service state", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: CANARY }] })],
+    ["service desired", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "stopped", desired: CANARY }] })],
+    ["service pid", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "stopped", pid: { token: CANARY } }] })],
+    ["service since", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "stopped", since: { token: CANARY } }] })],
+    ["service restarts", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "stopped", restarts: CANARY }] })],
+    ["service heartbeat", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "stopped", heartbeat: { token: CANARY } }] })],
+    ["service heartbeat interval", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "stopped", heartbeat_s: CANARY }] })],
+    ["service heartbeat monitor time", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "stopped", heartbeat_monitor_since: { token: CANARY } }] })],
+    ["service stop deadline", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "stopped", stop_deadline: { token: CANARY } }] })],
+    ["service error", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "error", error: `Could not start /run/${CANARY}: No such file or directory` }] })],
+    ["service secrets", (entry: Record<string, unknown>) => ({ ...entry, services: [{ name: "worker", state: "stopped", secrets: [CANARY] }] })],
+  ] as const)("normalizes malformed %s inventory data before Settings renders it", async (_field, mutate) => {
+    const base = {
+      ...plugin([{ type: "label", path: "plugin-values.hello.label", label: "Label", editable: false }]),
+      enabled: true,
+      services: [{
+        name: "worker", state: "stopped", desired: "stopped", pid: null, since: null, restarts: 0,
+        secrets: [], heartbeat: null, heartbeat_s: null, heartbeat_monitor_since: null, stop_deadline: null, error: null,
+      }],
+    } as unknown as Record<string, unknown>;
+    const raw = mutate(base);
+    const markup = await markupFor([raw]);
+    expect(markup).not.toContain(CANARY);
+
+    const entries = listedPluginEntries();
+    if (_field === "entry id") {
+      expect(entries).toHaveLength(0);
+      return;
+    }
+    expect(entries).toHaveLength(1);
+    const normalized = entries[0] as unknown as Record<string, unknown>;
+    expect(JSON.stringify(normalized)).not.toContain(CANARY);
+    expect(typeof normalized.id).toBe("string");
+    expect(typeof normalized.name).toBe("string");
+    expect(normalized.version === null || typeof normalized.version === "string").toBe(true);
+    expect(["built-in", "installed", "dev"]).toContain(normalized.kind);
+    expect(normalized.source === null || typeof normalized.source === "string").toBe(true);
+    expect(normalized.commit === null || typeof normalized.commit === "string").toBe(true);
+    expect(typeof normalized.enabled).toBe("boolean");
+    expect(typeof normalized.shadowed).toBe("boolean");
+    expect(["ok", "error", "off", "stopping", "stop-failed", "changed-on-disk", "skipped"]).toContain(normalized.state);
+    expect(normalized.error === null || typeof normalized.error === "string").toBe(true);
+    expect(normalized.web === null || typeof normalized.web === "object").toBe(true);
+    expect(normalized.contributes && typeof normalized.contributes === "object").toBe(true);
+    expect(Array.isArray(normalized.services)).toBe(true);
+    expect(Array.isArray(normalized.settings)).toBe(true);
+    expect(normalized.settings_section === null || typeof normalized.settings_section === "object").toBe(true);
+    expect(Array.isArray(normalized.uses)).toBe(true);
+    expect(Array.isArray(normalized.granted)).toBe(true);
+    expect(normalized.enable_order === null || typeof normalized.enable_order === "number").toBe(true);
+    for (const service of normalized.services as Record<string, unknown>[]) {
+      expect(typeof service.name).toBe("string");
+      expect(["starting", "running", "backoff", "stopping", "stop-failed", "exited", "stopped", "crash-stopped", "error", "unknown", "failed"]).toContain(service.state);
+      expect(["running", "stopped"]).toContain(service.desired);
+      expect(service.pid === null || typeof service.pid === "number").toBe(true);
+      expect(service.since === null || typeof service.since === "number").toBe(true);
+      expect(typeof service.restarts).toBe("number");
+      expect(service.heartbeat === null || typeof service.heartbeat === "number").toBe(true);
+      expect(service.heartbeat_s === null || typeof service.heartbeat_s === "number").toBe(true);
+      expect(service.heartbeat_monitor_since === null || typeof service.heartbeat_monitor_since === "number").toBe(true);
+      expect(service.stop_deadline === null || typeof service.stop_deadline === "number").toBe(true);
+      expect(service.error === null || typeof service.error === "string").toBe(true);
+      expect(Array.isArray(service.secrets)).toBe(true);
+    }
+  });
+
   it("renders the engine-listed settings fields and a save action", async () => {
     const markup = await markupFor([plugin([
       {
@@ -121,6 +209,40 @@ describe("plugin settings page", () => {
         heartbeat_s: 60,
       } as PluginEntry["services"][number]],
     }], "/settings", engineNow);
+
+    expect(markup).not.toContain("No Heartbeat");
+    expect(markup).toContain("Running · 2 h");
+  });
+
+  it.each([
+    ["omitted", {}],
+    ["malformed", { server_time: { token: CANARY } }],
+  ] as const)("retains the last engine clock offset when server_time is %s", async (_kind, secondResponse) => {
+    const engineNow = 1_800_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date((engineNow + 10 * 60) * 1000));
+    const entry = {
+      ...plugin([]),
+      enabled: true,
+      services: [{ name: "worker", state: "running", since: engineNow - 7200, heartbeat: engineNow - 30, heartbeat_s: 60 }],
+    };
+    let reads = 0;
+    const loader = createPluginLoader(pluginRegistry, {
+      list: async () => {
+        reads += 1;
+        return (reads === 1
+          ? { plugins: [entry], server_time: engineNow }
+          : { plugins: [entry], ...secondResponse }) as never;
+      },
+      importModule: async () => ({}),
+      fetchText: async () => "",
+      loadCode: false,
+      api: { request: async () => new Response(), stream: async () => {} },
+    });
+    await loader.refresh();
+    await loader.refresh();
+    vi.stubGlobal("window", { location: { pathname: "/settings" } });
+    const markup = renderToStaticMarkup(<PluginsSettings api={{} as never} />);
 
     expect(markup).not.toContain("No Heartbeat");
     expect(markup).toContain("Running · 2 h");
