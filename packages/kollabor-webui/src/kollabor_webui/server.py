@@ -18,7 +18,7 @@ from pathlib import Path
 import anyio
 import httpx
 from fastapi import FastAPI, Request  # type: ignore[import-not-found]
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # type: ignore[import-not-found]
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse  # type: ignore[import-not-found]
 
 from .network_security import (
     allowed_hostnames,
@@ -398,7 +398,7 @@ def create_app(
 
     @app.get("/plugins/{plugin_id}/web/{asset_path:path}")
     async def plugin_asset(plugin_id: str, asset_path: str):
-        from kollabor_plugins.packages import _ID, _read_registry, files_sha256_with_asset
+        from kollabor_plugins.packages import _ID, _read_registry, files_sha256_with_asset_snapshot
 
         missing = JSONResponse({"detail": "Not found"}, status_code=404)
         is_dev = plugin_id.endswith("@dev")
@@ -444,11 +444,22 @@ def create_app(
                     return missing
                 if not is_dev:
                     # Hash the package and capture the served bytes in one traversal, off the event loop.
-                    digest, contents = await anyio.to_thread.run_sync(files_sha256_with_asset, root, asset)
+                    digest, contents = await anyio.to_thread.run_sync(
+                        files_sha256_with_asset_snapshot, root, asset
+                    )
                     if digest != approved_hash:
+                        contents.close()
                         return missing
                     media_type = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
-                    return Response(contents, media_type=media_type)
+
+                    def body():
+                        try:
+                            while chunk := contents.read(64 * 1024):
+                                yield chunk
+                        finally:
+                            contents.close()
+
+                    return StreamingResponse(body(), media_type=media_type)
         except (OSError, ValueError, RuntimeError):
             return missing
         return FileResponse(asset) if asset is not None else missing

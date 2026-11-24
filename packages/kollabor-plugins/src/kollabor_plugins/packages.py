@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import urlsplit
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -242,34 +243,57 @@ def resolve_git_commit(url: str, ref: str | None) -> str:
     return commit
 
 
-def _hash_files(root: Path, capture: Path | None = None) -> tuple[str, bytes | None]:
+def _hash_files(root: Path, capture: Path | None = None) -> tuple[str, BinaryIO | None]:
     root = Path(root).resolve()
+    capture = Path(capture).resolve() if capture is not None else None
     if capture is not None and not capture.is_relative_to(root):
         raise ValueError("Asset is outside plugin folder")
     captured = None
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        if path.is_symlink():
-            target = os.readlink(path).encode("utf-8")
-            entry_type = b"l"
-            content = target
-        elif path.is_dir():
-            entry_type = b"d"
-            content = b""
-        elif path.is_file():
-            entry_type = b"x" if path.stat().st_mode & 0o111 else b"f"
-            content = path.read_bytes()
-            if path == capture:
-                captured = content
-        else:
-            raise ValueError("Unsupported file type in plugin")
-        digest.update(entry_type)
-        digest.update(len(relative).to_bytes(8, "big"))
-        digest.update(relative)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
-    return digest.hexdigest(), captured
+    try:
+        for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            if path.is_symlink():
+                entry_type = b"l"
+                content = os.readlink(path).encode("utf-8")
+            elif path.is_dir():
+                entry_type = b"d"
+                content = b""
+            elif path.is_file():
+                entry_type = b"x" if path.stat().st_mode & 0o111 else b"f"
+                size = path.stat().st_size
+                digest.update(entry_type)
+                digest.update(len(relative).to_bytes(8, "big"))
+                digest.update(relative)
+                digest.update(size.to_bytes(8, "big"))
+                target = None
+                if path == capture:
+                    captured = tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b")
+                    target = captured
+                read_size = 0
+                with path.open("rb") as stream:
+                    while chunk := stream.read(64 * 1024):
+                        read_size += len(chunk)
+                        digest.update(chunk)
+                        if target is not None:
+                            target.write(chunk)
+                if read_size != size:
+                    raise ValueError("Plugin file changed while hashing")
+                continue
+            else:
+                raise ValueError("Unsupported file type in plugin")
+            digest.update(entry_type)
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        if captured is not None:
+            captured.seek(0)
+        return digest.hexdigest(), captured
+    except BaseException:
+        if captured is not None:
+            captured.close()
+        raise
 
 
 def files_sha256(root: Path) -> str:
@@ -279,6 +303,15 @@ def files_sha256(root: Path) -> str:
 
 def files_sha256_with_asset(root: Path, asset: Path) -> tuple[str, bytes]:
     """Return the package hash and the exact asset bytes included in that hash."""
+    digest, captured = files_sha256_with_asset_snapshot(root, asset)
+    try:
+        return digest, captured.read()
+    finally:
+        captured.close()
+
+
+def files_sha256_with_asset_snapshot(root: Path, asset: Path) -> tuple[str, BinaryIO]:
+    """Return the package hash and a spooled snapshot of the exact asset bytes."""
     digest, captured = _hash_files(root, Path(asset))
     if captured is None:
         raise ValueError("Asset is not a regular file in plugin folder")
