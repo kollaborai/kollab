@@ -364,6 +364,7 @@ class ConfigPanel:
             "panel": self.name,
             "kind": self.kind,
             "title": TITLE,
+            "notice": getattr(service, "get_config_error", lambda: None)(),
             "sections": [
                 {
                     "id": f"s{index}",
@@ -397,8 +398,11 @@ class ConfigPanel:
             return error_result("Some settings were not saved", errors)
 
         changes = _whole_numbers(fields, changes)
-        if not apply_config_changes(_config_service(ctx), changes, target):
-            return error_result("Could not write the settings file")
+        service = _config_service(ctx)
+        if not apply_config_changes(service, changes, target):
+            get_error = getattr(service, "get_config_error", None)
+            message = get_error() if callable(get_error) else None
+            return error_result(message or "Could not write the settings file")
         where = current["save_targets"][target]
         noun = "setting" if len(changes) == 1 else "settings"
         return ok_result(
