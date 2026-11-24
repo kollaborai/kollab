@@ -256,6 +256,7 @@ const mainConfig = defineConfig({
       "src/plugins/inventory.test.ts",
       "src/plugins/surfaces.test.tsx",
       "src/plugins/wiring.test.tsx",
+      "src/plugins/hello-template.test.ts",
     ],
     environment: "node",
   },

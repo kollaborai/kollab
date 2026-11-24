@@ -150,8 +150,8 @@ The service API does not return a stop countdown. When they exit, every open pag
 goes, a page that was open shows `PR Chain is off` with a Back to Chat button, and a chat showing its tab
 switches to Chat.
 
-**Notices.** A plugin can raise a NoticeBar notice: one line and one button, with no ids or version
-numbers in the text: `A pull request is waiting for your review.  [Open]`.
+**Notices.** A plugin can raise a NoticeBar notice: one line and at most one action button, plus a dismiss
+control, with no ids or version numbers in the text: `A pull request is waiting for your review.  [Open]`.
 
 **Composer and chat.** Plugin slash commands appear in the composer palette. A plugin can draw its own
 card for a tool or message it owns, such as a PR status card.

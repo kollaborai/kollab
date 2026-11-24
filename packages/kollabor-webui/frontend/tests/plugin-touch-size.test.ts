@@ -72,3 +72,14 @@ describe("touch close-button spacing", () => {
     expect(trajectorySource).toMatch(/<SheetContent[^>]*className="[^"]*pointer-coarse:pt-14/);
   });
 });
+
+describe("NoticeAction touch size", () => {
+  it("keeps the coarse-pointer 44px minimum when a caller passes className", async () => {
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { NoticeAction } = await import("@/components/shell/NoticeBar");
+    const html = renderToStaticMarkup(createElement(NoticeAction, { className: "max-lg:h-11" }, "Retry"));
+    expect(html).toContain("pointer-coarse:min-h-11");
+    expect(html).toContain("max-lg:h-11");
+  });
+});
