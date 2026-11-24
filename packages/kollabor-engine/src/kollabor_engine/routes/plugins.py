@@ -177,6 +177,11 @@ async def get_plugin_job(request: Request, job_id: str):
     return request.app.state.plugin_jobs.get(job_id)
 
 
+@router.delete("/jobs/{job_id}")
+async def cancel_plugin_job(request: Request, job_id: str):
+    return await request.app.state.plugin_jobs.cancel(job_id)
+
+
 @router.post("/jobs/{job_id}/confirm")
 async def confirm_plugin_job(request: Request, job_id: str, body: ConfirmPluginJobRequest):
     return await request.app.state.plugin_jobs.confirm(job_id, body.commit, body.files_sha256)

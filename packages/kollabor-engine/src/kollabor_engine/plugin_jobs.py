@@ -174,6 +174,7 @@ class PluginJobs:
         if self.reaper is None:
             self.reaper = asyncio.create_task(self._reap(), name="plugin-job-reaper")
         task = self._track(self._stage(job))
+        job["_stage_task"] = task
         self.staging_tasks.add(task)
         task.add_done_callback(self.staging_tasks.discard)
         return self._public(job)
@@ -327,6 +328,26 @@ class PluginJobs:
         job["updated"] = time.monotonic()
         task = self._track(self._apply(job, commit, digest))
         return await asyncio.shield(task)
+
+    async def cancel(self, job_id: str) -> dict:
+        self._expire()
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Plugin job not found")
+        if job["status"] in {"installing", "complete"}:
+            raise HTTPException(status_code=409, detail="Plugin job can no longer be cancelled")
+
+        task = job.get("_stage_task")
+        if job["status"] == "staging" and task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        cleaned, _ = await self._run_cleanup(job)
+        del self.jobs[job_id]
+        if not cleaned:
+            self.expired_jobs[job_id] = job
+        self.hub.publish_change()
+        return {"job_id": job_id, "status": "cancelled"}
 
     @staticmethod
     def _install_update(job: dict, commit: str, digest: str) -> None:
