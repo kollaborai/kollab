@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type RefObject } from "react";
 import { Plus } from "lucide-react";
 import type { EngineApi } from "@/api";
-import { serializeDraft, type Draft } from "@/components/panels/FieldRenderer";
+import { FieldRenderer, serializeDraft, type Draft } from "@/components/panels/FieldRenderer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
@@ -27,6 +27,13 @@ export function settingsValues(entry: Pick<PluginEntry, "id" | "kind">, draft: D
     }
     return [path.slice(prefix.length), value];
   }));
+}
+
+async function savePluginSettings(api: EngineApi, entry: Pick<PluginEntry, "id" | "kind">, draft: Draft): Promise<void> {
+  await api.json(`/plugins/${encodeURIComponent(entry.id)}/settings`, {
+    method: "PUT",
+    body: JSON.stringify(settingsValues(entry, draft)),
+  });
 }
 
 /** The failure to show for a plugin: its load error on this page, else the engine's error. Null when none. */
@@ -126,12 +133,27 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<"disable" | "remove" | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<Draft>({});
   const { managed, switchEnabled, services, updateRemove } = pluginRowControls(entry, remote);
   const stopping = entry.state === "stopping";
   const failure = failureOf(entry, record);
   const uses = describeUses(entry.uses);
   const usesCount = uses.throughKollab.length + uses.onItsOwn.length + uses.other.length;
   const SettingsView = record?.contributions.settings?.render;
+  const settings = entry.settings ?? [];
+  const saveSettings = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await savePluginSettings(api, entry, settingsDraft);
+      setSettingsDraft({});
+      await refreshPlugins();
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
   const perform = async (action: "enable" | "disable" | "remove") => {
     setBusy(true);
     setError(null);
@@ -207,6 +229,32 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
               ) : null,
             )}
             <p className="text-muted-foreground mt-2 text-xs">{PLUGIN_TRUST_NOTICE}</p>
+          </div>
+        ) : null}
+        {settings.length ? (
+          <div data-plugin={entry.id} className="min-w-0">
+            <h3 className="text-sm font-semibold">{entry.settings_section?.title ?? "Settings"}</h3>
+            {settings.map((field) => (
+              <FieldRenderer
+                key={field.path}
+                field={field}
+                draft={settingsDraft}
+                disabled={remote || busy || entry.state === "changed-on-disk"}
+                onChange={setSettingsDraft}
+              />
+            ))}
+            {!remote ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="pointer-coarse:min-h-11"
+                disabled={busy || !Object.keys(settingsDraft).length}
+                onClick={() => { void saveSettings(); }}
+              >
+                Save
+              </Button>
+            ) : null}
           </div>
         ) : null}
         {SettingsView && record?.k ? (

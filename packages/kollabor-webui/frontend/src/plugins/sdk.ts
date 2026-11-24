@@ -8,6 +8,7 @@
  * never as HTML, and plugin controls are the app's own components (`k.ui`).
  */
 import { useCallback, useEffect, useState, type ComponentType } from "react";
+import type { PanelField } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -74,6 +75,8 @@ export type PluginEntry = {
     renderers?: Declared[];
   };
   services: PluginService[];
+  settings?: PanelField[];
+  settings_section?: { title?: string } | null;
   uses?: string[];
   granted?: string[];
 };
