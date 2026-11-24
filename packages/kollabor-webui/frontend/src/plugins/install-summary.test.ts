@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 // @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
 import { ApiError } from "@/api";
-import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, discardReview, normalizeReviewJob, reviewFormState, shouldPollReview, shouldRetryPolling, showFetching, startReview } from "./install";
+import { describePluginAdds, describeUses, errorText, PLUGIN_TRUST_NOTICE, discardReview, normalizeReviewJob, reviewFormState, shouldPollReview, shouldRetryPolling, showFetching, startReview } from "./install";
 
 const installSource = readFileSync(new URL("./install.tsx", import.meta.url), "utf8");
 const settingsSource = readFileSync(new URL("./settings.tsx", import.meta.url), "utf8");
@@ -56,6 +56,10 @@ describe("plugin review manifest boundary", () => {
     const normalized = normalizeReviewJob(input);
     expect(normalized).not.toBeNull();
     expect(JSON.stringify(normalized)).not.toContain(canary);
+  });
+  it("shows safe reasons for rejected plugin requests", () => {
+    expect(errorText(new ApiError("Invalid plugin Git source", 422, {}))).toBe("Invalid plugin Git source");
+    expect(errorText(new ApiError("Cannot safely update this plugin", 409, {}))).toBe("Cannot safely update this plugin");
   });
 });
 
