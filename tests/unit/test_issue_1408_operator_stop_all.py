@@ -534,3 +534,35 @@ def test_cli_everywhere_skips_a_row_without_a_start_time(tmp_path, monkeypatch, 
 
     assert [call.args[0]["identity"] for call in stop.await_args_list] == ["far"]
     assert "partial" in capsys.readouterr().out
+
+
+def test_cli_stop_ladder_never_signals_a_pid_whose_start_differs_from_the_row(monkeypatch):
+    """The ladder's guard binds to the row's start_token, not to whatever holds the pid now."""
+    import subprocess
+
+    from kollabor import cli
+    from plugins.hub.messenger import AgentMessenger
+
+    bystander = subprocess.Popen(["sleep", "30"])
+    try:
+        monkeypatch.setattr(AgentMessenger, "signal_shutdown", AsyncMock(return_value=False))
+        monkeypatch.setattr(AgentMessenger, "request_status", AsyncMock(return_value={}))
+        kills = []
+        record = {
+            "agent_id": "a1", "identity": "amethyst", "pid": bystander.pid,
+            "start_token": "darwin:1.0", "started_at": 1.0,
+            "socket_path": "/nonexistent/amethyst.sock",
+        }
+
+        stable = (1795468911.0, "/bin/sleep", "argvhash")  # F15b sees one steady process
+        ok, message = asyncio.run(cli.stop_agent_record(
+            record, "test", kill=lambda pid, sig: kills.append(sig),
+            identity=lambda pid: stable,
+        ))
+
+        assert kills == []
+        assert bystander.poll() is None
+        assert not ok
+    finally:
+        bystander.kill()
+        bystander.wait()
