@@ -412,7 +412,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
                       key={key}
                       type="button"
                       variant={isSelected ? "secondary" : "ghost"}
-                      className="h-auto min-h-12 w-full min-w-0 justify-start gap-2 px-2 py-2 text-left"
+                      className="h-auto min-h-12 w-full min-w-0 justify-start gap-2 whitespace-normal px-2 py-2 text-left"
                       aria-label={entry.name}
                       aria-describedby={descriptionId}
                       aria-pressed={isSelected}
