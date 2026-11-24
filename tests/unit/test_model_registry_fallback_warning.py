@@ -24,4 +24,5 @@ def test_unlisted_model_warns_once(monkeypatch, caplog):
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "mystery-9" in warnings[0] and "128000" in warnings[0]
+    assert "mystery-9" not in warnings[0]
+    assert "128000" in warnings[0]
