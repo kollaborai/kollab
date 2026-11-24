@@ -121,8 +121,13 @@ A package plugin's `web/dist/index.js` default-exports `definePlugin((k) => ...)
 - `registry.ts`: the store every contribution point reads (`usePlugins()`); removing a plugin drops all it added.
 - `loader.ts`: `GET /plugins`, `import()` with a 5 s limit, Retry as `?v=<hash>&retry=<n>`, `plugins-changed`,
   `?plugins=off`. A plugin's contributions show only after its function returns.
-- `mount.tsx`, `surfaces.tsx`: the `<div data-plugin>` mount and error boundary, and what kollab draws
-  (menu rows in `SessionPanel.tsx`, pages and notices in `App.tsx`, views, modals).
+- `mount.tsx`, `surfaces.tsx`: scoped plugin mounts (`<div>` for surfaces and `<span>` for inline
+  message tags), the error boundary, and the page, view, and modal wiring.
+- `composer-commands.ts`: plugin slash-command matching, palette entries, and conflict selection.
+- `renderer-select.ts`, `renderers.tsx`, `tagged-text.ts`: tool and tag renderer selection, Markdown
+  tag slots, and their native fallbacks. Tag renderers apply to assistant message text.
+- `components/assistant-ui/thread.tsx`: connects the command and renderer modules to the assistant
+  chat surface.
 
 Rules: plugin text renders as text, never as HTML; plugin UI mounts only through `PluginMount`; with no
 plugin installed every surface draws nothing. Plugins share the app's React through the import map the

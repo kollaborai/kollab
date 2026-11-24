@@ -151,8 +151,9 @@ switches to Chat.
 **Notices.** A plugin can raise a NoticeBar notice: one line and one button, with no ids or version
 numbers in the text: `A pull request is waiting for your review.  [Open]`.
 
-**Composer and chat.** Plugin slash commands appear in the composer palette. A plugin can draw its own
-card for a tool or message it owns, such as a PR status card.
+**Composer and chat.** Plugin slash commands appear in the composer palette. Submitting a matching
+command without attachments consumes the draft and calls the plugin's `run(args)` locally. A plugin
+can draw a card for its tool or an inline card for its registered tag in assistant message text.
 
 **Failures.** A plugin whose code fails while loading keeps its row as `PR Chain  Failed to Load`, and
 one that fails while drawing shows `Failed to Render`; both open a small kollab-drawn panel with Retry,
@@ -489,9 +490,11 @@ export default definePlugin((k) => {
 });
 ```
 
-Every `render` is a React component that receives `{ k, session }` as props (`session` only inside a
-`view`). The `/badge` route answers `{text, hint}`. Paths in `k.api`, `k.useApi` and `count.path` are
-relative to `/plugins/{id}/api/`.
+View, page-tab, modal-tab, and settings render components receive `{ k, session? }`; `session` is
+provided for a `view`. A chat renderer registered with `k.renderer` receives `{ k, toolCall }` for a
+tool renderer or `{ k, tag }` for a tag renderer, never `session`. `toolCall` has `name`, `args`,
+`result`, and `status`; `tag` has `name` and `content`. The `/badge` route answers `{text, hint}`.
+Paths in `k.api`, `k.useApi` and `count.path` are relative to `/plugins/{id}/api/`.
 
 Contribution points. Each is one existing component that also reads the plugin registry:
 
@@ -502,9 +505,14 @@ Contribution points. Each is one existing component that also reads the plugin r
 | `k.page({id, title, tabs})` | the whole main area with a plugin tab bar | main column in `App.tsx` |
 | `k.modal({id, title, tabs})` | a dialog with tabs; full screen on a phone | `components/ui/dialog` |
 | `k.settings({render})` | Settings → Plugins → this plugin, under its generated form | `panel-model.ts`, `PanelHost.tsx` |
-| `k.command({name, description, run})` | the composer palette | the composer's slash palette |
-| `k.renderer({tool or tag, render})` | a chat card for that tool or message tag | `Thread.tsx` |
+| `k.command({name, description, run})` | the composer palette; submitting a matching draft without attachments calls `run(args)` locally | `composer-commands.ts`, `components/assistant-ui/thread.tsx` |
+| `k.renderer({tool or tag, render})` | a tool-call card or an inline card for a registered tag in assistant message text | `renderers.tsx`, `components/assistant-ui/thread.tsx` |
 | `k.notice({text, button})` | NoticeBar | `NoticeBar.tsx` |
+
+Tag renderer names use `[A-Za-z][A-Za-z0-9_-]*` and must match the tag's case. Assistant message
+text uses bare `<name>content</name>` tags with no attributes; unmatched or incomplete tags stay
+ordinary Markdown text. A tag renderer is mounted inline inside the Markdown paragraph, so its
+component must return phrasing content such as a `span`, not block content such as a `div`.
 
 `open` is `{page}`, `{modal}`, `{view}` (switches the open chat to that tab) or `{url}`.
 
