@@ -1252,7 +1252,7 @@ class PluginDispatcher:
                 except Exception as exc:
                     message = redact_log(str(exc).strip())[:500] or type(exc).__name__
                     self.errors[plugin_id] = message
-                    logger.warning("Plugin %s engine failed to load: %s", plugin_id, type(exc).__name__)
+                    logger.warning("Plugin %s engine failed to load: %s", plugin_id, message)
                     raise HTTPException(status_code=503, detail="Plugin engine failed to load") from exc
                 self._loaded[plugin_id] = loaded
             self.errors.pop(plugin_id, None)
