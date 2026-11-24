@@ -155,8 +155,8 @@ describe("loading", () => {
     expect(plugin("hello")?.status).toBe("loading");
     await vi.advanceTimersByTimeAsync(1);
     await loader.idle();
-    expect(plugin("hello")).toMatchObject({ status: "failed", error: "Hello did not finish loading within 5 s." });
-    expect(plugin("pr-chain")).toMatchObject({ status: "failed", error: "PR Chain did not finish loading within 5 s." });
+    expect(plugin("hello")).toMatchObject({ status: "failed", error: "This plugin's web code failed while loading. Check the browser console for details." });
+    expect(plugin("pr-chain")).toMatchObject({ status: "failed", error: "This plugin's web code failed while loading. Check the browser console for details." });
   });
 
   it("a timed-out import that resolves later is ignored: its plugin function never runs", async () => {
@@ -225,7 +225,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js does not default-export definePlugin(...).",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
   });
 
@@ -238,7 +238,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js bundles its own React: mark react as external",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
     expect(deps.importModule).not.toHaveBeenCalled();
   });
@@ -256,7 +256,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js bundles its own React: mark react as external",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
     expect(deps.importModule).not.toHaveBeenCalled();
   });
@@ -290,7 +290,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js bundles its own React: mark react as external",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
     expect(deps.importModule).not.toHaveBeenCalled();
   });
@@ -311,7 +311,11 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")?.status).toBe("failed");
     await loader.retry("hello");
-    expect(plugin("hello")).toMatchObject({ status: "failed", error: "second try fails", retries: 1 });
+    expect(plugin("hello")).toMatchObject({
+      status: "failed",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
+      retries: 1,
+    });
     fail = false;
     await loader.retry("hello");
     expect(plugin("hello")).toMatchObject({ status: "ready", retries: 2, error: null });
