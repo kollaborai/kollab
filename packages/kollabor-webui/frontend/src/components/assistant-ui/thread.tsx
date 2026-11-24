@@ -1224,7 +1224,7 @@ function prettyCommandName(name: string): string {
       }
       return lower.charAt(0).toUpperCase() + lower.slice(1);
     })
-    .join(" ");
+    .join(" ") || name;
 }
 
 type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
