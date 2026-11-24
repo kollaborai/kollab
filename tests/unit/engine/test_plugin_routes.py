@@ -92,6 +92,56 @@ def test_plugin_settings_read_installed_development_and_builtin(tmp_path, monkey
         assert client.get("/plugins/hello/settings").status_code == 409
 
 
+def test_settings_routes_select_builtin_when_package_id_collides(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from kollabor_engine.routes import plugins as plugin_routes
+    from kollabor_plugins import registry, settings as plugin_settings
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    builtin_values = {"plugins.voice.mode": "built-in"}
+    package_values = {"mode": "installed"}
+    package_settings = SimpleNamespace(
+        get=lambda: dict(package_values),
+        save=lambda values: package_values.update(values),
+    )
+    monkeypatch.setattr(
+        plugin_routes,
+        "_package_context",
+        lambda plugin_id: SimpleNamespace(settings=package_settings) if plugin_id == "voice" else None,
+    )
+    monkeypatch.setattr(
+        registry,
+        "plugin_entries",
+        lambda: [{
+            "id": "voice",
+            "kind": "built-in",
+            "settings": [{
+                "path": "plugins.voice.mode",
+                "value": builtin_values["plugins.voice.mode"],
+                "secret": False,
+                "type": "text_input",
+            }],
+        }],
+    )
+
+    def save_builtin(plugin_id, values):
+        assert plugin_id == "voice"
+        builtin_values.update(values)
+
+    monkeypatch.setattr(plugin_settings, "save", save_builtin)
+    with TestClient(create_app()) as client:
+        assert client.get("/plugins/voice/settings?kind=built-in").json() == {
+            "plugins.voice.mode": "built-in"
+        }
+        assert client.put(
+            "/plugins/voice/settings?kind=built-in", json={"plugins.voice.mode": "updated"}
+        ).json() == {"plugins.voice.mode": "updated"}
+        assert package_values == {"mode": "installed"}
+
+
 @pytest.mark.asyncio
 async def test_plugin_event_streams_heartbeat_and_disconnect(tmp_path, monkeypatch):
     import asyncio
