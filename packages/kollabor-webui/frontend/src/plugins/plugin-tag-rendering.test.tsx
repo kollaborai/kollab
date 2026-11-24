@@ -107,6 +107,15 @@ describe("plugin tag message markdown", () => {
     expect(paragraph).not.toContain('<div data-plugin="renderer-test"');
   });
 
+  it("keeps inline code inline around a plugin tag", () => {
+    const html = render("use `npm test` here, then <card>x</card>");
+    const paragraph = html.match(/<p[^>]*>[\s\S]*?<\/p>/)?.[0] ?? "";
+
+    expect(paragraph).toMatch(/use <code[^>]*aui-md-inline-code[^>]*>npm test<\/code> here, then/);
+    expect(paragraph).toContain("data-plugin-tag-view");
+    expect(paragraph).not.toContain("<pre");
+  });
+
   it("keeps native Copy headers on code blocks around a plugin view", () => {
     const html = render("```ts\nconst before = 1;\n```\n\n<card>x</card>\n\n```ts\nconst after = 2;\n```");
 
