@@ -29,14 +29,19 @@ def _peer(identity, project="/work/here"):
     )
 
 
-def _plugin(monkeypatch, here, machine):
+def _plugin(monkeypatch, here, machine, busy=()):
+    """``busy``: live pids whose socket does not answer (stuck on a turn)."""
     plugin = HubPlugin()
 
     async def discover_agents_async(include_self=False, include_solo=False):
         return list(here)
 
+    def discover_agents(include_self=False, include_solo=False, include_busy=False):
+        return list(here) + (list(busy) if include_busy else [])
+
     plugin._presence = SimpleNamespace(
         discover_agents_async=discover_agents_async,
+        discover_agents=discover_agents,
         scan_machine_presence=lambda: list(machine),
     )
     plugin._identity = SimpleNamespace(agent_id="me", identity="legal-ops-lead")
@@ -356,3 +361,23 @@ def test_cli_everywhere_is_refused_from_an_agent_context(tmp_path, monkeypatch):
         asyncio.run(_handle_cli_hub(["stop", "all", "--everywhere"]))
 
     assert stop.await_count == 0
+
+
+def test_typed_stop_all_stops_a_stuck_agent(monkeypatch):
+    """A live agent whose socket stopped answering is the one most worth stopping."""
+    stuck = _peer("stuck")
+    plugin, stopped = _plugin(monkeypatch, [], [stuck], busy=[stuck])
+
+    asyncio.run(plugin._handle_hub_command("stop all"))
+
+    assert stopped == ["stuck"]
+
+
+def test_other_folder_list_keeps_a_live_agent_with_an_old_heartbeat(monkeypatch):
+    quiet = _peer("quiet", project="/work/elsewhere")
+    quiet.last_heartbeat = time.time() - 600
+    plugin, _ = _plugin(monkeypatch, [], [quiet])
+
+    result = asyncio.run(plugin._handle_hub_command("stop all"))
+
+    assert "/work/elsewhere: quiet" in result
