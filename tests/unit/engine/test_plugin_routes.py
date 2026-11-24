@@ -33,7 +33,7 @@ def test_plugin_list_uses_shared_inventory(tmp_path, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data.pop("server_time") > 0
-    assert data == {"schema": 1, "plugins": entries}
+    assert data == {"schema": 1, "plugins": [registry._normalize_plugin_entry(entries[0])]}
 
 
 def test_no_plugins_disables_engine_plugin_routes(monkeypatch):
@@ -502,7 +502,7 @@ def make_router(ctx):
         assert client.get("/plugins/other/api/value").status_code == 503
         other = next(row for row in client.get("/plugins").json()["plugins"] if row["id"] == "other")
         assert other["state"] == "error"
-        assert "clash" in other["error"].lower()
+        assert other["error"] == "Python entry failed while loading; see the process log for details."
         records["hello"]["enabled"] = False
         path.write_text(json.dumps({"plugins": records, "dev": {}}))
         assert client.get("/plugins/hello/api/value").status_code == 404
@@ -541,7 +541,8 @@ def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch)
     with TestClient(create_app()) as client:
         entry = client.get("/plugins").json()["plugins"][0]
         assert entry["state"] == "error"
-        assert "ValueError" in entry["error"]
+        assert entry["error"] == "Python entry failed while loading; see the process log for details."
+        assert "ValueError" not in entry["error"]
         assert "secret-value" not in entry["error"]
         assert client.get("/plugins/hello/api/anything").status_code == 503
 
