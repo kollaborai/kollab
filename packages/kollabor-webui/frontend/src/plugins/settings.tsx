@@ -335,7 +335,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
         <DialogContent onCloseAutoFocus={restoreConfirmationFocus}>
           <DialogHeader>
             <DialogTitle>{confirmation === "remove" ? "Remove" : "Turn Off"} {entry.name}?</DialogTitle>
-            <DialogDescription>{confirmation === "remove" ? "Background processes will stop. Plugin requests must finish before it can be removed." : "Background processes will stop. Cancel active plugin agent runs before turning it off."}</DialogDescription>
+            <DialogDescription>{confirmation === "remove" ? "Background processes will stop. Cancel active plugin agent runs first; plugin requests must finish before removal." : "Background processes will stop. Cancel active plugin agent runs before turning it off."}</DialogDescription>
           </DialogHeader>
           {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
           <DialogFooter>
