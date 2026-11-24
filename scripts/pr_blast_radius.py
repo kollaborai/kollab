@@ -20,9 +20,10 @@ _JS_IMPORT = re.compile(
 )
 _JS_SUFFIXES = (".ts", ".tsx", ".js", ".mjs")
 _DYNAMIC_MODULE_CALLS = {"import_module", "__import__", "run_module"}
+_DYNAMIC_EXECUTION_CALLS = {"exec", "eval"}
 _DYNAMIC_DIRECTORY_CALLS = {"glob", "rglob", "iterdir", "walk", "listdir"}
 _DYNAMIC_CALL_IN_PATCH = re.compile(
-    r"\b(?:import_module|__import__|spec_from_file_location|exec_module|"
+    r"\b(?:exec|eval|import_module|__import__|spec_from_file_location|exec_module|"
     r"run_path|run_module|glob|rglob|iterdir|walk|listdir)\s*\("
 )
 _DYNAMIC_IMPORT_MENTION_IN_PATCH = re.compile(
@@ -262,6 +263,8 @@ def _is_dynamic_load_call(
 ) -> bool:
     name = _call_name(node, aliases)
     short_name = name.rsplit(".", 1)[-1] if name else None
+    if short_name in _DYNAMIC_EXECUTION_CALLS:
+        return True
     if short_name in _DYNAMIC_MODULE_CALLS:
         argument = _call_argument(node, 0, {"name", "name_or_path", "mod_name"})
         module_name = _literal_string(argument)
