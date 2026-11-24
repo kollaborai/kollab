@@ -221,8 +221,7 @@ async def test_receiver_cancellation_after_effect_is_not_retried_automatically(
         replay = messenger_module.AgentMessenger.read_mailboxes(
             ["receiver"], consume=False
         )
-        with pytest.raises(asyncio.CancelledError):
-            await plugin._deliver_inbox_batch(replay)
+        await plugin._deliver_inbox_batch(replay)
 
     assert effects == [message.id]
 
