@@ -1,5 +1,5 @@
-"""Pick which optional CI lanes a change needs.
-Webui skips only when all paths are safe; voice runs for voice paths, shared files, or empty input.
+"""Pick optional CI lanes from changed paths.
+Webui skips only for explicitly safe paths; voice runs for voice or shared paths or empty input.
 """
 
 import sys
@@ -8,9 +8,7 @@ VOICE_PREFIX = "packages/kollabor-voice/"
 SHARED_FILES = {".github/workflows/ci.yml", "uv.lock", "pyproject.toml"}
 SHARED_PREFIXES = (".github/actions/",)
 WEBUI_SAFE_PREFIXES = (
-    "docs/",
     "changes/",
-    VOICE_PREFIX,
     "tests/unit/",
     "tests/tmux/specs/",
     ".github/ISSUE_TEMPLATE/",
