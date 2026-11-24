@@ -882,8 +882,8 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
    refuse callers that are not on this computer.
 10. **Engine down.** Background processes and their restarts keep going, agent-run limits hold, usage
     lines wait in `usage.jsonl`, and plugin views show the app's engine-down state.
-11. **Orphaned runs and half-finished steps.** Turning a plugin off or removing it cancels its live agent
-    runs after a confirm, and stopping gives each process `stop_timeout_s` to finish its step. If Kollab
+11. **Orphaned runs and half-finished steps.** The engine refuses to turn off or remove a plugin while its
+    agent runs are active; the user must cancel those runs first. Stopping gives each process `stop_timeout_s` to finish its step. If Kollab
     cannot signal a verified wrapper, the plugin stays off, Settings shows `Failed to Stop`, and the process
     may still be running until stopping succeeds.
 12. **Lost results.** Every run's state and result are written to `runs.json` with a temp file and rename
