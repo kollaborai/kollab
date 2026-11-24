@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
+import { readFileSync } from "node:fs";
 import {
   assetUrl,
   bundlesOwnReact,
@@ -418,6 +420,7 @@ describe("own React detection", () => {
 
 describe("PhoneLink lists plugins and loads no code", () => {
   it("fills the list, imports nothing and keeps the registry empty when loadCode is false", async () => {
+    const runtimeSource = readFileSync(new URL("./loader.ts", import.meta.url), "utf8");
     const { registry, deps } = harness([[entry("hello"), entry("pr-chain")]], {});
     const phone = { ...deps, loadCode: false };
     const loader = createPluginLoader(registry, phone);
@@ -426,6 +429,7 @@ describe("PhoneLink lists plugins and loads no code", () => {
     expect(deps.importModule).not.toHaveBeenCalled();
     expect(deps.fetchText).not.toHaveBeenCalled();
     expect(deps.addStyle).not.toHaveBeenCalled();
+    expect(runtimeSource).toContain("loadCode: !inPhoneApp(where.pathname)");
     expect(listedPluginEntries().map((item) => item.id)).toEqual(["hello", "pr-chain"]);
     expect(registry.getSnapshot()).toMatchObject({ listed: true, plugins: [] });
   });
