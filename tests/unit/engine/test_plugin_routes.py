@@ -190,6 +190,39 @@ def test_builtin_settings_save_uses_builtin_writer_when_package_id_collides(tmp_
     assert package_writes == []
 
 
+def test_builtin_enable_route_selects_builtin_when_package_id_collides(tmp_path, monkeypatch):
+    import json
+
+    from kollabor_engine.routes import plugins as plugin_routes
+
+    from kollabor_plugins import registry, services
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    config_path = home / "config.json"
+    config_path.write_text(json.dumps({"plugins": {"voice": {"enabled": True}}}))
+    registry_path = home / "plugins.json"
+    registry_path.write_text(json.dumps({"plugins": {"voice": {"enabled": True}}, "dev": {}}))
+    monkeypatch.setattr(plugin_routes, "_package_context", lambda _plugin_id: None)
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [{
+        "id": "voice", "kind": "built-in", "settings": [{
+            "path": "plugins.voice.enabled", "type": "checkbox", "editable": True,
+            "secret": False, "value": True,
+        }],
+    }])
+    monkeypatch.setattr(services, "stop_services", lambda _plugin_id: [])
+
+    with TestClient(create_app()) as client:
+        response = client.post("/plugins/voice/disable?kind=built-in")
+
+    assert response.status_code == 200, response.text
+    assert json.loads(config_path.read_text())["plugins"]["voice"]["enabled"] is False
+    assert json.loads(registry_path.read_text())["plugins"]["voice"]["enabled"] is True
+
+
 @pytest.mark.asyncio
 async def test_plugin_event_streams_heartbeat_and_disconnect(tmp_path, monkeypatch):
     import asyncio
@@ -751,6 +784,7 @@ def test_plugin_tokens_are_private_stable_and_scoped(tmp_path, monkeypatch):
 
     from kollabor_engine import server
 
+    from kollabor_plugins import registry
     from kollabor_plugins.packages import files_sha256
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -783,6 +817,12 @@ def make_router(ctx):
 ''')
         records[plugin_id] = {"enabled": True, "files_sha256": files_sha256(root), "granted": []}
     (home / "plugins.json").write_text(json.dumps({"plugins": records, "dev": {}}))
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [{
+        "id": "hello", "kind": "built-in", "settings": [{
+            "path": "plugins.hello.mode", "type": "text_input", "editable": True,
+            "secret": False, "value": "built-in",
+        }],
+    }])
     with TestClient(create_app()) as client:
         hello_path = home / "plugin-data" / "hello" / "run" / "token"
         other_path = home / "plugin-data" / "other" / "run" / "token"
@@ -799,7 +839,16 @@ def make_router(ctx):
         with client.websocket_connect("/plugins/hello/api/socket", headers=own) as websocket:
             assert websocket.receive_json() == {"id": "hello"}
         assert client.get("/plugins/hello/settings", headers=own).status_code == 200
+        assert client.get("/plugins/hello/settings?kind=installed", headers=own).status_code == 200
         assert client.get("/plugins/hello/usage", headers=own).status_code == 200
+        protected_settings = [
+            client.get("/plugins/hello/settings?kind=built-in", headers=own),
+            client.put(
+                "/plugins/hello/settings?kind=built-in", headers=own,
+                json={"plugins.hello.mode": "changed"},
+            ),
+        ]
+        assert [response.status_code for response in protected_settings] == [401, 401]
         assert client.post("/plugins/hello/events", headers=own, json={"topic": "ready", "data": {}}).status_code == 200
         assert client.get("/plugins/other/api/who", headers=own).status_code == 401
         assert client.get("/plugins", headers=own).status_code == 401

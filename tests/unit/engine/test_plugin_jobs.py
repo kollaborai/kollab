@@ -439,6 +439,28 @@ def test_jobs_are_bounded_and_expire(client, monkeypatch):
     assert client.get(f"/plugins/jobs/{first['job_id']}").status_code == 404
 
 
+def test_finished_review_job_does_not_block_the_next_review(client, managed_repo, monkeypatch):
+    from kollabor_engine import plugin_jobs
+
+    source, bare = managed_repo
+    manifest = json.loads((source / "kollab-plugin.json").read_text())
+    manifest["uses"] = [f"net:host-{index}.example" for index in range(257)]
+    (source / "kollab-plugin.json").write_text(json.dumps(manifest))
+    _git("add", "kollab-plugin.json", cwd=source)
+    _git("commit", "-m", "exceed review limit", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+
+    monkeypatch.setattr(plugin_jobs, "_MAX_JOBS", 1)
+    first = client.post("/plugins/install", json={"source": "https://example.invalid/repo#main"})
+    failed = _ready(client, first.json()["job_id"])
+    assert failed["status"] == "error"
+
+    second = client.post("/plugins/install", json={"source": "https://example.invalid/repo#main"})
+
+    assert second.status_code == 202, second.text
+    assert failed["job_id"] not in client.app.state.plugin_jobs.jobs
+
+
 def test_expiry_leaves_cleanup_to_close_when_manager_is_closing(client, monkeypatch):
     from kollabor_engine import plugin_jobs
 

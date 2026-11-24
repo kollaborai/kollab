@@ -39,6 +39,27 @@ def test_save_package_settings(tmp_path, monkeypatch):
     assert json.loads(values.read_text()) == {"loop.threads": 3, "issues.build": False}
 
 
+def test_save_package_textarea_setting(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.settings import save
+
+    home = tmp_path / ".kollab"
+    package = home / "plugins" / "hello"
+    package.mkdir(parents=True)
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": True}}, "dev": {}}))
+    (package / "kollab-plugin.json").write_text(json.dumps({"settings": "settings.json"}))
+    (package / "settings.json").write_text(json.dumps({
+        "title": "Hello",
+        "widgets": [{"type": "textarea", "config_path": "notes.summary", "default": ""}],
+    }))
+
+    save("hello", {"notes.summary": "First line\nSecond line"})
+
+    values = home / "plugin-data" / "hello" / "values.json"
+    assert json.loads(values.read_text()) == {"notes.summary": "First line\nSecond line"}
+
+
 def test_enable_order_tracks_transitions_without_reordering_idempotent_writes(tmp_path, monkeypatch):
     """The persisted order is shared by clients and advances only for a real enable."""
     from kollabor_plugins import services
