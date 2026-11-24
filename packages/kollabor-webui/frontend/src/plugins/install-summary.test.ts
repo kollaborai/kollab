@@ -197,6 +197,10 @@ describe("plugin review after a failure", () => {
     expect(start).toMatch(/job && \(job\.status === "staging" \|\| job\.status === "ready"\)/);
     expect(start).toMatch(/startReview\(api, \{ action, pluginId, url, gitRef \}\)/);
   });
+  it("does not release an error or cancelled job when closing the review", () => {
+    const close = installSource.slice(installSource.indexOf("const close ="), installSource.indexOf("const confirm ="));
+    expect(close).toMatch(/job\.status === "staging" \|\| job\.status === "ready"/);
+  });
   it("keeps a failed update review retryable through the shared review request path", async () => {
     expect(reviewFormState("update", { status: "error" }).review).toBe(true);
     const requests: { path: string; init?: { method?: string; body?: string } }[] = [];
