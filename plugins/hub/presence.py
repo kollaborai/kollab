@@ -783,9 +783,12 @@ class PresenceManager:
             except (OSError, ValueError):
                 preserve = True
                 continue
-            if isinstance(row, dict) and (
-                row.get("pid") != agent.pid
-                or row.get("started_at", agent.started_at) != agent.started_at
+            if (
+                not isinstance(row, dict)
+                or row.get("pid") != agent.pid
+                or "started_at" not in row
+                or agent.started_at is None
+                or row["started_at"] != agent.started_at
             ):
                 preserve = True
                 continue
