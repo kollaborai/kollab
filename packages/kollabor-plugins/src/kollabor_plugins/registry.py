@@ -119,7 +119,7 @@ class _RegistryDiscovery(PluginDiscovery):
 def _plugin_code_error(plugin_id: str, exc: Exception) -> ValueError:
     """Keep text raised by plugin code out of metadata; it can hold secrets (#1401)."""
     logger.error("Plugin %s raised while loading", plugin_id, exc_info=exc)
-    return ValueError(f"Python entry raised {type(exc).__name__}; details in kollab.log")
+    return ValueError("Python entry failed while loading; see the process log for details.")
 
 
 class PluginRegistry:
