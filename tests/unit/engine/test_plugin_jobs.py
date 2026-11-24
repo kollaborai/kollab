@@ -99,6 +99,40 @@ def test_job_management_is_local_even_with_user_token(client):
     assert client.get("/plugins/jobs/missing", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
 
 
+def test_cancel_discards_ready_plugin_job(client):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    assert _ready(client, job_id)["status"] == "ready"
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+
+    response = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"job_id": job_id, "status": "cancelled"}
+    assert not base.exists()
+    assert client.get(f"/plugins/jobs/{job_id}").status_code == 404
+
+
+def test_cancel_stops_staging_job_and_removes_its_files(client, monkeypatch):
+    import asyncio
+
+    async def stalled(*args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client.app.state.plugin_jobs, "_run_staging", stalled)
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "staging"
+
+    response = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"job_id": job_id, "status": "cancelled"}
+    assert not base.exists()
+    assert client.get(f"/plugins/jobs/{job_id}").status_code == 404
+
+
 def test_install_staging_is_background_and_does_not_reveal_errors(client, monkeypatch):
     import asyncio
     import threading
