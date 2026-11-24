@@ -89,10 +89,44 @@ _MAX_PLUGIN_MANIFEST_BYTES = 1_048_576
 _MAX_PLUGIN_SERVICES = 128
 _MAX_PLUGIN_SERVICE_SECRETS = 64
 _MAX_PLUGIN_USES = 256
+_MAX_PLUGIN_CONTRIBUTIONS = 256
+_MAX_PLUGIN_SETTINGS = 256
+_MAX_PLUGIN_SETTING_OPTIONS = 256
+_MAX_PLUGIN_OPTION_LABELS = 256
+_MAX_PLUGIN_SETTINGS_BYTES = 1_048_576
 
 
 class ManifestReviewLimitError(ValueError):
     """A manifest exceeds a collection limit that the review UI can display."""
+
+
+def _validate_settings_review_limits(path: Path) -> None:
+    try:
+        if path.stat().st_size > _MAX_PLUGIN_SETTINGS_BYTES:
+            raise ManifestReviewLimitError("Plugin settings file exceeds the review size limit")
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except ManifestReviewLimitError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid plugin settings JSON") from exc
+    widgets = settings.get("widgets") if isinstance(settings, dict) else None
+    if not isinstance(widgets, list):
+        raise ValueError("Invalid settings widgets")
+    if len(widgets) > _MAX_PLUGIN_SETTINGS:
+        raise ManifestReviewLimitError(f"Plugin settings list exceeds {_MAX_PLUGIN_SETTINGS} widgets")
+    for widget in widgets:
+        if not isinstance(widget, dict):
+            continue
+        options = widget.get("options")
+        if isinstance(options, list) and len(options) > _MAX_PLUGIN_SETTING_OPTIONS:
+            raise ManifestReviewLimitError(
+                f"Plugin setting exceeds {_MAX_PLUGIN_SETTING_OPTIONS} options"
+            )
+        labels = widget.get("option_labels")
+        if isinstance(labels, dict) and len(labels) > _MAX_PLUGIN_OPTION_LABELS:
+            raise ManifestReviewLimitError(
+                f"Plugin setting exceeds {_MAX_PLUGIN_OPTION_LABELS} option labels"
+            )
 
 
 def _check_manifest_string_lengths(value: object) -> None:
@@ -194,7 +228,9 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
                 raise ValueError(f"{field} entry must be a file")
     for field in ("agents", "skills", "commands", "hooks", "mcp", "settings"):
         if field in manifest:
-            _within(root, manifest[field], field)
+            path = _within(root, manifest[field], field)
+            if field == "settings":
+                _validate_settings_review_limits(path)
     web = manifest.get("web", {})
     if not isinstance(web, dict) or set(web) - {"entry", "style"}:
         raise ValueError("Invalid web keys")
@@ -207,6 +243,11 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
         raise ValueError("Invalid contributes keys")
     if any(not isinstance(value, list) for value in contributes.values()):
         raise ValueError("Invalid contributes entries")
+    for kind, items in contributes.items():
+        if len(items) > _MAX_PLUGIN_CONTRIBUTIONS:
+            raise ManifestReviewLimitError(
+                f"Plugin manifest exceeds {_MAX_PLUGIN_CONTRIBUTIONS} {kind} contributions"
+            )
     services = manifest.get("services", {})
     if not isinstance(services, dict):
         raise ValueError("Invalid services")
