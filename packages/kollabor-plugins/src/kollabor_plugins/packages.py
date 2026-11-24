@@ -85,6 +85,7 @@ _MANIFEST_KEYS = {
 _SERVICE_KEYS = {"command", "autostart", "restart", "stop_timeout_s", "heartbeat_s", "secrets"}
 _MAX_SERVICE_SECONDS = 86400
 _MAX_MANIFEST_STRING = 4096
+_MAX_PLUGIN_MANIFEST_BYTES = 1_048_576
 _MAX_PLUGIN_SERVICES = 128
 _MAX_PLUGIN_SERVICE_SECRETS = 64
 _MAX_PLUGIN_USES = 256
@@ -142,6 +143,12 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
     """Read and validate a package manifest without executing its code."""
     root = Path(root).resolve()
     manifest_path = _within(root, "kollab-plugin.json", "manifest")
+    try:
+        manifest_size = manifest_path.stat().st_size
+    except OSError as exc:
+        raise ValueError("Invalid plugin manifest JSON") from exc
+    if manifest_size > _MAX_PLUGIN_MANIFEST_BYTES:
+        raise ValueError("Plugin manifest is too large")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
