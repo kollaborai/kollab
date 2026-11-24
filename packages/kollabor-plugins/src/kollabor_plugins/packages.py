@@ -21,6 +21,8 @@ from packaging.version import InvalidVersion, Version
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
 
+from .redaction import contains_sensitive_text, redact_sensitive_text
+
 logger = logging.getLogger(__name__)
 
 _REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z", re.ASCII)
@@ -64,11 +66,6 @@ _SERVICE = re.compile(r"[a-z0-9][a-z0-9-]{0,39}\Z", re.ASCII)
 _SYMBOL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z", re.ASCII)
 _PLUGIN_USE_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z", re.ASCII)
 _PLUGIN_USE_DETAIL = re.compile(r"[A-Za-z0-9_./,-]{1,256}\Z", re.ASCII)
-_PLUGIN_USE_SECRET_ASSIGNMENT = re.compile(
-    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)\s*[:=]\s*\S+",
-    re.IGNORECASE,
-)
-_PLUGIN_USE_SECRET_VALUE = re.compile(r"\bsecret[-_]token[-_][A-Za-z0-9_-]{6,}", re.IGNORECASE)
 _PLUGIN_USE_INVISIBLE = re.compile(r"[\u200b\u202a-\u202e\u2066-\u2069]")
 _MANIFEST_KEYS = {
     "format",
@@ -116,15 +113,16 @@ def _normalize_plugin_use(value: object) -> str | None:
         or len(value) > 1024
         or any(ord(char) < 32 or ord(char) == 127 for char in value)
         or _PLUGIN_USE_INVISIBLE.search(value)
-        or _PLUGIN_USE_SECRET_VALUE.search(value)
     ):
         return None
     if value.startswith("secret:"):
         secret = value[7:]
         return value if len(secret) <= 64 and _SYMBOL.fullmatch(secret) else None
+    if contains_sensitive_text(value):
+        return None
     kind, separator, detail = value.partition(":")
     if separator and kind in {"run", "net", "files"}:
-        if not detail or len(detail) > 1000 or _PLUGIN_USE_SECRET_ASSIGNMENT.search(detail):
+        if not detail or len(detail) > 1000:
             return None
         return value
     if separator and _PLUGIN_USE_KIND.fullmatch(kind) and _PLUGIN_USE_DETAIL.fullmatch(detail):
@@ -325,14 +323,9 @@ def _git(*args: str) -> bytes:
     if completed.returncode:
         diagnostic = completed.stderr.decode("utf-8", "replace")[:4096]
         # URLs may contain arbitrary credentials in userinfo, paths, or queries.
-        diagnostic = re.sub(r"(?:https?|ssh)://[^\s'\"<>]+", "[redacted URL]", diagnostic)
-        diagnostic = re.sub(
-            r"(?i)\b(password|token|secret|credential|authorization)\s*[:=]\s*[^\s,;]+",
-            r"\1=[REDACTED]",
-            diagnostic,
-        )
-        diagnostic = re.sub(r"(?i)\b(bearer|basic)\s+[^\s,;]+", r"\1 [REDACTED]", diagnostic)
-        diagnostic = re.sub(r"\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+", "[REDACTED]", diagnostic).strip()
+        diagnostic = redact_sensitive_text(
+            diagnostic, replacement="[REDACTED]", url_replacement="[redacted URL]"
+        ).strip()
         message = f"Git {args[0]} failed (exit {completed.returncode})"
         raise ValueError(f"{message}: {diagnostic}" if diagnostic else message)
     return completed.stdout
@@ -640,8 +633,11 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expect
             # Leave the journal if recovery itself fails; next startup retries.
             try:
                 _recover_locked(home)
-            except Exception:
-                logger.exception("Plugin installation rollback failed; recovery will retry")
+            except Exception as exc:
+                logger.warning(
+                    "Plugin installation rollback failed; recovery will retry: %s",
+                    redact_sensitive_text(str(exc)),
+                )
             raise
 
 

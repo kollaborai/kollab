@@ -38,17 +38,12 @@ from .packages import (
     recover_installs,
     validate_manifest,
 )
+from .redaction import contains_sensitive_text, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
 _INVENTORY_TEXT_LIMIT = 4096
-_INVENTORY_SENSITIVE_TEXT = re.compile(
-    r"(?:\b(?:secret|token|password|credential|authorization|bearer|api[_-]?key)[-_][A-Za-z0-9_-]{6,}"
-    r"|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|credential|authorization)\s*[:=]\s*\S+)",
-    re.IGNORECASE,
-)
 _INVENTORY_INVISIBLE_CONTROLS = re.compile(r"[\u00ad\u200b-\u200d\u202a-\u202e\u2060\u2066-\u2069\ufeff]")
-_INVENTORY_EXPLICIT_SECRET_IDENTIFIER = re.compile(r"\bsecret[-_]token[-_][A-Za-z0-9_-]{6,}", re.IGNORECASE)
 _PLUGIN_INVENTORY_STATES = {"ok", "error", "off", "stopping", "stop-failed", "changed-on-disk", "skipped"}
 _SERVICE_INVENTORY_STATES = {
     "starting",
@@ -174,7 +169,7 @@ class _RegistryDiscovery(PluginDiscovery):
 
 def _plugin_code_error(plugin_id: str, exc: Exception) -> ValueError:
     """Keep text raised by plugin code out of metadata; it can hold secrets (#1401)."""
-    logger.error("Plugin %s raised while loading", plugin_id, exc_info=exc)
+    logger.error("Plugin %s raised while loading: %s", plugin_id, redact_sensitive_text(str(exc)))
     return ValueError("Python entry failed while loading; see the process log for details.")
 
 
@@ -269,7 +264,7 @@ class PluginRegistry:
             recover_installs()
             registry = _read_registry(home / "plugins.json")
         except (OSError, ValueError) as exc:
-            logger.warning("Cannot read installed plugins: %s", exc)
+            logger.warning("Cannot read installed plugins: %s", redact_sensitive_text(str(exc)))
             return loaded
         candidates = [
             (plugin_id, record, home / "plugins" / plugin_id, False)
@@ -369,8 +364,9 @@ class PluginRegistry:
                     _vendor_owners.pop(name, None)
                 if added_vendor is not None:
                     sys.path.remove(str(added_vendor))
-                self.package_errors[plugin_id] = str(exc)
-                logger.warning("Plugin %s could not be loaded: %s", plugin_id, exc)
+                message = redact_sensitive_text(str(exc))
+                self.package_errors[plugin_id] = message
+                logger.warning("Plugin %s could not be loaded: %s", plugin_id, message)
         return loaded
 
     def discover_plugins(self) -> List[str]:
@@ -667,7 +663,7 @@ def _bounded_inventory_text(
         or len(value) > limit
         or any(ord(char) < 32 or ord(char) == 127 for char in value)
         or _INVENTORY_INVISIBLE_CONTROLS.search(value)
-        or (reject_sensitive and _INVENTORY_SENSITIVE_TEXT.search(value))
+        or (reject_sensitive and contains_sensitive_text(value, allow_safe_values=True))
     ):
         return None
     clean = value.strip()
@@ -676,7 +672,7 @@ def _bounded_inventory_text(
 
 def _bounded_inventory_identifier(value: object, limit: int = _INVENTORY_TEXT_LIMIT) -> str | None:
     clean = _bounded_inventory_text(value, limit, reject_sensitive=False)
-    return None if clean is None or _INVENTORY_EXPLICIT_SECRET_IDENTIFIER.search(clean) else clean
+    return None if clean is None or contains_sensitive_text(clean) else clean
 
 
 def _normalize_web_dist_path(value: object) -> str | None:
@@ -1126,7 +1122,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         try:
             section = cls.get_config_widgets() if callable(getattr(cls, "get_config_widgets", None)) else None
         except Exception as exc:
-            logger.warning("Cannot describe plugin %s settings: %s", plugin_id, exc)
+            logger.warning("Cannot describe plugin %s settings: %s", plugin_id, redact_sensitive_text(str(exc)))
             section = None
         default_enabled = (
             plugin_defaults.get(plugin_id, {}).get("enabled", True)
@@ -1163,7 +1159,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
     try:
         data = _read_registry(home / "plugins.json")
     except ValueError as exc:
-        logger.warning("Cannot list installed plugins: %s", exc)
+        logger.warning("Cannot list installed plugins: %s", redact_sensitive_text(str(exc)))
         return [normalized for entry in entries if (normalized := _normalize_plugin_entry(entry)) is not None]
     enable_order = data.get("enable_order", {})
     if not isinstance(enable_order, dict):
@@ -1192,7 +1188,12 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
 
             settings = setting_widgets(root, manifest)
         except (OSError, ValueError, TypeError) as exc:
-            logger.warning("Failed to load plugin metadata for %s", plugin_id, exc_info=exc)
+            logger.warning(
+                "Failed to load plugin metadata for %s (%s): %s",
+                plugin_id,
+                type(exc).__name__,
+                redact_sensitive_text(str(exc)),
+            )
             state, error = "error", "Plugin metadata could not be loaded"
         if plugin_id in registry.package_errors and state == "ok":
             state, error = "error", registry.package_errors[plugin_id]
@@ -1248,7 +1249,12 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
 
             dev_settings = setting_widgets(Path(folder), manifest)
         except (OSError, ValueError) as exc:
-            logger.warning("Failed to load development plugin metadata for %s", plugin_id, exc_info=exc)
+            logger.warning(
+                "Failed to load development plugin metadata for %s (%s): %s",
+                plugin_id,
+                type(exc).__name__,
+                redact_sensitive_text(str(exc)),
+            )
             manifest, error = {}, "Development plugin metadata could not be loaded"
         service_entries = _service_entries(home, f"{plugin_id}@dev", manifest)
         state = "error" if error else "ok"

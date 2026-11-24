@@ -20,6 +20,7 @@ from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file, try_lock, unlock
 
 from .packages import _ID, _SERVICE, _read_registry, files_sha256, stop_timeout
+from .redaction import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +63,7 @@ def _engine_url(value: str | None = None) -> str:
 
 def redact_log(text: str, secret_values: list[str] | tuple[str, ...] = ()) -> str:
     """Redact declared values and common credential forms from log text."""
-    for value in sorted((value for value in secret_values if value), key=len, reverse=True):
-        text = text.replace(value, "[redacted]")
-    text = re.sub(r"(?:https?|ssh)://[^\s'\"<>]+", "[redacted]", text, flags=re.IGNORECASE)
-    text = re.sub(r"(?i)\b(bearer|basic)\s+[^\s,;]+", r"\1 [redacted]", text)
-    text = re.sub(r"(?i)\b(authorization|password|token|secret|credential)\s*[:=]\s*[^\s,;]+", r"\1: [redacted]", text)
-    return re.sub(r"\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+", "[redacted]", text)
+    return redact_sensitive_text(text, secret_values)
 
 
 class _LogFilter:
@@ -864,6 +860,10 @@ async def supervise_services(*, engine_url: str | None = None) -> None:
                 await asyncio.to_thread(supervisor_tick)
             else:
                 await asyncio.to_thread(supervisor_tick, engine_url=engine_url)
-        except Exception:
-            logger.exception("Plugin service supervisor sweep failed")
+        except Exception as exc:
+            logger.warning(
+                "Plugin service supervisor sweep failed (%s): %s",
+                type(exc).__name__,
+                redact_sensitive_text(str(exc)),
+            )
         await asyncio.sleep(30)
