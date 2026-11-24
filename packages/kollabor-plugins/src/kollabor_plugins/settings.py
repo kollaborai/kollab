@@ -262,7 +262,7 @@ def set_enabled(plugin_id: str, enabled: bool, *, config_service=None, save_targ
             raise ServiceStopError("Could not stop background processes. The plugin is off; retry stopping them.")
 
 
-def apply_config_changes(changes: dict) -> dict:
+def apply_config_changes(changes: dict, *, failures: list[Exception] | None = None) -> dict:
     """Write installed-plugin rows and return the ordinary configuration changes.
 
     The UI uses namespaced paths to distinguish the plugin's own settings from
@@ -300,15 +300,24 @@ def apply_config_changes(changes: dict) -> dict:
             raise ValueError("Invalid plugin configuration path")
         else:
             ordinary[path] = value
+
+    def apply(operation, *args):
+        try:
+            operation(*args)
+        except Exception as exc:
+            if failures is None:
+                raise
+            failures.append(exc)
+
     for plugin_id, plugin_values in values.items():
-        save(plugin_id, plugin_values)
+        apply(save, plugin_id, plugin_values)
     for plugin_id, value in enabled.items():
-        set_enabled(plugin_id, value)
+        apply(set_enabled, plugin_id, value)
     if controls:
         from .services import control_service
 
         for plugin_id, service_name, action in controls:
-            control_service(plugin_id, service_name, action)
+            apply(control_service, plugin_id, service_name, action)
     return ordinary
 
 
