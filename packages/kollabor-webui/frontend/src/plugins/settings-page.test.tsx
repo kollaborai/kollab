@@ -149,6 +149,16 @@ describe("plugin settings page", () => {
     expect(markup).toContain("Receives secrets: API_TOKEN");
   });
 
+  it("ignores a non-array service secrets value from the inventory", async () => {
+    const markup = await markupFor([{
+      ...plugin([]),
+      enabled: true,
+      services: [{ name: "worker", state: "stopped", secrets: "API_TOKEN" as unknown as string[] }],
+    }]);
+
+    expect(markup).not.toContain("API_TOKEN");
+  });
+
   it("uses Failed to Load in the plugin row and detail", async () => {
     const markup = await markupFor([{
       ...plugin([]),
