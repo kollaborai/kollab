@@ -170,7 +170,8 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
         if "autostart" in service and type(service["autostart"]) is not bool:
             raise ValueError("Invalid service autostart")
         for key in ("stop_timeout_s", "heartbeat_s"):
-            if key in service and (type(service[key]) not in (int, float) or service[key] <= 0):
+            # Bounded so float() and deadline math never overflow (one day is plenty).
+            if key in service and (type(service[key]) not in (int, float) or not 0 < service[key] <= 86400):
                 raise ValueError(f"Invalid service {key}")
         secrets = service.get("secrets", [])
         if not isinstance(secrets, list) or any(not isinstance(x, str) or f"secret:{x}" not in uses for x in secrets):
