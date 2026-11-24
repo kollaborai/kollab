@@ -55,25 +55,20 @@ async def _remove_voice_artifacts_after_communication(
     import shutil
 
     try:
-        await asyncio.gather(communication_task, return_exceptions=True)
+        # A detached Whisper child can keep communicate()'s pipes open after
+        # the direct process exits. Wait for observed writers first, with a
+        # deadline that kills anything that outlives the run.
+        if descendants:
+            try:
+                await _wait_for_voice_descendants(descendants)
+            except asyncio.TimeoutError:
+                logger.warning("Voice descendants exceeded cleanup deadline")
+        if not communication_task.done():
+            await asyncio.wait({communication_task}, timeout=2)
         if descendants is None:
             logger.warning(
                 "Voice descendant status unavailable; removing protected artifacts"
             )
-        if descendants:
-            import psutil
-
-            while True:
-                try:
-                    if not any(descendant.is_running() for descendant in descendants):
-                        break
-                except psutil.Error as exc:
-                    logger.warning(
-                        "Voice descendant status failed (%s); removing protected artifacts",
-                        type(exc).__name__,
-                    )
-                    break
-                await asyncio.sleep(0.1)
         os.chmod(temp_dir, 0o700)
         await asyncio.to_thread(shutil.rmtree, temp_dir)
     except FileNotFoundError:
@@ -143,7 +138,10 @@ async def _wait_for_voice_descendants(
         running = []
         for descendant in descendants:
             try:
-                if descendant.is_running():
+                if (
+                    descendant.is_running()
+                    and descendant.status() != psutil.STATUS_ZOMBIE
+                ):
                     running.append(descendant)
             except psutil.NoSuchProcess:
                 continue
@@ -160,6 +158,7 @@ async def _wait_for_voice_descendants(
                     descendant.kill()
                 except psutil.Error:
                     pass
+            await asyncio.to_thread(psutil.wait_procs, running, timeout=2)
             raise asyncio.TimeoutError
         await asyncio.sleep(0.05)
 
