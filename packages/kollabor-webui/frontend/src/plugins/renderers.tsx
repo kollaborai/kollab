@@ -73,6 +73,7 @@ export function PluginToolPart({
       record={found.record}
       renderer={`tool:${part.toolName}`}
       resetKey={toolRendererResetKey(part)}
+      errorFallback={fallback}
     >
       <Render
         k={found.k}

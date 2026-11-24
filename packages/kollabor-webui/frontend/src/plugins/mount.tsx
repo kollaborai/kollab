@@ -109,7 +109,13 @@ export function PluginFailure({
 }
 
 /** Catches an error a plugin throws while drawing; Retry draws it again. */
-type PluginBoundaryProps = { name: string; resetKey?: unknown; inline?: boolean; children: ReactNode };
+type PluginBoundaryProps = {
+  name: string;
+  resetKey?: unknown;
+  inline?: boolean;
+  errorFallback?: ReactNode;
+  children: ReactNode;
+};
 
 export class PluginBoundary extends Component<PluginBoundaryProps, { error: Error | null }> {
   state: { error: Error | null } = { error: null };
@@ -132,6 +138,7 @@ export class PluginBoundary extends Component<PluginBoundaryProps, { error: Erro
 
   render() {
     if (!this.state.error) return this.props.children;
+    if (this.props.errorFallback !== undefined) return this.props.errorFallback;
     return (
       <PluginFailure
         title={`${this.props.name} Failed to Render`}
@@ -154,12 +161,14 @@ export function PluginMount({
   renderer = "default",
   resetKey,
   inline = false,
+  errorFallback,
   children,
 }: {
   record: Pick<PluginRecord, "id" | "name">;
   renderer?: string;
   resetKey?: unknown;
   inline?: boolean;
+  errorFallback?: ReactNode;
   children: ReactNode;
 }) {
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
@@ -176,6 +185,7 @@ export function PluginMount({
           name={record.name}
           resetKey={resetKey}
           inline={inline}
+          errorFallback={errorFallback}
         >
           {children}
         </PluginBoundary>

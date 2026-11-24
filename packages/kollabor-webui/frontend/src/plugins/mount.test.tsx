@@ -104,6 +104,14 @@ describe("PluginBoundary", () => {
     expect(setState).toHaveBeenCalledWith({ error: null });
   });
 
+  it("shows a supplied host fallback after a renderer fails", () => {
+    const fallback = <p>native tool output</p>;
+    const boundary = new PluginBoundary({ name: "Hello", children: null, errorFallback: fallback });
+    boundary.state = { error: new Error("bad plugin render") };
+
+    expect(boundary.render()).toBe(fallback);
+  });
+
   it("logs what failed for the developer", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const boundary = new PluginBoundary({ name: "Hello", children: null });
