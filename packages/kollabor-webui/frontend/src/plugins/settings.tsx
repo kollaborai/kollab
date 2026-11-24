@@ -150,7 +150,7 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
             <DialogTitle>{service.name} Log</DialogTitle>
             <DialogDescription>Most recent redacted output.</DialogDescription>
           </DialogHeader>
-          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words text-xs">{log || "No log output."}</pre>
+          <pre tabIndex={0} aria-label={`${service.name} log`} className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words text-xs">{log || "No log output."}</pre>
         </DialogContent>
       </Dialog>
     </div>
