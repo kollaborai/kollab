@@ -439,6 +439,23 @@ def test_jobs_are_bounded_and_expire(client, monkeypatch):
     assert client.get(f"/plugins/jobs/{first['job_id']}").status_code == 404
 
 
+def test_expiry_leaves_cleanup_to_close_when_manager_is_closing(client, monkeypatch):
+    from kollabor_engine import plugin_jobs
+
+    manager = client.app.state.plugin_jobs
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    assert _ready(client, job_id)["status"] == "ready"
+    manager.closing = True
+    monkeypatch.setattr(plugin_jobs, "_JOB_TTL", -1)
+
+    def expire_while_closing():
+        manager._expire()
+        return job_id in manager.jobs and job_id not in manager.expired_jobs
+
+    assert client.portal.call(expire_while_closing)
+
+
 def _install_hello(client):
     response = client.post("/plugins/install", json={"source": "https://example.invalid/repo#main"})
     job_id = response.json()["job_id"]
