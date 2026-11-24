@@ -88,6 +88,13 @@ describe("plugin dialog focus", () => {
   });
 });
 
+describe("plugin scroll regions", () => {
+  it("gives the review details and service log named keyboard scroll targets", () => {
+    expect(installSource).toMatch(/<div tabIndex=\{0\} aria-label="Plugin review details" className="[^"]*overflow-y-auto/);
+    expect(settingsSource).toMatch(/<pre tabIndex=\{0\} aria-label=\{`\$\{service\.name\} log`\} className="[^"]*overflow-auto/);
+  });
+});
+
 describe("plugin review form state", () => {
   it("keeps the source form and Review open after a failed review", () => {
     expect(reviewFormState("install", { status: "error" })).toEqual({ source: true, review: true });
