@@ -62,6 +62,14 @@ def parse_git_source(source: str) -> tuple[str, str | None]:
 _ID = re.compile(r"[a-z0-9][a-z0-9-]{1,39}\Z", re.ASCII)
 _SERVICE = re.compile(r"[a-z0-9][a-z0-9-]{0,39}\Z", re.ASCII)
 _SYMBOL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z", re.ASCII)
+_PLUGIN_USE_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z", re.ASCII)
+_PLUGIN_USE_DETAIL = re.compile(r"[A-Za-z0-9_./,-]{1,256}\Z", re.ASCII)
+_PLUGIN_USE_SECRET_ASSIGNMENT = re.compile(
+    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)\s*[:=]\s*\S+",
+    re.IGNORECASE,
+)
+_PLUGIN_USE_SECRET_VALUE = re.compile(r"\bsecret[-_]token[-_][A-Za-z0-9_-]{6,}", re.IGNORECASE)
+_PLUGIN_USE_INVISIBLE = re.compile(r"[\u200b\u202a-\u202e\u2066-\u2069]")
 _MANIFEST_KEYS = {
     "format",
     "id",
@@ -97,7 +105,31 @@ _MAX_PLUGIN_SETTINGS_BYTES = 1_048_576
 
 
 class ManifestReviewLimitError(ValueError):
-    """A manifest exceeds a collection limit that the review UI can display."""
+    """A manifest exceeds a limit that the review UI can display."""
+
+
+def _normalize_plugin_use(value: object) -> str | None:
+    if isinstance(value, str) and value in {"agents", "agents:unattended"}:
+        return value
+    if (
+        not isinstance(value, str)
+        or len(value) > 1024
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        or _PLUGIN_USE_INVISIBLE.search(value)
+        or _PLUGIN_USE_SECRET_VALUE.search(value)
+    ):
+        return None
+    if value.startswith("secret:"):
+        secret = value[7:]
+        return value if len(secret) <= 64 and _SYMBOL.fullmatch(secret) else None
+    kind, separator, detail = value.partition(":")
+    if separator and kind in {"run", "net", "files"}:
+        if not detail or len(detail) > 1000 or _PLUGIN_USE_SECRET_ASSIGNMENT.search(detail):
+            return None
+        return value
+    if separator and _PLUGIN_USE_KIND.fullmatch(kind) and _PLUGIN_USE_DETAIL.fullmatch(detail):
+        return value
+    return None
 
 
 def _validate_settings_review_limits(path: Path) -> None:
@@ -136,7 +168,7 @@ def _check_manifest_string_lengths(value: object) -> None:
         current = pending.pop()
         if isinstance(current, str):
             if len(current) > _MAX_MANIFEST_STRING:
-                raise ValueError(f"Manifest string exceeds {_MAX_MANIFEST_STRING} characters")
+                raise ManifestReviewLimitError(f"Manifest string exceeds {_MAX_MANIFEST_STRING} characters")
         elif isinstance(current, dict):
             pending.extend(current.keys())
             pending.extend(current.values())
@@ -182,7 +214,7 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
     except OSError as exc:
         raise ValueError("Invalid plugin manifest JSON") from exc
     if manifest_size > _MAX_PLUGIN_MANIFEST_BYTES:
-        raise ValueError("Plugin manifest is too large")
+        raise ManifestReviewLimitError("Plugin manifest is too large")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -214,7 +246,7 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
         raise ValueError("Invalid uses")
     if len(uses) > _MAX_PLUGIN_USES:
         raise ManifestReviewLimitError(f"Plugin manifest exceeds {_MAX_PLUGIN_USES} uses")
-    if any(not isinstance(item, str) for item in uses):
+    if any(_normalize_plugin_use(item) is None for item in uses):
         raise ValueError("Invalid uses")
     for field in ("python", "engine"):
         if field in manifest:
