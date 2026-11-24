@@ -34,6 +34,12 @@ Peer-to-peer agent mesh with persistent identity.
 - First agent becomes coordinator via `flock()` on `hub.lock`
 - Designations come from the folder's roster (`plugins.hub.roster`, default `gems`: lapis, peridot, ruby with color castes); a persona is a name, look, agent bundle, role and prompt, and `kollab --as [roster/]name` takes one from any roster. Teams are reporting chains of personas; the engine serves `GET /rosters`, `GET /teams`, `POST /teams/{name}/launch`
 - Open channel: all agents see all messages (like Slack)
+- Mailbox delivery claims every source record under the mailbox root's shared
+  file lock before invoking a receiver. Callback cancellation or failure holds
+  the original payload for inspection; it never proves acceptance or permits
+  an automatic retry. Refusal releases the claim, and successful delivery
+  removes the record or atomically replaces it with a receipt. The orphan
+  sweep removes empty directories only. See `docs/specs/hub-message-flow.md`.
 - Off-box mesh: `plugins.hub.endpoint_enabled` binds a TCP/TLS listener sharing the
   same `_handle_connection` handler; remote agents complete the same Ed25519 handshake.
   Default OFF (unix socket only). The endpoint always forces auth and refuses to bind
@@ -100,10 +106,17 @@ kollab --hub help                # full command list
 kollab --attach lapis@devbox     # attach over ssh: `where` on devbox + ssh -L (kollabor/attach_remote.py)
 ```
 
+Stop-all scope (#669, #875, #1408): `/hub stop all` typed in a session stops every agent in that
+session's hub folder and lists live agents in other folders; the agent `hub_stop` tool stops only
+agents its caller started. The hub folder is `/tmp/kollabor-hub/<hash>/`, keyed by `KOLLAB_PROJECT_ROOT`
+or the git root, so a test rig with its own root has its own hub.
+
 **Starting/stopping agents:**
 ```bash
 kollab --agent koordinator --detached   # start detached
 kollab --hub stop koordinator                    # stop (socket + SIGTERM fallback)
+kollab --hub stop all                            # this folder's hub; names live agents in other folders
+kollab --hub stop all --everywhere               # every folder on this machine (#1408)
 kollab --hub status                              # verify
 kollab service install                           # this folder's agent under systemd/launchd (kollabor/service.py)
 ```
