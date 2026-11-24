@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from kollabor_config import config_utils
-from plugins.hub import messenger, plugin as hub_plugin
+from plugins.hub import messenger
+from plugins.hub import plugin as hub_plugin
 from plugins.hub.messenger import AgentMessenger
 from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin

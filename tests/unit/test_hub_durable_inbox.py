@@ -36,8 +36,6 @@ from plugins.hub.messenger import (
     INBOX_TTL_SECS,
     AgentMessenger,
     _prune_inbox,
-    get_restart_boundary,
-    set_restart_boundary,
 )
 from plugins.hub.models import HubMessage, MessageScope
 from plugins.hub.task_ledger import TaskLedger
@@ -811,8 +809,27 @@ def _make_summary_batch(n_msgs: int = 5, n_total: int = 30) -> List[HubMessage]:
 class TestSingleBlockDelivery:
     """_deliver_inbox_batch must call inject_system_message ONCE for replay batches."""
 
-    def _run(self, coro):
-        return asyncio.run(coro)
+    @pytest.fixture(autouse=True)
+    def _delivery_mailbox(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            messenger_mod, "get_messages_dir", lambda: tmp_path / "delivery-mailbox"
+        )
+
+    def _deliver(self, plugin, messages):
+        # Formatting/classification fixtures are synthetic read results. Give
+        # them real durable sources so the delivery boundary is exercised too.
+        if plugin._identity is None:
+            plugin._identity = AgentRuntime(
+                name="coder", identity="lapis", agent_id="lapis-id", state="idle"
+            )
+
+        async def deliver():
+            for message in messages:
+                if message.action != "inbox_summary":
+                    await AgentMessenger.send_to_file(plugin._identity.identity, message)
+            return await plugin._deliver_inbox_batch(messages)
+
+        return asyncio.run(deliver())
 
     # ------------------------------------------------------------------
     # _deliver_inbox_batch: replay batch → single injection
@@ -832,7 +849,7 @@ class TestSingleBlockDelivery:
 
         batch = _make_summary_batch(n_msgs=5, n_total=30)
 
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         inject_mock.assert_awaited_once()
 
@@ -849,7 +866,7 @@ class TestSingleBlockDelivery:
         plugin.event_bus = bus
 
         batch = _make_summary_batch(n_msgs=3, n_total=25)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         _, kwargs = inject_mock.await_args
         assert kwargs.get("subtype") == "inbox_replay"
@@ -871,7 +888,7 @@ class TestSingleBlockDelivery:
         plugin.event_bus = bus
 
         batch = _make_summary_batch(n_msgs=3, n_total=25)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         assert len(captured) == 1
         assert "[offline inbox]" in captured[0]
@@ -893,7 +910,7 @@ class TestSingleBlockDelivery:
         plugin.event_bus = bus
 
         batch = _make_summary_batch(n_msgs=5, n_total=30)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         block = captured[0]
         for i in range(5):
@@ -939,7 +956,7 @@ class TestSingleBlockDelivery:
             },
         )
 
-        self._run(plugin._deliver_inbox_batch([summary, reminder, *ordinary]))
+        self._deliver(plugin, [summary, reminder, *ordinary])
 
         ack = plugin._route_message.await_args.args[0]
         assert ack.to == "koordinator"
@@ -982,11 +999,7 @@ class TestSingleBlockDelivery:
             metadata={"task_assignment": True, "task_id": "task-retained"},
         )
 
-        self._run(
-            plugin._deliver_inbox_batch(
-                [summary, ordinary[0], assignment, ordinary[1]]
-            )
-        )
+        self._deliver(plugin, [summary, ordinary[0], assignment, ordinary[1]])
 
         assert received == [assignment]
         inject_mock.assert_awaited_once()
@@ -1020,11 +1033,7 @@ class TestSingleBlockDelivery:
             metadata={"task_cron": True, "task_id": "metadata-only"},
         )
 
-        self._run(
-            plugin._deliver_inbox_batch(
-                [summary, ordinary[0], reminder, ordinary[1]]
-            )
-        )
+        self._deliver(plugin, [summary, ordinary[0], reminder, ordinary[1]])
 
         assert received == [reminder]
         inject_mock.assert_awaited_once()
@@ -1068,9 +1077,7 @@ class TestSingleBlockDelivery:
             metadata={"task_cron": True, "task_id": card.id},
         )
 
-        self._run(
-            plugin._deliver_inbox_batch([summary, ordinary[0], reminder, ordinary[1]])
-        )
+        self._deliver(plugin, [summary, ordinary[0], reminder, ordinary[1]])
 
         assert received == [reminder]
         inject_mock.assert_awaited_once()
@@ -1135,7 +1142,7 @@ class TestSingleBlockDelivery:
         bus.emit_with_hooks = AsyncMock()
         plugin.event_bus = bus
 
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         ack = plugin._route_message.await_args.args[0]
         assert ack.reply_to == reminder.id
@@ -1170,9 +1177,7 @@ class TestSingleBlockDelivery:
             metadata={"task_cron": True, "task_id": "active"},
         )
 
-        self._run(
-            plugin._deliver_inbox_batch([summary, ordinary[0], reminder, ordinary[1]])
-        )
+        self._deliver(plugin, [summary, ordinary[0], reminder, ordinary[1]])
 
         assert received == [reminder, ordinary[0], ordinary[1]]
         assert received.count(reminder) == 1
@@ -1216,7 +1221,7 @@ class TestSingleBlockDelivery:
             },
         )
 
-        self._run(plugin._deliver_inbox_batch([summary, reminder]))
+        self._deliver(plugin, [summary, reminder])
 
         plugin._route_message.assert_awaited_once()
         inject_mock.assert_not_awaited()
@@ -1247,7 +1252,7 @@ class TestSingleBlockDelivery:
         plugin._on_message_received = fake_on_message
 
         normal_msgs = [_make_msg(content=f"normal {i}") for i in range(3)]
-        self._run(plugin._deliver_inbox_batch(normal_msgs))
+        self._deliver(plugin, normal_msgs)
 
         inject_mock.assert_not_awaited()
         assert len(received) == 3
@@ -1265,7 +1270,7 @@ class TestSingleBlockDelivery:
         plugin._on_message_received = fake_on_message
 
         normal_msgs = [_make_msg(content=f"m{i}") for i in range(4)]
-        self._run(plugin._deliver_inbox_batch(normal_msgs))
+        self._deliver(plugin, normal_msgs)
 
         assert len(received) == 4
         assert [m.content for m in received] == [f"m{i}" for i in range(4)]
@@ -1290,7 +1295,7 @@ class TestSingleBlockDelivery:
         plugin._on_message_received = fake_on_message
 
         batch = _make_summary_batch(n_msgs=4, n_total=20)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         # Summary is not delivered via _on_message_received, only real msgs
         assert len(received) == 4
@@ -1313,7 +1318,7 @@ class TestSingleBlockDelivery:
         plugin._on_message_received = fake_on_message
 
         batch = _make_summary_batch(n_msgs=3, n_total=15)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         assert len(received) == 3
 

@@ -132,6 +132,7 @@ async def test_cancelled_mailbox_batch_exposes_completed_deliveries(tmp_path):
         for index in range(2)
     ]
     plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
     delivered = []
 
     async def cancel_second(message):
