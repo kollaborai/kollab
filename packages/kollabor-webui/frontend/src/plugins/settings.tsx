@@ -278,7 +278,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
           <PluginFailure error={failure} inset={false} onRetry={() => { if (record) retryPlugin(entry.id); else void refreshPlugins(); }} />
         ) : null}
         {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development Folder: {entry.source}</p> : null}
-        {entry.kind === "installed" && entry.version ? <p className="text-muted-foreground break-words text-xs">Version: {entry.version}</p> : null}
+        {(entry.kind === "installed" || entry.kind === "dev") && entry.version ? <p className="text-muted-foreground break-words text-xs">Version: {entry.version}</p> : null}
         {entry.services.length ? (
           <div>
             <h3 className="text-sm font-semibold">Background Processes</h3>
