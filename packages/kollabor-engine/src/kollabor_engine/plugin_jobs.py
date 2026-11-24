@@ -24,8 +24,9 @@ _MAX_STAGING = 4
 _JOB_TTL = 3600
 _CLEANUP_RETRY_DELAY = 60
 _STAGE_TIMEOUT = 120
+_MAX_PLUGIN_CHANGED_FOLDERS = 256
 _MANIFEST_REVIEW_LIMIT_ERROR = (
-    "Plugin manifest exceeds the review limits (128 services, 64 secrets per service, 256 uses)"
+    "Plugin review exceeds a display limit; reduce the manifest or changed folders and stage again."
 )
 
 
@@ -200,7 +201,7 @@ class PluginJobs:
 
     @classmethod
     def _update_preview(cls, job: dict, staged: dict) -> dict:
-        from kollabor_plugins.packages import _read_registry, files_sha256
+        from kollabor_plugins.packages import ManifestReviewLimitError, _read_registry, files_sha256
 
         home = Path.home() / ".kollab"
         plugin_id = job["target_id"]
@@ -216,6 +217,8 @@ class PluginJobs:
             str(Path(name).parent)
             for name in before.keys() | after.keys() if before.get(name) != after.get(name)
         })
+        if len(changed) > _MAX_PLUGIN_CHANGED_FOLDERS:
+            raise ManifestReviewLimitError(_MANIFEST_REVIEW_LIMIT_ERROR)
         return {"previous_commit": job["expected_record"].get("commit"), "changed_folders": changed}
 
     @staticmethod
