@@ -833,3 +833,42 @@ async def test_accepted_effect_is_not_replayed_when_ack_receipt_cannot_persist(
         await plugin._deliver_inbox_batch(replay)
 
     assert effects == [message.id]
+
+
+@pytest.mark.asyncio
+async def test_failed_coalesced_replay_is_not_delivered_again_individually(tmp_path):
+    message = HubMessage(
+        action="message", from_identity="peer", to="receiver", content="effect"
+    )
+    summary = HubMessage(
+        action="inbox_summary",
+        from_identity="hub",
+        to="receiver",
+        content="offline replay",
+    )
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+    injected = []
+    individually_delivered = []
+
+    async def inject(block, subtype=None):
+        injected.append(block)
+        raise RuntimeError("injection outcome is ambiguous")
+
+    llm = SimpleNamespace(inject_system_message=inject)
+    plugin.event_bus = SimpleNamespace(get_service=lambda _name: llm)
+
+    async def receive(msg):
+        individually_delivered.append(msg.id)
+
+    plugin._on_message_received = receive
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        await plugin._deliver_inbox_batch([summary, message])
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+
+    assert len(injected) == 1
+    assert individually_delivered == []
+    assert replay[0].metadata["_mailbox_delivery_uncertain"] is True
