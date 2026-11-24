@@ -151,6 +151,10 @@ describe("plugin settings page", () => {
     });
   });
 
+  it("explains the different blockers for turning off and removing a plugin", () => {
+    expect(source).toMatch(/confirmation === "remove" \? "Background processes will stop\. Plugin requests must finish before it can be removed\." : "Background processes will stop\. Cancel active plugin agent runs before turning it off\."/);
+  });
+
   it("names each service action for the process it controls", async () => {
     const markup = await markupFor([{
       ...plugin([]),
