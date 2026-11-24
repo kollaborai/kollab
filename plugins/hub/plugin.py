@@ -14658,9 +14658,12 @@ class HubPlugin(BasePlugin):
         if socket_path_override:
             dial_target, dial_auth = socket_path_override, None
         elif not peer.socket_path:
-            if self._presence:
-                self._presence.cleanup_agent(peer)
-            message = f"agent '{peer.identity}' has no socket path, cleaned up"
+            cleaned = bool(self._presence and self._presence.cleanup_agent(peer))
+            message = (
+                f"agent '{peer.identity}' has no socket path, cleaned up"
+                if cleaned
+                else f"agent '{peer.identity}' has no socket yet (still starting)"
+            )
             return _CaptureOutcome(message, error=message)
         else:
             dial_target, dial_auth = self._resolve_dial_target(
@@ -15653,10 +15656,6 @@ class HubPlugin(BasePlugin):
                 available = [a.identity for a in all_agents]
                 return f"agent '{target}' not found. online: {', '.join(available) or 'none'}"
 
-            if not agent.socket_path:
-                self._presence.cleanup_agent(agent)
-                return f"agent '{target}' has no socket path, cleaned up"
-
             result = await self._stop_peer_agent(
                 agent,
                 reason=f"stopped by {self._identity.identity}",
@@ -15811,7 +15810,12 @@ class HubPlugin(BasePlugin):
             self._cleanup_stopped_peer(agent, session)
             return guard
 
-        if not getattr(agent, "socket_path", ""):
+        socket_path = getattr(agent, "socket_path", "")
+        # A session-less agent whose process runs with no socket yet is still
+        # starting: stop its proven pid below instead of dropping its row (#1408).
+        if not socket_path and (
+            session is not None or not self._agent_pid_alive(getattr(agent, "pid", 0))
+        ):
             cleaned = self._cleanup_stopped_peer(agent, session)
             if session is not None and not cleaned:
                 return "no socket; presence cleanup deferred"
@@ -15836,9 +15840,9 @@ class HubPlugin(BasePlugin):
             )
             # A session-less row that cannot name its process sends nothing a
             # replacement on the same socket would also accept (#1408).
-            success = (session is not None or bool(generation)) and await (
+            success = bool(socket_path) and (session is not None or bool(generation)) and await (
                 AgentMessenger.signal_shutdown(
-                    agent.socket_path,
+                    socket_path,
                     reason=reason,
                     timeout=3.0,
                     **generation,

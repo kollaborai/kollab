@@ -762,15 +762,36 @@ class PresenceManager:
             except Exception:
                 pass
 
-    def cleanup_agent(self, agent: "AgentRuntime") -> None:
-        """Remove an agent's presence file and socket.
+    def cleanup_agent(self, agent: "AgentRuntime") -> bool:
+        """Remove a stopped agent's presence file and socket; True when removed.
 
-        Public method for callers (like hub stop) that need to
-        explicitly clean up an agent they know is dead.
+        Only ``agent``'s own generation goes, and only once its process is gone
+        (#1408): while the pid still runs as that agent nothing is removed, so a
+        live agent never drops out of discovery, and a row on disk that now
+        names another pid or start (a newer agent under the same id) keeps its
+        file and socket.
         """
+        if agent.pid and not _owner_gone(agent):
+            return False
+        replaced = False
         for directory in _presence_directories(self._presence_dir):
-            (directory / f"{agent.agent_id}.json").unlink(missing_ok=True)
-        self._cleanup_agent_socket(agent)
+            path = directory / f"{agent.agent_id}.json"
+            try:
+                row = json.loads(path.read_text())
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                row = None
+            if isinstance(row, dict) and (
+                row.get("pid") != agent.pid
+                or row.get("started_at", agent.started_at) != agent.started_at
+            ):
+                replaced = True
+                continue
+            path.unlink(missing_ok=True)
+        if not replaced:
+            self._cleanup_agent_socket(agent)
+        return not replaced
 
     def get_agent_by_identity(self, identity: str) -> Optional[AgentRuntime]:
         """Find an agent by its identity."""
