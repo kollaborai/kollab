@@ -294,11 +294,6 @@ describe("plugin review after a failure", () => {
     const api = { json: async () => { throw new ApiError("Plugin job cannot be cancelled", 409, null); } };
     await expect(discardReview(api as never, "failed-job")).resolves.toBeUndefined();
   });
-  it("releases only staging or ready jobs before retrying the edited install URL", () => {
-    const start = installSource.slice(installSource.indexOf("const start ="), installSource.indexOf("useEffect(() =>"));
-    expect(start).toMatch(/job && \(job\.status === "staging" \|\| job\.status === "ready"\)/);
-    expect(start).toMatch(/startReview\(api, \{ action, pluginId, url, gitRef \}\)/);
-  });
   it("does not release an error or cancelled job when closing the review", () => {
     const close = installSource.slice(installSource.indexOf("const close ="), installSource.indexOf("const confirm ="));
     expect(close).toMatch(/job\.status === "staging" \|\| job\.status === "ready"/);

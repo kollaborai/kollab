@@ -82,4 +82,63 @@ describe("plugin install response recovery", () => {
       }
     },
   );
+
+  it.each([
+    ["error", "Cannot stage plugin source; check the URL, ref, and plugin manifest"],
+    ["cancelled", null],
+  ] as const)("cleans staged files before retrying a failed review (%s)", async (status, error) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const requests: { path: string; method?: string }[] = [];
+    let reviewCount = 0;
+    const api = {
+      json: async (path: string, init?: { method?: string }) => {
+        requests.push({ path, method: init?.method });
+        if (path === "/plugins/hello/update") {
+          reviewCount += 1;
+          return {
+            job_id: reviewCount === 1 ? "old-review" : "new-review",
+            action: "update",
+            status: reviewCount === 1 ? status : "error",
+            plugin_id: "hello",
+            error: reviewCount === 1 ? error : "Cannot stage plugin source; check the URL, ref, and plugin manifest",
+          };
+        }
+        if (path === "/plugins/jobs/old-review" && init?.method === "DELETE") return { status: "cancelled" };
+        throw new Error(`unexpected request ${path}`);
+      },
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => {
+        root.render(<PluginInstallDialog
+          api={api as never}
+          action="update"
+          pluginId="hello"
+          onClose={() => {}}
+          onApplied={async () => {}}
+          onRestoreFocus={() => {}}
+        />);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      const retry = [...document.querySelectorAll("button")]
+        .find((button) => button.textContent?.trim() === "Review Again");
+      expect(retry).toBeDefined();
+      await act(async () => {
+        retry?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(requests).toEqual([
+        { path: "/plugins/hello/update", method: "POST" },
+        { path: "/plugins/jobs/old-review", method: "DELETE" },
+        { path: "/plugins/hello/update", method: "POST" },
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
