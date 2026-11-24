@@ -24,6 +24,9 @@ _DYNAMIC_CALL_IN_PATCH = re.compile(
     r"\b(?:import_module|__import__|spec_from_file_location|exec_module|"
     r"run_path|run_module|glob|rglob|iterdir|walk|listdir)\s*\("
 )
+_DYNAMIC_IMPORT_MENTION_IN_PATCH = re.compile(
+    r"\b(?:import_module|__import__|spec_from_file_location|importlib)\b"
+)
 
 
 class _ImportGraph(dict[str, set[str]]):
@@ -34,12 +37,14 @@ class _ImportGraph(dict[str, set[str]]):
         module_index: dict[str, str],
         package_index: dict[str, str],
         package_src_roots: list[Path],
+        unresolved_imports: dict[str, set[str]],
     ) -> None:
         super().__init__(graph)
         self.dynamic = dynamic
         self.module_index = module_index
         self.package_index = package_index
         self.package_src_roots = package_src_roots
+        self.unresolved_imports = unresolved_imports
 
 
 def _repo_path(root: Path, path: Path) -> str:
@@ -225,6 +230,8 @@ def _python_imports(
     is_package: bool,
     module_index: dict[str, str],
     package_index: dict[str, str],
+    unresolved: set[str] | None = None,
+    include_dynamic_package_ancestors: bool = False,
 ) -> set[str]:
     dependencies: set[str] = set()
     current_parts = module_name.split(".") if module_name else []
@@ -234,9 +241,13 @@ def _python_imports(
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                _add_python_dependency(
-                    dependencies, alias.name, module_index, package_index
-                )
+                if _resolve_module(alias.name, module_index) is None:
+                    if unresolved is not None:
+                        unresolved.add(alias.name)
+                else:
+                    _add_python_dependency(
+                        dependencies, alias.name, module_index, package_index
+                    )
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 parent_count = len(package_parts) - (node.level - 1)
@@ -250,6 +261,12 @@ def _python_imports(
                 base_name = node.module or ""
 
             if any(alias.name == "*" for alias in node.names):
+                if (
+                    base_name
+                    and _resolve_module(base_name, module_index) is None
+                    and unresolved is not None
+                ):
+                    unresolved.add(base_name)
                 _add_python_dependency(
                     dependencies, base_name, module_index, package_index
                 )
@@ -272,11 +289,18 @@ def _python_imports(
                 for alias in imported_names
             ] or [base_name]
             for candidate in candidates:
-                resolved_name = (
-                    candidate
-                    if _resolve_module(candidate, module_index) is not None
-                    else base_name
+                candidate_resolves = (
+                    _resolve_module(candidate, module_index) is not None
                 )
+                resolved_name = candidate if candidate_resolves else base_name
+                if not candidate_resolves and unresolved is not None:
+                    if candidate:
+                        unresolved.add(candidate)
+                    if (
+                        base_name
+                        and _resolve_module(base_name, module_index) is None
+                    ):
+                        unresolved.add(base_name)
                 _add_python_dependency(
                     dependencies, resolved_name, module_index, package_index
                 )
@@ -289,8 +313,14 @@ def _python_imports(
             )
             if module_name is not None:
                 target = _resolve_module(module_name, module_index)
-                if target is not None:
+                if target is not None and include_dynamic_package_ancestors:
+                    _add_python_dependency(
+                        dependencies, module_name, module_index, package_index
+                    )
+                elif target is not None:
                     dependencies.add(target)
+                elif unresolved is not None:
+                    unresolved.add(module_name)
     return dependencies
 
 
@@ -386,6 +416,7 @@ def _build_import_analysis(
     dict[str, str],
     dict[str, str],
     list[Path],
+    dict[str, set[str]],
 ]:
     """Build the import graph and its statically resolvable loader context."""
     root = root.resolve()
@@ -406,6 +437,7 @@ def _build_import_analysis(
         if name and is_package
     }
     dynamic_paths: set[str] = set()
+    unresolved_imports: dict[str, set[str]] = {}
     for path in sorted(python_paths):
         relative_path = _repo_path(root, path)
         try:
@@ -413,9 +445,11 @@ def _build_import_analysis(
         except (OSError, UnicodeError, SyntaxError) as exc:
             raise RuntimeError(f"could not parse {relative_path}") from exc
         name, is_package = module_info[relative_path]
+        unresolved: set[str] = set()
         graph[relative_path] = _python_imports(
-            tree, name, is_package, module_index, package_index
+            tree, name, is_package, module_index, package_index, unresolved
         )
+        unresolved_imports[relative_path] = unresolved
         nodes = list(ast.walk(tree))
         aliases = _dynamic_import_aliases(tree)
         parents = {
@@ -489,20 +523,37 @@ def _build_import_analysis(
             if target is not None:
                 dependencies.add(target)
         graph[relative_path] = dependencies
-    return graph, dynamic_paths, module_index, package_index, package_src_roots
+    return (
+        graph,
+        dynamic_paths,
+        module_index,
+        package_index,
+        package_src_roots,
+        unresolved_imports,
+    )
 
 
 def build_import_graph(
     root: Path, dynamic: set[str] | None = None
 ) -> dict[str, set[str]]:
     """Build a static Python and frontend import graph without importing code."""
-    graph, dynamic_paths, module_index, package_index, package_src_roots = (
-        _build_import_analysis(root)
-    )
+    (
+        graph,
+        dynamic_paths,
+        module_index,
+        package_index,
+        package_src_roots,
+        unresolved_imports,
+    ) = _build_import_analysis(root)
     if dynamic is not None:
         dynamic.update(dynamic_paths)
     return _ImportGraph(
-        graph, dynamic_paths, module_index, package_index, package_src_roots
+        graph,
+        dynamic_paths,
+        module_index,
+        package_index,
+        package_src_roots,
+        unresolved_imports,
     )
 
 
@@ -536,6 +587,59 @@ def _is_test_file(path: str) -> bool:
 def tests_of(graph: dict[str, set[str]], files: Iterable[str]) -> set[str]:
     """Find test files that are changed or depend on any given file."""
     return {path for path in reverse_closure(graph, files) if _is_test_file(path)}
+
+
+def _module_name_for_changed_path(
+    filename: str, root: Path, package_src_roots: list[Path]
+) -> str | None:
+    path = root / PurePosixPath(filename)
+    source_roots = list(package_src_roots)
+    parts = PurePosixPath(filename).parts
+    if len(parts) >= 4 and parts[0] == "packages" and parts[2] == "src":
+        inferred_root = root.joinpath(*parts[:3])
+        if inferred_root not in source_roots:
+            source_roots.append(inferred_root)
+    try:
+        name, _is_package = _module_name(path, root, source_roots)
+    except ValueError:
+        return None
+    return name or None
+
+
+def _top_level_module_for_path(filename: str) -> str | None:
+    parts = list(PurePosixPath(filename).with_suffix("").parts)
+    if len(parts) >= 4 and parts[0] == "packages" and parts[2] == "src":
+        parts = parts[3:]
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return parts[0] if parts else None
+
+
+def _removed_main_modules(
+    records: list[dict[str, Any]], root: Path, package_src_roots: list[Path]
+) -> tuple[set[str], set[str]]:
+    modules: set[str] = set()
+    unmapped_top_levels: set[str] = set()
+    for record in records:
+        status = record.get("status")
+        if status == "removed":
+            filename = record.get("filename")
+        elif status == "renamed":
+            filename = record.get("previous_filename")
+        else:
+            continue
+        if not isinstance(filename, str) or not filename.endswith(".py"):
+            continue
+        module_name = _module_name_for_changed_path(
+            filename, root, package_src_roots
+        )
+        if module_name is not None:
+            modules.add(module_name)
+            continue
+        top_level = _top_level_module_for_path(filename)
+        if top_level is not None:
+            unmapped_top_levels.add(top_level)
+    return modules, unmapped_top_levels
 
 
 def _is_global_main_path(path: str) -> bool:
@@ -574,6 +678,9 @@ def decide(
     graph: dict[str, set[str]],
     complete: bool = True,
     dynamic: set[str] | frozenset[str] = frozenset(),
+    unresolved_imports: dict[str, set[str]] | None = None,
+    removed_main_modules: set[str] | frozenset[str] = frozenset(),
+    removed_main_top_levels: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[bool, list[str]]:
     """Apply the five stale rules to changed paths and their test impact."""
     pr_paths = _without_changes(pr_files)
@@ -591,6 +698,25 @@ def decide(
     shared_tests = tests_of(graph, pr_paths) & tests_of(graph, main_paths)
     if shared_tests:
         reasons.append(f"rule 3: shared test impact ({_examples(shared_tests)})")
+
+    affected_imports: set[str] = set()
+    unresolved_imports = unresolved_imports or {}
+    pr_tests = {path for path in pr_paths if _is_test_file(path)}
+    for test_path in pr_tests:
+        for imported_name in unresolved_imports.get(test_path, set()):
+            if any(
+                imported_name == module_name
+                or imported_name.startswith(f"{module_name}.")
+                for module_name in removed_main_modules
+            ):
+                affected_imports.add(imported_name)
+            elif imported_name.split(".", 1)[0] in removed_main_top_levels:
+                affected_imports.add(imported_name)
+    if affected_imports:
+        reasons.append(
+            "rule 3: unresolved test import may match removed main module "
+            f"({_examples(affected_imports)})"
+        )
 
     frontend_root = "packages/kollabor-webui/frontend/"
     pr_frontend = {path for path in pr_paths if path.startswith(frontend_root)}
@@ -682,6 +808,32 @@ def _count(value: Any) -> int:
     return value
 
 
+def _valid_api_path(value: Any) -> bool:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or "\\" in value
+        or PurePosixPath(value).is_absolute()
+        or re.match(r"^[A-Za-z]:/", value) is not None
+    ):
+        return False
+    return all(part not in {"", ".."} for part in value.split("/"))
+
+
+def _valid_api_file_list(records: list[dict[str, Any]]) -> bool:
+    filenames = [record.get("filename") for record in records]
+    if not all(_valid_api_path(filename) for filename in filenames):
+        return False
+    if len(set(filenames)) != len(filenames):
+        return False
+    return all(
+        record.get("previous_filename") is None
+        or _valid_api_path(record.get("previous_filename"))
+        for record in records
+    )
+
+
 def _changed_paths(value: Any) -> tuple[list[str], bool]:
     if not isinstance(value, list):
         return [], False
@@ -696,6 +848,9 @@ def _changed_paths(value: Any) -> tuple[list[str], bool]:
         except ValueError:
             complete = False
             continue
+        if not _valid_api_path(filename):
+            complete = False
+            continue
         paths.append(filename)
         try:
             status = _text(record.get("status"))
@@ -707,14 +862,24 @@ def _changed_paths(value: Any) -> tuple[list[str], bool]:
         previous_filename = record.get("previous_filename")
         if status in {"renamed", "copied"}:
             try:
-                paths.append(_text(previous_filename))
+                previous_path = _text(previous_filename)
             except ValueError:
                 complete = False
+            else:
+                if _valid_api_path(previous_path):
+                    paths.append(previous_path)
+                else:
+                    complete = False
         elif previous_filename is not None:
             try:
-                paths.append(_text(previous_filename))
+                previous_path = _text(previous_filename)
             except ValueError:
                 complete = False
+            else:
+                if _valid_api_path(previous_path):
+                    paths.append(previous_path)
+                else:
+                    complete = False
     return paths, complete
 
 
@@ -725,8 +890,9 @@ def _patch_imports(
     module_index: dict[str, str],
     package_index: dict[str, str],
     package_src_roots: list[Path],
-) -> tuple[set[str], bool, bool]:
+) -> tuple[set[str], set[str], bool, bool]:
     dependencies: set[str] = set()
+    unresolved: set[str] = set()
     complete = True
     dynamic = False
     try:
@@ -734,14 +900,22 @@ def _patch_imports(
             root / PurePosixPath(filename), root, package_src_roots
         )
     except ValueError:
-        return dependencies, False, False
+        return dependencies, unresolved, False, False
 
+    saw_dynamic_import_mention = False
+    parsed_dynamic_import_mention = False
     for line in patch.splitlines():
         if not line.startswith("+") or line.startswith("+++"):
             continue
-        source = line[1:].lstrip()
+        source = line[1:].strip()
         if not source:
             continue
+        mentions_dynamic_import = (
+            _DYNAMIC_IMPORT_MENTION_IN_PATCH.search(source) is not None
+        )
+        saw_dynamic_import_mention = (
+            saw_dynamic_import_mention or mentions_dynamic_import
+        )
         looks_like_import = re.match(r"(?:import|from)\b", source) is not None
         try:
             tree = ast.parse(source, filename=filename)
@@ -752,19 +926,29 @@ def _patch_imports(
                 dynamic = True
             continue
 
-        if looks_like_import:
-            dependencies.update(
-                _python_imports(
-                    tree, module_name, is_package, module_index, package_index
-                )
+        parsed_dynamic_import_mention = (
+            parsed_dynamic_import_mention or mentions_dynamic_import
+        )
+        dependencies.update(
+            _python_imports(
+                tree,
+                module_name,
+                is_package,
+                module_index,
+                package_index,
+                unresolved,
+                include_dynamic_package_ancestors=True,
             )
+        )
         aliases = _dynamic_import_aliases(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and _is_dynamic_load_call(
                 root, node, module_index, package_index, aliases
             ):
                 dynamic = True
-    return dependencies, complete, dynamic
+    if saw_dynamic_import_mention and not parsed_dynamic_import_mention:
+        dynamic = True
+    return dependencies, unresolved, complete, dynamic
 
 
 def _default_branch(fetcher: Callable[..., Any], repo: str) -> str:
@@ -833,17 +1017,28 @@ def _inspect_pr(
         for record in pr_records
         if isinstance(record.get("filename"), str)
     ]
-    if len(pr_records) != changed_files or len(set(filenames)) != len(pr_records):
+    if (
+        len(pr_records) != changed_files
+        or len(set(filenames)) != len(pr_records)
+        or not _valid_api_file_list(pr_records)
+    ):
         raise ValueError("pull request file list is incomplete")
     main_comparison = _fetch(
         fetcher, f"repos/{repo}/compare/{merge_base_sha}...{base_ref}"
     )
     if not isinstance(main_comparison, dict):
         raise ValueError("invalid base comparison response")
+    main_records = _records(main_comparison.get("files"))
+    if not _valid_api_file_list(main_records):
+        raise ValueError("base comparison file list is incomplete")
     pr_paths, pr_complete = _changed_paths(pr_records)
-    main_paths, main_complete = _changed_paths(main_comparison.get("files"))
+    main_paths, main_complete = _changed_paths(main_records)
     pr_graph = {path: set(dependencies) for path, dependencies in graph.items()}
     pr_dynamic = set(dynamic)
+    unresolved_imports = {
+        path: set(names)
+        for path, names in getattr(graph, "unresolved_imports", {}).items()
+    }
     for record in pr_records:
         filename = record.get("filename")
         status = record.get("status")
@@ -860,7 +1055,7 @@ def _inspect_pr(
         if not isinstance(patch, str):
             pr_complete = False
             continue
-        dependencies, patch_complete, patch_dynamic = _patch_imports(
+        dependencies, patch_unresolved, patch_complete, patch_dynamic = _patch_imports(
             filename,
             patch,
             root,
@@ -869,15 +1064,22 @@ def _inspect_pr(
             package_src_roots,
         )
         pr_graph.setdefault(filename, set()).update(dependencies)
+        unresolved_imports.setdefault(filename, set()).update(patch_unresolved)
         pr_complete = pr_complete and patch_complete
         if patch_dynamic:
             pr_dynamic.add(filename)
+    removed_modules, removed_top_levels = _removed_main_modules(
+        main_records, root, package_src_roots
+    )
     return decide(
         pr_paths,
         main_paths,
         pr_graph,
         complete=pr_complete and main_complete,
         dynamic=pr_dynamic,
+        unresolved_imports=unresolved_imports,
+        removed_main_modules=removed_modules,
+        removed_main_top_levels=removed_top_levels,
     )
 
 
