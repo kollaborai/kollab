@@ -412,17 +412,15 @@ async def test_success_waits_for_detached_transcript_writer(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_non_linux_successful_transcription_is_preserved(tmp_path, monkeypatch):
+async def test_non_linux_transcription_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/python3" if name == "python3" else None)
-    process = _Process()
-    create_process = AsyncMock(return_value=process)
+    create_process = AsyncMock()
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
 
     result = await _bridge()._transcribe_voice("synthetic-file-id")
 
-    assert result == "[voice] synthetic transcript"
-    create_process.assert_awaited_once()
-    assert create_process.await_args.args[0] == "whisper"
+    assert result == "[voice message - transcription failed]"
+    create_process.assert_not_awaited()
     assert list(tmp_path.iterdir()) == []
