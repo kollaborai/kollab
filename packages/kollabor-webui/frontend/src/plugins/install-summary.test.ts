@@ -122,7 +122,8 @@ describe("plugin review sheet data", () => {
 
   it("confirms only a ready review and sends its exact displayed commit and file hash", () => {
     expect(installSource).toMatch(/if\s*\(!job\s*\|\|\s*job\.status\s*!==\s*"ready"\s*\|\|\s*!job\.commit\s*\|\|\s*!job\.files_sha256\)\s*return;/);
-    expect(installSource).toMatch(/const ready = job\?\.status === "ready" && Boolean\(job\.commit && job\.files_sha256\)/);
+    expect(installSource).toMatch(/const ready = job\?\.status === "ready" && job\.review_complete && Boolean\(job\.commit && job\.files_sha256\)/);
+    expect(installSource).toContain("pluginReviewOmissionSummary(job)");
     expect(installSource).toMatch(/body:\s*JSON\.stringify\(\{\s*commit:\s*job\.commit,\s*files_sha256:\s*job\.files_sha256\s*\}\)/);
     expect(installSource).toMatch(/\{ready\s*\?\s*<Button[\s\S]*?void confirm\(\);[\s\S]*?:\s*null\}/);
   });

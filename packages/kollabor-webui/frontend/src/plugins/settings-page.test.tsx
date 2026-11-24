@@ -27,7 +27,7 @@ const plugin = (settings: unknown[]): PluginEntry => ({
   web: null,
   contributes: {},
   services: [],
-  omitted: { services: 0, uses: 0, granted: 0 },
+  omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
   settings,
 } as PluginEntry);
 
@@ -55,13 +55,13 @@ describe("plugin settings page", () => {
   it("shows counts for data omitted from the installed inventory", async () => {
     const entry = {
       ...plugin([]),
-      omitted: { services: 1, uses: 1, granted: 1 },
+      omitted: { services: 1, uses: 1, granted: 1, settings: 1, setting_options: 1, option_labels: 1, contributions: 1 },
       services: [{ name: "worker", state: "stopped", secrets: [], secrets_omitted: 1 }],
     } as unknown as PluginEntry;
     const markup = await markupFor([entry]);
 
     expect(markup).toContain(
-      "Inventory omitted: 1 service, 1 use declaration, 1 granted capability, 1 service secret.",
+      "Inventory omitted: 1 service, 1 use declaration, 1 granted capability, 1 setting, 1 setting option, 1 option label, 1 contribution declaration, 1 service secret.",
     );
   });
 
