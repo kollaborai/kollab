@@ -708,11 +708,13 @@ const Composer: FC<{
   // going to the agent. Returns true when it handled the submit.
   const runPluginCommand = (event: { preventDefault: () => void }) => {
     if (aui.composer.getState().attachments.length > 0) return false;
-    const match = matchPluginCommand(aui.composer.getState().text, pluginEntries);
+    const draft = aui.composer.getState().text;
+    const match = matchPluginCommand(draft, pluginEntries);
     if (!match) return false;
     event.preventDefault();
     aui.composer.setText("");
     const fail = (error: unknown) => {
+      if (!aui.composer.getState().text) aui.composer.setText(draft);
       match.entry.k.toast(pluginCommandFailure(match.entry.name, error));
     };
     try {
