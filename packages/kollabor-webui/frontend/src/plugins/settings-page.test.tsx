@@ -24,7 +24,7 @@ const plugin = (settings: unknown[]): PluginEntry => ({
   settings,
 } as PluginEntry);
 
-async function markupFor(entries: PluginEntry[]): Promise<string> {
+async function markupFor(entries: PluginEntry[], pathname = "/settings"): Promise<string> {
   const loader = createPluginLoader(pluginRegistry, {
     list: async () => ({ plugins: entries }),
     importModule: async () => ({}),
@@ -33,7 +33,7 @@ async function markupFor(entries: PluginEntry[]): Promise<string> {
     api: { request: async () => new Response(), stream: async () => {} },
   });
   await loader.refresh();
-  vi.stubGlobal("window", { location: { pathname: "/settings" } });
+  vi.stubGlobal("window", { location: { pathname } });
   return renderToStaticMarkup(<PluginsSettings api={{} as never} />);
 }
 
@@ -127,5 +127,25 @@ describe("plugin settings page", () => {
   it("locks service controls and plugin navigation during a plugin action", () => {
     expect(source).toMatch(/<ServiceRow[\s\S]*?disabled=\{busy\}/);
     expect(source).toMatch(/disabled=\{busyPluginKey !== null\}/);
+  });
+
+  it("renders PhoneLink as read-only through the plugin page controls", async () => {
+    const markup = await markupFor([{
+      ...plugin([{
+        type: "spinbox", label: "Daily Token Cap", path: "plugin-values.hello.max_tokens_per_day",
+        value: 2_000_000, editable: true,
+      }]),
+      enabled: true,
+      state: "ok",
+      services: [{ name: "worker", state: "stopped" }],
+    }], "/relay/v1/phone");
+
+    expect(markup).toContain("Manage plugins on this computer");
+    expect(markup).not.toContain("Add Plugin");
+    expect(markup).not.toContain(">Update</button>");
+    expect(markup).not.toContain(">Remove</button>");
+    expect(markup).not.toContain(">Start</button>");
+    expect(markup).toContain('data-disabled="" disabled=""');
+    expect(markup).not.toContain(">Save</button>");
   });
 });
