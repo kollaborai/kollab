@@ -15804,13 +15804,22 @@ class HubPlugin(BasePlugin):
             return "no socket, cleaned up"
 
         try:
-            # Always name the selected generation, so a new agent that took
-            # over this socket refuses a stop meant for the old one (#1408).
-            generation = {
-                "expected_agent_id": getattr(agent, "agent_id", None),
-                "expected_pid": getattr(agent, "pid", None),
-                "expected_started_at": getattr(agent, "started_at", None),
-            }
+            # Name the selected generation, so a new agent that took over this
+            # socket refuses a stop meant for the old one (#1408). A tracked
+            # child must name it; a session-less row names it when it can.
+            generation = (
+                {
+                    "expected_agent_id": getattr(agent, "agent_id", None),
+                    "expected_pid": getattr(agent, "pid", None),
+                    "expected_started_at": getattr(agent, "started_at", None),
+                }
+                if session is not None
+                else AgentMessenger.shutdown_generation(
+                    getattr(agent, "agent_id", None),
+                    getattr(agent, "pid", None),
+                    getattr(agent, "started_at", None),
+                )
+            )
             success = await AgentMessenger.signal_shutdown(
                 agent.socket_path,
                 reason=reason,

@@ -1926,7 +1926,13 @@ async def stop_agent_record(
 
     shutdown_acked = False
     if sock:
-        shutdown_acked = await AgentMessenger.signal_shutdown(sock, reason=reason)
+        shutdown_acked = await AgentMessenger.signal_shutdown(
+            sock,
+            reason=reason,
+            **AgentMessenger.shutdown_generation(
+                agent.get("agent_id"), pid, agent.get("started_at")
+            ),
+        )
 
     if shutdown_acked:
         if await _wait_for_pid_exit(pid, timeout=STOP_GRACE_SECONDS):
@@ -2051,9 +2057,10 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 if current is not None and current != recorded:
                     _drop(f)
                     continue
-                # Pid alive but heartbeat stale = recycled pid, clean up
+                # Pid alive but heartbeat stale = recycled pid, clean up -- unless
+                # the kernel start proves the writer still runs (stuck, #575).
                 heartbeat_age = _time.time() - (data.get("last_heartbeat") or 0)
-                if heartbeat_age > 30:
+                if heartbeat_age > 30 and current is None:
                     sock = data.get("socket_path", "")
                     alive = False
                     if sock:
