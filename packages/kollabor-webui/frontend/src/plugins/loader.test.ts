@@ -118,6 +118,33 @@ describe("which plugins load", () => {
   });
 });
 
+describe("plugin inventory text redaction", () => {
+  it("preserves safe labels and provenance while rejecting credential text", () => {
+    const source = "https://github.com/acme/token-manager.git";
+    const normalized = normalizePluginEntry({
+      ...entry("hello"),
+      name: "Token-Budget",
+      source,
+      settings: [{
+        type: "text_input", path: "plugins.demo.password", label: "Password: required",
+        help: "Password: required", value: null, editable: false,
+      }],
+    });
+    expect(normalized?.name).toBe("Token-Budget");
+    expect(normalized?.source).toBe(source);
+    expect(normalized?.settings[0]?.label).toBe("Password: required");
+    expect(normalized?.settings[0]?.help).toBe("Password: required");
+  });
+
+  it.each([
+    ["underscore credential assignment", "GITHUB_TOKEN=ghp_fakecredentialvalue123"],
+    ["bearer credential", "Bearer abc123XYZ987"],
+    ["API key shape", "sk-live-abcdefghijklmnop"],
+  ])("rejects %s", (_label, value) => {
+    expect(normalizePluginEntry({ ...entry("hello"), name: value })?.name).toBe("hello");
+  });
+});
+
 describe("loading", () => {
   it("imports every enabled entry in parallel and awaits each plugin function before showing it", async () => {
     const gates = { hello: deferred(), chain: deferred() };
