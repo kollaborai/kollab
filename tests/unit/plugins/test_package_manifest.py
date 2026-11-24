@@ -134,6 +134,56 @@ def test_manifest_collections_fit_the_plugin_review_limits(collection, count, er
         assert validate_manifest(root, "0.23.0") == manifest
 
 
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "contributes.menu",
+        "contributes.views",
+        "contributes.pages",
+        "contributes.modals",
+        "contributes.slash",
+        "contributes.renderers",
+        "settings.widgets",
+        "settings.options",
+        "settings.option_labels",
+    ],
+)
+def test_plugin_manifest_review_lists_reject_over_limit(surface, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "Example",
+        "kollab": ">=0.23.0",
+        "uses": [],
+    }
+    kind, key = surface.split(".")
+    if kind == "contributes":
+        manifest["contributes"] = {key: [{"id": f"entry-{index}"} for index in range(257)]}
+    else:
+        manifest["settings"] = "settings.json"
+        if key == "widgets":
+            widgets = [{"type": "label", "label": f"Field {index}"} for index in range(257)]
+        elif key == "options":
+            widgets = [{"type": "dropdown", "label": "Mode", "config_path": "mode",
+                        "options": [f"choice-{index}" for index in range(257)]}]
+        else:
+            widgets = [{"type": "dropdown", "label": "Mode", "config_path": "mode",
+                        "option_labels": {f"choice-{index}": f"Choice {index}" for index in range(257)}}]
+        (root / "settings.json").write_text(json.dumps({"widgets": widgets}))
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="exceeds 256"):
+        validate_manifest(root, "0.23.0")
+
+
 def test_manifest_file_size_is_bounded_before_json_parsing(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
