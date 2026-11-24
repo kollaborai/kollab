@@ -51,6 +51,7 @@ export type PluginService = {
   since?: number | null;
   restarts?: number;
   secrets?: string[];
+  secrets_omitted: number;
   heartbeat_s?: number | null;
   heartbeat?: number | null;
   heartbeat_monitor_since?: number | null;
@@ -85,6 +86,7 @@ export type PluginEntry = {
   settings_section?: { title?: string } | null;
   uses?: string[];
   granted?: string[];
+  omitted: { services: number; uses: number; granted: number };
 };
 
 /** `GET /plugins` response. `server_time` is Unix time in seconds. */
