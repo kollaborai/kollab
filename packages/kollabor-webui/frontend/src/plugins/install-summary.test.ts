@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+// @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
 import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, reviewFormState, shouldRetryPolling, showFetching, startReview } from "./install";
 

@@ -1,5 +1,8 @@
+// @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
+// @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import path from "node:path";
+// @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
