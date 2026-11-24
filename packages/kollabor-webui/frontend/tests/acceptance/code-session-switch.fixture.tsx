@@ -6,11 +6,12 @@ import "../../src/styles.css";
 function Fixture() {
   const [sessionId, setSessionId] = useState("session-a");
   const [show, setShow] = useState(true);
+  const daemonNotice = { notice: null, fallbackName: "agent", busy: false, onRestart: () => {} };
   return <><button onClick={() => setSessionId("session-b")}>Switch session</button>
     <button onClick={() => setSessionId("session-c")}>Switch to unavailable session</button>
     <button onClick={() => setShow(false)}>Leave editor</button>
     <div style={{ display: "flex", width: 1000, height: 700 }}>
-      {show && <CodeEditorView sessionId={sessionId} device="device" workspace="/shared" mode="code" />}
+      {show && <CodeEditorView sessionId={sessionId} device="device" workspace="/shared" mode="code" daemonNotice={daemonNotice} />}
     </div></>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);
