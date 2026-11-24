@@ -13,7 +13,7 @@ import shlex
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from kollabor_events.models import EventType
 
@@ -3845,16 +3845,22 @@ class ToolExecutor:
     # WEB TOOLS (web-fetch, web-search)
     # ------------------------------------------------------------------
 
-    async def _execute_web_fetch(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+    async def _execute_web_fetch(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
         """Fetch a URL and return cleaned text content.
 
-        Uses aiohttp with a 30-second timeout. Content extraction follows
-        a priority chain: JSON-LD → meta tags → semantic HTML5 → readability
-        heuristic. If the extracted text is suspiciously sparse (<500 chars
+        Uses aiohttp with a 30-second timeout. Content extraction prioritizes
+        JSON-LD article bodies, semantic HTML5, and readability. JSON-LD
+        descriptions supplement the result only when longer than page text.
+        If the extracted text is suspiciously sparse (<500 chars
         from a 200 OK), retries with Playwright headless browser (if installed)
         to handle JS-rendered pages.
 
-        Output is truncated to max_chars (default 5000).
+        At most 500000 downloaded bytes are retained and decoded input is
+        capped at 2000000 bytes. A one-byte lookahead detects overflow. The
+        complete output, including its URL header and any truncation marker,
+        is capped by max_chars (default 5000, maximum 50000).
 
         Args:
             tool_data: Dict with 'url' (required), 'max_chars' (optional),
@@ -3863,12 +3869,35 @@ class ToolExecutor:
         Returns:
             ToolExecutionResult with the cleaned text or an error message.
         """
+        import zlib
+        from contextlib import asynccontextmanager
+        from urllib.parse import urljoin, urlparse
+
         import aiohttp
 
         tool_id = tool_data.get("id", "unknown")
         url = tool_data.get("url", "").strip()
-        max_chars = int(tool_data.get("max_chars", 5000))
+        max_chars = tool_data.get("max_chars", 5000)
         extract_main = tool_data.get("extract_main", True)
+
+        if isinstance(max_chars, str):
+            try:
+                max_chars = int(max_chars)
+            except ValueError:
+                max_chars = None
+
+        if (
+            isinstance(max_chars, bool)
+            or not isinstance(max_chars, int)
+            or max_chars < 1
+            or max_chars > 50_000
+        ):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error="max_chars must be an integer from 1 to 50000",
+            )
 
         if not url:
             return ToolExecutionResult(
@@ -3879,15 +3908,13 @@ class ToolExecutor:
             )
 
         # Basic URL validation
-        from urllib.parse import urlparse
-
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error=f"Invalid URL: {url}",
+                error="Invalid URL",
             )
         if parsed.scheme not in ("http", "https"):
             return ToolExecutionResult(
@@ -3898,59 +3925,324 @@ class ToolExecutor:
             )
 
         try:
+            max_download_bytes = 500_000
+            max_decoded_bytes = 2_000_000
+            redirect_statuses = {301, 302, 303, 307, 308}
             timeout = aiohttp.ClientTimeout(total=30)
+            loop = asyncio.get_running_loop()
+            total_timeout = timeout.total if timeout.total is not None else 30
+            deadline = loop.time() + total_timeout
+
+            @asynccontextmanager
+            async def request_before_deadline(
+                request_context: Any,
+            ) -> AsyncIterator[Any]:
+                async with asyncio.timeout_at(deadline):
+                    async with request_context as response:
+                        yield response
+
             headers = {
+                "Accept-Encoding": "identity, gzip, deflate",
                 "User-Agent": (
                     "Mozilla/5.0 (compatible; KollabAgent/1.0; "
                     "+https://github.com/kollaborai/kollab)"
                 ),
             }
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, headers=headers, allow_redirects=True) as resp:
-                    if resp.status >= 400:
+            async with aiohttp.ClientSession(
+                timeout=timeout, auto_decompress=False
+            ) as session:
+                current_url = url
+                downloaded = 0
+                for redirect_count in range(11):
+                    if downloaded > max_download_bytes:
                         return ToolExecutionResult(
                             tool_id=tool_id,
                             tool_type="web_fetch",
                             success=False,
-                            error=f"HTTP {resp.status} {resp.reason}",
+                            error="Response exceeded the 500000-byte download limit",
                         )
+                    async with request_before_deadline(
+                        session.get(
+                            current_url, headers=headers, allow_redirects=False
+                        )
+                    ) as resp:
+                        if resp.status in redirect_statuses:
+                            location = resp.headers.get("Location")
+                            if not location:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Redirect response had no Location header",
+                                )
+                            if redirect_count == 10:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Too many redirects",
+                                )
+                            try:
+                                redirect_length = int(
+                                    resp.headers.get("Content-Length", "")
+                                )
+                            except ValueError, TypeError:
+                                redirect_length = None
+                            if (
+                                redirect_length is not None
+                                and redirect_length > max_download_bytes - downloaded
+                            ):
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 500000-byte download limit",
+                                )
+                            while True:
+                                redirect_chunk = await resp.content.read(
+                                    min(
+                                        64 * 1024,
+                                        max_download_bytes - downloaded + 1,
+                                    )
+                                )
+                                if not redirect_chunk:
+                                    break
+                                downloaded += len(redirect_chunk)
+                                if downloaded > max_download_bytes:
+                                    return ToolExecutionResult(
+                                        tool_id=tool_id,
+                                        tool_type="web_fetch",
+                                        success=False,
+                                        error="Response exceeded the 500000-byte download limit",
+                                    )
+                            current_url = urljoin(current_url, location)
+                            redirected = urlparse(current_url)
+                            if redirected.scheme not in ("http", "https"):
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Redirect used an unsupported URL scheme",
+                                )
+                            continue
 
-                    # Content-Length check: warn on very large pages
-                    try:
-                        content_length = resp.headers.get("Content-Length", "")
-                        if content_length and int(content_length) > 500_000:
-                            logger.warning(
-                                f"web_fetch: large page {url} ({content_length} bytes)"
+                        if resp.status >= 400:
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error=f"HTTP {resp.status} {resp.reason}",
                             )
-                    except (ValueError, TypeError):
-                        pass
 
-                    final_url = str(resp.url)
-                    raw = await resp.text(errors="replace")
+                        final_url = str(resp.url)
+                        content_length = resp.headers.get("Content-Length")
+                        try:
+                            declared_length = (
+                                int(content_length) if content_length else None
+                            )
+                        except ValueError, TypeError:
+                            declared_length = None
+                        if declared_length is not None and declared_length < 0:
+                            declared_length = None
+                        if (
+                            declared_length is not None
+                            and declared_length > max_download_bytes - downloaded
+                        ):
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response exceeded the 500000-byte download limit",
+                            )
+
+                        encoding = resp.headers.get(
+                            "Content-Encoding", "identity"
+                        ).lower()
+                        decompressor = None
+                        if encoding in ("", "identity"):
+                            pass
+                        elif encoding == "gzip":
+                            decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                        elif encoding == "deflate":
+                            # Servers use both the zlib wrapper and raw DEFLATE
+                            # despite the HTTP deflate coding specifying a wrapper.
+                            decompressor = None
+                        else:
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response uses an unsupported content encoding",
+                            )
+
+                        decoded_parts = []
+                        decoded_size = 0
+                        deflate_prefix = bytearray()
+                        while True:
+                            chunk = await resp.content.read(
+                                min(64 * 1024, max_download_bytes - downloaded + 1)
+                            )
+                            if not chunk:
+                                break
+                            downloaded += len(chunk)
+                            if downloaded > max_download_bytes:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 500000-byte download limit",
+                                )
+                            if encoding == "deflate" and decompressor is None:
+                                deflate_prefix.extend(chunk)
+                                if len(deflate_prefix) < 2:
+                                    continue
+                                cmf, flg = deflate_prefix[:2]
+                                has_zlib_header = (
+                                    cmf & 0x0F == 8
+                                    and cmf >> 4 <= 7
+                                    and ((cmf << 8) | flg) % 31 == 0
+                                )
+                                window_bits = (
+                                    zlib.MAX_WBITS if has_zlib_header else -zlib.MAX_WBITS
+                                )
+                                decompressor = zlib.decompressobj(window_bits)
+                                chunk = bytes(deflate_prefix)
+                                deflate_prefix.clear()
+                            if (
+                                encoding == "gzip"
+                                and decompressor is not None
+                                and decompressor.eof
+                            ):
+                                # A gzip member can end exactly at a read boundary.
+                                decompressor = zlib.decompressobj(
+                                    16 + zlib.MAX_WBITS
+                                )
+                            if decompressor is None:
+                                decoded = chunk
+                            else:
+                                pending = chunk
+                                while True:
+                                    decoded = decompressor.decompress(
+                                        pending,
+                                        max_decoded_bytes - decoded_size + 1,
+                                    )
+                                    if decompressor.unconsumed_tail:
+                                        return ToolExecutionResult(
+                                            tool_id=tool_id,
+                                            tool_type="web_fetch",
+                                            success=False,
+                                            error="Response exceeded the 2000000-byte decoded limit",
+                                        )
+                                    decoded_size += len(decoded)
+                                    if decoded_size > max_decoded_bytes:
+                                        return ToolExecutionResult(
+                                            tool_id=tool_id,
+                                            tool_type="web_fetch",
+                                            success=False,
+                                            error="Response exceeded the 2000000-byte decoded limit",
+                                        )
+                                    decoded_parts.append(decoded)
+                                    if encoding != "gzip" or not decompressor.unused_data:
+                                        break
+                                    pending = decompressor.unused_data
+                                    decompressor = zlib.decompressobj(
+                                        16 + zlib.MAX_WBITS
+                                    )
+                            if decompressor is None:
+                                decoded_size += len(chunk)
+                                if decoded_size > max_decoded_bytes:
+                                    return ToolExecutionResult(
+                                        tool_id=tool_id,
+                                        tool_type="web_fetch",
+                                        success=False,
+                                        error="Response exceeded the 2000000-byte decoded limit",
+                                    )
+                                decoded_parts.append(chunk)
+
+                        if encoding == "gzip" and not decompressor.eof:
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response contained an incomplete gzip stream",
+                            )
+                        if encoding == "deflate" and (
+                            decompressor is None or not decompressor.eof
+                        ):
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response contained an incomplete deflate stream",
+                            )
+
+                        if decompressor is not None:
+                            tail = decompressor.flush()
+                            decoded_size += len(tail)
+                            if decoded_size > max_decoded_bytes:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 2000000-byte decoded limit",
+                                )
+                            decoded_parts.append(tail)
+
+                        charset = resp.charset
+                        if not isinstance(charset, str) or not charset:
+                            charset = "utf-8"
+                        decoded_body = b"".join(decoded_parts)
+                        try:
+                            raw = decoded_body.decode(charset, errors="replace")
+                        except LookupError:
+                            raw = decoded_body.decode("utf-8", errors="replace")
+                        break
 
             # Extract main content using priority chain
             text = self._extract_main_content(raw, extract_main)
 
             # Playwright fallback: if aiohttp got suspiciously little text
-            # from a valid response, the page may be JS-rendered.
-            if len(text) < 500:
-                pw_text = await self._playwright_fetch(url)
+            # from a valid response, render the bounded source and its
+            # byte-budgeted script subresources.
+            json_ld_body = (
+                self._extract_json_ld_article_body(raw)
+                if extract_main and 0 < len(text) < 500
+                else ""
+            )
+            if len(text) < 500 and (not json_ld_body or text != json_ld_body):
+                pw_text = await self._playwright_fetch(
+                    raw,
+                    page_url=final_url,
+                    max_chars=2_000_000,
+                    max_download_bytes=max_download_bytes - downloaded,
+                    max_decoded_bytes=max_decoded_bytes - decoded_size,
+                    deadline=deadline,
+                )
                 if pw_text and len(pw_text) > len(text):
                     text = pw_text
-                    logger.info(f"web_fetch: used Playwright fallback for {url}")
+                    logger.info("web_fetch: used Playwright fallback")
 
-            # Truncate to max_chars (accounting for the URL header)
             header = f"URL: {final_url}\n\n"
-            available = max(100, max_chars - len(header))
-            if len(text) > available:
-                text = text[:available] + "\n...[truncated]"
+            output = header + text
+            if len(output) > max_chars:
+                marker = "\n...[truncated]"
+                if max_chars > len(marker):
+                    output = output[: max_chars - len(marker)] + marker
+                else:
+                    output = output[:max_chars]
 
+            parsed_final_url = urlparse(final_url)
+            metadata_url = parsed_final_url._replace(
+                netloc=parsed_final_url.netloc.rsplit("@", 1)[-1],
+                query="",
+                fragment="",
+            ).geturl()
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=True,
-                output=header + text,
-                metadata={"url": final_url, "chars": len(text)},
+                output=output,
+                metadata={"url": metadata_url, "chars": len(output)},
             )
 
         except asyncio.TimeoutError:
@@ -3965,18 +4257,20 @@ class ToolExecutor:
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error=f"Network error: {e}",
+                error=f"Network error: {type(e).__name__}",
             )
         except Exception as e:
-            logger.error(f"web_fetch error for {url}: {e}", exc_info=True)
+            logger.error("web_fetch failed: %s", type(e).__name__, exc_info=True)
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error=f"Fetch error: {e}",
+                error=f"Fetch error: {type(e).__name__}",
             )
 
-    async def _execute_web_search(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+    async def _execute_web_search(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
         """Search the web using DuckDuckGo's HTML endpoint and return results.
 
         No API key required. Parses the top N results (title, URL, snippet)
@@ -4092,75 +4386,183 @@ class ToolExecutor:
         """Extract main content from HTML using a priority chain.
 
         Priority order:
-        1. JSON-LD structured data (articleBody / description)
+        1. JSON-LD articleBody
         2. Semantic HTML5 (<article>, <main>, <section>)
         3. Readability heuristic (highest text-to-tag ratio element)
-        4. Fallback: strip non-content tags, extract remaining text
+        4. Longer JSON-LD description, then stripped page text
 
-        Uses beautifulsoup4 with lxml parser. Falls back to regex-based
-        extraction if bs4 is not available.
+        Uses beautifulsoup4 with lxml when available and Python's built-in
+        html.parser otherwise. Falls back to regex-based extraction if bs4 is
+        not available; the regex fallback cannot inspect JSON-LD before
+        stripping scripts.
         """
         try:
             from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "lxml")
+            from bs4.exceptions import FeatureNotFound
         except ImportError:
             # bs4 not available — fall back to regex-based extraction
-            return ToolExecutor._html_to_text_regex(html)
+            return ToolExecutor._html_to_text_regex(html, extract_main=extract_main)
+
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except FeatureNotFound:
+            soup = BeautifulSoup(html, "html.parser")
+
+        if extract_main:
+            # JSON-LD lives in script tags, so read it before removing scripts.
+            article_body, description = ToolExecutor._extract_json_ld(soup)
 
         # Remove non-content elements entirely
-        for tag in soup.find_all(["script", "style", "nav", "footer", "aside",
-                                   "header", "noscript", "svg", "form",
+        for tag in soup.find_all(["script", "style", "nav", "footer",
+                                   "aside", "header", "noscript", "svg", "form",
                                    "button", "iframe"]):
             tag.decompose()
 
         if extract_main:
-            # Priority 1: JSON-LD structured data
-            text = ToolExecutor._extract_json_ld(soup)
-            if text and len(text) > 200:
-                return text
-
             # Priority 2: Semantic HTML5 — <article>, <main>
             for selector in ["article", "main", "[role='main']"]:
                 element = soup.select_one(selector)
                 if element:
                     text = ToolExecutor._soup_to_text(element)
                     if len(text) > 200:
-                        return text
+                        return article_body if len(article_body) > len(text) else text
+
+            # Preformatted samples and inline code are not page prose. A
+            # malformed inline code wrapper with block children must not hide
+            # the page content it swallowed.
+            block_tags = [
+                "p", "div", "section", "article", "main", "h1", "h2", "h3",
+                "h4", "h5", "h6", "ul", "ol", "li", "table", "blockquote",
+            ]
+            for tag in soup.find_all("pre"):
+                tag.decompose()
+
+            code_tags = soup.find_all("code")
+            code_with_blocks = [tag for tag in code_tags if tag.find(block_tags)]
+            if code_with_blocks:
+                import re
+
+                line_offsets = [0]
+                for line in html.splitlines(keepends=True):
+                    line_offsets.append(line_offsets[-1] + len(line))
+                code_tag_tokens = re.compile(r"<(/?)\s*code\b[^>]*>", re.IGNORECASE)
+
+            for tag in code_tags:
+                if tag.find(block_tags):
+                    source_line = getattr(tag, "sourceline", None)
+                    source_pos = getattr(tag, "sourcepos", None)
+                    if (
+                        source_line is None
+                        or source_pos is None
+                        or source_line < 1
+                        or source_line >= len(line_offsets)
+                    ):
+                        has_closing_tag = True
+                    else:
+                        source_start = line_offsets[source_line - 1] + source_pos
+                        tokens = code_tag_tokens.finditer(html, source_start)
+                        opening = next(tokens, None)
+                        has_closing_tag = (
+                            opening is None
+                            or opening.start() != source_start
+                            or bool(opening.group(1))
+                        )
+                        if not has_closing_tag:
+                            depth = 1
+                            for token in tokens:
+                                if token.group(1):
+                                    depth -= 1
+                                    if depth == 0:
+                                        has_closing_tag = True
+                                        break
+                                elif not token.group(0).rstrip().endswith("/>"):
+                                    depth += 1
+
+                    if has_closing_tag:
+                        tag.decompose()
+                    else:
+                        for child in list(tag.contents):
+                            if isinstance(child, str):
+                                child.extract()
+                            elif child.name not in block_tags and child.find(block_tags) is None:
+                                child.decompose()
+                        tag.unwrap()
+                else:
+                    tag.decompose()
 
             # Priority 3: Readability heuristic — find densest content block
             text = ToolExecutor._readability_extract(soup)
             if text and len(text) > 200:
-                return text
+                return article_body if len(article_body) > len(text) else text
 
-        # Priority 4: Fallback — extract all remaining text
-        return ToolExecutor._soup_to_text(soup)
+        # Prefer shorter structured candidates only when they add more than
+        # the semantic, readability, and plain-text fallbacks already found.
+        text = ToolExecutor._soup_to_text(soup)
+        if extract_main:
+            if len(article_body) > len(text):
+                return article_body
+            if len(description) > len(text):
+                return description
+        return text
 
     @staticmethod
-    def _extract_json_ld(soup) -> str:
-        """Extract articleBody or description from JSON-LD script tags."""
+    def _extract_json_ld_article_body(html: str) -> str:
+        """Return a usable JSON-LD article body when the parser is available."""
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return ""
+
+        soup = BeautifulSoup(html, "html.parser")
+        article_body, _ = ToolExecutor._extract_json_ld(soup)
+        return article_body
+
+    @staticmethod
+    def _extract_json_ld(soup) -> tuple[str, str]:
+        """Return the longest articleBody and description from JSON-LD tags."""
         import json
 
+        article_body = ""
+        description = ""
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "")
-                # Handle both single objects and arrays
-                items = data if isinstance(data, list) else [data]
-                for item in items:
+                # Handle top-level arrays and graph-wrapped JSON-LD nodes.
+                items = [data]
+                while items:
+                    item = items.pop()
+                    if isinstance(item, list):
+                        items.extend(reversed(item))
+                        continue
                     if not isinstance(item, dict):
                         continue
+                    graph = item.get("@graph")
+                    if isinstance(graph, (dict, list)):
+                        items.append(graph)
                     # Look for articleBody first (richest content)
-                    body = item.get("articleBody") or item.get("text", "")
-                    if body and len(body) > 200:
-                        # Collapse whitespace
-                        lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
-                        return "\n".join(lines)
-                    # Fall back to description
-                    desc = item.get("description", "")
-                    if desc and len(desc) > 100:
-                        return desc.strip()
+                    body = item.get("articleBody")
+                    if not isinstance(body, str) or not body.strip():
+                        body = item.get("text", "")
+                    if isinstance(body, str):
+                        # Normalize each line so padded text cannot win by length.
+                        lines = [" ".join(ln.split()) for ln in body.splitlines()]
+                        lines = [line for line in lines if line]
+                        normalized_body = "\n".join(lines)
+                        if normalized_body and len(normalized_body) > len(article_body):
+                            article_body = normalized_body
+                    # Keep the longest usable description while examining all
+                    # scripts for an article body.
+                    desc = item.get("description")
+                    if isinstance(desc, str):
+                        normalized_description = desc.strip()
+                        if (
+                            len(normalized_description) > len(description)
+                            and len(normalized_description) > 100
+                        ):
+                            description = normalized_description
             except (json.JSONDecodeError, TypeError):
                 continue
-        return ""
+        return article_body, description
 
     @staticmethod
     def _readability_extract(soup) -> str:
@@ -4214,7 +4616,7 @@ class ToolExecutor:
         return "\n".join(lines)
 
     @staticmethod
-    def _html_to_text_regex(html: str) -> str:
+    def _html_to_text_regex(html: str, extract_main: bool = True) -> str:
         """Regex-based HTML to text fallback (no bs4 dependency).
 
         Used when beautifulsoup4 is not installed.
@@ -4222,9 +4624,36 @@ class ToolExecutor:
         import html as html_mod
         import re
 
-        # Remove non-content tags entirely (tag + inner content)
+        # Unterminated script/style content runs to the end; other malformed
+        # non-content tags should not erase the rest of the page.
+        raw_content = re.compile(
+            r"<(script|style)\b[^>]*>.*?(?:</\1\s*>|$)",
+            re.DOTALL | re.IGNORECASE,
+        )
+        html = raw_content.sub("", html)
+
+        if extract_main:
+            # Remove complete pre/code blocks first, including any block tags
+            # nested inside them.
+            closed_code_blocks = re.compile(
+                r"<(pre|code)\b[^>]*>.*?</\1\s*>",
+                re.DOTALL | re.IGNORECASE,
+            )
+            html = closed_code_blocks.sub("", html)
+
+            # For unclosed wrappers, stop at the next block boundary so
+            # malformed inline markup cannot hide following page text.
+            block_start = r"(?=<\s*(?:p|div|section|article|main|h[1-6]|li|ul|ol|table|blockquote)\b)"
+            unclosed_code_blocks = re.compile(
+                r"<(pre|code)\b[^>]*>.*?(?:" + block_start + r"|$)",
+                re.DOTALL | re.IGNORECASE,
+            )
+            html = unclosed_code_blocks.sub("", html)
+
+        # Remove structural non-content elements only when their closing tag
+        # is present, so a malformed navigation tag cannot consume the page.
         non_content = re.compile(
-            r"<(script|style|nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1>",
+            r"<(nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1\s*>",
             re.DOTALL | re.IGNORECASE,
         )
         html = non_content.sub("", html)
@@ -4251,29 +4680,246 @@ class ToolExecutor:
 
         return "\n".join(lines)
 
-    async def _playwright_fetch(self, url: str) -> str:
-        """Fetch a URL using Playwright headless browser (optional).
+    async def _playwright_fetch(
+        self,
+        html: str,
+        *,
+        page_url: str,
+        max_chars: int = 2_000_000,
+        max_download_bytes: int = 500_000,
+        max_decoded_bytes: int = 2_000_000,
+        deadline: float | None = None,
+    ) -> str:
+        """Render sparse HTML with script resources under the remaining budgets.
 
-        Used as a fallback for JS-rendered pages where aiohttp returns
-        sparse content. Returns extracted text or empty string if
-        Playwright is not available or fails.
+        The main document is served from the already-bounded response. Script
+        resources are fetched through the remaining byte limits; other browser
+        requests are blocked.
         """
         try:
+            import zlib
+            from urllib.parse import urljoin, urlparse
+
+            import aiohttp
             from playwright.async_api import async_playwright
         except ImportError:
             return ""
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
-                await page.goto(url, timeout=20000, wait_until="networkidle")
-                html = await page.content()
-                await browser.close()
+            downloaded_bytes = 0
+            decoded_bytes = 0
+            resource_lock = asyncio.Lock()
+            document_served = False
+            redirect_statuses = {301, 302, 303, 307, 308}
+            request_headers = {
+                "Accept-Encoding": "identity, gzip, deflate",
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; KollabAgent/1.0; "
+                    "+https://github.com/kollaborai/kollab)"
+                ),
+            }
 
-            return self._extract_main_content(html)
+            def decode_resource(body: bytes, encoding: str, limit: int):
+                if encoding in ("", "identity"):
+                    return body if len(body) <= limit else None
+                if encoding == "gzip":
+                    window_bits = 16 + zlib.MAX_WBITS
+                elif encoding == "deflate":
+                    has_zlib_header = False
+                    if len(body) >= 2:
+                        cmf, flg = body[:2]
+                        has_zlib_header = (
+                            cmf & 0x0F == 8
+                            and cmf >> 4 <= 7
+                            and ((cmf << 8) | flg) % 31 == 0
+                        )
+                    window_bits = (
+                        zlib.MAX_WBITS if has_zlib_header else -zlib.MAX_WBITS
+                    )
+                else:
+                    return None
+
+                output = bytearray()
+                decoder = zlib.decompressobj(window_bits)
+                pending = body
+                try:
+                    while pending:
+                        decoded = decoder.decompress(
+                            pending, limit - len(output) + 1
+                        )
+                        output.extend(decoded)
+                        if len(output) > limit:
+                            return None
+                        if decoder.unconsumed_tail:
+                            pending = decoder.unconsumed_tail
+                            continue
+                        if encoding == "gzip" and decoder.eof and decoder.unused_data:
+                            pending = decoder.unused_data
+                            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                            continue
+                        pending = b""
+
+                    if not decoder.eof:
+                        return None
+                    output.extend(decoder.flush())
+                except zlib.error:
+                    return None
+                return bytes(output) if len(output) <= limit else None
+
+            async def read_bounded_body(response):
+                nonlocal downloaded_bytes
+                remaining = max_download_bytes - downloaded_bytes
+                if remaining < 0:
+                    return None
+                try:
+                    declared_length = int(response.headers.get("Content-Length", ""))
+                except (ValueError, TypeError):
+                    declared_length = None
+                if declared_length is not None and declared_length < 0:
+                    declared_length = None
+                if declared_length is not None and declared_length > remaining:
+                    downloaded_bytes = max_download_bytes
+                    return None
+
+                parts = []
+                body_size = 0
+                while True:
+                    chunk = await response.content.read(
+                        min(64 * 1024, remaining - body_size + 1)
+                    )
+                    if not chunk:
+                        break
+                    body_size += len(chunk)
+                    if body_size > remaining:
+                        downloaded_bytes = max_download_bytes
+                        return None
+                    parts.append(chunk)
+                downloaded_bytes += body_size
+                return b"".join(parts)
+
+            async def fetch_script(url: str, session):
+                nonlocal decoded_bytes
+                parsed_url = urlparse(url)
+                if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+                    return None
+
+                async with resource_lock:
+                    current_url = url
+                    for redirect_count in range(11):
+                        timeout_context = (
+                            asyncio.timeout_at(deadline)
+                            if deadline is not None
+                            else asyncio.timeout(20)
+                        )
+                        try:
+                            async with timeout_context:
+                                async with session.get(
+                                    current_url,
+                                    headers=request_headers,
+                                    allow_redirects=False,
+                                ) as response:
+                                    if response.status in redirect_statuses:
+                                        location = response.headers.get("Location")
+                                        body = await read_bounded_body(response)
+                                        if body is None or not location or redirect_count == 10:
+                                            return None
+                                        current_url = urljoin(current_url, location)
+                                        redirected_url = urlparse(current_url)
+                                        if (
+                                            redirected_url.scheme not in ("http", "https")
+                                            or not redirected_url.netloc
+                                        ):
+                                            return None
+                                        continue
+                                    if response.status >= 400:
+                                        return None
+
+                                    body = await read_bounded_body(response)
+                                    if body is None:
+                                        return None
+                                    encoding = response.headers.get(
+                                        "Content-Encoding", "identity"
+                                    ).lower().strip()
+                                    remaining_decoded = max_decoded_bytes - decoded_bytes
+                                    decoded_body = decode_resource(
+                                        body, encoding, remaining_decoded
+                                    )
+                                    if decoded_body is None:
+                                        decoded_bytes = max_decoded_bytes
+                                        return None
+                                    decoded_bytes += len(decoded_body)
+                                    response_headers = {
+                                        name: value
+                                        for name, value in response.headers.items()
+                                        if name.lower()
+                                        not in {
+                                            "connection",
+                                            "content-encoding",
+                                            "content-length",
+                                            "set-cookie",
+                                            "transfer-encoding",
+                                        }
+                                    }
+                                    return response.status, response_headers, decoded_body
+                        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                            return None
+                    return None
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=None), auto_decompress=False
+            ) as session:
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True)
+                    try:
+                        page = await browser.new_page()
+
+                        async def handle_request(route):
+                            nonlocal document_served
+                            request = route.request
+                            if request.resource_type == "document":
+                                if not document_served:
+                                    document_served = True
+                                    await route.fulfill(
+                                        status=200,
+                                        headers={
+                                            "content-type": "text/html; charset=utf-8"
+                                        },
+                                        body=html,
+                                    )
+                                else:
+                                    await route.abort()
+                                return
+                            if request.resource_type != "script":
+                                await route.abort()
+                                return
+
+                            resource = await fetch_script(request.url, session)
+                            if resource is None:
+                                await route.abort()
+                                return
+                            status, headers, body = resource
+                            await route.fulfill(
+                                status=status,
+                                headers=headers,
+                                body=body,
+                            )
+
+                        await page.route("**/*", handle_request)
+                        await page.goto(
+                            page_url,
+                            wait_until="domcontentloaded",
+                            timeout=20_000,
+                        )
+                        text = await page.locator("body").evaluate(
+                            "(body, limit) => body.innerText.slice(0, limit)",
+                            max_chars,
+                        )
+                    finally:
+                        await browser.close()
+
+            return str(text)[:max_chars]
         except Exception as e:
-            logger.debug(f"Playwright fetch failed for {url}: {e}")
+            logger.debug("Playwright fetch failed: %s", type(e).__name__)
             return ""
 
     @staticmethod

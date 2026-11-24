@@ -51,6 +51,17 @@ LLM Request
 note: these are XML tags parsed by kollabor_ai.response_parser, not tools/
   directory entries. execution happens in packages/kollabor-agent/.
 
+### Web Fetch
+
+`web-fetch` compares supported JSON-LD article bodies with semantic HTML and
+readable page text before selecting the fullest candidate. It uses a JSON-LD
+description only when that description is longer than the extracted page text,
+so metadata does not mask fuller article content. Fallback text extraction
+removes script, style, `pre`, and `code` bodies. The agent package installs
+Beautiful Soup and uses Python's built-in HTML parser; lxml is not required. If
+Beautiful Soup is unavailable, the regex fallback strips script, style, `pre`,
+and `code` contents but does not extract JSON-LD.
+
 ### Terminal Commands
 
 The LLM can execute shell commands through the `terminal` XML tag.
@@ -325,6 +336,19 @@ Agent bundle scope treats terminal session management as part of the `terminal`
 capability. The `terminal-status`, `terminal-output`, and `terminal-kill` tools
 require that grant, so an agent without terminal access cannot inspect or stop
 a session started by the operator.
+
+### Web Fetch
+
+`web-fetch` streams a response instead of buffering the full page. It retains
+at most 500000 downloaded bytes, including redirect response bodies, and reads
+at most one additional byte to detect overflow. The final response is
+additionally limited to 2000000 decompressed bytes. The optional Playwright
+fallback renders the bounded response and fetches script resources within the
+remaining byte limits; other browser requests are blocked.
+
+`max_chars` limits the complete returned output, including the URL header and
+any truncation marker. It accepts integers from 1 through 50000 and defaults to
+5000. Invalid values return an error.
 
 File location: `packages/kollabor-agent/src/kollabor_agent/`
 
