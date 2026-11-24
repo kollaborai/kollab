@@ -9,7 +9,9 @@ Mocks aiohttp to avoid real network calls.
 """
 
 import asyncio
+import builtins
 import gzip
+import json
 import os
 import re
 import sys
@@ -225,6 +227,659 @@ class TestWebFetchExecution(unittest.TestCase):
             # HTML tags should be stripped
             self.assertNotIn("<html>", result.output)
             self.assertNotIn("<p>", result.output)
+
+    def test_web_fetch_extracts_json_ld_before_removing_scripts(self):
+        """JSON-LD is extracted before scripts are stripped on the real fetch path."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "Structured article content. " * 12
+        cases = [
+            (
+                "JSON-LD article body",
+                (
+                    '<script type="application/ld+json">'
+                    + json.dumps({"articleBody": article_body})
+                    + "</script><p>ordinary fallback</p>"
+                ),
+                article_body,
+                "ordinary fallback",
+            ),
+            (
+                "multiple scripts and array",
+                (
+                    '<script type="application/ld+json">{bad json</script>'
+                    '<script type="application/ld+json">'
+                    + json.dumps([
+                        {"articleBody": ["not", "text"]},
+                        {"articleBody": article_body},
+                    ])
+                    + "</script><p>ordinary fallback</p>"
+                ),
+                article_body,
+                "ordinary fallback",
+            ),
+            (
+                "missing fields and non-string values",
+                (
+                    '<script type="application/ld+json">'
+                    + json.dumps(
+                        [
+                            {"name": "no article fields"},
+                            {
+                                "articleBody": ["x" * 201],
+                                "description": {"text": "not a string"},
+                            },
+                        ]
+                    )
+                    + "</script><p>ordinary fallback</p>"
+                ),
+                "ordinary fallback",
+                "not a string",
+            ),
+            (
+                "malformed and absent JSON-LD fallback",
+                (
+                    '<script type="application/ld+json">{bad json</script>'
+                    "<script>private script marker</script>"
+                    "<pre>code marker</pre><code>inline code marker</code>"
+                    "<p>ordinary fallback</p>"
+                ),
+                "ordinary fallback",
+                "private script marker",
+            ),
+        ]
+
+        for label, html, expected, excluded in cases:
+            with self.subTest(label=label):
+                response = _make_mock_aiohttp_response(text=html)
+                with (
+                    _patch_aiohttp_session(mock_get=response),
+                    patch.object(
+                        ToolExecutor,
+                        "_playwright_fetch",
+                        new=AsyncMock(return_value=""),
+                    ),
+                ):
+                    result = _run(
+                        self.executor._execute_web_fetch(
+                            {"type": "web_fetch", "url": "https://example.com"}
+                        )
+                    )
+                self.assertTrue(result.success, result.error)
+                self.assertIn(expected.rstrip(), result.output)
+                self.assertNotIn(excluded, result.output)
+                self.assertNotIn("code marker", result.output)
+                self.assertNotIn("inline code marker", result.output)
+
+    def test_web_fetch_extracts_short_json_ld_article_body(self):
+        """A concise JSON-LD-only article is still useful fetched content."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "A concise but complete article with useful facts and a clear conclusion."
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"articleBody": article_body})
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body, result.output)
+
+    def test_web_fetch_keeps_short_json_ld_body_over_playwright_text(self):
+        """A concise JSON-LD body is not replaced by unrelated rendered text."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "A concise article with useful facts and a clear conclusion."
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"articleBody": article_body})
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+        playwright = AsyncMock(return_value="Unrelated rendered page text. " * 30)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(ToolExecutor, "_playwright_fetch", new=playwright),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body, result.output)
+        playwright.assert_not_awaited()
+
+    def test_web_fetch_extracts_json_ld_article_inside_graph(self):
+        """JSON-LD graph nodes can carry article bodies."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "Graph-wrapped article body. " * 5
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps(
+                {"@graph": [{"@type": "NewsArticle", "articleBody": article_body}]}
+            )
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+
+    def test_web_fetch_json_ld_does_not_require_lxml(self):
+        """A BeautifulSoup install without lxml can still parse web-fetch HTML."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "Structured article content. " * 12
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"articleBody": article_body})
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+        real_import = builtins.__import__
+
+        def import_without_lxml(name, *args, **kwargs):
+            if name == "lxml" or name.startswith("lxml."):
+                raise ImportError("lxml intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+            patch("builtins.__import__", side_effect=import_without_lxml),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+
+    def test_web_fetch_json_ld_prefers_article_body_over_descriptions(self):
+        """Article content wins across scripts; a valid short description survives."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        short_description = "short JSON-LD description marker " * 5
+        article_after_short_description = "articleBody after short description " * 8
+        website_description = "website metadata description marker " * 8
+        news_article_body = "news article body marker " * 12
+        cases = [
+            (
+                "short description",
+                "<script type=\"application/ld+json\">"
+                + json.dumps({"description": short_description})
+                + "</script><p>ordinary fallback</p>",
+                short_description,
+            ),
+            (
+                "later article body",
+                "<script type=\"application/ld+json\">"
+                + json.dumps({"description": short_description})
+                + "</script><script type=\"application/ld+json\">"
+                + json.dumps({"articleBody": article_after_short_description})
+                + "</script>",
+                article_after_short_description,
+            ),
+            (
+                "article body after website metadata",
+                "<script type=\"application/ld+json\">"
+                + json.dumps({"@type": "WebSite", "description": website_description})
+                + "</script><script type=\"application/ld+json\">"
+                + json.dumps({"@type": "NewsArticle", "articleBody": news_article_body})
+                + "</script>",
+                news_article_body,
+            ),
+        ]
+
+        for label, html, expected in cases:
+            with self.subTest(label=label):
+                response = _make_mock_aiohttp_response(text=html)
+                with (
+                    _patch_aiohttp_session(mock_get=response),
+                    patch.object(
+                        ToolExecutor,
+                        "_playwright_fetch",
+                        new=AsyncMock(return_value=""),
+                    ),
+                ):
+                    result = _run(
+                        self.executor._execute_web_fetch(
+                            {"type": "web_fetch", "url": "https://example.com"}
+                        )
+                    )
+                self.assertTrue(result.success, result.error)
+                self.assertIn(expected.rstrip(), result.output)
+
+    def test_web_fetch_json_ld_skips_padded_article_teaser(self):
+        """Whitespace padding cannot make a teaser shadow later article text."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        teaser = "Short teaser" + " " * 300
+        article_body = "Later article body marker. " * 12
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"articleBody": teaser})
+            + '</script><script type="application/ld+json">'
+            + json.dumps({"articleBody": article_body})
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+
+    def test_web_fetch_json_ld_collapses_internal_whitespace_for_selection(self):
+        """Repeated internal whitespace cannot make a teaser beat article text."""
+        article_body = "Actual later article body. " * 12
+        teaser = "Short teaser" + (" " * 600) + " text"
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps(
+                [
+                    {"articleBody": teaser},
+                    {"articleBody": article_body},
+                ]
+            )
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                self.executor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+
+    def test_web_fetch_keeps_short_json_ld_article_over_playwright_text(self):
+        """Longer rendered text must not replace a valid JSON-LD article body."""
+        article_body = "JSON-LD article sentence. " * 10
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"articleBody": article_body})
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+        playwright = AsyncMock(return_value="unrelated rendered text. " * 30)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(self.executor, "_playwright_fetch", new=playwright),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+        playwright.assert_not_awaited()
+
+    def test_web_fetch_json_ld_description_does_not_shadow_semantic_article(self):
+        """A metadata description cannot replace longer semantic article text."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        description = "Web page description marker. " * 12
+        article_body = "Visible semantic article body marker. " * 15
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"@type": "WebPage", "description": description})
+            + "</script>"
+            + f"<article><p>{article_body}</p></article>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+        self.assertNotIn(description.rstrip(), result.output)
+
+    def test_web_fetch_full_semantic_article_beats_json_ld_teaser(self):
+        """A JSON-LD teaser cannot replace a fuller semantic article."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        teaser = "Structured teaser sentence. " * 9
+        article_body = "Full semantic article with useful details. " * 24
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"@type": "NewsArticle", "articleBody": teaser})
+            + "</script>"
+            + f"<article><p>{article_body}</p></article>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+        self.assertNotIn(teaser.rstrip(), result.output)
+
+    def test_web_fetch_regex_fallback_strips_script_content(self):
+        """The optional no-bs4 path strips script bodies before returning text."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        html = (
+            "<script>private script marker</script>"
+            "<pre>code marker</pre><code>inline code marker</code>"
+            "<p>ordinary fallback</p>"
+        )
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_without_bs4):
+            text = ToolExecutor._extract_main_content(html)
+        self.assertIn("ordinary fallback", text)
+        self.assertNotIn("private script marker", text)
+        self.assertNotIn("code marker", text)
+        self.assertNotIn("inline code marker", text)
+
+    def test_web_fetch_keeps_code_inside_semantic_article(self):
+        """Recognized article content retains code examples before fallback."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        prose = "Article prose for a useful guide. " * 12
+        code = "def preserve_this_example(): return 42"
+        html = f"<article><p>{prose}</p><pre><code>{code}</code></pre></article>"
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(code, result.output)
+
+    def test_web_fetch_filters_code_from_readability_fallback(self):
+        """Non-semantic code blocks are omitted from main-content fallback."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        code = "private code marker " * 40
+        html = f"<div><pre><code>{code}</code></pre></div>"
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertNotIn("private code marker", result.output)
+
+    def test_web_fetch_filters_closed_blocks_with_block_children(self):
+        """Closed pre/code blocks are omitted even when they contain block tags."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        html = (
+            "<p>intro words</p>"
+            "<pre><div>PRE_BLOCK_MARK</div></pre>"
+            "<code><div>CODE_BLOCK_MARK</div></code>"
+        )
+        text = ToolExecutor._extract_main_content(html)
+
+        self.assertIn("intro words", text)
+        self.assertNotIn("PRE_BLOCK_MARK", text)
+        self.assertNotIn("CODE_BLOCK_MARK", text)
+
+    def test_web_fetch_regex_fallback_filters_closed_blocks_with_block_children(self):
+        """The regex fallback removes closed pre/code blocks with block tags."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        html = (
+            "<p>intro words</p>"
+            "<pre><div>PRE_BLOCK_MARK</div></pre>"
+            "<code><div>CODE_BLOCK_MARK</div></code>"
+        )
+        with patch("builtins.__import__", side_effect=import_without_bs4):
+            text = ToolExecutor._extract_main_content(html)
+
+        self.assertIn("intro words", text)
+        self.assertNotIn("PRE_BLOCK_MARK", text)
+        self.assertNotIn("CODE_BLOCK_MARK", text)
+
+    def test_web_fetch_preserves_block_text_inside_malformed_code(self):
+        """An unclosed code wrapper cannot hide following block content."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        visible = "visible article marker. " * 15
+        html = f"<p>intro</p><code>stray<p>{visible}</p>"
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(visible.strip(), result.output)
+
+    def test_web_fetch_extract_main_false_preserves_code_text(self):
+        """Full-text mode retains visible pre/code text."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        html = "<pre><code>show me the full text</code></pre>"
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {
+                        "type": "web_fetch",
+                        "url": "https://example.com",
+                        "extract_main": False,
+                    }
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn("show me the full text", result.output)
+
+    def test_web_fetch_extract_main_false_preserves_code_text_without_bs4(self):
+        """The regex fallback also retains code in full-text mode."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_without_bs4):
+            text = ToolExecutor._extract_main_content(
+                "<pre><code>show me the full text</code></pre>",
+                extract_main=False,
+            )
+
+        self.assertIn("show me the full text", text)
+
+    def test_web_fetch_regex_fallback_strips_malformed_script(self):
+        """The optional regex path drops unclosed and whitespace-closed scripts."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        cases = [
+            "<script>private script marker<p>visible text",
+            "<script>private script marker</script ><p>visible text</p>",
+        ]
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        for html in cases:
+            with self.subTest(html=html):
+                with patch("builtins.__import__", side_effect=import_without_bs4):
+                    text = ToolExecutor._extract_main_content(html)
+                self.assertNotIn("private script marker", text)
+
+    def test_web_fetch_regex_fallback_keeps_text_after_unclosed_nav(self):
+        """An unclosed navigation tag cannot erase the rest of the page."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        html = "<nav>menu</nav><nav>broken<p>visible article text</p>"
+        with patch("builtins.__import__", side_effect=import_without_bs4):
+            text = ToolExecutor._extract_main_content(html)
+
+        self.assertIn("visible article text", text)
+
+    def test_web_fetch_regex_fallback_keeps_text_after_unclosed_code(self):
+        """An unclosed code wrapper cannot erase following block content."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        html = "<p>intro</p><code>stray<p>visible article text</p>"
+        with patch("builtins.__import__", side_effect=import_without_bs4):
+            text = ToolExecutor._extract_main_content(html)
+
+        self.assertIn("visible article text", text)
 
     def test_web_fetch_truncation(self):
         """Test that max_chars limit truncates output."""
