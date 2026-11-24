@@ -26,49 +26,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Decides which optional lanes this run needs. A pull request runs only the
-  # lanes its diff touches; every other event runs them all, and so does a
-  # pull request whose diff cannot be read.
-  changes:
-    name: ci/changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      webui: ${{ steps.pick.outputs.webui }}
-      voice: ${{ steps.pick.outputs.voice }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-
-      - name: Pick lanes from the changed paths
-        id: pick
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          changed_paths="$(mktemp)"
-          lanes="$(mktemp)"
-          trap 'rm -f "$changed_paths" "$lanes"' EXIT
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            if git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA" > "$changed_paths"; then
-              python scripts/ci_changed_lanes.py < "$changed_paths" > "$lanes"
-            else
-              python scripts/ci_changed_lanes.py --all > "$lanes"
-            fi
-          else
-            python scripts/ci_changed_lanes.py --all > "$lanes"
-          fi
-          cat "$lanes" >> "$GITHUB_OUTPUT"
-
   tests:
     name: ci/tests (${{ matrix.shard.gem }})
     runs-on: ubuntu-latest
@@ -269,15 +226,42 @@ jobs:
   supporting_tests:
     name: ci/tests (support, python)
     runs-on: ubuntu-latest
+    outputs:
+      webui: ${{ steps.pick.outputs.webui }}
+      voice: ${{ steps.pick.outputs.voice }}
 
     steps:
       - uses: actions/checkout@v6
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
+
+      - name: Pick lanes from the changed paths
+        id: pick
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed_paths="$(mktemp)"
+          lanes="$(mktemp)"
+          trap 'rm -f "$changed_paths" "$lanes"' EXIT
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA" > "$changed_paths"; then
+              python scripts/ci_changed_lanes.py < "$changed_paths" > "$lanes"
+            else
+              python scripts/ci_changed_lanes.py --all > "$lanes"
+            fi
+          else
+            python scripts/ci_changed_lanes.py --all > "$lanes"
+          fi
+          cat "$lanes" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -316,8 +300,8 @@ jobs:
   # runtime itself (--no-project), so this lane needs no workspace install.
   support_voice_tests:
     name: ci/tests (support, voice)
-    needs: [changes]
-    if: needs.changes.outputs.voice == 'true'
+    needs: [supporting_tests]
+    if: needs.supporting_tests.outputs.voice == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -344,8 +328,8 @@ jobs:
   # uv or workspace install.
   support_webui_tests:
     name: ci/tests (support, webui ${{ matrix.lane }})
-    needs: [changes]
-    if: needs.changes.outputs.webui == 'true'
+    needs: [supporting_tests]
+    if: needs.supporting_tests.outputs.webui == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -430,19 +414,18 @@ jobs:
     # is free-form: this resolves as the check "ci/tests", which is the exact
     # name the required rule expects.
     name: ci/tests
-    needs: [changes, tests, heavy_tests, supporting_tests, support_voice_tests, support_webui_tests]
+    needs: [tests, heavy_tests, supporting_tests, support_voice_tests, support_webui_tests]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every required test job passed
         env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
           UNIT_RESULT: ${{ needs.tests.result }}
           HEAVY_RESULT: ${{ needs.heavy_tests.result }}
           SUPPORT_PYTHON_RESULT: ${{ needs.supporting_tests.result }}
-          RUN_VOICE: ${{ needs.changes.outputs.voice }}
+          RUN_VOICE: ${{ needs.supporting_tests.outputs.voice }}
           SUPPORT_VOICE_RESULT: ${{ needs.support_voice_tests.result }}
-          RUN_WEBUI: ${{ needs.changes.outputs.webui }}
+          RUN_WEBUI: ${{ needs.supporting_tests.outputs.webui }}
           SUPPORT_WEBUI_RESULT: ${{ needs.support_webui_tests.result }}
         run: |
           # A support lane passes when it succeeded, or when the change skipped it.
@@ -454,11 +437,11 @@ jobs:
           case "$SUPPORT_WEBUI_RESULT:$RUN_WEBUI" in
             success:*|skipped:false) webui_ok=yes ;;
           esac
-          if [ "$CHANGES_RESULT" = success ] && [ "$UNIT_RESULT" = success ] && [ "$HEAVY_RESULT" = success ] && [ "$SUPPORT_PYTHON_RESULT" = success ] && [ "$voice_ok" = yes ] && [ "$webui_ok" = yes ]; then
+          if [ "$UNIT_RESULT" = success ] && [ "$HEAVY_RESULT" = success ] && [ "$SUPPORT_PYTHON_RESULT" = success ] && [ "$voice_ok" = yes ] && [ "$webui_ok" = yes ]; then
             echo "ci/tests: all required test jobs succeeded"
             exit 0
           fi
-          echo "ci/tests: changes '$CHANGES_RESULT'; unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support python '$SUPPORT_PYTHON_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"
+          echo "ci/tests: unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support python '$SUPPORT_PYTHON_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"
           exit 1
 
   standards-check:
