@@ -515,6 +515,51 @@ async def test_cancellation_blocks_detached_writer_before_artifact_cleanup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
+async def test_cancellation_stops_indefinite_detached_descendant_and_cleans(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(psutil.Process, "children", _REAL_PROCESS_CHILDREN)
+    private = tmp_path / "private"
+    private.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(private))
+    whisper = tmp_path / "whisper"
+    child_pid = tmp_path / "child.pid"
+    whisper.write_text(
+        "#!/usr/bin/env python3\n"
+        + textwrap.dedent(
+            f"""\
+            import os, pathlib, subprocess, sys, time
+            child = subprocess.Popen([
+                sys.executable, "-c", "import os,time; os.setsid(); time.sleep(120)"
+            ])
+            pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+            time.sleep(120)
+            """
+        )
+    )
+    whisper.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    deadline = time.monotonic() + 5
+    while not child_pid.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert child_pid.exists(), "detached child did not start"
+    child = psutil.Process(int(child_pid.read_text()))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 3)
+    try:
+        assert not child.is_running(), "cancellation left a detached writer alive"
+        assert not list(private.glob("kollab-telegram-voice-*"))
+    finally:
+        if child.is_running():
+            child.kill()
+            child.wait(timeout=2)
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
 async def test_timeout_kills_pipe_holder_after_transcriber_exits(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
