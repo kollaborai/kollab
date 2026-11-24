@@ -8,6 +8,9 @@ const installSource = readFileSync(path.resolve(path.dirname(fileURLToPath(impor
 
 // The rule that makes plugin controls touch-sized (docs/specs/plugins.md, "Right-hand menu").
 const css = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/styles.css"), "utf8");
+const dialogSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/components/ui/dialog.tsx"), "utf8");
+const sheetSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/components/ui/sheet.tsx"), "utf8");
+const sessionPanelSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/components/shell/SessionPanel.tsx"), "utf8");
 const block = /@media \(pointer: coarse\) \{\s*(\[data-plugin\][^{]+)\{\s*min-height: 44px;/.exec(css);
 
 const escapeRegexText = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -51,5 +54,16 @@ describe("Add Plugin touch targets", () => {
     expect(inputs).toHaveLength(2);
     for (const input of inputs)
       expect(input).toContain("pointer-coarse:min-h-11");
+  });
+});
+
+describe("touch close-button spacing", () => {
+  it("reserves title space beside enlarged Dialog and Sheet close buttons", () => {
+    expect(dialogSource).toMatch(/data-slot="dialog-header"[\s\S]*?className=\{cn\("[^"]*pointer-coarse:pr-12/);
+    expect(sheetSource).toMatch(/data-slot="sheet-header"[\s\S]*?className=\{cn\("[^"]*pointer-coarse:pr-12/);
+  });
+
+  it("keeps the mobile session sheet content below the enlarged close target", () => {
+    expect(sessionPanelSource).toMatch(/<SheetContent[^>]*className="[^"]*pointer-coarse:pt-14/);
   });
 });
