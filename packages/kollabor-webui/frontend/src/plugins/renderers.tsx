@@ -46,6 +46,7 @@ type ToolPart = {
   args: unknown;
   result?: unknown;
   status?: unknown;
+  toolUI?: ReactNode;
 };
 
 function toolRendererResetKey(part: ToolPart): string {
@@ -56,7 +57,7 @@ function toolRendererResetKey(part: ToolPart): string {
   return `${statusType}:${part.result === undefined ? "pending" : "complete"}`;
 }
 
-/** A tool call. A loaded plugin's renderer for its tool wins; otherwise `fallback`. */
+/** A registered host UI wins; otherwise a loaded plugin renderer, then `fallback`. */
 export function PluginToolPart({
   part,
   fallback,
@@ -64,6 +65,7 @@ export function PluginToolPart({
   part: ToolPart;
   fallback: ReactNode;
 }) {
+  if (part.toolUI != null) return <>{fallback}</>;
   const { plugins } = usePlugins();
   const found = findToolRenderer(plugins, part.toolName);
   if (!found) return <>{fallback}</>;
