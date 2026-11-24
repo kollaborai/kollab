@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from kollabor_plugins.registry import plugin_entries
+from kollabor_plugins import registry
 
 
 @pytest.mark.parametrize(
@@ -34,12 +34,12 @@ def test_dev_services_are_listed(tmp_path, monkeypatch, service_status, expected
     home = tmp_path / ".kollab"
     home.mkdir()
     (home / "plugins.json").write_text(json.dumps({"plugins": {}, "dev": {"hello": str(root)}}))
-    run = home / "plugin-data" / "hello@dev" / "run"
-    run.mkdir(parents=True)
-    (run / "worker.state").write_text(
-        json.dumps({"desired": "stopped", "status": service_status, "exit_history": []})
+    monkeypatch.setattr(
+        registry,
+        "_service_entries",
+        lambda *_: [{"name": "worker", "state": service_status, "desired": "stopped"}],
     )
-    entry = next(row for row in plugin_entries(builtins) if row["id"] == "hello@dev")
+    entry = next(row for row in registry.plugin_entries(builtins) if row["id"] == "hello@dev")
     assert entry["state"] == expected_plugin_state
     assert [(item["name"], item["state"], item["desired"]) for item in entry["services"]] == [
         ("worker", service_status, "stopped")
