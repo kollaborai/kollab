@@ -26,7 +26,7 @@ from urllib.parse import quote
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
 from kollabor.user_input_source import UserInputSource
-from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
+from kollabor_agent.runtime import AgentLifecycle, AgentRuntime, process_start_token
 from kollabor_ai.message_content import content_to_text
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.models import (
@@ -15425,6 +15425,35 @@ class HubPlugin(BasePlugin):
         lines.append("reject: /hub reject <identity> [reason]")
         return "\n".join(lines)
 
+    def _under_hub_agent(self) -> bool:
+        """True when another hub agent started this session, e.g. a terminal
+        tool ran `printf '/hub stop all' | kollab`: its typed stop all is not
+        the operator's and keeps the #669 scope (#1408).
+
+        The same deny-only signals the CLI checks: tool-shell markers, then
+        any parent process (never this one) that is a hub agent. Unreadable
+        context fails closed.
+        """
+        from .network_halt import TOOL_SHELL_VARS
+
+        if any(os.environ.get(var) for var in TOOL_SHELL_VARS):
+            return True
+        try:
+            parents = self._parent_pids()
+            agent_pids = {
+                getattr(agent, "pid", 0) for agent in self._presence.scan_machine_presence()
+            }
+        except Exception as exc:  # noqa: BLE001 - uncertainty must not grant a sweep
+            logger.warning(f"cannot verify /hub stop all caller ancestry: {exc}")
+            return True
+        return bool(parents & agent_pids)
+
+    @staticmethod
+    def _parent_pids() -> set:
+        import psutil
+
+        return {process.pid for process in psutil.Process().parents()}
+
     async def _operator_stop_all(self) -> str:
         """`/hub stop all` typed by the operator (#1408).
 
@@ -15499,7 +15528,7 @@ class HubPlugin(BasePlugin):
         if not self._presence or not self._identity:
             return "hub not active"
 
-        if target.lower() == "all" and operator:
+        if target.lower() == "all" and operator and not self._under_hub_agent():
             return await self._operator_stop_all()
 
         if target.lower() == "all":
@@ -15627,6 +15656,18 @@ class HubPlugin(BasePlugin):
         its existing raw-PID behavior.
         """
         return session is None or bool(getattr(session, "is_alive", False))
+
+    def _may_signal(self, agent, session) -> bool:
+        """``_signal_allowed``, and never a raw-PID signal to a recycled pid:
+        a session-less stop refuses once the row's pid runs a process whose
+        kernel start differs from the row's ``start_token`` (#1408)."""
+        if not self._signal_allowed(session):
+            return False
+        if session is not None:
+            return True
+        recorded = getattr(agent, "start_token", None)
+        current = process_start_token(getattr(agent, "pid", 0)) if recorded else None
+        return current is None or current == recorded
 
     def _cleanup_stopped_peer(self, agent, session) -> bool:
         """Clean up a stopped peer without crossing its selected generation.
@@ -15765,7 +15806,7 @@ class HubPlugin(BasePlugin):
                 self._cleanup_stopped_peer(agent, session)
                 return "stopped"
 
-            if not self._signal_allowed(session):
+            if not self._may_signal(agent, session):
                 self._cleanup_stopped_peer(agent, session)
                 return guard
 
@@ -15780,7 +15821,7 @@ class HubPlugin(BasePlugin):
             ):
                 self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGTERM after graceful timeout)"
-            if not self._signal_allowed(session):
+            if not self._may_signal(agent, session):
                 self._cleanup_stopped_peer(agent, session)
                 return guard
 
@@ -15795,7 +15836,7 @@ class HubPlugin(BasePlugin):
                 return "killed (SIGKILL — was unresponsive)"
             return "stop timed out (pid survived SIGKILL)"
 
-        if not self._signal_allowed(session):
+        if not self._may_signal(agent, session):
             self._cleanup_stopped_peer(agent, session)
             return guard
 
@@ -15813,7 +15854,7 @@ class HubPlugin(BasePlugin):
                 return "already dead; presence cleanup deferred"
             return "already dead, cleaned up"
 
-        if not self._signal_allowed(session):
+        if not self._may_signal(agent, session):
             self._cleanup_stopped_peer(agent, session)
             return guard
 
