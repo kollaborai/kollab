@@ -164,10 +164,11 @@ describe("plugin inventory collection bounds", () => {
   );
 
   it.each([
-    ["installing", "Plugin installation is in progress. Wait for it to finish."],
-    ["ready", null],
-    ["complete", null],
-  ] as const)("explains whether dismissing a %s job is blocked", (status, expected) => {
-    expect(installDismissalMessage(status)).toBe(expected);
+    ["installing", null, "Plugin installation is in progress. Wait for it to finish."],
+    ["installing", "Plugin review no longer exists.", null],
+    ["ready", null, null],
+    ["complete", null, null],
+  ] as const)("explains whether dismissing a %s job is blocked", (status, error, expected) => {
+    expect(installDismissalMessage(status, error)).toBe(expected);
   });
 });
