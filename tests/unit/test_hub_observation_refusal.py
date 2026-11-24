@@ -191,6 +191,43 @@ async def test_receiver_cancellation_after_effect_keeps_message_available(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_receiver_cancellation_after_effect_is_not_retried_automatically(
+    tmp_path,
+):
+    message = HubMessage(
+        action="message",
+        from_agent="peer-id-1",
+        from_identity="peer-1",
+        to="receiver",
+        content="effect before cancellation",
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def interrupted_delivery(msg):
+        effects.append(msg.id)
+        raise asyncio.CancelledError
+
+    plugin._on_message_received = interrupted_delivery
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        first = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._deliver_inbox_batch(first)
+
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._deliver_inbox_batch(replay)
+
+    assert effects == [message.id]
+
+
+@pytest.mark.asyncio
 async def test_receiver_cancel_before_effect_stays_queued(tmp_path):
     message = HubMessage(
         action="message",
