@@ -115,6 +115,7 @@ describe("plugin review after a failure", () => {
   });
   it("offers another poll for a staging job after a polling error", () => {
     expect(installSource).toContain("Check Again");
+    expect(installSource).toMatch(/\{shouldRetryPolling\(job, error !== null\)\s*\? <Button[\s\S]*?setPollVersion\(\(version\) => version \+ 1\);[\s\S]*>Check Again<\/Button>/);
   });
   it("reloads the job after the confirm request fails", () => {
     const confirm = installSource.slice(installSource.indexOf("const confirm = async"), installSource.indexOf("const ready ="));
