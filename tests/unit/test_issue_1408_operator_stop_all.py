@@ -41,6 +41,8 @@ def _plugin(monkeypatch, here, machine):
     )
     plugin._identity = SimpleNamespace(agent_id="me", identity="legal-ops-lead")
     monkeypatch.setattr(plugin, "_get_orchestrator", lambda: None)
+    # conftest blocks host process enumeration; no hub agent above this session.
+    monkeypatch.setattr(plugin, "_parent_pids", lambda: set(), raising=False)
     stopped = []
 
     async def fake_stop(agent, reason="", session=None):
@@ -163,6 +165,7 @@ def test_typed_stop_all_under_a_hub_agent_process_keeps_caller_scope(monkeypatch
     parent = _peer("launcher")
     parent.pid = os.getppid()
     plugin, stopped = _plugin(monkeypatch, here, here + [parent])
+    monkeypatch.setattr(plugin, "_parent_pids", lambda: {parent.pid}, raising=False)
 
     asyncio.run(plugin._handle_hub_command("stop all"))
 
