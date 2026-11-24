@@ -187,6 +187,7 @@ def open_main_red_issue(repo: str, run_id: str, *, gh: Gh = _run_gh) -> dict[str
     if earlier:
         keep = min(earlier, key=lambda row: row["number"])
         _api(gh, f"repos/{repo}/issues/{issue['number']}", method="PATCH", fields={"state": "closed"})
+        _ensure_pr_comment(gh, repo, pull, keep)
         print(f"closed duplicate main red issue: {keep.get('html_url', keep.get('number'))}")
         return keep
     _ensure_pr_comment(gh, repo, pull, issue)
