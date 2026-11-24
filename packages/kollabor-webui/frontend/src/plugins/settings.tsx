@@ -7,7 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import { inPhoneApp } from "@/utils/page-route";
 import { PLUGIN_TRUST_NOTICE, PluginInstallDialog, describeUses } from "./install";
 import { listedPluginEntries, refreshPlugins, retryPlugin, usePluginInventory } from "./loader";
-import { PluginBoundary, PluginFailure } from "./mount";
+import { PluginMount, PluginFailure } from "./mount";
 import { type PluginRecord, usePlugins } from "./registry";
 import type { PluginEntry, PluginService } from "./sdk";
 
@@ -292,11 +292,9 @@ function PluginDetail({ entry, record, api, remote, onUpdate, onBusyChange, oper
           </div>
         ) : null}
         {SettingsView && record?.k ? (
-          <div data-plugin={entry.id}>
-            <PluginBoundary name={entry.name}>
-              <SettingsView k={record.k} />
-            </PluginBoundary>
-          </div>
+          <PluginMount record={record}>
+            <SettingsView k={record.k} />
+          </PluginMount>
         ) : null}
       </div>
       <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open && !busy && !operationBusy) setConfirmation(null); }}>
