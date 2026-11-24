@@ -30,8 +30,11 @@ describe("settings Plugins tab", () => {
     expect(settings).toMatch(/inPhoneApp\(window\.location\.pathname\)/);
   });
 
-  it("opens the Plugins tab in the responsive dialog surface", () => {
-    expect(read("PanelHost.tsx")).toMatch(/responsive=\{tab === "plugins"\}/);
-    expect(read("PanelDialogSurface.tsx")).toMatch(/responsive\?: boolean/);
+  it("keeps the same mobile sheet mounted across Settings sections", () => {
+    const host = read("PanelHost.tsx");
+    expect(host).not.toMatch(/isMobile\s*&&\s*tab\s*!==\s*"plugins"/);
+    expect(host).toMatch(/isMobile\s*\?\s*\(\s*<SheetContent/);
+    expect(host).not.toMatch(/responsive=\{tab === "plugins"\}/);
+    expect(read("PanelDialogSurface.tsx")).not.toMatch(/responsive\?: boolean/);
   });
 });
