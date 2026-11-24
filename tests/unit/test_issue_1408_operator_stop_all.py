@@ -745,3 +745,40 @@ def test_cli_stop_cleanup_keeps_a_replacement_with_the_same_pid(tmp_path):
 
     assert row.exists()
     assert sock.exists()
+
+
+def test_cli_stop_cleanup_needs_a_whole_selected_generation(tmp_path):
+    """A selection without a start time cannot prove the row is still its agent."""
+    from kollabor.cli import _cleanup_presence_for_pid
+
+    row = tmp_path / "agent-w.json"
+    row.write_text(json.dumps({"agent_id": "agent-w", "pid": 4242, "started_at": 200.0}))
+
+    _cleanup_presence_for_pid(tmp_path, 4242, {"agent_id": "agent-w", "pid": 4242})
+
+    assert row.exists()
+
+
+def test_cli_status_keeps_a_row_it_cannot_reread(tmp_path, monkeypatch):
+    """A recycled row that turns unreadable before the drop is not deleted."""
+    _cli(tmp_path, monkeypatch, local=False)
+    current = tmp_path / "current"
+    _write(current, "stale", "/work/here")
+    path = current / "stale.json"
+    row = json.loads(path.read_text())
+    row["start_token"] = "darwin:1.0"
+    path.write_text(json.dumps(row))
+    calls = []
+
+    def start_token_then_corrupt(_pid):
+        if calls:
+            return "darwin:1.0"
+        calls.append(1)
+        path.write_text("{ half-written")
+        return "darwin:9.9"
+
+    monkeypatch.setattr("kollabor_agent.runtime.process_start_token", start_token_then_corrupt)
+
+    asyncio.run(_handle_cli_hub(["status"]))
+
+    assert path.exists()
