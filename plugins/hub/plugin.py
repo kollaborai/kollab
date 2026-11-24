@@ -15675,12 +15675,16 @@ class HubPlugin(BasePlugin):
         return session is None or bool(getattr(session, "is_alive", False))
 
     def _may_signal(self, agent, session) -> bool:
-        """``_signal_allowed``, and never a raw-PID signal to a recycled pid:
-        a session-less stop refuses once the row's pid runs a process whose
-        kernel start differs from the row's ``start_token`` (#1408)."""
+        """``_signal_allowed``, and a raw-PID signal only to a proven process:
+        a session-less stop signals only while the pid's kernel start still
+        equals the row's ``start_token``. A recycled pid, a row without a
+        token or an unreadable start gets no SIGTERM/SIGKILL (#1408)."""
         if not self._signal_allowed(session):
             return False
-        return session is not None or not self._pid_recycled(agent)
+        if session is not None:
+            return True
+        recorded = getattr(agent, "start_token", None)
+        return bool(recorded) and process_start_token(getattr(agent, "pid", 0)) == recorded
 
     @staticmethod
     def _pid_recycled(agent) -> bool:

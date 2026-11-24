@@ -33,7 +33,7 @@
     {
       "action": "shell",
       "description": "stop every fixture agent, folder by folder (never --everywhere); runs even when a step failed",
-      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-stop-all\"; PP=\"$R$(printf ':%s' \"$R\"/packages/*/src)\"; for d in ws other; do (cd \"$H/$d\" && HOME=\"$H\" KOLLAB_PROJECT_ROOT=\"$H/$d\" KOLLAB_NO_KEYRING=1 PYTHONPATH=\"$PP\" \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all) || exit 1; done"
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-stop-all\"; PP=\"$R$(printf ':%s' \"$R\"/packages/*/src)\"; rc=0; for d in ws other; do (cd \"$H/$d\" && HOME=\"$H\" KOLLAB_PROJECT_ROOT=\"$H/$d\" KOLLAB_NO_KEYRING=1 PYTHONPATH=\"$PP\" \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all) || rc=1; done; exit $rc"
     }
   ]
 }

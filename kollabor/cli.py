@@ -2357,10 +2357,24 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 sys.exit(2)
             agents = _get_live_agents()
             others = _other_folder_agents()
+            unproven: List[dict] = []
             if everywhere:
-                agents, others = agents + others, []
+                # Another folder's row is signalled only when its pid still runs
+                # the process that wrote it (start_token matches, #1408).
+                from kollabor_agent.runtime import process_start_token
+
+                proven = [
+                    a for a in others
+                    if a.get("start_token")
+                    and process_start_token(int(a.get("pid") or 0)) == a.get("start_token")
+                ]
+                unproven = [a for a in others if a not in proven]
+                agents, others = agents + proven, []
+            skipped = ", ".join(sorted(a.get("identity", "?") for a in unproven))
             if not agents:
                 print("no agents online" if everywhere else "no agents in this folder")
+                if skipped:
+                    print(f"skipped (cannot prove which process holds the pid): {skipped}")
                 _print_other_folders(others, "still running")
                 return
             stopped = 0
@@ -2372,6 +2386,8 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 if ok:
                     stopped += 1
             print(f"\n{stopped}/{len(agents)} agent(s) stopped")
+            if skipped:
+                print(f"skipped (cannot prove which process holds the pid): {skipped}")
             _print_other_folders(others, "still running")
         else:
             agent = _find_agent(target)

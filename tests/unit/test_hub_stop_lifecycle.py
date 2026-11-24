@@ -45,11 +45,14 @@ def test_stop_peer_waits_after_shutdown_ack_then_sigterms(monkeypatch):
     async def run_test():
         plugin = HubPlugin()
         plugin._presence = FakePresence()
+        # A live agent whose kernel start still matches its row (#1408).
+        monkeypatch.setattr("plugins.hub.plugin.process_start_token", lambda pid: "proven")
         agent = SimpleNamespace(
             identity="lapis",
             pid=1234,
             socket_path="/tmp/lapis.sock",
             agent_id="agent-lapis",
+            start_token="proven",
         )
 
         async def signal_shutdown(socket_path, reason="", timeout=3.0, **_generation):
@@ -88,11 +91,14 @@ def test_stop_peer_escalates_to_sigkill_when_sigterm_fails(monkeypatch):
     async def run_test():
         plugin = HubPlugin()
         plugin._presence = FakePresence()
+        # A live agent whose kernel start still matches its row (#1408).
+        monkeypatch.setattr("plugins.hub.plugin.process_start_token", lambda pid: "proven")
         agent = SimpleNamespace(
             identity="sapphire",
             pid=5678,
             socket_path="/tmp/sapphire.sock",
             agent_id="agent-sapphire",
+            start_token="proven",
         )
 
         async def signal_shutdown(socket_path, reason="", timeout=3.0, **_generation):
@@ -133,11 +139,14 @@ def test_stop_peer_reports_failure_only_if_pid_survives_sigkill(monkeypatch):
     async def run_test():
         plugin = HubPlugin()
         plugin._presence = FakePresence()
+        # A live agent whose kernel start still matches its row (#1408).
+        monkeypatch.setattr("plugins.hub.plugin.process_start_token", lambda pid: "proven")
         agent = SimpleNamespace(
             identity="sapphire",
             pid=5678,
             socket_path="/tmp/sapphire.sock",
             agent_id="agent-sapphire",
+            start_token="proven",
         )
 
         async def signal_shutdown(socket_path, reason="", timeout=3.0, **_generation):
