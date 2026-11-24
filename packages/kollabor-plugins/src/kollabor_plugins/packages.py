@@ -335,8 +335,13 @@ def _read_registry(path: Path) -> dict:
 _MAX_ENABLE_ORDER = (1 << 53) - 1  # Exactly representable in the browser's Number type.
 
 
-def _set_enable_order(registry: dict, plugin_id: str, enabled: bool) -> None:
-    """Update durable command priority while holding the plugin registry lock."""
+def _set_enable_order(registry: dict, plugin_id: str, enabled: bool, *, was_enabled: bool = False) -> None:
+    """Update durable command priority while holding the plugin registry lock.
+
+    A registry written before ranks existed has enabled plugins with none; they are ranked first, in
+    file order (the order they loaded in), so giving one plugin a rank cannot move it ahead of the
+    others. `was_enabled` says `plugin_id` was already on, so it keeps its file-order place too.
+    """
     current = registry.get("enable_order", {})
     counter = registry.get("enable_counter", 0)
     if not isinstance(current, dict) or type(counter) is not int or not 0 <= counter <= _MAX_ENABLE_ORDER:
@@ -348,10 +353,24 @@ def _set_enable_order(registry: dict, plugin_id: str, enabled: bool) -> None:
         raise ValueError("Invalid plugin enable order")
     order = dict(current)
     if enabled:
-        counter = max(counter, *order.values(), 0) + 1
+        counter = max(counter, *order.values(), 0)
+        plugins = registry.get("plugins", {})
+        unranked = [
+            key for key, record in (plugins.items() if isinstance(plugins, dict) else ())
+            if isinstance(record, dict) and record.get("enabled") is True and key not in order
+        ]
+        dev = registry.get("dev", {})
+        unranked += [f"{key}@dev" for key in (dev if isinstance(dev, dict) else ()) if f"{key}@dev" not in order]
+        for key in unranked:
+            if key == plugin_id and not was_enabled:
+                continue
+            counter += 1
+            order[key] = counter
+        if plugin_id not in order or not was_enabled:
+            counter += 1
+            order[plugin_id] = counter
         if counter > _MAX_ENABLE_ORDER:
             raise ValueError("Plugin enable order exhausted")
-        order[plugin_id] = counter
     else:
         order.pop(plugin_id, None)
     registry["enable_order"] = order
@@ -461,7 +480,9 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expect
             has_order = isinstance(order, dict) and plugin_id in order
             # A registry from before enable_order existed has enabled plugins with no order.
             if record["enabled"] and (not isinstance(prior, dict) or not prior.get("enabled") or not has_order):
-                _set_enable_order(next_registry, plugin_id, True)
+                _set_enable_order(
+                    next_registry, plugin_id, True, was_enabled=isinstance(prior, dict) and prior.get("enabled") is True
+                )
             _write_json(registry_path, next_registry)
             transaction["committed"] = True
             _write_json(journal, transaction)
