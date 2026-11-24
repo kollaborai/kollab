@@ -31,6 +31,10 @@ def _python_sources(root: Path) -> tuple[set[Path], list[Path]]:
         if folder.is_dir():
             paths.update(path for path in folder.rglob("*.py") if path.is_file())
 
+    for initializer in root.glob("*/__init__.py"):
+        folder = initializer.parent
+        paths.update(path for path in folder.rglob("*.py") if path.is_file())
+
     package_src_roots = sorted(path for path in (root / "packages").glob("*/src") if path.is_dir())
     for folder in package_src_roots:
         paths.update(path for path in folder.rglob("*.py") if path.is_file())
@@ -107,6 +111,21 @@ def _python_imports(
             else:
                 base_name = node.module or ""
 
+            if any(alias.name == "*" for alias in node.names):
+                _add_python_dependency(
+                    dependencies, base_name, module_index, package_index
+                )
+                prefix = f"{base_name}." if base_name else ""
+                depth = len(base_name.split(".")) + 1 if base_name else 1
+                for candidate, target in module_index.items():
+                    if (
+                        prefix
+                        and candidate.startswith(prefix)
+                        and len(candidate.split(".")) == depth
+                    ):
+                        dependencies.add(target)
+                continue
+
             aliases = [alias.name for alias in node.names if alias.name != "*"]
             candidates = [
                 f"{base_name}.{alias}" if base_name else alias for alias in aliases
@@ -121,6 +140,24 @@ def _python_imports(
                     dependencies, resolved_name, module_index, package_index
                 )
     return dependencies
+
+
+def _path_string_parts(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return _path_string_parts(node.left) + _path_string_parts(node.right)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    return []
+
+
+def _existing_repo_file(root: Path, value: str) -> str | None:
+    candidate = Path(value.replace("\\", "/"))
+    try:
+        resolved = (root / candidate).resolve()
+        relative = resolved.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    return relative if resolved.is_file() else None
 
 
 def _js_sources(root: Path) -> set[Path]:
@@ -180,6 +217,17 @@ def build_import_graph(root: Path) -> dict[str, set[str]]:
         graph[relative_path] = _python_imports(
             tree, name, is_package, module_index, package_index
         )
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                target = _existing_repo_file(root, node.value)
+                if target is not None:
+                    graph[relative_path].add(target)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+                parts = _path_string_parts(node)
+                if parts:
+                    target = _existing_repo_file(root, "/".join(parts))
+                    if target is not None:
+                        graph[relative_path].add(target)
 
     for path in sorted(_js_sources(root)):
         relative_path = _repo_path(root, path)
@@ -328,60 +376,112 @@ def _records(value: Any) -> list[dict[str, Any]]:
     return value
 
 
+def _text(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("expected non-empty text")
+    return value
+
+
+def _number(value: Any) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError("expected a positive integer")
+    return value
+
+
+def _count(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError("expected a non-negative integer")
+    return value
+
+
 def _changed_paths(value: Any) -> tuple[list[str], bool]:
     if not isinstance(value, list):
         return [], False
     complete = len(value) < MAX_FILE_LIST
     paths: list[str] = []
     for record in value:
-        if not isinstance(record, dict) or not isinstance(record.get("filename"), str):
+        if not isinstance(record, dict):
             complete = False
             continue
-        paths.append(record["filename"])
+        try:
+            filename = _text(record.get("filename"))
+        except ValueError:
+            complete = False
+            continue
+        paths.append(filename)
+        try:
+            status = _text(record.get("status"))
+        except ValueError:
+            status = ""
+            complete = False
+        if status not in {"added", "removed", "modified", "renamed", "copied"}:
+            complete = False
         previous_filename = record.get("previous_filename")
-        if previous_filename is not None:
-            if not isinstance(previous_filename, str) or not previous_filename:
+        if status in {"renamed", "copied"}:
+            try:
+                paths.append(_text(previous_filename))
+            except ValueError:
                 complete = False
-            else:
-                paths.append(previous_filename)
+        elif previous_filename is not None:
+            try:
+                paths.append(_text(previous_filename))
+            except ValueError:
+                complete = False
     return paths, complete
+
+
+def _default_branch(fetcher: Callable[..., Any], repo: str) -> str:
+    repository = _fetch(fetcher, f"repos/{repo}")
+    if not isinstance(repository, dict):
+        raise ValueError("invalid repository response")
+    return _text(repository.get("default_branch"))
 
 
 def _inspect_pr(
     repo: str,
     number: int,
+    default_branch: str,
     graph: dict[str, set[str]],
     fetcher: Callable[..., Any],
     head_state: dict[str, str],
+    selection_error: str | None = None,
 ) -> tuple[bool, list[str]]:
+    number = _number(number)
+    default_branch = _text(default_branch)
     pull = _fetch(fetcher, f"repos/{repo}/pulls/{number}")
     if not isinstance(pull, dict):
         raise ValueError("invalid pull request response")
     head = pull.get("head")
-    head_sha = head.get("sha") if isinstance(head, dict) else None
-    if isinstance(head_sha, str):
-        head_state["sha"] = head_sha
+    head_sha = _text(head.get("sha") if isinstance(head, dict) else None)
+    head_state["sha"] = head_sha
     base = pull.get("base")
-    base_ref = base.get("ref") if isinstance(base, dict) else None
-    if not isinstance(head_sha, str) or not isinstance(base_ref, str):
-        raise ValueError("pull request is missing its head or base")
+    base_ref = _text(base.get("ref") if isinstance(base, dict) else None)
+    if base_ref != default_branch:
+        raise ValueError("pull request base does not match the repository default branch")
+    if selection_error is not None:
+        raise ValueError(selection_error)
 
     comparison = _fetch(fetcher, f"repos/{repo}/compare/{base_ref}...{head_sha}")
     if not isinstance(comparison, dict):
         raise ValueError("invalid pull request comparison response")
-    behind_by = comparison.get("behind_by")
-    if type(behind_by) is not int or behind_by < 0:
-        raise ValueError("comparison is missing a valid behind count")
+    behind_by = _count(comparison.get("behind_by"))
+    merge_base_sha: str | None = None
+    if "merge_base_commit" in comparison:
+        merge_base_commit = comparison["merge_base_commit"]
+        if not isinstance(merge_base_commit, dict):
+            raise ValueError("invalid merge base response")
+        merge_base_sha = _text(merge_base_commit.get("sha"))
     if behind_by == 0:
         return False, ["up to date"]
-    merge_base = comparison.get("merge_base_commit", {}).get("sha")
-    if not isinstance(merge_base, str):
+    if merge_base_sha is None:
         raise ValueError("comparison is missing its merge base")
 
     pr_records = _records(
         _fetch(fetcher, f"repos/{repo}/pulls/{number}/files?per_page=100", paginate=True)
     )
-    main_comparison = _fetch(fetcher, f"repos/{repo}/compare/{merge_base}...{base_ref}")
+    main_comparison = _fetch(
+        fetcher, f"repos/{repo}/compare/{merge_base_sha}...{base_ref}"
+    )
     if not isinstance(main_comparison, dict):
         raise ValueError("invalid base comparison response")
     pr_paths, pr_complete = _changed_paths(pr_records)
@@ -405,33 +505,46 @@ def _post_status(
     )
 
 
-def _pull_numbers(fetcher: Callable[..., Any], repo: str) -> list[tuple[int, str]]:
-    repository = _fetch(fetcher, f"repos/{repo}")
-    if not isinstance(repository, dict) or not isinstance(repository.get("default_branch"), str):
-        raise ValueError("repository is missing its default branch")
-    default_branch = repository["default_branch"]
+def _pull_numbers(
+    fetcher: Callable[..., Any], repo: str
+) -> tuple[str, list[tuple[int | None, str, str | None]]]:
+    default_branch = _default_branch(fetcher, repo)
     pulls = _records(
         _fetch(fetcher, f"repos/{repo}/pulls?state=open&per_page=100", paginate=True)
     )
-    selected: list[tuple[int, str]] = []
+    selected: list[tuple[int | None, str, str | None]] = []
     for pull in pulls:
-        number = pull.get("number")
+        errors: list[str] = []
+        try:
+            number = _number(pull.get("number"))
+        except ValueError:
+            number = None
+            errors.append("open pull request has an invalid number")
         base = pull.get("base")
-        base_ref = base.get("ref") if isinstance(base, dict) else None
+        try:
+            base_ref = _text(base.get("ref") if isinstance(base, dict) else None)
+        except ValueError:
+            base_ref = None
+            errors.append("open pull request has an invalid base ref")
         head = pull.get("head")
-        head_sha = head.get("sha") if isinstance(head, dict) else None
-        if isinstance(base_ref, str) and base_ref != default_branch:
+        try:
+            head_sha = _text(head.get("sha") if isinstance(head, dict) else None)
+        except ValueError:
+            head_sha = ""
+            errors.append("open pull request has an invalid head sha")
+        if base_ref is not None and base_ref != default_branch and not errors:
             continue
-        if not isinstance(number, int):
-            raise ValueError("open pull request is missing its number")
-        selected.append((number, head_sha if isinstance(head_sha, str) else ""))
-    return selected
+        selected.append(
+            (number, head_sha, "; ".join(errors) if errors else None)
+        )
+    return default_branch, selected
 
 
-def _line(number: int, stale: bool, reasons: list[str]) -> str:
+def _line(number: int | None, stale: bool, reasons: list[str]) -> str:
     status = "STALE" if stale else "FRESH"
     detail = reasons[0] if reasons else "no relevant test impact"
-    return f"#{number} {status} {detail}"
+    identity = f"#{number}" if number is not None else "#?"
+    return f"{identity} {status} {detail}"
 
 
 def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = None) -> int:
@@ -457,7 +570,11 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
             return 1
 
     try:
-        pulls = _pull_numbers(api, args.repo) if args.all_open else [(args.pr, "")]
+        if args.all_open:
+            default_branch, pulls = _pull_numbers(api, args.repo)
+        else:
+            default_branch = _default_branch(api, args.repo)
+            pulls = [(_number(args.pr), "", None)]
     except Exception as exc:
         print(f"blast-radius error: {type(exc).__name__}", file=sys.stderr)
         return 1
@@ -465,13 +582,18 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
     if graph_error is not None:
         print(f"blast-radius error: {type(graph_error).__name__}", file=sys.stderr)
         description = f"blast-radius error: {type(graph_error).__name__}"
-        for number, head_hint in pulls:
+        for number, head_hint, _selection_error in pulls:
             head_sha = head_hint
-            if not head_sha:
+            if not head_sha and number is not None:
                 try:
                     pull = _fetch(api, f"repos/{args.repo}/pulls/{number}")
-                    candidate = pull.get("head", {}).get("sha") if isinstance(pull, dict) else None
-                    head_sha = candidate if isinstance(candidate, str) else ""
+                    candidate = (
+                        pull.get("head", {}).get("sha")
+                        if isinstance(pull, dict)
+                        and isinstance(pull.get("head"), dict)
+                        else None
+                    )
+                    head_sha = _text(candidate)
                 except Exception:
                     head_sha = ""
             if head_sha:
@@ -484,6 +606,15 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
                         f"blast-radius status error: {type(exc).__name__}",
                         file=sys.stderr,
                     )
+            if number is None:
+                print(
+                    _line(
+                        None,
+                        True,
+                        ["rule 5: comparison data incomplete (invalid pull number)"],
+                    )
+                )
+                continue
             print(
                 _line(
                     number,
@@ -494,10 +625,43 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
         return 1
 
     exit_code = 0
-    for number, head_hint in pulls:
+    for number, head_hint, selection_error in pulls:
+        if number is None:
+            exit_code = 1
+            if args.post and head_hint:
+                try:
+                    _post_status(
+                        api,
+                        args.repo,
+                        head_hint,
+                        "failure",
+                        args.context,
+                        "blast-radius error: ValueError",
+                    )
+                except Exception as status_exc:
+                    print(
+                        f"blast-radius status error: {type(status_exc).__name__}",
+                        file=sys.stderr,
+                    )
+            print(
+                _line(
+                    None,
+                    True,
+                    ["rule 5: comparison data incomplete (invalid pull number)"],
+                )
+            )
+            continue
         head_state = {"sha": head_hint}
         try:
-            stale, reasons = _inspect_pr(args.repo, number, graph, api, head_state)
+            stale, reasons = _inspect_pr(
+                args.repo,
+                number,
+                default_branch,
+                graph,
+                api,
+                head_state,
+                selection_error=selection_error,
+            )
         except Exception as exc:
             exit_code = 1
             stale = True
