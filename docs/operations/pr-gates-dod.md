@@ -109,7 +109,8 @@ trusted_reviewers = ["owner-login"]
   (`ruff check --select E9,F63,F7,F82`, #1024), and a list of two or more full
   rule codes (letters plus 3-4 digits) with at least one non-`F` code, as ruff
   reports diagnostics (`six E501, I001, F841`, #1407). Short ids in prose
-  (`F63,F7,F82`) and all-`F` lists still count as findings. A trusted reviewer may suppress one exact incidental
+  (`F63,F7,F82`), all-`F` lists and lists on a line that declares findings
+  (`Finding IDs: F841 and E501`) still count as findings. A trusted reviewer may suppress one exact incidental
   occurrence or accept a non-testable finding by posting a marker-only PR issue
   comment while holding the latest
   `APPROVED` review on the current head. The reviewer must be listed in

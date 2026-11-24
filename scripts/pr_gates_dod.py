@@ -116,7 +116,8 @@ RULE_SELECTION_RE = re.compile(
 )
 # Ruff output lists full rule codes (letters plus 3-4 digits: E501, I001, F841).
 # A list of two or more of them with at least one non-F code is lint output, so
-# its F codes are rules too (#1407). An all-F list still counts as findings.
+# its F codes are rules too (#1407). An all-F list, or one on a line that
+# declares findings, still counts as findings.
 LINT_CODE_RE = re.compile(r"\b[A-Z]{1,4}\d{3,4}\b")
 LINT_LIST_RE = re.compile(
     r"\b[A-Z]{1,4}\d{3,4}(?:(?:\s*[,/]\s*|\s+)(?:and\s+)?"
@@ -470,6 +471,8 @@ def _finding_matches(pattern: re.Pattern[str], body: str) -> list[re.Match[str]]
         run.span()
         for run in LINT_LIST_RE.finditer(body)
         if any(not code.startswith("F") for code in LINT_CODE_RE.findall(run.group(0)))
+        # A line that declares findings keeps its ids ("Finding IDs: F841 and E501").
+        and "finding" not in body[body.rfind("\n", 0, run.start()) + 1 : run.start()].lower()
     ]
     return [
         match
