@@ -519,4 +519,44 @@ describe("plugin settings page", () => {
       host.remove();
     }
   });
+
+  it("includes plugin kind when enabling a built-in plugin", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const voice = {
+      ...plugin([]), id: "voice", name: "Voice", kind: "built-in", enabled: false, state: "off",
+    } as PluginEntry;
+    const loader = createPluginLoader(pluginRegistry, {
+      list: async () => ({ plugins: [voice], server_time: undefined }),
+      importModule: async () => ({}),
+      fetchText: async () => "",
+      loadCode: false,
+      api: { request: async () => new Response(), stream: async () => {} },
+    });
+    await loader.refresh();
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const requests: string[] = [];
+    try {
+      await act(async () => root.render(<PluginsSettings api={{
+        json: async (path: string) => {
+          requests.push(path);
+          return {};
+        },
+      } as never} />));
+
+      const toggle = host.querySelector('[role="switch"]');
+      expect(toggle).toBeDefined();
+      await act(async () => {
+        toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(requests).toEqual(["/plugins/voice/enable?kind=built-in"]);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
