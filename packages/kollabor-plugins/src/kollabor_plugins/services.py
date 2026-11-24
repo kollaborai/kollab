@@ -286,6 +286,14 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             current_root, current = _approved_service_root(home, _read_registry(home / "plugins.json"), plugin_id)
             if current_root != root or current != record:
                 raise ValueError("Plugin approval or files changed while starting service")
+            if initial_state_path.is_symlink():
+                raise ValueError("Service state may not be a symlink")
+            if initial_state_path.exists():
+                latest_state = json.loads(initial_state_path.read_text(encoding="utf-8"))
+                if not isinstance(latest_state, dict):
+                    raise ValueError("Invalid service state")
+                if latest_state.get("desired") == "stopped":
+                    return 0
             _write_state(pid_path, identity)
             state = {"desired": "running", "status": "starting", "exit_history": []}
             _write_state(state_path, state)
@@ -336,8 +344,9 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             except psutil.Error, ProcessLookupError:
                 identity["child"] = {"pid": child.pid, "pgid": child.pid, "start_time": None}
             _write_state(pid_path, identity)
-            state["status"] = "running"
-            _write_state(state_path, state)
+            if not stopping:
+                state["status"] = "running"
+                _write_state(state_path, state)
             deadline = None
             term_sent = False
             log_filter = _LogFilter([*secret_values.values(), token])
@@ -586,28 +595,75 @@ def control_service(
         raise ValueError("Plugin data path may not be a symlink")
     run_dir.mkdir(parents=True, exist_ok=True)
     state_path = run_dir / f"{service_name}.state"
-    if state_path.is_symlink():
-        raise ValueError("Service state may not be a symlink")
-    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-    if not isinstance(state, dict):
-        raise ValueError("Invalid service state")
     pid_path = run_dir / f"{service_name}.pid"
     if action == "start":
-        if state.get("status") == "stopping" and _recorded_process_alive(pid_path):
-            raise ValueError("Service is stopping; wait until it has stopped")
-        if not plugin_id.endswith("@dev") and record.get("enabled") is not True:
-            raise ValueError("Enable the plugin before starting its service")
-        if _recorded_process_alive(pid_path):
-            raise ValueError("Service is already running or has an unverifiable process")
-        state.update({"desired": "running", "status": "starting"})
-        _write_state(state_path, state)
+        with locked_file(home / "plugins.json.lock", private=True):
+            if state_path.is_symlink():
+                raise ValueError("Service state may not be a symlink")
+            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+            if not isinstance(state, dict):
+                raise ValueError("Invalid service state")
+            if state.get("status") == "stopping" and _recorded_process_alive(pid_path):
+                raise ValueError("Service is stopping; wait until it has stopped")
+            if not plugin_id.endswith("@dev") and record.get("enabled") is not True:
+                raise ValueError("Enable the plugin before starting its service")
+            if _recorded_process_alive(pid_path):
+                raise ValueError("Service is already running or has an unverifiable process")
+            state.update({"desired": "running", "status": "starting"})
+            _write_state(state_path, state)
         if engine_url is None:
             supervisor_tick()
         else:
             supervisor_tick(engine_url=engine_url)
         return
+    with locked_file(home / "plugins.json.lock", private=True):
+        _stop_service_locked(home, plugin_id, service_name, manifest, state_path, pid_path)
+
+
+def _process_exited(identity: object) -> bool:
+    """True only when the recorded pid has no live process under that identity.
+
+    A missing pid, a zombie, or a reused pid (start time mismatch) counts as exited.
+    Without a start time a live pid is never counted as exited.
+    """
+    if not isinstance(identity, dict):
+        return False
+    pid = identity.get("pid")
+    if type(pid) is not int or pid <= 0:
+        return False
+    started = identity.get("start_time")
+    try:
+        process = psutil.Process(pid)
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return True
+        return isinstance(started, (int, float)) and abs(process.create_time() - started) > 0.02
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.AccessDenied:
+        return False
+
+
+def _identity_gone(identity: object, *, wrapper: bool = False) -> bool:
+    """True only when _identity_alive finds no live match and _process_exited confirms the pid is gone or reused."""
+    return not _identity_alive(identity, wrapper=wrapper) and _process_exited(identity)
+
+
+def _stop_service_locked(
+    home: Path,
+    plugin_id: str,
+    service_name: str,
+    manifest: dict,
+    state_path: Path,
+    pid_path: Path,
+) -> None:
+    if state_path.is_symlink():
+        raise ValueError("Service state may not be a symlink")
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    if not isinstance(state, dict):
+        raise ValueError("Invalid service state")
     identity = {}
     if not pid_path.exists() and not pid_path.is_symlink():
+        run_dir = state_path.parent
         fd = os.open(run_dir / f"{service_name}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
             if not try_lock(fd):
@@ -658,34 +714,6 @@ def control_service(
                           "error": "Could not stop this process. Retry stopping it."})
             _write_state(state_path, state)
             raise ServiceSignalError("Could not signal verified service wrapper") from exc
-
-
-def _process_exited(identity: object) -> bool:
-    """True only when the recorded pid has no live process under that identity.
-
-    A missing pid, a zombie, or a reused pid (start time mismatch) counts as exited.
-    Without a start time a live pid is never counted as exited.
-    """
-    if not isinstance(identity, dict):
-        return False
-    pid = identity.get("pid")
-    if type(pid) is not int or pid <= 0:
-        return False
-    started = identity.get("start_time")
-    try:
-        process = psutil.Process(pid)
-        if process.status() == psutil.STATUS_ZOMBIE:
-            return True
-        return isinstance(started, (int, float)) and abs(process.create_time() - started) > 0.02
-    except psutil.NoSuchProcess:
-        return True
-    except psutil.AccessDenied:
-        return False
-
-
-def _identity_gone(identity: object, *, wrapper: bool = False) -> bool:
-    """True only when _identity_alive finds no live match and _process_exited confirms the pid is gone or reused."""
-    return not _identity_alive(identity, wrapper=wrapper) and _process_exited(identity)
 
 
 def _record_stop_state(state_path: Path, status: str, deadline: float | None, error: str | None = None) -> None:
