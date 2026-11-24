@@ -146,6 +146,23 @@ describe("plugin inventory text redaction", () => {
 });
 
 describe("loading", () => {
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+  ] as const)("keeps loaded plugins when the inventory response is %s", async (_label, response) => {
+    const existing = entry("hello");
+    const setup = harness([[existing]], { [assetUrl(existing, "entry")!]: module(page) });
+    await setup.loader.refresh();
+    await setup.loader.idle();
+    expect(setup.plugin("hello")?.status).toBe("ready");
+
+    setup.deps.list.mockImplementationOnce(async () => response as never);
+    await setup.loader.refresh();
+
+    expect(setup.plugin("hello")?.status).toBe("ready");
+    expect(setup.registry.getSnapshot().listError).toBe("Invalid plugin inventory response.");
+  });
+
   it("imports every enabled entry in parallel and awaits each plugin function before showing it", async () => {
     const gates = { hello: deferred(), chain: deferred() };
     const { loader, deps, plugin } = harness([[entry("hello"), entry("pr-chain")]], {
