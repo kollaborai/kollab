@@ -915,17 +915,8 @@ def get_plugin_usage(plugin_id: str):
 
 def _plugin_token_target(method: str, path: str, query: bytes | str = b"") -> str | None:
     """Return the own-plugin id only for routes that accept a plugin token."""
-    from urllib.parse import parse_qs
-
     from kollabor_plugins.settings import _valid_data_id
 
-    try:
-        query_text = query.decode("ascii") if isinstance(query, bytes) else query
-        kinds = parse_qs(query_text, keep_blank_values=True).get("kind", [])
-    except (UnicodeDecodeError, ValueError):
-        return None
-    if len(kinds) > 1 or (kinds and kinds != ["installed"]):
-        return None
     if not path.startswith("/") or "\\" in path or "\x00" in path or "%" in path:
         return None
     parts = path.split("/")[1:]
@@ -935,6 +926,16 @@ def _plugin_token_target(method: str, path: str, query: bytes | str = b"") -> st
         return None
     tail = parts[2:]
     method = method.upper()
+    if tail == ["settings"]:
+        from urllib.parse import parse_qs
+
+        try:
+            query_text = query.decode("ascii") if isinstance(query, bytes) else query
+            kinds = parse_qs(query_text, keep_blank_values=True).get("kind", [])
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if len(kinds) > 1 or (kinds and kinds != ["installed"]):
+            return None
     allowed = (
         (len(tail) >= 2 and tail[0] == "api")
         or (tail == ["events"] and method in {"GET", "POST"})
