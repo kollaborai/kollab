@@ -569,3 +569,76 @@ async def test_successful_staging_stays_ready_without_cleanup(monkeypatch):
     public = manager.get(job["id"])
     assert public["status"] == "ready"
     assert public["commit"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_cancel_keeps_status_non_terminal_until_staged_files_are_removed(
+    monkeypatch, tmp_path
+):
+    manager, job = _job_manager()
+    staged = tmp_path / "staged"
+    (staged / "package").mkdir(parents=True)
+    (staged / "package" / "file.txt").write_text("staged")
+    job["status"] = "ready"
+    job["base"] = staged
+    cleanup_started, finish_cleanup = _gate_cleanup(
+        monkeypatch, manager, job, run_cleanup=True
+    )
+    task = asyncio.create_task(manager.cancel(job["id"]))
+    public = None
+    try:
+        await _wait_for_thread_event(cleanup_started)
+        assert manager.get(job["id"])["status"] == "cancelling"
+        assert staged.exists()
+        finish_cleanup.set()
+        public = await task
+    finally:
+        finish_cleanup.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert public["status"] == "cancelled"
+    assert not staged.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_staging_task_does_not_publish_terminal_while_retry_is_pending(
+    monkeypatch, tmp_path
+):
+    manager, job = _job_manager()
+    staged = tmp_path / "staged"
+    (staged / "package").mkdir(parents=True)
+    (staged / "package" / "file.txt").write_text("staged")
+    job["base"] = staged
+    cleanup_started = threading.Event()
+    release = threading.Event()
+    real_cleanup = manager._cleanup
+    attempts = []
+
+    def fail_once_then_gate(current_job):
+        attempts.append(current_job)
+        if len(attempts) == 1:
+            return False  # the staging task's own cleanup fails once
+        cleanup_started.set()
+        release.wait()
+        return real_cleanup(current_job)
+
+    async def hold_staging(*_args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager, "_cleanup", fail_once_then_gate)
+    monkeypatch.setattr(manager, "_run_staging", hold_staging)
+    job["stage_task"] = asyncio.create_task(manager._stage(job))
+    await asyncio.sleep(0)
+    task = asyncio.create_task(manager.cancel(job["id"]))
+    public = None
+    try:
+        await _wait_for_thread_event(cleanup_started)
+        assert manager.get(job["id"])["status"] == "cancelling"
+        release.set()
+        public = await task
+    finally:
+        release.set()
+        await asyncio.gather(task, job["stage_task"], return_exceptions=True)
+
+    assert public["status"] == "cancelled"
+    assert not staged.exists()

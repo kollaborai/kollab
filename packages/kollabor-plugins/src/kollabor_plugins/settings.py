@@ -7,7 +7,7 @@ from pathlib import Path
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
 
-from .packages import _ID, _read_registry, _recover_locked, _within, _write_json
+from .packages import _ID, _read_registry, _recover_locked, _set_enable_order, _within, _write_json
 
 
 def _read_json(path: Path) -> dict:
@@ -242,17 +242,27 @@ def set_enabled(plugin_id: str, enabled: bool, *, config_service=None, save_targ
             raise ValueError("Invalid plugin id")
         if not isinstance(record, dict):
             raise ValueError("Plugin is not installed")
+        if enabled and not record.get("enabled"):
+            from .services import _recorded_process_alive
+
+            run_dir = home / "plugin-data" / plugin_id / "run"
+            if any(pid.is_symlink() or _recorded_process_alive(pid) for pid in run_dir.glob("*.pid")):
+                raise ValueError("Plugin is stopping or still has a running service; wait before enabling it")
+        if bool(record.get("enabled")) != enabled:
+            _set_enable_order(registry, plugin_id, enabled)
         record["enabled"] = enabled
         if enabled:
             record["enabled_path"] = os.environ.get("PATH", os.defpath)
         _write_json(path, registry)
     if not enabled:
-        from .services import stop_services
+        from .services import ServiceStopError, stop_services
 
-        stop_services(plugin_id)
+        failures = stop_services(plugin_id)
+        if failures:
+            raise ServiceStopError("Could not stop background processes. The plugin is off; retry stopping them.")
 
 
-def apply_config_changes(changes: dict) -> dict:
+def apply_config_changes(changes: dict, *, failures: list[Exception] | None = None) -> dict:
     """Write installed-plugin rows and return the ordinary configuration changes.
 
     The UI uses namespaced paths to distinguish the plugin's own settings from
@@ -290,15 +300,24 @@ def apply_config_changes(changes: dict) -> dict:
             raise ValueError("Invalid plugin configuration path")
         else:
             ordinary[path] = value
+
+    def apply(operation, *args):
+        try:
+            operation(*args)
+        except Exception as exc:
+            if failures is None:
+                raise
+            failures.append(exc)
+
     for plugin_id, plugin_values in values.items():
-        save(plugin_id, plugin_values)
+        apply(save, plugin_id, plugin_values)
     for plugin_id, value in enabled.items():
-        set_enabled(plugin_id, value)
+        apply(set_enabled, plugin_id, value)
     if controls:
         from .services import control_service
 
         for plugin_id, service_name, action in controls:
-            control_service(plugin_id, service_name, action)
+            apply(control_service, plugin_id, service_name, action)
     return ordinary
 
 

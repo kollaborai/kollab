@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import urlsplit
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -82,6 +83,23 @@ _MANIFEST_KEYS = {
     "uses",
 }
 _SERVICE_KEYS = {"command", "autostart", "restart", "stop_timeout_s", "heartbeat_s", "secrets"}
+_MAX_SERVICE_SECONDS = 86400
+
+
+def stop_timeout(service: object) -> float:
+    """A service's stop grace in seconds; anything unusable falls back to the 30 s default."""
+    value = service.get("stop_timeout_s", 30) if isinstance(service, dict) else 30
+    if type(value) not in (int, float) or not 0 < value <= _MAX_SERVICE_SECONDS:
+        return 30.0
+    return float(value)
+
+
+def heartbeat_seconds(service: object) -> float | None:
+    """A service's heartbeat interval in seconds, or None when absent or out of the manifest bound."""
+    value = service.get("heartbeat_s") if isinstance(service, dict) else None
+    if type(value) not in (int, float) or not 0 < value <= _MAX_SERVICE_SECONDS:
+        return None
+    return float(value)
 _CONTRIBUTION_KEYS = {"menu", "views", "pages", "modals", "slash", "renderers"}
 
 
@@ -170,7 +188,9 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
         if "autostart" in service and type(service["autostart"]) is not bool:
             raise ValueError("Invalid service autostart")
         for key in ("stop_timeout_s", "heartbeat_s"):
-            if key in service and (type(service[key]) not in (int, float) or service[key] <= 0):
+            # Bounded so float() and deadline math never overflow (one day is plenty).
+            value = service.get(key, 1)
+            if type(value) not in (int, float) or not 0 < value <= _MAX_SERVICE_SECONDS:
                 raise ValueError(f"Invalid service {key}")
         secrets = service.get("secrets", [])
         if not isinstance(secrets, list) or any(not isinstance(x, str) or f"secret:{x}" not in uses for x in secrets):
@@ -223,30 +243,79 @@ def resolve_git_commit(url: str, ref: str | None) -> str:
     return commit
 
 
+def _hash_files(root: Path, capture: Path | None = None) -> tuple[str, BinaryIO | None]:
+    root = Path(root).resolve()
+    capture = Path(capture).resolve() if capture is not None else None
+    if capture is not None and not capture.is_relative_to(root):
+        raise ValueError("Asset is outside plugin folder")
+    captured = None
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            if path.is_symlink():
+                entry_type = b"l"
+                content = os.readlink(path).encode("utf-8")
+            elif path.is_dir():
+                entry_type = b"d"
+                content = b""
+            elif path.is_file():
+                entry_type = b"x" if path.stat().st_mode & 0o111 else b"f"
+                size = path.stat().st_size
+                digest.update(entry_type)
+                digest.update(len(relative).to_bytes(8, "big"))
+                digest.update(relative)
+                digest.update(size.to_bytes(8, "big"))
+                target = None
+                if path == capture:
+                    captured = tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b")
+                    target = captured
+                read_size = 0
+                with path.open("rb") as stream:
+                    while chunk := stream.read(64 * 1024):
+                        read_size += len(chunk)
+                        digest.update(chunk)
+                        if target is not None:
+                            target.write(chunk)
+                if read_size != size:
+                    raise ValueError("Plugin file changed while hashing")
+                continue
+            else:
+                raise ValueError("Unsupported file type in plugin")
+            digest.update(entry_type)
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        if captured is not None:
+            captured.seek(0)
+        return digest.hexdigest(), captured
+    except BaseException:
+        if captured is not None:
+            captured.close()
+        raise
+
+
 def files_sha256(root: Path) -> str:
     """Hash relative paths, entry types, executable bits, and file contents."""
-    root = Path(root).resolve()
-    digest = hashlib.sha256()
-    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        if path.is_symlink():
-            target = os.readlink(path).encode("utf-8")
-            entry_type = b"l"
-            content = target
-        elif path.is_dir():
-            entry_type = b"d"
-            content = b""
-        elif path.is_file():
-            entry_type = b"x" if path.stat().st_mode & 0o111 else b"f"
-            content = path.read_bytes()
-        else:
-            raise ValueError("Unsupported file type in plugin")
-        digest.update(entry_type)
-        digest.update(len(relative).to_bytes(8, "big"))
-        digest.update(relative)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
-    return digest.hexdigest()
+    return _hash_files(root)[0]
+
+
+def files_sha256_with_asset(root: Path, asset: Path) -> tuple[str, bytes]:
+    """Return the package hash and the exact asset bytes included in that hash."""
+    digest, captured = files_sha256_with_asset_snapshot(root, asset)
+    try:
+        return digest, captured.read()
+    finally:
+        captured.close()
+
+
+def files_sha256_with_asset_snapshot(root: Path, asset: Path) -> tuple[str, BinaryIO]:
+    """Return the package hash and a spooled snapshot of the exact asset bytes."""
+    digest, captured = _hash_files(root, Path(asset))
+    if captured is None:
+        raise ValueError("Asset is not a regular file in plugin folder")
+    return digest, captured
 
 
 def stage_git_source(source: str, stage: Path, kollab_version: str) -> dict:
@@ -294,6 +363,51 @@ def _read_registry(path: Path) -> dict:
     if not isinstance(data, dict) or not isinstance(data.get("plugins"), dict) or not isinstance(data.get("dev"), dict):
         raise ValueError("Invalid plugin registry")
     return data
+
+
+_MAX_ENABLE_ORDER = (1 << 53) - 1  # Exactly representable in the browser's Number type.
+
+
+def _set_enable_order(registry: dict, plugin_id: str, enabled: bool, *, was_enabled: bool = False) -> None:
+    """Update durable command priority while holding the plugin registry lock.
+
+    A registry written before ranks existed has enabled plugins with none; they are ranked first, in
+    file order (the order they loaded in), so giving one plugin a rank cannot move it ahead of the
+    others. `was_enabled` says `plugin_id` was already on, so it keeps its file-order place too.
+    """
+    current = registry.get("enable_order", {})
+    counter = registry.get("enable_counter", 0)
+    if not isinstance(current, dict) or type(counter) is not int or not 0 <= counter <= _MAX_ENABLE_ORDER:
+        raise ValueError("Invalid plugin enable order")
+    if any(
+        not isinstance(key, str) or type(value) is not int or not 0 < value <= _MAX_ENABLE_ORDER
+        for key, value in current.items()
+    ):
+        raise ValueError("Invalid plugin enable order")
+    order = dict(current)
+    if enabled:
+        counter = max(counter, *order.values(), 0)
+        plugins = registry.get("plugins", {})
+        unranked = [
+            key for key, record in (plugins.items() if isinstance(plugins, dict) else ())
+            if isinstance(record, dict) and record.get("enabled") is True and key not in order
+        ]
+        dev = registry.get("dev", {})
+        unranked += [f"{key}@dev" for key in (dev if isinstance(dev, dict) else ()) if f"{key}@dev" not in order]
+        for key in unranked:
+            if key == plugin_id and not was_enabled:
+                continue
+            counter += 1
+            order[key] = counter
+        if plugin_id not in order or not was_enabled:
+            counter += 1
+            order[plugin_id] = counter
+        if counter > _MAX_ENABLE_ORDER:
+            raise ValueError("Plugin enable order exhausted")
+    else:
+        order.pop(plugin_id, None)
+    registry["enable_order"] = order
+    registry["enable_counter"] = counter
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -395,6 +509,13 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expect
                 "updated": now,
             }
             next_registry = {**registry, "plugins": {**registry["plugins"], plugin_id: record}}
+            order = registry.get("enable_order")
+            has_order = isinstance(order, dict) and plugin_id in order
+            # A registry from before enable_order existed has enabled plugins with no order.
+            if record["enabled"] and (not isinstance(prior, dict) or not prior.get("enabled") or not has_order):
+                _set_enable_order(
+                    next_registry, plugin_id, True, was_enabled=isinstance(prior, dict) and prior.get("enabled") is True
+                )
             _write_json(registry_path, next_registry)
             transaction["committed"] = True
             _write_json(journal, transaction)
@@ -434,7 +555,9 @@ def remove_package(plugin_id: str, *, expected_record: dict, purge: bool = False
             os.replace(live, old)
             next_plugins = dict(registry["plugins"])
             del next_plugins[plugin_id]
-            _write_json(registry_path, {**registry, "plugins": next_plugins})
+            next_registry = {**registry, "plugins": next_plugins}
+            _set_enable_order(next_registry, plugin_id, False)
+            _write_json(registry_path, next_registry)
             transaction["committed"] = True
             _write_json(journal, transaction)
             _recover_locked(home)
