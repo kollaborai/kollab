@@ -607,7 +607,7 @@ def make_router(ctx):
     assert "plugin_vendor_collision_1028" not in sys.modules
 
 
-def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch):
+def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch, caplog):
     import json
     import shutil
     from pathlib import Path
@@ -642,6 +642,8 @@ def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch)
         assert "ValueError" not in entry["error"]
         assert "secret-value" not in entry["error"]
         assert client.get("/plugins/hello/api/anything").status_code == 503
+    assert "Plugin engine initialization failed (ValueError)" in caplog.text
+    assert "secret-value" not in caplog.text
 
 
 def test_plugin_tokens_are_private_stable_and_scoped(tmp_path, monkeypatch):
