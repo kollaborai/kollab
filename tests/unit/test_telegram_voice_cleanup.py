@@ -307,6 +307,65 @@ async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeyp
     assert not list(tmp_path.glob("kollab-telegram-voice-*"))
 
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
+async def test_unknown_descendants_keep_private_artifacts_protected(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    private.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(private))
+    whisper = tmp_path / "whisper"
+    writer = tmp_path / "writer.py"
+    started, outcome = tmp_path / "writer.started", tmp_path / "writer.outcome"
+    writer.write_text(
+        textwrap.dedent(
+            f"""\
+            import pathlib, sys, time
+            pathlib.Path({str(started)!r}).touch()
+            time.sleep(0.5)
+            try:
+                pathlib.Path(sys.argv[1]).write_text("late output")
+            except OSError as exc:
+                pathlib.Path({str(outcome)!r}).write_text(type(exc).__name__)
+            else:
+                pathlib.Path({str(outcome)!r}).write_text("written")
+            """
+        )
+    )
+    whisper.write_text(
+        "#!/usr/bin/env python3\n"
+        + textwrap.dedent(
+            f"""\
+            import pathlib, subprocess, sys, time
+            audio = pathlib.Path(sys.argv[1])
+            subprocess.Popen(
+                [sys.executable, {str(writer)!r}, str(audio.parent / "late.txt")],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+            while not pathlib.Path({str(started)!r}).exists():
+                time.sleep(0.005)
+            time.sleep(0.05)
+            """
+        )
+    )
+    whisper.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(
+        psutil.Process,
+        "children",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(psutil.AccessDenied()),
+    )
+
+    result = await _bridge()._transcribe_voice("synthetic-file-id")
+
+    assert result == "[voice] [voice message - whisper returned empty]"
+    deadline = time.monotonic() + 2
+    while not outcome.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert outcome.read_text() == "PermissionError"
+    assert len(list(private.glob("kollab-telegram-voice-*"))) == 1
+
+
 def _install_detached_whisper(tmp_path, temp_root, monkeypatch):
     whisper = tmp_path / "whisper"
     descendant_script = tmp_path / "descendant.py"
