@@ -3808,8 +3808,17 @@ class AgentMessenger:
                         json.dump(data, fh)
                         fh.flush()
                         os.fsync(fh.fileno())
-                    os.replace(temp_name, path)
-                    temp_name = ""
+                    try:
+                        os.replace(temp_name, path)
+                        temp_name = ""
+                    except OSError:
+                        # Some filesystems permit rewriting the record but
+                        # reject atomic replacement. Keep the uncertainty
+                        # marker durable on the existing record in that case.
+                        with open(path, "w") as fh:
+                            json.dump(data, fh)
+                            fh.flush()
+                            os.fsync(fh.fileno())
                 except (OSError, ValueError, TypeError) as exc:
                     logger.error(
                         "Could not persist uncertain mailbox delivery %s (%s)",
