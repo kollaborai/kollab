@@ -83,8 +83,8 @@ function DetailsList({ label, values }: { label: string; values: unknown }) {
 }
 
 /** Which source and Review controls the dialog shows. A failed review keeps both open so the URL can be edited and reviewed again. */
-export function reviewFormState(action: "install" | "update", job: Pick<Job, "status"> | null): { source: boolean; review: boolean } {
-  const retryable = job?.status === "error" || job?.status === "cancelled";
+export function reviewFormState(action: "install" | "update", job: Pick<Job, "status"> | null, failed = false): { source: boolean; review: boolean } {
+  const retryable = job?.status === "error" || job?.status === "cancelled" || (action === "update" && job === null && failed);
   const open = action === "install" && (!job || retryable);
   return { source: open, review: action === "install" ? open : retryable };
 }
@@ -134,10 +134,11 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   const [pollVersion, setPollVersion] = useState(0);
   const started = useRef(false);
   const start = async () => {
-    setBusy(true); setError(null); setJob(null);
+    setBusy(true); setError(null);
     try {
       if (job && job.status !== "installing" && job.status !== "complete")
         await discardReview(api, job.job_id);
+      setJob(null);
       const result = await startReview(api, { action, pluginId, url, gitRef });
       setJob(result);
     } catch (caught) { setError(errorText(caught)); } finally { setBusy(false); }
@@ -207,7 +208,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
       return secrets.length ? [`Background process ${name} receives: ${secrets.join(", ")}.`] : [];
     }),
   ];
-  const form = reviewFormState(action, job);
+  const form = reviewFormState(action, job, error !== null);
   return <Dialog open onOpenChange={open => { if (!open) close(); }}>
     <DialogContent className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
