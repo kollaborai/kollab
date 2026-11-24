@@ -169,9 +169,11 @@ describe("plugin settings page", () => {
       kind: "dev",
       enabled: true,
       source: "/tmp/hello",
+      version: "0.8.1",
     }]);
 
     expect(markup).toContain("Development Folder:");
+    expect(markup).toContain("Version: 0.8.1");
     expect(markup).not.toContain("Development folder:");
   });
 
