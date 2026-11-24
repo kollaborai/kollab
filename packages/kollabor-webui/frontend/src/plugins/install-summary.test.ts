@@ -78,14 +78,14 @@ describe("plugin review form state", () => {
   });
   it("never shows the source form for an update", () => {
     expect(reviewFormState("update", null)).toEqual({ source: false, review: false });
-    expect(reviewFormState("update", { status: "error" })).toEqual({ source: false, review: false });
+    expect(reviewFormState("update", { status: "error" })).toEqual({ source: false, review: true });
   });
 });
 
 describe("plugin review after a failure", () => {
   const failedPoll = { status: "staging" } as const;
-  it("reopens the source form and Review when the review stalled on an error", () => {
-    expect(reviewFormState("install", failedPoll, true)).toEqual({ source: true, review: true });
+  it("keeps the source form closed after a polling error", () => {
+    expect(reviewFormState("install", failedPoll, true)).toEqual({ source: false, review: false });
   });
   it("keeps the form closed while a review is staging without an error", () => {
     expect(reviewFormState("install", failedPoll, false)).toEqual({ source: false, review: false });
@@ -95,6 +95,25 @@ describe("plugin review after a failure", () => {
     expect(showFetching(failedPoll, true)).toBe(false);
     expect(showFetching({ status: "error" }, false)).toBe(false);
     expect(showFetching(null, false)).toBe(false);
+  });
+  it("offers another poll for a staging job after a polling error", () => {
+    expect(installSource).toContain("Check Again");
+  });
+  it("retries a failed update review without asking for a new URL", () => {
+    expect(reviewFormState("update", { status: "error" })).toEqual({ source: false, review: true });
+  });
+  it("reloads the job after the confirm request fails", () => {
+    const confirm = installSource.slice(installSource.indexOf("const confirm = async"), installSource.indexOf("const ready ="));
+    expect(confirm).toMatch(/catch[\s\S]*fetchReview\(api,\s*job\.job_id\)/);
+  });
+  it("discards a prior job before closing or starting a replacement review", () => {
+    const close = installSource.slice(installSource.indexOf("const close ="), installSource.indexOf("const confirm ="));
+    const start = installSource.slice(installSource.indexOf("const start ="), installSource.indexOf("useEffect(() =>"));
+    expect(close).toContain("discardReview(api, job.job_id)");
+    expect(start).toContain("discardReview(api, job.job_id)");
+  });
+  it("explains when a review job was cancelled", () => {
+    expect(installSource).toContain("Plugin review was cancelled.");
   });
   it("sends the edited URL when Review runs again after a failure", async () => {
     const sent: { path: string; body: string }[] = [];
