@@ -357,16 +357,22 @@ def _inspect_pr(
     pull = _fetch(fetcher, f"repos/{repo}/pulls/{number}")
     if not isinstance(pull, dict):
         raise ValueError("invalid pull request response")
-    head_sha = pull.get("head", {}).get("sha")
-    base_ref = pull.get("base", {}).get("ref")
+    head = pull.get("head")
+    head_sha = head.get("sha") if isinstance(head, dict) else None
+    if isinstance(head_sha, str):
+        head_state["sha"] = head_sha
+    base = pull.get("base")
+    base_ref = base.get("ref") if isinstance(base, dict) else None
     if not isinstance(head_sha, str) or not isinstance(base_ref, str):
         raise ValueError("pull request is missing its head or base")
-    head_state["sha"] = head_sha
 
     comparison = _fetch(fetcher, f"repos/{repo}/compare/{base_ref}...{head_sha}")
     if not isinstance(comparison, dict):
         raise ValueError("invalid pull request comparison response")
-    if int(comparison.get("behind_by", -1)) == 0:
+    behind_by = comparison.get("behind_by")
+    if type(behind_by) is not int or behind_by < 0:
+        raise ValueError("comparison is missing a valid behind count")
+    if behind_by == 0:
         return False, ["up to date"]
     merge_base = comparison.get("merge_base_commit", {}).get("sha")
     if not isinstance(merge_base, str):
@@ -410,9 +416,11 @@ def _pull_numbers(fetcher: Callable[..., Any], repo: str) -> list[tuple[int, str
     selected: list[tuple[int, str]] = []
     for pull in pulls:
         number = pull.get("number")
-        base_ref = pull.get("base", {}).get("ref")
-        head_sha = pull.get("head", {}).get("sha")
-        if base_ref != default_branch:
+        base = pull.get("base")
+        base_ref = base.get("ref") if isinstance(base, dict) else None
+        head = pull.get("head")
+        head_sha = head.get("sha") if isinstance(head, dict) else None
+        if isinstance(base_ref, str) and base_ref != default_branch:
             continue
         if not isinstance(number, int):
             raise ValueError("open pull request is missing its number")
@@ -491,6 +499,7 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
         try:
             stale, reasons = _inspect_pr(args.repo, number, graph, api, head_state)
         except Exception as exc:
+            exit_code = 1
             stale = True
             reasons = [f"rule 5: comparison data incomplete ({type(exc).__name__})"]
             if args.post and head_state["sha"]:
