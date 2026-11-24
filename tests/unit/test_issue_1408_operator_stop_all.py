@@ -682,3 +682,17 @@ def test_named_stop_of_an_agent_with_no_socket_yet_goes_through_the_stop_ladder(
 
     assert stop.await_count == 1
     assert "cleaned up" not in result
+
+
+def test_typed_stop_all_does_not_count_a_row_whose_pid_was_recycled(monkeypatch):
+    """A dead agent whose pid another process took is neither stopped nor counted."""
+    alive = _peer("alive")
+    ghost = _peer("ghost")
+    ghost.start_token = "darwin:1.0"  # this test process is not the row's writer
+    plugin, stopped = _plugin(monkeypatch, [alive, ghost], [])
+
+    result = asyncio.run(plugin._handle_hub_command("stop all"))
+
+    assert stopped == ["alive"]
+    assert "stopping 1 agent" in result
+    assert "ghost" not in result
