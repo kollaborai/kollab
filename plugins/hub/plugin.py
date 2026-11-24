@@ -15461,7 +15461,12 @@ class HubPlugin(BasePlugin):
         stop as `/hub stop <name>`, and names live agents in other folders
         (left running) with the terminal command that stops them too.
         """
-        here = await self._presence.discover_agents_async(include_solo=True)
+        # include_busy: a live agent whose socket stopped answering (stuck on
+        # a turn) is the one most worth stopping. The sync scan blocks on
+        # socket checks, so it runs off the event loop.
+        here = await asyncio.to_thread(
+            self._presence.discover_agents, include_solo=True, include_busy=True
+        )
         here_ids = {agent.agent_id for agent in here}
         managed = self._locally_managed_sessions()
         sessions = []
@@ -15502,11 +15507,10 @@ class HubPlugin(BasePlugin):
             )
 
         elsewhere: dict = {}
-        now = time.time()
         for agent in self._presence.scan_machine_presence():
+            # A quiet heartbeat is not death (#575): a live, unrecycled pid counts.
             if (
                 agent.agent_id in here_ids
-                or now - (getattr(agent, "last_heartbeat", 0) or 0) > 60
                 or not pid_alive(getattr(agent, "pid", 0))
                 or self._pid_recycled(agent)
             ):
