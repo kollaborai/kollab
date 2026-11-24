@@ -18,6 +18,7 @@ Coordinator visibility: get_all_inbox_counts() scans dirs without consuming.
 """
 
 import asyncio
+import builtins
 import json
 import time
 from collections import OrderedDict
@@ -35,8 +36,6 @@ from plugins.hub.messenger import (
     INBOX_TTL_SECS,
     AgentMessenger,
     _prune_inbox,
-    get_restart_boundary,
-    set_restart_boundary,
 )
 from plugins.hub.models import HubMessage, MessageScope
 from plugins.hub.task_ledger import TaskLedger
@@ -74,6 +73,17 @@ async def _send(target: str, msg: HubMessage, msg_base: Path) -> None:
 # ---------------------------------------------------------------------------
 
 class TestInboxSizeBound:
+    @pytest.mark.asyncio
+    async def test_send_to_file_rejects_invalid_timestamp(self, tmp_path: Path) -> None:
+        message = _make_msg(content="invalid timestamp")
+        message.timestamp = float("nan")
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            with pytest.raises(ValueError, match="invalid timestamp"):
+                await AgentMessenger.send_to_file("lapis", message)
+
+        assert not (tmp_path / "lapis").exists()
+
     def test_prune_inbox_evicts_oldest_when_over_limit(self, tmp_path: Path) -> None:
         inbox = tmp_path / "lapis"
         inbox.mkdir()
@@ -121,6 +131,119 @@ class TestInboxSizeBound:
 # ---------------------------------------------------------------------------
 
 class TestInboxTTLExpiry:
+    @pytest.mark.parametrize(
+        "bad_timestamp",
+        [
+            "invalid",
+            [],
+            {},
+            float("nan"),
+            float("inf"),
+            -float("inf"),
+            1e300,
+            -1e300,
+            None,
+            "<missing>",
+        ],
+    )
+    @pytest.mark.parametrize("bad_is_control", [False, True])
+    def test_F401_malformed_timestamp_does_not_abort_or_consume_neighboring_controls(
+        self, tmp_path: Path, bad_timestamp, bad_is_control: bool, caplog
+    ) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+
+        def control(content: str) -> dict:
+            data = _make_msg(content=content).to_dict()
+            data["metadata"] = {"task_assignment": True}
+            return data
+
+        before = inbox / "0000001-before.json"
+        control_before = inbox / "0000002-control-before.json"
+        malformed = inbox / "0000003-malformed.json"
+        after = inbox / "0000004-after.json"
+        control_after = inbox / "0000005-control-after.json"
+        before.write_text(json.dumps(_make_msg(content="ordinary-before").to_dict()))
+        control_before.write_text(json.dumps(control("control-before")))
+        bad_data = _make_msg(content="SENSITIVE_CORRUPT_CONTENT").to_dict()
+        if bad_is_control:
+            bad_data["metadata"] = {"task_assignment": True}
+        if bad_timestamp == "<missing>":
+            bad_data.pop("timestamp")
+        else:
+            bad_data["timestamp"] = bad_timestamp
+        malformed.write_text(json.dumps(bad_data))
+        after.write_text(json.dumps(_make_msg(content="ordinary-after").to_dict()))
+        control_after.write_text(json.dumps(control("control-after")))
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert [message.content for message in result] == [
+            "ordinary-before",
+            "control-before",
+            "ordinary-after",
+            "control-after",
+        ]
+        assert not malformed.exists()
+        assert "invalid timestamp" in caplog.text
+        assert "SENSITIVE_CORRUPT_CONTENT" not in caplog.text
+
+    def test_bad_record_unlink_failure_does_not_abort_valid_neighbors(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        before = _make_msg(content="before")
+        after = _make_msg(content="after")
+        before_path = inbox / "0000001-before.json"
+        malformed_path = inbox / "0000002-malformed.json"
+        after_path = inbox / "0000003-after.json"
+        before_path.write_text(json.dumps(before.to_dict()))
+        bad_data = _make_msg(content="DO_NOT_LOG_THIS").to_dict()
+        bad_data["timestamp"] = "invalid"
+        malformed_path.write_text(json.dumps(bad_data))
+        after_path.write_text(json.dumps(after.to_dict()))
+        original_unlink = Path.unlink
+
+        def fail_target(self, *args, **kwargs):
+            if self == malformed_path:
+                raise PermissionError("simulated corrupt-file unlink failure")
+            return original_unlink(self, *args, **kwargs)
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            with patch.object(Path, "unlink", new=fail_target):
+                result = AgentMessenger.read_mailbox("lapis", consume=False)
+
+        assert [message.id for message in result] == [before.id, after.id]
+        assert malformed_path.exists()
+        assert "Could not discard malformed mailbox record" in caplog.text
+        assert "DO_NOT_LOG_THIS" not in caplog.text
+
+    def test_transient_read_failure_preserves_record_for_retry(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        message = _make_msg(content="retry after read failure")
+        path = inbox / "0000001-message.json"
+        path.write_text(json.dumps(message.to_dict()))
+        original_open = builtins.open
+
+        def fail_target(file, *args, **kwargs):
+            if Path(file) == path:
+                raise PermissionError("simulated transient read failure")
+            return original_open(file, *args, **kwargs)
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            with patch("builtins.open", side_effect=fail_target):
+                result = AgentMessenger.read_mailbox("lapis", consume=False)
+
+        assert result == []
+        assert path.exists()
+        assert "Could not read mailbox record" in caplog.text
+        assert "retry after read failure" not in caplog.text
+
     def test_expired_messages_not_returned(self, tmp_path: Path) -> None:
         inbox = tmp_path / "lapis"
         inbox.mkdir()
@@ -435,6 +558,72 @@ class TestBoundedReplay:
 # ---------------------------------------------------------------------------
 
 class TestReadMailboxes:
+    def test_later_mailbox_read_failure_preserves_prior_results(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        inbox = tmp_path / "good"
+        inbox.mkdir()
+        message = _make_msg(content="survives")
+        (inbox / "00000001-message.json").write_text(json.dumps(message.to_dict()))
+        original_read = AgentMessenger.read_mailbox
+
+        def fail_one_address(agent_id: str, **kwargs):
+            if agent_id == "broken":
+                raise OSError("simulated mailbox read failure")
+            return original_read(agent_id, **kwargs)
+
+        monkeypatch.setattr(
+            AgentMessenger, "read_mailbox", staticmethod(fail_one_address)
+        )
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailboxes(
+                ["good", "broken"], consume=False
+            )
+
+        assert [msg.id for msg in result] == [message.id]
+        assert (inbox / "00000001-message.json").exists()
+
+    def test_ack_unlink_failure_keeps_message_available_for_replay(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        message = _make_msg(content="retry after unlink error")
+        path = inbox / "00000001-message.json"
+        path.write_text(json.dumps(message.to_dict()))
+        original_unlink = Path.unlink
+
+        def fail_target(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError("simulated unlink failure")
+            return original_unlink(self, *args, **kwargs)
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            with patch.object(Path, "unlink", new=fail_target):
+                AgentMessenger.acknowledge_mailboxes(["lapis"], {message.id})
+            replayed = AgentMessenger.read_mailboxes(["lapis"], consume=False)
+
+        assert [msg.id for msg in replayed] == [message.id]
+        assert "Could not acknowledge delivered mailbox record" in caplog.text
+
+    def test_unacknowledged_replay_survives_until_explicit_ack(self, tmp_path: Path) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        message = _make_msg(content="retryable")
+        path = inbox / "00000001-message.json"
+        path.write_text(json.dumps(message.to_dict()))
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            first = AgentMessenger.read_mailboxes(["lapis"], consume=False)
+            replayed = AgentMessenger.read_mailboxes(["lapis"], consume=False)
+            AgentMessenger.acknowledge_mailboxes(["lapis"], {message.id})
+            after_ack = AgentMessenger.read_mailboxes(["lapis"], consume=False)
+
+        assert [msg.id for msg in first] == [message.id]
+        assert [msg.id for msg in replayed] == [message.id]
+        assert after_ack == []
+        assert not path.exists()
+
     def _write_to(self, tmp_path: Path, identity: str, n: int) -> None:
         inbox = tmp_path / identity
         inbox.mkdir(parents=True, exist_ok=True)
@@ -620,8 +809,27 @@ def _make_summary_batch(n_msgs: int = 5, n_total: int = 30) -> List[HubMessage]:
 class TestSingleBlockDelivery:
     """_deliver_inbox_batch must call inject_system_message ONCE for replay batches."""
 
-    def _run(self, coro):
-        return asyncio.run(coro)
+    @pytest.fixture(autouse=True)
+    def _delivery_mailbox(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            messenger_mod, "get_messages_dir", lambda: tmp_path / "delivery-mailbox"
+        )
+
+    def _deliver(self, plugin, messages):
+        # Formatting/classification fixtures are synthetic read results. Give
+        # them real durable sources so the delivery boundary is exercised too.
+        if plugin._identity is None:
+            plugin._identity = AgentRuntime(
+                name="coder", identity="lapis", agent_id="lapis-id", state="idle"
+            )
+
+        async def deliver():
+            for message in messages:
+                if message.action != "inbox_summary":
+                    await AgentMessenger.send_to_file(plugin._identity.identity, message)
+            return await plugin._deliver_inbox_batch(messages)
+
+        return asyncio.run(deliver())
 
     # ------------------------------------------------------------------
     # _deliver_inbox_batch: replay batch → single injection
@@ -641,7 +849,7 @@ class TestSingleBlockDelivery:
 
         batch = _make_summary_batch(n_msgs=5, n_total=30)
 
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         inject_mock.assert_awaited_once()
 
@@ -658,7 +866,7 @@ class TestSingleBlockDelivery:
         plugin.event_bus = bus
 
         batch = _make_summary_batch(n_msgs=3, n_total=25)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         _, kwargs = inject_mock.await_args
         assert kwargs.get("subtype") == "inbox_replay"
@@ -680,7 +888,7 @@ class TestSingleBlockDelivery:
         plugin.event_bus = bus
 
         batch = _make_summary_batch(n_msgs=3, n_total=25)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         assert len(captured) == 1
         assert "[offline inbox]" in captured[0]
@@ -702,7 +910,7 @@ class TestSingleBlockDelivery:
         plugin.event_bus = bus
 
         batch = _make_summary_batch(n_msgs=5, n_total=30)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         block = captured[0]
         for i in range(5):
@@ -748,7 +956,7 @@ class TestSingleBlockDelivery:
             },
         )
 
-        self._run(plugin._deliver_inbox_batch([summary, reminder, *ordinary]))
+        self._deliver(plugin, [summary, reminder, *ordinary])
 
         ack = plugin._route_message.await_args.args[0]
         assert ack.to == "koordinator"
@@ -791,11 +999,7 @@ class TestSingleBlockDelivery:
             metadata={"task_assignment": True, "task_id": "task-retained"},
         )
 
-        self._run(
-            plugin._deliver_inbox_batch(
-                [summary, ordinary[0], assignment, ordinary[1]]
-            )
-        )
+        self._deliver(plugin, [summary, ordinary[0], assignment, ordinary[1]])
 
         assert received == [assignment]
         inject_mock.assert_awaited_once()
@@ -829,11 +1033,7 @@ class TestSingleBlockDelivery:
             metadata={"task_cron": True, "task_id": "metadata-only"},
         )
 
-        self._run(
-            plugin._deliver_inbox_batch(
-                [summary, ordinary[0], reminder, ordinary[1]]
-            )
-        )
+        self._deliver(plugin, [summary, ordinary[0], reminder, ordinary[1]])
 
         assert received == [reminder]
         inject_mock.assert_awaited_once()
@@ -877,9 +1077,7 @@ class TestSingleBlockDelivery:
             metadata={"task_cron": True, "task_id": card.id},
         )
 
-        self._run(
-            plugin._deliver_inbox_batch([summary, ordinary[0], reminder, ordinary[1]])
-        )
+        self._deliver(plugin, [summary, ordinary[0], reminder, ordinary[1]])
 
         assert received == [reminder]
         inject_mock.assert_awaited_once()
@@ -944,7 +1142,7 @@ class TestSingleBlockDelivery:
         bus.emit_with_hooks = AsyncMock()
         plugin.event_bus = bus
 
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         ack = plugin._route_message.await_args.args[0]
         assert ack.reply_to == reminder.id
@@ -979,9 +1177,7 @@ class TestSingleBlockDelivery:
             metadata={"task_cron": True, "task_id": "active"},
         )
 
-        self._run(
-            plugin._deliver_inbox_batch([summary, ordinary[0], reminder, ordinary[1]])
-        )
+        self._deliver(plugin, [summary, ordinary[0], reminder, ordinary[1]])
 
         assert received == [reminder, ordinary[0], ordinary[1]]
         assert received.count(reminder) == 1
@@ -1025,7 +1221,7 @@ class TestSingleBlockDelivery:
             },
         )
 
-        self._run(plugin._deliver_inbox_batch([summary, reminder]))
+        self._deliver(plugin, [summary, reminder])
 
         plugin._route_message.assert_awaited_once()
         inject_mock.assert_not_awaited()
@@ -1056,7 +1252,7 @@ class TestSingleBlockDelivery:
         plugin._on_message_received = fake_on_message
 
         normal_msgs = [_make_msg(content=f"normal {i}") for i in range(3)]
-        self._run(plugin._deliver_inbox_batch(normal_msgs))
+        self._deliver(plugin, normal_msgs)
 
         inject_mock.assert_not_awaited()
         assert len(received) == 3
@@ -1074,7 +1270,7 @@ class TestSingleBlockDelivery:
         plugin._on_message_received = fake_on_message
 
         normal_msgs = [_make_msg(content=f"m{i}") for i in range(4)]
-        self._run(plugin._deliver_inbox_batch(normal_msgs))
+        self._deliver(plugin, normal_msgs)
 
         assert len(received) == 4
         assert [m.content for m in received] == [f"m{i}" for i in range(4)]
@@ -1099,7 +1295,7 @@ class TestSingleBlockDelivery:
         plugin._on_message_received = fake_on_message
 
         batch = _make_summary_batch(n_msgs=4, n_total=20)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         # Summary is not delivered via _on_message_received, only real msgs
         assert len(received) == 4
@@ -1122,7 +1318,7 @@ class TestSingleBlockDelivery:
         plugin._on_message_received = fake_on_message
 
         batch = _make_summary_batch(n_msgs=3, n_total=15)
-        self._run(plugin._deliver_inbox_batch(batch))
+        self._deliver(plugin, batch)
 
         assert len(received) == 3
 
