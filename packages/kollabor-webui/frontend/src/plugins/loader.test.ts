@@ -407,6 +407,24 @@ describe("plugins-changed", () => {
     expect(plugin("hello")).toBeUndefined();
   });
 
+  it("does not load a listing that finishes after the loader stops", async () => {
+    const gate = deferred<{ plugins: PluginEntry[] }>();
+    const setup = vi.fn(page);
+    const { loader, deps, plugin } = harness([[entry("hello")]], {
+      "/plugins/hello/web/index.js?v=abc": module(setup),
+    });
+    deps.list.mockImplementationOnce(() => gate.promise);
+
+    const refresh = loader.refresh();
+    loader.stop();
+    gate.resolve({ plugins: [entry("hello")] });
+    await refresh;
+    await loader.idle();
+
+    expect(setup).not.toHaveBeenCalled();
+    expect(plugin("hello")).toBeUndefined();
+  });
+
   it("an engine notice for a loaded plugin becomes its notice; one for an unknown plugin is dropped", async () => {
     const { loader, plugin } = harness([[entry("hello")]], {
       "/plugins/hello/web/index.js?v=abc": module(page),
