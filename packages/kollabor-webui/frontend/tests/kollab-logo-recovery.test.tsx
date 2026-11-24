@@ -9,7 +9,7 @@ import { K_POLYS } from "@/components/icons/kollab-logo";
 
 type Listener = (event: { preventDefault: () => void }) => void;
 
-function mockThree(renders: { count: number }) {
+function mockThree(renders: { count: number; ratio?: number }) {
   class Disposable {
     dispose() {}
   }
@@ -21,7 +21,9 @@ function mockThree(renders: { count: number }) {
   }
   class Renderer {
     private size = { x: 0, y: 0 };
-    setPixelRatio() {}
+    setPixelRatio(ratio: number) {
+      renders.ratio = ratio;
+    }
     setRenderTarget() {}
     setSize(x: number, y: number) {
       this.size = { x, y };
@@ -188,6 +190,31 @@ describe("glass K recovery", () => {
     expect(renders.count).toBe(2);
     expect(onFrame).toHaveBeenCalledOnce();
     glass?.stop();
+  });
+
+  it("supersamples so the small mark's edges stay smooth on 1x and 2x screens", async () => {
+    for (const dpr of [1, 2]) {
+      vi.resetModules();
+      const renders: { count: number; ratio?: number } = { count: 0 };
+      vi.stubGlobal("window", {
+        devicePixelRatio: dpr,
+        matchMedia: () => ({ matches: true }),
+        addEventListener() {},
+        removeEventListener() {},
+        clearTimeout() {},
+      });
+      vi.stubGlobal("document", {
+        documentElement: { classList: { contains: () => true } },
+      });
+      vi.stubGlobal("cancelAnimationFrame", vi.fn());
+      mockThree(renders);
+      const { startGlass } = await import("@/components/icons/kollab-logo-glass");
+      const { canvas, raw } = controllableCanvas();
+      raw.clientWidth = 40;
+      raw.clientHeight = 40;
+      startGlass(canvas, K_POLYS)?.stop();
+      expect(renders.ratio).toBeGreaterThanOrEqual(3);
+    }
   });
 
   it("reports a lost WebGL context so the flat mark can come back", async () => {
