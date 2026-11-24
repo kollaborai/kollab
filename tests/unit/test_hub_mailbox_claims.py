@@ -236,6 +236,36 @@ async def test_refusal_release_retries_transient_replace_failure(inbox, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_refusal_release_recovers_after_consecutive_replace_failures(
+    inbox, monkeypatch
+):
+    message = HubMessage(action="message", to="receiver", content="retry me")
+    calls = []
+
+    async def refuse(_msg):
+        calls.append("refused")
+        return False
+
+    await AgentMessenger.send_to_file("receiver", message)
+    original_replace = messenger.os.replace
+    replace_calls = 0
+
+    def fail_two_releases(src, dst):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls in {2, 3}:
+            raise PermissionError("release denied")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(messenger.os, "replace", fail_two_releases)
+    assert await _receiver(refuse)._deliver_inbox_batch(_queued()) == set()
+    monkeypatch.setattr(messenger.os, "replace", original_replace)
+    await _receiver(refuse)._deliver_inbox_batch(_queued())
+
+    assert calls == ["refused", "refused"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("after_effect", [False, True])
 async def test_ack_replace_failure_cannot_reopen_cancelled_delivery(
     inbox, monkeypatch, after_effect
