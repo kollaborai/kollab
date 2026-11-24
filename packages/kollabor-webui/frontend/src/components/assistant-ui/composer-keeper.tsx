@@ -7,6 +7,10 @@ import { useAui, useAuiState } from "@assistant-ui/react";
 // reloading the page starts clean.
 const kept = new Map<string, string>();
 
+export function forgetComposerText(sessionId: string) {
+  kept.delete(sessionId);
+}
+
 /**
  * Renders nothing. Inside the runtime it copies the message box's text into `kept` as it changes, and puts it back when
  * a runtime for the same chat mounts with an empty box. Text the person deleted or sent is forgotten, so it never
