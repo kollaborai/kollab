@@ -351,7 +351,7 @@ All sit behind the existing bearer-token middleware.
 | `POST /plugins/{id}/services/{name}/start`, `/stop`, `/restart` | background processes (`200` or `202`); `409` for an invalid transition, `503` if Kollab cannot signal a verified wrapper (service state becomes `stop-failed`) | own id | no |
 | `GET /plugins/{id}/services/{name}/log?tail=200` | the process log, redacted like Agent Output | own id | yes |
 | `POST /plugins/install`, `POST /plugins/{id}/update` → `{job_id}`; `GET /plugins/jobs/{job_id}` | clone or fetch into staging, check, then report the sheet facts; job status is `cancelling` while cancellation cleanup runs | no | no |
-| `DELETE /plugins/jobs/{job_id}` | cancel a staging or ready job; `200` after cleanup, `404` if missing, `409` if it cannot be cancelled, `503` if staged files cannot be removed | no | no |
+| `DELETE /plugins/jobs/{job_id}` | cancel a staging or ready job; `200` after cleanup, `404` if missing, `409` if it cannot be cancelled, `503` if staged files cannot be removed or the manager is shutting down | no | no |
 | `POST /plugins/jobs/{job_id}/confirm` | `{commit, files_sha256}`: refused unless both match the staged copy; then move into place | no | no |
 | `POST /plugins/{id}/enable`, `/disable`, `/remove` | manage; `409` if a service cannot be stopped during disable/remove (the plugin remains off and the stop can be retried); `503` for an I/O failure | no | no |
 
