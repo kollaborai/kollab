@@ -375,8 +375,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   const start = async () => {
     setBusy(true); setError(null);
     try {
-      if (job && (job.status === "staging" || job.status === "ready"))
-        await discardReview(api, job.job_id);
+      if (job) await discardReview(api, job.job_id);
       setJob(null);
       const result = await startReview(api, { action, pluginId, url, gitRef });
       setJob(result);

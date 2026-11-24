@@ -349,7 +349,9 @@ class PluginJobs:
             return await asyncio.shield(job["cancel_task"])
         if status == "cancelled" and "base" not in job:
             return self._public(job)
-        if status not in {"staging", "ready", "cancelling", "cancelled"}:
+        if status not in {"staging", "ready", "cancelling", "cancelled"} and not (
+            status == "error" and "base" in job
+        ):
             raise HTTPException(status_code=409, detail="Plugin job cannot be cancelled")
         # Terminal "cancelled" is published only after the staged files are gone (#1373).
         job["status"] = "cancelling"
