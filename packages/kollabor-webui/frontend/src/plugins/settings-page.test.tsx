@@ -86,6 +86,23 @@ describe("plugin settings page", () => {
       expect(markup).not.toContain(`>${state}<`);
   });
 
+  it("shows when a running service misses its declared heartbeat", async () => {
+    const now = Date.now() / 1000;
+    const markup = await markupFor([{
+      ...plugin([]),
+      enabled: true,
+      services: [{
+        name: "worker",
+        state: "running",
+        since: now - 7200,
+        heartbeat: now - 6 * 60,
+        heartbeat_s: 60,
+      } as PluginEntry["services"][number]],
+    }]);
+
+    expect(markup).toContain("Running · No Heartbeat for 6 min");
+  });
+
   it("uses Failed to Load in the plugin row and detail", async () => {
     const markup = await markupFor([{
       ...plugin([]),
