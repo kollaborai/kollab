@@ -439,7 +439,7 @@ async def test_cancellation_kills_pipe_holder_after_transcriber_exits(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group lifecycle")
-async def test_cancellation_does_not_remove_artifacts_from_closed_pipe_descendant(
+async def test_cancellation_blocks_detached_writer_before_artifact_cleanup(
     tmp_path, monkeypatch
 ):
     private = tmp_path / "private"
@@ -510,9 +510,7 @@ async def test_cancellation_does_not_remove_artifacts_from_closed_pipe_descendan
         await asyncio.wait_for(task, 2)
 
     await asyncio.sleep(0.45)
-    assert not outcome.exists() or outcome.read_text() == "written", (
-        "cleanup raced detached writer"
-    )
+    assert outcome.read_text() == "PermissionError"
     assert list(private.iterdir()) == []
 
 
@@ -549,7 +547,7 @@ async def test_timeout_kills_pipe_holder_after_transcriber_exits(tmp_path, monke
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
-async def test_success_defers_cleanup_for_detached_writer(tmp_path, monkeypatch):
+async def test_success_protects_artifacts_until_detached_writer_exits(tmp_path, monkeypatch):
     monkeypatch.setattr(psutil.Process, "children", _REAL_PROCESS_CHILDREN)
     temp_root = tmp_path / "temporary"
     temp_root.mkdir()
@@ -603,7 +601,7 @@ async def test_success_defers_cleanup_for_detached_writer(tmp_path, monkeypatch)
         while not outcome.exists() and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
         assert outcome.exists(), "detached writer did not finish"
-        assert outcome.read_text() == "written"
+        assert outcome.read_text() == "PermissionError"
         deadline = time.monotonic() + 2
         while list(temp_root.iterdir()) and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
