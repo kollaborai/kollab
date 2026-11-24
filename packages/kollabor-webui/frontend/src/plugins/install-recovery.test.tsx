@@ -16,6 +16,7 @@ const job = (status: "ready" | "complete", warning: string | null = null) => ({
   plugin_id: "hello",
   commit,
   files_sha256: filesHash,
+  source: "https://example.invalid/plugin.git",
   changed_folders: ["content.txt"],
   omitted_changed_folders: 0,
   manifest: { id: "hello", name: "Hello", uses: [], services: {} },

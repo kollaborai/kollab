@@ -57,6 +57,23 @@ describe("plugin review manifest boundary", () => {
     expect(normalized).not.toBeNull();
     expect(JSON.stringify(normalized)).not.toContain(canary);
   });
+  it.each([
+    ["complete install response", (_value: Record<string, any>) => {}, true],
+    ["complete update response", (value: Record<string, any>) => { value.action = "update"; }, true],
+    ["missing action", (value: Record<string, any>) => { delete value.action; }, false],
+    ["unknown action", (value: Record<string, any>) => { value.action = "remove"; }, false],
+    ["missing plugin id", (value: Record<string, any>) => { delete value.plugin_id; }, false],
+    ["missing source", (value: Record<string, any>) => { delete value.source; }, false],
+    ["mistyped source", (value: Record<string, any>) => { value.source = { url: "https://example.invalid" }; }, false],
+    ["missing commit", (value: Record<string, any>) => { delete value.commit; }, false],
+    ["mistyped file hash", (value: Record<string, any>) => { value.files_sha256 = "not-a-hash"; }, false],
+    ["missing update folders", (value: Record<string, any>) => { value.action = "update"; delete value.changed_folders; }, false],
+    ["mistyped update folders", (value: Record<string, any>) => { value.action = "update"; value.changed_folders = "content.txt"; }, false],
+  ] as const)("sets review completeness for %s", (_label, mutate, complete) => {
+    const input: Record<string, any> = job();
+    mutate(input);
+    expect(normalizeReviewJob(input)?.review_complete).toBe(complete);
+  });
   it("shows safe reasons for rejected plugin requests", () => {
     expect(errorText(new ApiError("Invalid plugin Git source", 422, {}))).toBe("Invalid plugin Git source");
     expect(errorText(new ApiError("Cannot safely update this plugin", 409, {}))).toBe("Cannot safely update this plugin");
