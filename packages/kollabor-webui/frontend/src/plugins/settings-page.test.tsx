@@ -27,6 +27,7 @@ const plugin = (settings: unknown[]): PluginEntry => ({
   web: null,
   contributes: {},
   services: [],
+  omitted: { services: 0, uses: 0, granted: 0 },
   settings,
 } as PluginEntry);
 

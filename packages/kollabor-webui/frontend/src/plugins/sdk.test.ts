@@ -22,6 +22,7 @@ const entry = (id = "hello", extra: Partial<PluginEntry> = {}): PluginEntry => (
     renderers: ["hello_tool"],
   },
   services: [],
+  omitted: { services: 0, uses: 0, granted: 0 },
   ...extra,
 });
 

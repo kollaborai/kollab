@@ -19,6 +19,7 @@ const entry = (id: string, name: string): PluginEntry => ({
   web: null,
   contributes: {},
   services: [],
+  omitted: { services: 0, uses: 0, granted: 0 },
 });
 
 const record = (id: string, name: string, extra: Partial<PluginRecord> = {}): PluginRecord => ({
