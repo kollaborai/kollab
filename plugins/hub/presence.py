@@ -8,11 +8,14 @@ import re
 import stat
 import tempfile
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from kollabor_agent.runtime import AgentRuntime, process_start_token
 from kollabor_config.hub_paths import hub_socket_root
+
+from .file_lock import locked_file
 
 logger = logging.getLogger(__name__)
 
@@ -487,7 +490,21 @@ def find_live_socket(identity: str) -> Optional[str]:
 
 
 def _atomic_write(path: Path, data: dict) -> None:
-    """Write JSON atomically via a unique temp file and rename."""
+    """Write JSON atomically while serialized with cleanup for this agent."""
+    try:
+        with _presence_file_lock(path):
+            _atomic_write_unlocked(path, data)
+    except Exception as e:
+        logger.error(f"Presence write failed for {path}: {e}")
+
+
+def _presence_file_lock(path: Path):
+    """Lock the stable sidecar associated with a replaceable presence row."""
+    return locked_file(path.with_suffix(".lock"), private=True)
+
+
+def _atomic_write_unlocked(path: Path, data: dict) -> None:
+    """Write JSON atomically; caller holds ``_presence_file_lock(path)``."""
     tmp_name = ""
     try:
         # A fixed ``.tmp`` path lets concurrent heartbeats unlink each
@@ -537,7 +554,8 @@ class PresenceManager:
     def remove(self) -> None:
         """Remove this agent's presence file (graceful shutdown)."""
         try:
-            self._presence_file.unlink(missing_ok=True)
+            with _presence_file_lock(self._presence_file):
+                self._presence_file.unlink(missing_ok=True)
             logger.info(
                 f"Removed presence file for {self.identity.identity}"
             )  # external attr
@@ -583,8 +601,7 @@ class PresenceManager:
 
                 if not agent.is_alive():
                     logger.info(f"Cleaning dead agent: {f.stem} (pid {agent.pid})")
-                    f.unlink(missing_ok=True)
-                    self._cleanup_agent_socket(agent)
+                    self.cleanup_agent(agent)
                     continue
 
                 # Trust fresh heartbeats -- skip expensive socket check.
@@ -605,8 +622,7 @@ class PresenceManager:
                     logger.info(
                         f"Cleaning stale agent: {f.stem} (owner gone, socket dead)"
                     )
-                    f.unlink(missing_ok=True)
-                    self._cleanup_agent_socket(agent)
+                    self.cleanup_agent(agent)
                     continue
 
                 agents.append(agent)
@@ -634,8 +650,7 @@ class PresenceManager:
 
                 if not agent.is_alive():
                     logger.info(f"Cleaning dead agent: {f.stem} (pid {agent.pid})")
-                    f.unlink(missing_ok=True)
-                    self._cleanup_agent_socket(agent)
+                    self.cleanup_agent(agent)
                     continue
 
                 # Trust fresh heartbeats
@@ -654,8 +669,7 @@ class PresenceManager:
                             f"Cleaning stale agent: {f.stem} "
                             f"(owner gone, socket dead)"
                         )
-                        f.unlink(missing_ok=True)
-                        self._cleanup_agent_socket(agent)
+                        self.cleanup_agent(agent)
                         continue
 
                 agents.append(agent)
@@ -753,24 +767,54 @@ class PresenceManager:
         s.close()
         return True
 
-    @staticmethod
-    def _cleanup_agent_socket(agent: "AgentRuntime") -> None:
-        """Remove a dead agent's socket file."""
-        if agent.socket_path:
-            try:
-                Path(agent.socket_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+    def cleanup_agent(self, agent: "AgentRuntime") -> bool:
+        """Remove a stopped agent's presence row; True when safe to clean.
 
-    def cleanup_agent(self, agent: "AgentRuntime") -> None:
-        """Remove an agent's presence file and socket.
-
-        Public method for callers (like hub stop) that need to
-        explicitly clean up an agent they know is dead.
+        Only ``agent``'s own generation goes, and only once its process is gone
+        (#1408): while the pid still runs as that agent nothing is removed, so a
+        live agent never drops out of discovery, and a row on disk that now
+        names another pid or start (a newer agent under the same id) keeps its
+        file and socket.
         """
-        for directory in _presence_directories(self._presence_dir):
-            (directory / f"{agent.agent_id}.json").unlink(missing_ok=True)
-        self._cleanup_agent_socket(agent)
+        if agent.pid and not _owner_gone(agent):
+            return False
+        preserve = False
+        paths = [
+            directory / f"{agent.agent_id}.json"
+            for directory in _presence_directories(self._presence_dir)
+        ]
+        # Writers use the same stable lock before replacing the row. Hold all
+        # matching locations through row validation and deletion so a new
+        # generation cannot take the pathname between those operations.
+        try:
+            with ExitStack() as locks:
+                for path in sorted(paths, key=str):
+                    locks.enter_context(_presence_file_lock(path))
+                for path in paths:
+                    try:
+                        row = json.loads(path.read_text())
+                    except FileNotFoundError:
+                        continue
+                    except (OSError, ValueError):
+                        preserve = True
+                        continue
+                    if (
+                        not isinstance(row, dict)
+                        or row.get("pid") != agent.pid
+                        or "started_at" not in row
+                        or agent.started_at is None
+                        or row["started_at"] != agent.started_at
+                    ):
+                        preserve = True
+                        continue
+                    path.unlink(missing_ok=True)
+        except OSError:
+            return False
+
+        # Socket paths are shared by agent id and can be bound before a
+        # replacement publishes its row. Without a socket-generation token,
+        # unlinking one here could remove that replacement's live socket.
+        return not preserve
 
     def get_agent_by_identity(self, identity: str) -> Optional[AgentRuntime]:
         """Find an agent by its identity."""
@@ -804,9 +848,8 @@ class PresenceManager:
                     logger.info(
                         f"Startup cleanup: dead agent {f.stem} (pid {agent.pid})"
                     )
-                    f.unlink(missing_ok=True)
-                    self._cleanup_agent_socket(agent)
-                    removed += 1
+                    if self.cleanup_agent(agent):
+                        removed += 1
                     continue
 
                 # A silent socket does not make an owner gone (#575): only a
@@ -817,9 +860,8 @@ class PresenceManager:
                             f"Startup cleanup: stale agent {f.stem} "
                             f"(owner gone, socket dead)"
                         )
-                        f.unlink(missing_ok=True)
-                        self._cleanup_agent_socket(agent)
-                        removed += 1
+                        if self.cleanup_agent(agent):
+                            removed += 1
             except (json.JSONDecodeError, Exception) as e:
                 logger.debug(f"Bad presence file during startup scan {f}: {e}")
 
