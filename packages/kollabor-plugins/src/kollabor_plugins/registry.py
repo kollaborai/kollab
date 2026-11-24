@@ -493,6 +493,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
                 "pid": identity.get("pid") if identity else None,
                 "since": identity.get("start_time") if identity else None,
                 "restarts": len(history) if isinstance(history, list) else 0,
+                "secrets": declaration.get("secrets", []) if isinstance(declaration, dict) else [],
                 "heartbeat_s": declaration.get("heartbeat_s") if isinstance(declaration, dict) else None,
                 "heartbeat": None,
                 "error": state.get("error"),

@@ -103,6 +103,16 @@ describe("plugin settings page", () => {
     expect(markup).toContain("Running · No Heartbeat for 6 min");
   });
 
+  it("shows which declared secrets a background process receives", async () => {
+    const markup = await markupFor([{
+      ...plugin([]),
+      enabled: true,
+      services: [{ name: "worker", state: "stopped", secrets: ["API_TOKEN"] }],
+    }]);
+
+    expect(markup).toContain("Receives secrets: API_TOKEN");
+  });
+
   it("uses Failed to Load in the plugin row and detail", async () => {
     const markup = await markupFor([{
       ...plugin([]),
