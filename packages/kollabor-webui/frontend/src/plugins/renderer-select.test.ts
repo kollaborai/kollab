@@ -32,6 +32,11 @@ describe("findToolRenderer", () => {
     expect(findToolRenderer([record("hello", [{ tool: "shell", render: Render }])], "read")).toBeNull();
   });
 
+  it("keeps the host permission prompt out of plugin tool renderers", () => {
+    const plugin = record("alpha", [{ tool: "request_permission", render: Render }]);
+    expect(findToolRenderer([plugin], "request_permission")).toBeNull();
+  });
+
   it("ignores tag renderers and plugins whose code has not loaded", () => {
     const plugins = [
       record("alpha", [{ tag: "shell", render: Render }]),
