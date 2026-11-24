@@ -28,6 +28,33 @@ def _pull_detail(head_sha: str, files: list[dict[str, str]]) -> dict[str, object
     }
 
 
+def _comparison_fetcher(
+    pr_files: list[dict[str, object]],
+    main_files: list[dict[str, object]],
+    changed_files: int | None = None,
+):
+    pull = {
+        "head": {"sha": "head-sha"},
+        "base": {"ref": "main"},
+        "changed_files": len(pr_files) if changed_files is None else changed_files,
+    }
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project/pulls/7":
+            return pull
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/compare/main...head-sha":
+            return {"behind_by": 1, "merge_base_commit": {"sha": "merge-sha"}}
+        if endpoint == "repos/example/project/pulls/7/files?per_page=100":
+            return pr_files
+        if endpoint == "repos/example/project/compare/merge-sha...main":
+            return {"files": main_files}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    return fake_fetcher
+
+
 def test_build_import_graph_resolves_python_and_frontend_imports(tmp_path: Path) -> None:
     write(tmp_path, "kollab/__init__.py", "")
     write(tmp_path, "kollab/core.py", "")
@@ -73,6 +100,46 @@ from .sibling import deeper
         "packages/kollabor-webui/frontend/src/components/view.tsx",
         "packages/kollabor-webui/frontend/src/components/index.ts",
     }
+
+
+def test_literal_runtime_imports_add_python_edges(tmp_path: Path) -> None:
+    write(tmp_path, "pkg/__init__.py", "")
+    write(tmp_path, "pkg/mod.py", "")
+    write(tmp_path, "pkg/other.py", "")
+    write(
+        tmp_path,
+        "tests/unit/test_runtime_import.py",
+        "import importlib\n"
+        'importlib.import_module("pkg.mod")\n'
+        '__import__("pkg.other")\n',
+    )
+
+    graph = pr_blast_radius.build_import_graph(tmp_path)
+
+    assert graph["tests/unit/test_runtime_import.py"] == {
+        "pkg/mod.py",
+        "pkg/other.py",
+    }
+
+
+def test_dynamic_directory_loader_makes_comparison_stale(tmp_path: Path) -> None:
+    loader = "plugins/loader.py"
+    write(
+        tmp_path,
+        loader,
+        'from pathlib import Path\n'
+        'for path in Path("plugins").glob("*.py"):\n'
+        "    pass\n",
+    )
+    dynamic: set[str] = set()
+    graph = pr_blast_radius.build_import_graph(tmp_path, dynamic=dynamic)
+
+    stale, reasons = pr_blast_radius.decide(
+        {loader}, {"plugins/new_plugin.py"}, graph, dynamic=dynamic
+    )
+
+    assert stale is True
+    assert reasons[0] == f"rule 5: cannot analyze dynamic loading in {loader}"
 
 
 def test_reverse_closure_and_tests_of_follow_two_hops(tmp_path: Path) -> None:
@@ -168,7 +235,13 @@ def test_changes_paths_are_ignored_on_both_sides() -> None:
 
 def test_main_with_fake_fetcher_prints_expected_line(tmp_path: Path, capsys) -> None:
     calls: list[tuple[str, bool]] = []
-    pr_files = [{"filename": "scripts/local_tool.py", "status": "modified"}]
+    pr_files = [
+        {
+            "filename": "scripts/local_tool.py",
+            "status": "modified",
+            "patch": "",
+        }
+    ]
 
     def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
         calls.append((endpoint, paginate))
@@ -192,6 +265,84 @@ def test_main_with_fake_fetcher_prints_expected_line(tmp_path: Path, capsys) -> 
     assert result == 0
     assert capsys.readouterr().out == "#7 FRESH no relevant test impact\n"
     assert any(paginate for _, paginate in calls)
+
+
+def test_pr_file_list_requires_exact_unique_records(
+    tmp_path: Path, capsys
+) -> None:
+    cases = [
+        (
+            [
+                {"filename": "src/one.txt", "status": "modified"},
+                {"filename": "src/two.txt", "status": "modified"},
+            ],
+            1,
+        ),
+        (
+            [
+                {"filename": "src/one.txt", "status": "modified"},
+                {"filename": "src/one.txt", "status": "modified"},
+            ],
+            2,
+        ),
+    ]
+    for pr_files, changed_files in cases:
+        result = pr_blast_radius.main(
+            ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+            fetcher=_comparison_fetcher(pr_files, [], changed_files),
+        )
+
+        output = capsys.readouterr().out
+        assert result == 1
+        assert "#7 STALE" in output
+        assert "rule 5:" in output
+
+
+def test_patch_import_connects_new_pr_test_to_main_change(
+    tmp_path: Path, capsys
+) -> None:
+    write(tmp_path, "pkg/__init__.py", "")
+    write(tmp_path, "pkg/core.py", "VALUE = 1\n")
+    pr_files: list[dict[str, object]] = [
+        {
+            "filename": "tests/unit/test_added.py",
+            "status": "added",
+            "patch": "@@ -0,0 +1 @@\n+from pkg import core\n",
+        }
+    ]
+    main_files: list[dict[str, object]] = [
+        {"filename": "pkg/core.py", "status": "modified"}
+    ]
+
+    result = pr_blast_radius.main(
+        ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+        fetcher=_comparison_fetcher(pr_files, main_files),
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "#7 STALE" in output
+    assert "rule 3:" in output
+
+
+def test_changed_python_file_without_patch_is_rule_five_stale(
+    tmp_path: Path, capsys
+) -> None:
+    pr_files: list[dict[str, object]] = [
+        {"filename": "src/new_module.py", "status": "added"}
+    ]
+
+    result = pr_blast_radius.main(
+        ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+        fetcher=_comparison_fetcher(
+            pr_files, [{"filename": "docs/guide.md", "status": "modified"}]
+        ),
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "#7 STALE" in output
+    assert "rule 5:" in output
 
 
 def test_rename_includes_old_path_for_overlap() -> None:
