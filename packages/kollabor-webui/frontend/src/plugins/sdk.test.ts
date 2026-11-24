@@ -25,7 +25,7 @@ const entry = (id = "hello", extra: Partial<PluginEntry> = {}): PluginEntry => (
   ...extra,
 });
 
-function harness(id = "hello") {
+function harness(id = "hello", declaredSlash = ["hello"]) {
   let contributions: Contributions = EMPTY_CONTRIBUTIONS;
   const json = (body: unknown) =>
     new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
@@ -41,7 +41,9 @@ function harness(id = "hello") {
     open: vi.fn(),
     openSession: vi.fn(),
   } satisfies PluginApiDeps;
-  const { k, dispose } = createPluginApi(entry(id), deps);
+  const pluginEntry = entry(id);
+  pluginEntry.contributes.slash = declaredSlash;
+  const { k, dispose } = createPluginApi(pluginEntry, deps);
   return { k, dispose, deps, current: () => contributions };
 }
 
@@ -88,6 +90,18 @@ describe("contribution points", () => {
     expect(current()).toEqual(EMPTY_CONTRIBUTIONS);
     expect(warn).toHaveBeenCalledTimes(6);
     expect(String(warn.mock.calls[1][0])).toContain("hello did not declare page secret");
+  });
+
+  it("rejects command names that are not one slash token with a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const names = ["two words", "/leading", "nested/name"];
+    const { k, current } = harness("hello", names);
+    for (const name of names) k.command({ name, description: "", run: () => {} });
+    expect(current()).toEqual(EMPTY_CONTRIBUTIONS);
+    expect(warn).toHaveBeenCalledTimes(names.length);
+    for (const [message] of warn.mock.calls) {
+      expect(String(message)).toContain("command ignored: name must be a single slash token");
+    }
   });
 
   it("ignores malformed specs instead of storing something that cannot draw", () => {
