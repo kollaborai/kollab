@@ -21,8 +21,10 @@ browser  ->  engine  /sessions/{id}/code/*   ->  session.state.code_call(op, par
   the daemon's working directory or another folder selected on the daemon's computer. A `workspace` field in a request is ignored; `codeRoot` is validated as an existing absolute directory on each request. Every file path is
   resolved and must sit inside that folder (closed-prefix check, symlinks followed; anything else is 403).
 - RPC: `state.code_call` (`kollabor/state/handlers.py`), answered like every other state call, local or remote.
-- A daemon older than this change answers `RpcMethodNotFound`; the engine turns that into 502 `daemon_outdated` ("This agent runs older code. Restart it to use Code, Git and Terminal.")
-  (never exception text). Restart the agent to pick up the code.
+- A daemon older than this change answers `RpcMethodNotFound`; the engine turns that into 502 `daemon_outdated` (never
+  exception text). Terminal, Code and Git use the chat's recovery notice (also when the folder-list request that opens Code and Git is the one refused): an agent with no published version gets the
+  stop-and-start instruction; a versioned agent gets Restart Agent when `kollabor.updates.restart_agents` is on or
+  `/restart` when it is off. Terminal hides Retry for `daemon_outdated` because retrying the same daemon cannot work.
 
 | surface | frontend | daemon op |
 |---|---|---|
