@@ -132,8 +132,8 @@ describe("plugin inventory text redaction", () => {
     });
     expect(normalized?.name).toBe("Token-Budget");
     expect(normalized?.source).toBe(source);
-    expect(normalized?.settings[0]?.label).toBe("Password: required");
-    expect(normalized?.settings[0]?.help).toBe("Password: required");
+    expect(normalized?.settings?.[0]?.label).toBe("Password: required");
+    expect(normalized?.settings?.[0]?.help).toBe("Password: required");
   });
 
   it.each([
