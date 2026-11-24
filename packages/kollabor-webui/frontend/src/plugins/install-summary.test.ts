@@ -142,11 +142,10 @@ describe("plugin review form state", () => {
 describe("cancelling a plugin review", () => {
   it("keeps a cancelling job pollable and retries cleanup after a failed DELETE", async () => {
     const closeSource = installSource.slice(installSource.indexOf("const close ="), installSource.indexOf("const confirm ="));
-    const api = {
-      json: vi.fn()
-        .mockRejectedValueOnce(new ApiError("Cleanup failed", 503, {}))
-        .mockResolvedValueOnce({ status: "cancelled" }),
-    } as never;
+    const json = vi.fn()
+      .mockRejectedValueOnce(new ApiError("Cleanup failed", 503, {}))
+      .mockResolvedValueOnce({ status: "cancelled" });
+    const api = { json } as never;
     const onClose = vi.fn();
     let job = { job_id: "review-1", status: "staging" as "staging" | "cancelling" };
     const cancel = async () => {
@@ -166,7 +165,7 @@ describe("cancelling a plugin review", () => {
     expect(onClose).not.toHaveBeenCalled();
 
     await cancel();
-    expect(api.json).toHaveBeenCalledTimes(2);
+    expect(json).toHaveBeenCalledTimes(2);
     expect(onClose).toHaveBeenCalledOnce();
   });
 });
