@@ -7001,6 +7001,7 @@ class HubPlugin(BasePlugin):
                         AgentMessenger.acknowledge_mailboxes(
                             [self._identity.agent_id, self._identity.identity],
                             acknowledged,
+                            persist_receipt=True,
                         )
             except asyncio.CancelledError as exc:
                 acknowledged = getattr(exc, "acknowledged_message_ids", set())
@@ -7008,6 +7009,7 @@ class HubPlugin(BasePlugin):
                     AgentMessenger.acknowledge_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
                         acknowledged,
+                        persist_receipt=True,
                     )
                 break
             except Exception as e:
@@ -7093,7 +7095,9 @@ class HubPlugin(BasePlugin):
             if identity is not None
             else (fallback_agent_keys or [])
         )
-        AgentMessenger.acknowledge_mailboxes(agent_keys, message_ids)
+        AgentMessenger.acknowledge_mailboxes(
+            agent_keys, message_ids, persist_receipt=True
+        )
 
     async def _deliver_inbox_message(self, msg: HubMessage) -> bool:
         """Deliver one mailbox message; refusal leaves its file unacknowledged."""

@@ -89,6 +89,19 @@ def _validated_mailbox_timestamp(data: Dict[str, Any]) -> Optional[float]:
         return None
     return timestamp
 
+
+def _is_acknowledged_mailbox_record(data: Any) -> bool:
+    return isinstance(data, dict) and data.get("_mailbox_acknowledged") is True
+
+
+def _is_acknowledged_mailbox_path(path: Path) -> bool:
+    try:
+        with open(path) as fh:
+            return _is_acknowledged_mailbox_record(json.load(fh))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 # Idle timeout (seconds) for the off-box read loop. An authenticated remote
 # peer that handshakes then sends nothing (or stops between actions) is dropped
 # after this long. Combined with REMOTE_MAX_CONNECTIONS this bounds remote
@@ -3445,6 +3458,13 @@ class AgentMessenger:
                     pass
                 continue
 
+            if _is_acknowledged_mailbox_record(data):
+                try:
+                    f.unlink()
+                except OSError:
+                    logger.warning("Could not clean acknowledged mailbox record")
+                continue
+
             timestamp = _validated_mailbox_timestamp(data)
             if timestamp is None:
                 logger.warning("Discarding mailbox record with invalid timestamp")
@@ -3660,7 +3680,12 @@ class AgentMessenger:
         return sorted(messages, key=lambda msg: msg.timestamp)
 
     @staticmethod
-    def acknowledge_mailboxes(agent_keys: List[str], message_ids: set[str]) -> None:
+    def acknowledge_mailboxes(
+        agent_keys: List[str],
+        message_ids: set[str],
+        *,
+        persist_receipt: bool = False,
+    ) -> None:
         """Consume matching mailbox records after their receiver accepts them."""
         if not message_ids:
             return
@@ -3682,7 +3707,31 @@ class AgentMessenger:
                     try:
                         path.unlink()
                     except OSError:
-                        logger.warning("Could not acknowledge delivered mailbox record")
+                        if not persist_receipt:
+                            logger.warning(
+                                "Could not acknowledge delivered mailbox record"
+                            )
+                            continue
+                        try:
+                            timestamp = _validated_mailbox_timestamp(data)
+                            receipt = {
+                                "id": message_id,
+                                "timestamp": timestamp or time.time(),
+                                "_mailbox_acknowledged": True,
+                            }
+                            with open(path, "w") as fh:
+                                json.dump(receipt, fh)
+                                fh.flush()
+                                os.fsync(fh.fileno())
+                        except OSError:
+                            logger.error(
+                                "Could not persist mailbox acknowledgment"
+                            )
+                        else:
+                            logger.warning(
+                                "Could not remove acknowledged mailbox record; "
+                                "persisted receipt"
+                            )
             except OSError:
                 logger.warning("Could not scan mailbox while acknowledging delivery")
 
@@ -3696,7 +3745,11 @@ class AgentMessenger:
         if not msg_dir.exists():
             return 0
         try:
-            return sum(1 for _ in msg_dir.glob("*.json"))
+            return sum(
+                1
+                for path in msg_dir.glob("*.json")
+                if not _is_acknowledged_mailbox_path(path)
+            )
         except Exception:
             return 0
 
@@ -3715,7 +3768,11 @@ class AgentMessenger:
             for d in messages_dir.iterdir():
                 if not d.is_dir():
                     continue
-                count = sum(1 for _ in d.glob("*.json"))
+                count = sum(
+                    1
+                    for path in d.glob("*.json")
+                    if not _is_acknowledged_mailbox_path(path)
+                )
                 if count > 0:
                     counts[d.name] = count
         except Exception:
