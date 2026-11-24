@@ -291,7 +291,7 @@ describe("plugin settings page", () => {
       services: [{ name: "worker", state: "stopped", secrets: ["API_TOKEN"] }],
     }]);
 
-    expect(markup).toContain("Receives secrets: API_TOKEN");
+    expect(markup).toContain("Receives Secrets: API_TOKEN");
   });
 
   it("ignores a non-array service secrets value from the inventory", async () => {
