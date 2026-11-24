@@ -63,6 +63,8 @@ class PluginJobs:
             self._expire()
 
     def _expire(self) -> None:
+        if self.closing:
+            return
         cutoff = time.monotonic() - _JOB_TTL
         for job_id, job in list(self.jobs.items()):
             cancellation_running = job["status"] == "cancelling" and job.get("cancel_task") is not None
