@@ -44,15 +44,28 @@ function failureOf(entry: PluginEntry, record: PluginRecord | undefined): string
 
 function serviceStatus(service: PluginService): string {
   switch (service.state) {
+    case "starting": return "Starting";
     case "running": return "Running";
     case "stopping": return "Stopping";
+    case "backoff": return "Restarting";
     case "exited": return "Exited";
     case "failed":
     case "crash-stopped": return "Stopped After 5 Crashes";
     case "stopped": return "Stopped";
     case "stop-failed": return "Failed to Stop";
-    default: return service.state;
+    case "error": return "Failed to Start";
+    case "unknown": return "Unknown";
+    default: return "Unknown";
   }
+}
+
+function pluginStatus(entry: PluginEntry, record: PluginRecord | undefined): string {
+  const failure = failureOf(entry, record);
+  if (failure !== null)
+    return record?.status === "failed" || entry.state === "error" ? "Failed to Load" : "Error";
+  return entry.state === "changed-on-disk" ? "Changed on Disk"
+    : entry.state === "stopping" ? "Stopping"
+    : entry.enabled ? "On" : "Off";
 }
 
 function ServiceRow({ service, api, id, canControl, enabled, onError }: {
@@ -171,8 +184,7 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
       setBusy(false);
     }
   };
-  const status = failure !== null ? (record?.status === "failed" ? "Failed to Load" : "Error")
-    : entry.state === "changed-on-disk" ? "Changed on Disk" : stopping ? "Stopping" : entry.enabled ? "On" : "Off";
+  const status = pluginStatus(entry, record);
   return (
     <section ref={detailRef} tabIndex={-1} aria-label={`${entry.name} details`} className="min-w-0 py-1">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -206,7 +218,7 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
         {failure !== null ? (
           <PluginFailure error={failure} inset={false} onRetry={() => { if (record) retryPlugin(entry.id); else void refreshPlugins(); }} />
         ) : null}
-        {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development folder: {entry.source}</p> : null}
+        {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development Folder: {entry.source}</p> : null}
         {entry.services.length ? (
           <div>
             <h3 className="text-sm font-semibold">Background Processes</h3>
@@ -328,7 +340,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
                   const isSelected = selected !== undefined && entryKey(selected) === key;
                   const descriptionId = `${listId}-${entry.kind}-${entry.id}`;
                   const failure = failureOf(entry, records.get(entry.id));
-                  const status = failure !== null ? "Failed" : entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.enabled ? "On" : "Off";
+                  const status = pluginStatus(entry, records.get(entry.id));
                   return (
                     <Button
                       key={key}
