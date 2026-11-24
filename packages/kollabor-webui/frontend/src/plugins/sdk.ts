@@ -61,6 +61,7 @@ export type PluginEntry = {
   source?: string | null;
   commit?: string | null;
   enabled: boolean;
+  enable_order?: number | null;
   shadowed: boolean;
   state: "ok" | "error" | "off" | "stopping" | "changed-on-disk" | "skipped";
   error: string | null;

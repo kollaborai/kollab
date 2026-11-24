@@ -1,6 +1,7 @@
 import type { ComposerPaletteItem } from "@/components/assistant-ui/composer-palette";
 import type { PluginRecord } from "./registry";
 import type { CommandSpec, PluginApi } from "./sdk";
+import { pluginsByEnableOrder } from "./plugin-order";
 
 /** A plugin command the composer can run. `k` is its owner's, for error toasts. */
 export type PluginCommandEntry = {
@@ -24,14 +25,14 @@ export function reservedCommandKeys(
   return keys;
 }
 
-/** Commands from loaded plugins. A native name wins, then the first plugin in the list. */
+/** Commands from loaded plugins. A native name wins, then the first enabled plugin. */
 export function pluginCommandEntries(
   plugins: readonly PluginRecord[],
   reserved: ReadonlySet<string>,
 ): PluginCommandEntry[] {
   const taken = new Set(reserved);
   const entries: PluginCommandEntry[] = [];
-  for (const record of plugins) {
+  for (const record of pluginsByEnableOrder(plugins)) {
     if (!record.k) continue;
     for (const command of record.contributions.commands) {
       const key = command.name.toLowerCase();
