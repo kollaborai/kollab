@@ -15475,6 +15475,11 @@ class HubPlugin(BasePlugin):
         sessions = []
         skipped = []
         for agent in list(here):
+            if self._pid_recycled(agent):
+                # A dead agent whose pid another process took: not stopped,
+                # not counted (discovery trusts a fresh heartbeat's pid).
+                here.remove(agent)
+                continue
             session = managed.get(getattr(agent, "pid", None))
             # A tracked child keeps its lock-guarded escalation; a pid this
             # session tracks under another process generation is not the row's
