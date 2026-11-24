@@ -171,6 +171,23 @@ def open_main_red_issue(repo: str, run_id: str, *, gh: Gh = _run_gh) -> dict[str
         },
     )
     issue = issue_payload if isinstance(issue_payload, dict) else {}
+    # A run that overlapped this one may have created an issue between the lookup and the
+    # create. The lowest-numbered issue for the commit stays open; later ones close themselves.
+    after = _api(gh, f"repos/{repo}/issues?state=all&per_page=100", paginate=True)
+    earlier = [
+        row
+        for row in _rows(after, "issues")
+        if "pull_request" not in row
+        and marker in str(row.get("body", ""))
+        and isinstance(row.get("number"), int)
+        and isinstance(issue.get("number"), int)
+        and row["number"] < issue["number"]
+    ]
+    if earlier:
+        keep = min(earlier, key=lambda row: row["number"])
+        _api(gh, f"repos/{repo}/issues/{issue['number']}", method="PATCH", fields={"state": "closed"})
+        print(f"closed duplicate main red issue: {keep.get('html_url', keep.get('number'))}")
+        return keep
     if pull:
         _api(
             gh,
