@@ -92,6 +92,9 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
 }) {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string | null>(null);
+  const secrets = Array.isArray(service.secrets)
+    ? service.secrets.filter((secret): secret is string => typeof secret === "string")
+    : [];
   const logOpener = useRef<HTMLElement | null>(null);
   const restoreLogFocus = (event: Event) => {
     if (!logOpener.current?.isConnected) return;
@@ -133,7 +136,7 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
     <div className="flex min-w-0 flex-wrap items-center gap-2 py-1 text-sm">
       <span className="font-medium">{service.name}</span>
       <span className="text-muted-foreground">{serviceStatus(service, now)}</span>
-      {service.secrets?.length ? <span className="text-muted-foreground break-words">Receives secrets: {service.secrets.join(", ")}</span> : null}
+      {secrets.length ? <span className="text-muted-foreground break-words">Receives secrets: {secrets.join(", ")}</span> : null}
       {service.error ? <span className="text-destructive break-words">{service.error}</span> : null}
       <div className="ml-auto flex flex-wrap gap-1">
         <Button type="button" variant="ghost" size="xs" className="pointer-coarse:min-h-11" aria-label={`View Log ${service.name}`} disabled={busy || disabled || operationBusy} onClick={(event) => { logOpener.current = event.currentTarget; void showLog(); }}>View Log</Button>

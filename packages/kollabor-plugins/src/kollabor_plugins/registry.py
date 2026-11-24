@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import json
 import logging
+import math
 import sys
 import types
 from pathlib import Path
@@ -525,6 +526,29 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
         except (OSError, ValueError):
             pass
         status = state.get("status", "stopped")
+        if not isinstance(status, str) or status not in {
+            "starting",
+            "running",
+            "backoff",
+            "stopping",
+            "stop-failed",
+            "exited",
+            "stopped",
+            "crash-stopped",
+            "error",
+            "unknown",
+            "failed",
+        }:
+            status = "unknown"
+        desired = state.get("desired", "stopped")
+        if not isinstance(desired, str) or desired not in {"running", "stopped"}:
+            desired = "stopped"
+        pid = identity.get("pid") if identity else None
+        since = _finite_service_number(identity.get("start_time")) if identity else None
+        if type(pid) is not int or pid <= 0 or since is None:
+            identity = None
+            pid = None
+            since = None
         definition = declared[name]
         heartbeat_s = heartbeat_seconds(definition)
         if status == "running" and identity is None:
@@ -537,18 +561,33 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
             {
                 "name": name,
                 "state": status,
-                "desired": state.get("desired", "stopped"),
-                "pid": identity.get("pid") if identity else None,
-                "since": identity.get("start_time") if identity else None,
+                "desired": desired,
+                "pid": pid,
+                "since": since,
                 "restarts": len(history) if isinstance(history, list) else 0,
-                "secrets": definition.get("secrets", []) if isinstance(definition, dict) else [],
+                "secrets": _service_secrets(definition),
                 "heartbeat": None,
                 "heartbeat_s": heartbeat_s,
-                "stop_deadline": state.get("stop_deadline") if status == "stopping" else None,
-                "error": state.get("error"),
+                "stop_deadline": _finite_service_number(state.get("stop_deadline")) if status == "stopping" else None,
+                "error": state.get("error") if isinstance(state.get("error"), str) else None,
             }
         )
     return result
+
+
+def _service_secrets(definition: object) -> list[str]:
+    raw = definition.get("secrets", []) if isinstance(definition, dict) else []
+    return [secret for secret in raw if isinstance(secret, str)] if isinstance(raw, list) else []
+
+
+def _finite_service_number(value: object) -> float | None:
+    if type(value) not in (int, float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
