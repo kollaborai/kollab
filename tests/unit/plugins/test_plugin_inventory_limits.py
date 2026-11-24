@@ -135,7 +135,89 @@ def test_plugin_inventory_reports_service_use_and_grant_omissions():
     assert entry is not None
     assert len(entry["services"]) == 128
     assert entry["services"][0]["secrets_omitted"] == 1
-    assert entry["omitted"] == {"services": 1, "uses": 1, "granted": 1}
+    normalized_again = _normalize_plugin_entry(entry)
+    assert normalized_again is not None
+    assert normalized_again["omitted"] == {
+        "services": 1,
+        "uses": 1,
+        "granted": 1,
+        "settings": 0,
+        "setting_options": 0,
+        "option_labels": 0,
+        "contributions": 0,
+    }
+
+
+def _over_limit_inventory_entry(surface):
+    if surface == "settings":
+        return {
+            "id": "example-plugin",
+            "settings": [
+                {"type": "checkbox", "path": f"plugins.example.field-{index}", "label": f"Field {index}"}
+                for index in range(257)
+            ],
+        }
+    if surface == "section widgets":
+        return {
+            "id": "example-plugin",
+            "settings_section": {
+                "title": "Settings",
+                "widgets": [
+                    {"type": "checkbox", "path": f"plugins.example.field-{index}", "label": f"Field {index}"}
+                    for index in range(257)
+                ],
+            },
+        }
+    if surface == "setting options":
+        return {
+            "id": "example-plugin",
+            "settings": [{
+                "type": "dropdown", "path": "plugins.example.mode", "label": "Mode",
+                "options": [f"choice-{index}" for index in range(257)],
+            }],
+        }
+    if surface == "option labels":
+        return {
+            "id": "example-plugin",
+            "settings": [{
+                "type": "dropdown", "path": "plugins.example.mode", "label": "Mode",
+                "option_labels": {f"choice-{index}": f"Choice {index}" for index in range(257)},
+            }],
+        }
+    kind = surface.removeprefix("contributes.")
+    if kind == "menu":
+        items = [
+            {"id": f"row-{index}", "label": f"Row {index}", "open": {"page": "main"}}
+            for index in range(257)
+        ]
+    else:
+        items = [f"declaration-{index}" for index in range(257)]
+    return {"id": "example-plugin", "contributes": {kind: items}}
+
+
+@pytest.mark.parametrize(
+    ("surface", "omitted_key"),
+    [
+        ("settings", "settings"),
+        ("section widgets", "settings"),
+        ("setting options", "setting_options"),
+        ("option labels", "option_labels"),
+        ("contributes.menu", "contributions"),
+        ("contributes.views", "contributions"),
+        ("contributes.pages", "contributions"),
+        ("contributes.modals", "contributions"),
+        ("contributes.slash", "contributions"),
+        ("contributes.renderers", "contributions"),
+    ],
+)
+def test_plugin_inventory_reports_bounded_collection_omissions(surface, omitted_key):
+    entry = _normalize_plugin_entry(_over_limit_inventory_entry(surface))
+
+    assert entry is not None
+    assert entry["omitted"][omitted_key] == 1
+    normalized_again = _normalize_plugin_entry(entry)
+    assert normalized_again is not None
+    assert normalized_again["omitted"][omitted_key] == 1
 
 
 @pytest.mark.parametrize("value", ["run:codex\u200b", "net:github.com\u202eevil.test"])
