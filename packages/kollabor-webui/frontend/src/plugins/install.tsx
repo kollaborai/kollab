@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { TriangleAlert } from "lucide-react";
-import type { EngineApi } from "@/api";
+import { ApiError, type EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -84,14 +84,19 @@ function DetailsList({ label, values }: { label: string; values: unknown }) {
 }
 
 /** Which source and Review controls the dialog shows. A failed review keeps both open so the URL can be edited and reviewed again. */
-export function reviewFormState(action: "install" | "update", job: Pick<Job, "status"> | null, failed = false): { source: boolean; review: boolean } {
-  const open = action === "install" && (!job || job.status === "error" || (job.status === "staging" && failed));
-  return { source: open, review: open };
+export function reviewFormState(action: "install" | "update", job: Pick<Job, "status"> | null): { source: boolean; review: boolean } {
+  const retryable = job?.status === "error" || job?.status === "cancelled";
+  const open = action === "install" && (!job || retryable);
+  return { source: open, review: action === "install" ? open : retryable };
 }
 
 /** The progress line is for a review that is really still working, never one that already failed. */
 export function showFetching(job: Pick<Job, "status"> | null, failed: boolean): boolean {
   return job?.status === "staging" && !failed;
+}
+
+export function shouldRetryPolling(job: Pick<Job, "status"> | null, failed: boolean): boolean {
+  return job?.status === "staging" && failed;
 }
 
 /** Ask the engine to stage a review of the source as it is now typed. */
@@ -104,6 +109,18 @@ export async function startReview(api: EngineApi, { action, pluginId, url, gitRe
   const result = await api.json<Job>(endpoint, { method: "POST", body: JSON.stringify(action === "install" ? { source } : {}) });
   if (!result.job_id) throw new Error("The plugin manager did not return a review job.");
   return result;
+}
+
+export async function fetchReview(api: EngineApi, jobId: string, signal?: AbortSignal): Promise<Job> {
+  return api.json<Job>(`/plugins/jobs/${encodeURIComponent(jobId)}`, { signal });
+}
+
+export async function discardReview(api: EngineApi, jobId: string): Promise<void> {
+  try {
+    await api.json(`/plugins/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+  } catch (caught) {
+    if (!(caught instanceof ApiError) || caught.status !== 404) throw caught;
+  }
 }
 
 /** Preview stages untrusted source; only the explicit second action confirms its exact bytes. */
@@ -120,6 +137,8 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   const start = async () => {
     setBusy(true); setError(null); setJob(null);
     try {
+      if (job && job.status !== "installing" && job.status !== "complete")
+        await discardReview(api, job.job_id);
       const result = await startReview(api, { action, pluginId, url, gitRef });
       setJob(result);
     } catch (caught) { setError(errorText(caught)); } finally { setBusy(false); }
@@ -134,7 +153,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
     const controller = new AbortController();
     const poll = async () => {
       try {
-        const next = await api.json<Job>(`/plugins/jobs/${encodeURIComponent(job.job_id)}`, { signal: controller.signal });
+        const next = await fetchReview(api, job.job_id, controller.signal);
         if (cancelled) return;
         setJob(next);
         if (next.status === "staging") timer = setTimeout(() => { void poll(); }, 750);
@@ -143,10 +162,16 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
     void poll();
     return () => { cancelled = true; controller.abort(); if (timer) clearTimeout(timer); };
   }, [api, job?.job_id, job?.status, pollVersion]);
-  // No server call on close: the engine has no route to discard a staged review, so it expires on the server.
   const close = () => {
     if (busy || job?.status === "installing") return;
-    onClose();
+    if (!job || job.status === "complete") {
+      onClose();
+      return;
+    }
+    setBusy(true); setError(null);
+    void discardReview(api, job.job_id).then(onClose).catch((caught) => {
+      setError(errorText(caught));
+    }).finally(() => setBusy(false));
   };
   const confirm = async () => {
     if (!job || job.status !== "ready" || !job.commit || !job.files_sha256) return;
@@ -159,7 +184,16 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
       if (result.status !== "complete") throw new Error(result.error || "The plugin manager did not complete the operation.");
       await onApplied();
       onClose();
-    } catch (caught) { setError(errorText(caught)); } finally { setBusy(false); }
+    } catch (caught) {
+      const fallback = errorText(caught);
+      try {
+        const current = await fetchReview(api, job.job_id);
+        setJob(current);
+        setError(current.error || fallback);
+      } catch {
+        setError(fallback);
+      }
+    } finally { setBusy(false); }
   };
   const ready = job?.status === "ready" && Boolean(job.commit && job.files_sha256);
   const uses = Array.isArray(job?.manifest?.uses) ? job.manifest.uses : [];
@@ -174,7 +208,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
       return secrets.length ? [`Background process ${name} receives: ${secrets.join(", ")}.`] : [];
     }),
   ];
-  const form = reviewFormState(action, job, error !== null);
+  const form = reviewFormState(action, job);
   return <Dialog open onOpenChange={open => { if (!open) close(); }}>
     <DialogContent className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
@@ -186,6 +220,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
         </div> : null}
         {showFetching(job, error !== null) ? <p role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
         {job?.status === "error" ? <p role="alert" className="text-destructive text-sm">{job.error || "Plugin review failed."}</p> : null}
+        {job?.status === "cancelled" ? <p role="status" className="text-muted-foreground text-sm">Plugin review was cancelled. You can start another review.</p> : null}
         {ready && job ? <>
           <p className="text-sm font-semibold">{job.manifest?.name ?? job.plugin_id ?? "Plugin"}</p>
           {job.manifest?.description ? <p className="text-muted-foreground text-sm">{job.manifest.description}</p> : null}
@@ -201,9 +236,10 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           <div className="bg-muted flex gap-3 rounded-lg p-3 text-sm"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" /><p>{PLUGIN_TRUST_NOTICE}</p></div>
         </> : null}
         {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
+        {shouldRetryPolling(job, error !== null) ? <Button type="button" variant="outline" className="pointer-coarse:min-h-11 self-start" disabled={busy} onClick={() => { setError(null); setPollVersion((version) => version + 1); }}>Check Again</Button> : null}
       </div>
       <DialogFooter><Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={close}>Cancel</Button>
-                {form.review ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || !url.trim()} onClick={() => { void start(); }}>Review</Button> : null}
+                {form.review ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || (action === "install" && !url.trim())} onClick={() => { void start(); }}>{action === "update" ? "Review Again" : "Review"}</Button> : null}
          {ready ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void confirm(); }}>{action === "install" ? "Add Plugin" : "Update"}</Button> : null}
       </DialogFooter>
     </DialogContent>
