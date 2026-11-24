@@ -115,6 +115,7 @@ const emptyEngine = {
 
 const problems = [];
 let pluginListRequests = 0;
+let pluginLoadRequests = 0;
 let indexBytes;
 let pageCsp;
 let origin;
@@ -145,6 +146,7 @@ function setPluginEntries(entries) {
 /** The routes the app reads at boot and the plugin's own files. Returns false for any other path. */
 function engine(url, req, res) {
   const { pathname } = url;
+  if (pathname.startsWith("/plugins/") || pathname === "/engine/plugins/events") pluginLoadRequests += 1;
   if (pathname === "/api/config") {
     sendJson(res, { engine_url: "/engine" });
     return true;
@@ -424,11 +426,13 @@ async function throwingBundleFlow() {
 
 async function pluginsOffFlow() {
   pluginListRequests = 0;
+  pluginLoadRequests = 0;
   const { context, page } = await openApp(1440, 900, { route: "/?plugins=off" });
   try {
     await page.getByRole("complementary", { name: "Session Controls" }).waitFor({ timeout: 10000 });
     await page.waitForTimeout(1000);
     assert.equal(pluginListRequests, 0, "?plugins=off requests no plugin list");
+    assert.equal(pluginLoadRequests, 0, "?plugins=off loads no plugin code or event stream");
     assert.equal(
       await page.getByRole("button", { name: "Hello View", exact: true }).count(),
       0,
