@@ -107,6 +107,19 @@ describe("plugin settings page", () => {
     expect(markup).not.toContain("Development folder:");
   });
 
+  it("does not offer an enable switch for an always-on development plugin", async () => {
+    const markup = await markupFor([{
+      ...plugin([]),
+      id: "hello@dev",
+      name: "Hello@dev",
+      kind: "dev",
+      enabled: true,
+      source: "/tmp/hello",
+    }]);
+
+    expect(markup).not.toContain('aria-label="Hello@dev enabled"');
+  });
+
   it("names each service action for the process it controls", async () => {
     const markup = await markupFor([{
       ...plugin([]),
