@@ -97,6 +97,7 @@ def test_job_management_is_local_even_with_user_token(client):
                            json={"source": "https://example.invalid/repo"})
     assert response.status_code == 403
     assert client.get("/plugins/jobs/missing", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
+    assert client.delete("/plugins/jobs/missing", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
 
 
 def test_cancel_discards_ready_plugin_job(client):
