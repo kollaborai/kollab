@@ -138,7 +138,7 @@ def test_update_rejects_changed_folder_lists_over_the_review_limit(client, manag
     )
     assert "changed_folders" not in job
     assert client.post(f"/plugins/jobs/{job_id}/confirm", json={
-        "commit": job.get("commit"), "files_sha256": job.get("files_sha256"),
+        "commit": "0" * 40, "files_sha256": "0" * 64,
     }).status_code == 409
 
 
