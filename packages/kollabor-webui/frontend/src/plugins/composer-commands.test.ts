@@ -383,3 +383,35 @@ describe("plugin command composer labels", () => {
     },
   );
 });
+
+describe("slash catalog notice", () => {
+  const statuses = ["loading", "empty", "fallback", "unavailable"] as const;
+
+  it("says nothing when the catalog is ready", async () => {
+    const { slashCatalogNotice } = await import("@/components/assistant-ui/slash-catalog-notice");
+
+    expect(slashCatalogNotice("ready", false)).toBeNull();
+    expect(slashCatalogNotice("ready", true)).toBeNull();
+  });
+
+  it("does not claim no commands are available while a plugin command is listed", async () => {
+    const { slashCatalogNotice } = await import("@/components/assistant-ui/slash-catalog-notice");
+
+    expect(slashCatalogNotice("empty", true)).toBeNull();
+    expect(slashCatalogNotice("empty", false)).toBe(
+      "No commands are available for this session. You can still type a slash command.",
+    );
+  });
+
+  it.each(statuses.filter((status) => status !== "empty"))(
+    "keeps the %s message whether or not plugin commands exist",
+    async (status) => {
+      const { slashCatalogNotice } = await import("@/components/assistant-ui/slash-catalog-notice");
+
+      const message = slashCatalogNotice(status, false);
+      expect(message).toBeTruthy();
+      expect(slashCatalogNotice(status, true)).toBe(message);
+    },
+  );
+});
+
