@@ -334,3 +334,25 @@ def test_typed_stop_all_says_the_typing_session_keeps_running(monkeypatch):
     result = asyncio.run(plugin._handle_hub_command("stop all"))
 
     assert "legal-ops-lead keeps running" in result
+
+
+def test_cli_status_with_an_empty_folder_names_other_folders(tmp_path, monkeypatch, capsys):
+    _cli(tmp_path, monkeypatch, local=False)
+
+    asyncio.run(_handle_cli_hub(["status"]))
+
+    out = capsys.readouterr().out
+    assert "no agents in this folder" in out
+    assert "/work/elsewhere: far" in out
+
+
+def test_cli_everywhere_is_refused_from_an_agent_context(tmp_path, monkeypatch):
+    import pytest
+
+    stop = _cli(tmp_path, monkeypatch)
+    monkeypatch.setattr("kollabor.cli._cli_is_hub_agent_context", lambda: True)
+
+    with pytest.raises(SystemExit):
+        asyncio.run(_handle_cli_hub(["stop", "all", "--everywhere"]))
+
+    assert stop.await_count == 0
