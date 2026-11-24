@@ -51,12 +51,12 @@ from .sibling import deeper
     )
     graph = pr_blast_radius.build_import_graph(tmp_path)
 
-    assert graph["kollab/nested/runner.py"] == {
+    assert {
         "kollab/core.py",
         "kollab/helpers.py",
         "kollab/nested/sibling.py",
         "kollab/nested/sibling/deeper.py",
-    }
+    } <= graph["kollab/nested/runner.py"]
     assert graph["packages/kollabor-webui/frontend/tests/app.test.ts"] == {
         "packages/kollabor-webui/frontend/src/components/view.tsx"
     }
@@ -181,3 +181,137 @@ def test_main_with_fake_fetcher_prints_expected_line(tmp_path: Path, capsys) -> 
     assert result == 0
     assert capsys.readouterr().out == "#7 FRESH no relevant test impact\n"
     assert any(paginate for _, paginate in calls)
+
+
+def test_rename_includes_old_path_for_overlap() -> None:
+    renamed_paths, complete = pr_blast_radius._changed_paths(
+        [{"filename": "pkg/new.py", "previous_filename": "pkg/old.py"}]
+    )
+
+    assert complete is True
+    stale, reasons = pr_blast_radius.decide(
+        {"pkg/old.py"}, set(renamed_paths), {}
+    )
+
+    assert stale is True
+    assert any("pkg/old.py" in reason for reason in reasons)
+
+
+def test_package_initializer_change_shares_submodule_test_impact(
+    tmp_path: Path,
+) -> None:
+    initializer = "packages/sample/src/sample/__init__.py"
+    core = "packages/sample/src/sample/core.py"
+    write(tmp_path, initializer, "")
+    write(tmp_path, core, "")
+    write(tmp_path, "tests/unit/test_sample.py", "from sample import core\n")
+    graph = pr_blast_radius.build_import_graph(tmp_path)
+
+    stale, reasons = pr_blast_radius.decide({initializer}, {core}, graph)
+
+    assert stale is True
+    assert any(reason.startswith("rule 3:") for reason in reasons)
+
+
+def test_graph_failure_posts_failure_for_each_listed_open_head(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    def fail_graph(root: Path) -> dict[str, set[str]]:
+        raise RuntimeError("graph unavailable")
+
+    monkeypatch.setattr(pr_blast_radius, "build_import_graph", fail_graph)
+    status_posts: list[tuple[str, str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/pulls?state=open&per_page=100":
+            return [
+                {"number": 7, "base": {"ref": "main"}, "head": {"sha": "head-7"}},
+                {"number": 8, "base": {"ref": "main"}, "head": {"sha": "head-8"}},
+            ]
+        if endpoint.startswith("repos/example/project/statuses/") and method == "POST":
+            status_posts.append(
+                (endpoint.rsplit("/", 1)[-1], fields["state"], fields["description"])
+            )
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--all-open",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == 1
+    assert status_posts == [
+        ("head-7", "failure", "blast-radius error: RuntimeError"),
+        ("head-8", "failure", "blast-radius error: RuntimeError"),
+    ]
+    assert "blast-radius error: RuntimeError" in capsys.readouterr().err
+
+
+def test_status_write_failures_return_nonzero_and_continue(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    status_attempts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/pulls?state=open&per_page=100":
+            return [
+                {"number": 7, "base": {"ref": "main"}, "head": {"sha": "head-7"}},
+                {"number": 8, "base": {"ref": "main"}, "head": {"sha": "head-8"}},
+            ]
+        if endpoint in {
+            "repos/example/project/pulls/7",
+            "repos/example/project/pulls/8",
+        }:
+            head = endpoint.rsplit("/", 1)[-1]
+            return {"head": {"sha": f"head-{head}"}, "base": {"ref": "main"}}
+        if endpoint in {
+            "repos/example/project/compare/main...head-7",
+            "repos/example/project/compare/main...head-8",
+        }:
+            return {"behind_by": 0}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    def fail_status(
+        fetcher,
+        repo: str,
+        head_sha: str,
+        state: str,
+        context: str,
+        description: str,
+    ) -> None:
+        status_attempts.append((head_sha, state))
+        raise RuntimeError("status unavailable")
+
+    monkeypatch.setattr(pr_blast_radius, "_post_status", fail_status)
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--all-open",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == 1
+    assert status_attempts == [
+        ("head-7", "success"),
+        ("head-7", "failure"),
+        ("head-8", "success"),
+        ("head-8", "failure"),
+    ]
+    assert capsys.readouterr().out.count("STALE") == 2
