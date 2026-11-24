@@ -680,6 +680,8 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
     try {
       const response = await deps.list();
       if (stopped) return;
+      if (response === null || response === undefined)
+        throw new Error("Invalid plugin inventory response.");
       const receivedAt = Date.now() / 1000;
       const inventoryResponse = record(response);
       const listed = inventoryResponse?.plugins;
