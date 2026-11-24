@@ -212,3 +212,60 @@ def test_other_folder_list_skips_a_row_whose_pid_was_recycled(monkeypatch):
     result = asyncio.run(plugin._handle_hub_command("stop all"))
 
     assert "phantom" not in result
+
+
+def test_stop_all_help_and_tips_describe_the_folder_scope(monkeypatch):
+    from plugins.hub.startup_messages import HUB_STARTUP_TIPS
+
+    tips = [tip for tip in HUB_STARTUP_TIPS if "stop all" in tip.lower()]
+    assert tips and not any("you started" in tip for tip in tips)
+
+    plugin = HubPlugin()
+    plugin._identity = SimpleNamespace(identity="citrine", session_log=None)
+    displayed = []
+    renderer = SimpleNamespace(
+        message_coordinator=SimpleNamespace(
+            display_message_sequence=lambda seq: displayed.extend(seq)
+        )
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_get_orchestrator",
+        lambda: SimpleNamespace(
+            orchestrator=SimpleNamespace(get_all_agents=lambda: {"helper": 111})
+        ),
+    )
+    plugin._display_startup_status(renderer, "member", [])
+    joined = " ".join(text for _, text, _ in displayed)
+    assert "/hub stop all" in joined
+    assert "agents you started" not in joined
+
+
+def test_cli_other_folder_list_names_the_agents(tmp_path, monkeypatch, capsys):
+    _cli(tmp_path, monkeypatch, local=False)
+
+    asyncio.run(_handle_cli_hub(["status"]))
+
+    assert "/work/elsewhere: far" in capsys.readouterr().out
+
+
+def test_cli_help_ties_everywhere_to_stop_all(capsys):
+    asyncio.run(_handle_cli_hub(["help"]))
+
+    out = capsys.readouterr().out
+    assert "stop all [--everywhere]" in out
+    assert "<name|all> [--everywhere]" not in out
+
+
+def test_cli_everywhere_skips_a_row_whose_pid_was_recycled(tmp_path, monkeypatch):
+    stop = _cli(tmp_path, monkeypatch, local=False)
+    ghost = tmp_path / "other" / "ghost.json"
+    ghost.write_text(json.dumps({
+        "agent_id": "ghost", "identity": "ghost", "pid": os.getpid(),
+        "start_token": "darwin:1.0", "last_heartbeat": time.time(),
+        "socket_path": str(tmp_path / "other" / "ghost"), "project": "/work/elsewhere",
+    }))
+
+    asyncio.run(_handle_cli_hub(["stop", "all", "--everywhere"]))
+
+    assert [call.args[0]["identity"] for call in stop.await_args_list] == ["far"]
