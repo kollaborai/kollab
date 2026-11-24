@@ -30,6 +30,7 @@ from .packages import (
     _MAX_PLUGIN_SERVICES,
     _MAX_PLUGIN_USES,
     _SYMBOL,
+    _normalize_plugin_use,
     _read_registry,
     _within,
     files_sha256,
@@ -46,7 +47,8 @@ _INVENTORY_SENSITIVE_TEXT = re.compile(
     r"|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|credential|authorization)\s*[:=]\s*\S+)",
     re.IGNORECASE,
 )
-_INVENTORY_INVISIBLE_CONTROLS = re.compile(r"[\u200b\u202a-\u202e\u2066-\u2069]")
+_INVENTORY_INVISIBLE_CONTROLS = re.compile(r"[\u00ad\u200b-\u200d\u202a-\u202e\u2060\u2066-\u2069\ufeff]")
+_INVENTORY_EXPLICIT_SECRET_IDENTIFIER = re.compile(r"\bsecret[-_]token[-_][A-Za-z0-9_-]{6,}", re.IGNORECASE)
 _PLUGIN_INVENTORY_STATES = {"ok", "error", "off", "stopping", "stop-failed", "changed-on-disk", "skipped"}
 _SERVICE_INVENTORY_STATES = {
     "starting",
@@ -654,17 +656,27 @@ def _finite_service_number(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _bounded_inventory_text(value: object, limit: int = _INVENTORY_TEXT_LIMIT) -> str | None:
+def _bounded_inventory_text(
+    value: object,
+    limit: int = _INVENTORY_TEXT_LIMIT,
+    *,
+    reject_sensitive: bool = True,
+) -> str | None:
     if (
         not isinstance(value, str)
         or len(value) > limit
         or any(ord(char) < 32 or ord(char) == 127 for char in value)
         or _INVENTORY_INVISIBLE_CONTROLS.search(value)
-        or _INVENTORY_SENSITIVE_TEXT.search(value)
+        or (reject_sensitive and _INVENTORY_SENSITIVE_TEXT.search(value))
     ):
         return None
     clean = value.strip()
     return clean or None
+
+
+def _bounded_inventory_identifier(value: object, limit: int = _INVENTORY_TEXT_LIMIT) -> str | None:
+    clean = _bounded_inventory_text(value, limit, reject_sensitive=False)
+    return None if clean is None or _INVENTORY_EXPLICIT_SECRET_IDENTIFIER.search(clean) else clean
 
 
 def _normalize_web_dist_path(value: object) -> str | None:
@@ -693,6 +705,22 @@ def _bounded_unique(values: list, limit: int, normalize) -> list:
     return result
 
 
+def _bounded_unique_with_omissions(values: list, limit: int, normalize) -> tuple[list, int]:
+    result = []
+    seen = set()
+    omitted = 0
+    for item in islice(values, limit):
+        clean = normalize(item)
+        if clean is None:
+            omitted += 1
+            continue
+        if clean in seen:
+            continue
+        seen.add(clean)
+        result.append(clean)
+    return result, omitted
+
+
 def _inventory_number(value: object, minimum: float = 0, maximum: float = float("inf")) -> int | float | None:
     if type(value) not in (int, float):
         return None
@@ -705,7 +733,7 @@ def _inventory_number(value: object, minimum: float = 0, maximum: float = float(
 def _normalize_service_entry(value: object) -> dict | None:
     if not isinstance(value, dict):
         return None
-    name = _bounded_inventory_text(value.get("name"), 40)
+    name = _bounded_inventory_identifier(value.get("name"), 40)
     from .packages import _SERVICE
 
     if not isinstance(name, str) or not _SERVICE.fullmatch(name):
@@ -746,25 +774,12 @@ def _normalize_service_entry(value: object) -> dict | None:
 
 
 def _normalize_capability(value: object) -> str | None:
-    if value in ("agents", "agents:unattended"):
-        return value
-    if not isinstance(value, str) or len(value) > 1024:
-        return None
-    if value.startswith("secret:"):
-        secret = value[7:]
-        return value if len(secret) <= 64 and _SYMBOL.fullmatch(secret) else None
-    kind, separator, detail = value.partition(":")
-    if separator and kind in {"run", "net", "files"}:
-        safe = _bounded_inventory_text(detail, 1000)
-        return f"{kind}:{safe}" if safe else None
-    if separator and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", kind) and re.fullmatch(r"[A-Za-z0-9_./,-]{1,256}", detail):
-        return value if _bounded_inventory_text(value, 1024) else None
-    return None
+    return _normalize_plugin_use(value)
 
 
 def _normalize_declared(value: object) -> str | dict | None:
     if isinstance(value, str):
-        safe = _bounded_inventory_text(value, 512)
+        safe = _bounded_inventory_identifier(value, 512)
         return safe if safe and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", safe) else None
     if not isinstance(value, dict):
         return None
@@ -772,7 +787,8 @@ def _normalize_declared(value: object) -> str | dict | None:
     for key in ("id", "name", "tool", "tag", "label", "title"):
         if key not in value:
             continue
-        safe = _bounded_inventory_text(value[key], 512)
+        normalizer = _bounded_inventory_text if key in {"label", "title"} else _bounded_inventory_identifier
+        safe = normalizer(value[key], 512)
         if not safe or (key not in {"label", "title"} and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", safe)):
             return None
         result[key] = safe
@@ -796,7 +812,7 @@ def _normalize_contributes(value: object) -> dict:
                 continue
             if not isinstance(item, dict):
                 continue
-            row_id = _bounded_inventory_text(item.get("id"), 128)
+            row_id = _bounded_inventory_identifier(item.get("id"), 128)
             label = _bounded_inventory_text(item.get("label"), 256)
             raw_open = item.get("open")
             if not row_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", row_id) or not label:
@@ -808,7 +824,11 @@ def _normalize_contributes(value: object) -> dict:
             ):
                 continue
             target_key = next(iter(raw_open))
-            target_value = _bounded_inventory_text(raw_open[target_key], 512)
+            target_value = (
+                _bounded_inventory_text(raw_open[target_key], 512)
+                if target_key == "url"
+                else _bounded_inventory_identifier(raw_open[target_key], 512)
+            )
             icon = _bounded_inventory_text(item.get("icon"), 64) if item.get("icon") is not None else None
             if not target_value or (item.get("icon") is not None and not icon):
                 continue
@@ -825,8 +845,8 @@ def _normalize_setting(value: object) -> dict | None:
     if not isinstance(value, dict):
         return None
     field_type = value.get("type")
-    config_path = _bounded_inventory_text(value.get("config_path"), 512)
-    path = _bounded_inventory_text(value.get("path"), 512) or config_path
+    config_path = _bounded_inventory_identifier(value.get("config_path"), 512)
+    path = _bounded_inventory_identifier(value.get("path"), 512) or config_path
     label = _bounded_inventory_text(value.get("label"), 256)
     allowed_types = {"checkbox", "slider", "spinbox", "dropdown", "text_input", "textarea", "label"}
     if not isinstance(field_type, str) or field_type not in allowed_types or not path or not label:
@@ -957,19 +977,23 @@ def _normalize_plugin_entry(value: object) -> dict | None:
     if isinstance(raw_services, list):
         omitted_services += max(0, len(raw_services) - _MAX_PLUGIN_SERVICES)
     raw_uses = value.get("uses")
-    uses = _bounded_unique(raw_uses, _MAX_PLUGIN_USES, _normalize_capability) if isinstance(raw_uses, list) else []
+    uses, dropped_uses = (
+        _bounded_unique_with_omissions(raw_uses, _MAX_PLUGIN_USES, _normalize_capability)
+        if isinstance(raw_uses, list)
+        else ([], int("uses" in value))
+    )
     omitted_uses = _reported_omissions(value, "uses")
     if isinstance(raw_uses, list):
-        omitted_uses += max(0, len(raw_uses) - _MAX_PLUGIN_USES)
+        omitted_uses += max(0, len(raw_uses) - _MAX_PLUGIN_USES) + dropped_uses
     raw_granted = value.get("granted")
-    granted = (
-        _bounded_unique(raw_granted, _MAX_PLUGIN_USES, _normalize_capability)
+    granted, dropped_granted = (
+        _bounded_unique_with_omissions(raw_granted, _MAX_PLUGIN_USES, _normalize_capability)
         if isinstance(raw_granted, list)
-        else []
+        else ([], int("granted" in value))
     )
     omitted_granted = _reported_omissions(value, "granted")
     if isinstance(raw_granted, list):
-        omitted_granted += max(0, len(raw_granted) - _MAX_PLUGIN_USES)
+        omitted_granted += max(0, len(raw_granted) - _MAX_PLUGIN_USES) + dropped_granted
     raw_settings = value.get("settings")
     settings = (
         [field for item in raw_settings[:_MAX_PLUGIN_SETTINGS] if (field := _normalize_setting(item)) is not None]

@@ -42,12 +42,17 @@ const LOADABLE = new Set<PluginEntry["state"]>(["ok", "error", "stopping", "stop
 const OWN_REACT =
   /__(?:CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE|SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED)\s*=(?!=)/;
 const INVENTORY_TEXT_LIMIT = 4096;
-export const PLUGIN_INVENTORY_LIMITS = { services: 128, serviceSecrets: 64, uses: 256 } as const;
+export const PLUGIN_INVENTORY_LIMITS = {
+  services: 128, serviceSecrets: 64, uses: 256, contributions: 256, settings: 256,
+  settingOptions: 256, optionLabels: 256, changedFolders: 256,
+} as const;
 const SENSITIVE_TEXT = /(?:\b(?:secret|token|password|credential|authorization|bearer|api[_-]?key)[-_][A-Za-z0-9_-]{6,}|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|credential|authorization)\s*[:=]\s*\S+)/i;
-const INVISIBLE_CONTROLS = /[\u200b\u202a-\u202e\u2066-\u2069]/;
+const INVISIBLE_CONTROLS = /[\u00ad\u200b-\u200d\u202a-\u202e\u2060\u2066-\u2069\ufeff]/;
 const SERVICE_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const DECLARATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const EXPLICIT_SECRET_IDENTIFIER = /\bsecret[-_]token[-_][A-Za-z0-9_-]{6,}/i;
+const CONTRIBUTION_KINDS = ["menu", "views", "pages", "modals", "slash", "renderers"] as const;
 const PLUGIN_STATES = new Set<PluginEntry["state"]>(["ok", "error", "off", "stopping", "stop-failed", "changed-on-disk", "skipped"]);
 const SERVICE_STATES = new Set<PluginService["state"]>([
   "starting", "running", "backoff", "stopping", "stop-failed", "exited", "stopped", "crash-stopped", "error", "unknown", "failed",
@@ -84,8 +89,20 @@ export function safePluginText(value: unknown, limit = INVENTORY_TEXT_LIMIT): st
   return safeText(value, limit);
 }
 
+function safeIdentifier(value: unknown, limit = INVENTORY_TEXT_LIMIT): string | null {
+  if (typeof value !== "string" || value.length > limit || /[\u0000-\u001f\u007f]/.test(value)
+    || INVISIBLE_CONTROLS.test(value) || EXPLICIT_SECRET_IDENTIFIER.test(value))
+    return null;
+  const clean = value.trim();
+  return clean || null;
+}
+
+export function safePluginIdentifier(value: unknown, limit = INVENTORY_TEXT_LIMIT): string | null {
+  return safeIdentifier(value, limit);
+}
+
 export function normalizePluginWebPath(value: unknown): string | null {
-  const path = safeText(value, 512);
+  const path = safeIdentifier(value, 512);
   if (!path || path.startsWith("/") || path.includes("\\")) return null;
   const parts = path.split("/").filter((part) => part && part !== ".");
   return parts.length >= 3 && parts[0] === "web" && parts[1] === "dist" && !parts.includes("..")
@@ -123,20 +140,22 @@ function normalizeOpenTarget(value: unknown): OpenTarget | null {
   if (!raw) return null;
   const keys = Object.keys(raw);
   if (keys.length !== 1 || !["page", "modal", "view", "url"].includes(keys[0])) return null;
-  const target = safeText(raw[keys[0]], 512);
+  const target = keys[0] === "url" ? safeText(raw.url, 512) : safeIdentifier(raw[keys[0]], 512);
   if (!target) return null;
   return { [keys[0]]: target } as OpenTarget;
 }
 
 function normalizeDeclared(value: unknown): string | Record<string, string> | null {
-  const text = safeText(value, 512);
+  const text = safeIdentifier(value, 512);
   if (text) return DECLARATION_ID.test(text) ? text : null;
   const raw = record(value);
   if (!raw) return null;
   const next: Record<string, string> = {};
   for (const key of ["id", "name", "tool", "tag", "label", "title"] as const) {
     if (raw[key] === undefined) continue;
-    const field = safeText(raw[key], 512);
+    const field = key === "label" || key === "title"
+      ? safeText(raw[key], 512)
+      : safeIdentifier(raw[key], 512);
     if (!field || (key !== "label" && key !== "title" && !DECLARATION_ID.test(field))) return null;
     next[key] = field;
   }
@@ -147,16 +166,16 @@ export function normalizePluginContributes(value: unknown): PluginEntry["contrib
   const raw = record(value);
   const result: Record<string, unknown[]> = { menu: [], views: [], pages: [], modals: [], slash: [], renderers: [] };
   if (!raw) return result as PluginEntry["contributes"];
-  for (const kind of ["menu", "views", "pages", "modals", "slash", "renderers"] as const) {
+  for (const kind of CONTRIBUTION_KINDS) {
     if (!Array.isArray(raw[kind])) continue;
-    for (const item of raw[kind].slice(0, 256)) {
+    for (const item of raw[kind].slice(0, PLUGIN_INVENTORY_LIMITS.contributions)) {
       if (kind !== "menu") {
         const declared = normalizeDeclared(item);
         if (declared) result[kind].push(declared);
         continue;
       }
       const row = record(item);
-      const id = safeText(row?.id, 128);
+      const id = safeIdentifier(row?.id, 128);
       const label = safeText(row?.label, 256);
       const open = normalizeOpenTarget(row?.open);
       const icon = row?.icon === undefined ? undefined : safeText(row.icon, 64);
@@ -174,24 +193,28 @@ function normalizeUse(value: unknown): string | null {
   if (secret) return value;
   const declaration = /^(run|net|files):(.+)$/.exec(value);
   if (declaration) {
-    const detail = safeText(declaration[2], 1000);
+    const detail = safeIdentifier(declaration[2], 1000);
     if (detail) return `${declaration[1]}:${detail}`;
   }
   const other = /^([a-z][a-z0-9_-]{0,63}):([A-Za-z0-9_./,-]{1,256})$/.exec(value);
-  return other && safeText(value, 1024) ? value : null;
+  return other && safeIdentifier(value, 1024) ? value : null;
 }
 
-export function normalizePluginUses(value: unknown): string[] {
-  return normalizeBoundedUnique(value, PLUGIN_INVENTORY_LIMITS.uses, normalizeUse);
+export function normalizePluginUses(value: unknown, onInvalid?: () => void): string[] {
+  return normalizeBoundedUnique(value, PLUGIN_INVENTORY_LIMITS.uses, (item) => {
+    const use = normalizeUse(item);
+    if (use === null) onInvalid?.();
+    return use;
+  });
 }
 
 function normalizeSettings(value: unknown): PanelField[] {
   if (!Array.isArray(value)) return [];
   const fields: PanelField[] = [];
-  for (const item of value.slice(0, 256)) {
+  for (const item of value.slice(0, PLUGIN_INVENTORY_LIMITS.settings)) {
     const raw = record(item);
     const type = raw?.type;
-    const path = safeText(raw?.path, 512);
+    const path = safeIdentifier(raw?.path, 512);
     const label = safeText(raw?.label, 256);
     if (!raw || !path || !label || !["checkbox", "slider", "spinbox", "dropdown", "text_input", "textarea", "label"].includes(String(type)))
       continue;
@@ -205,14 +228,14 @@ function normalizeSettings(value: unknown): PanelField[] {
     const optionalNumber = (field: string): number | null | undefined =>
       raw[field] === undefined ? undefined : raw[field] === null ? null : safeNumber(raw[field], -Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
     const options = raw.options === undefined ? undefined : raw.options === null ? null
-      : Array.isArray(raw.options) ? raw.options.slice(0, 256).map((option) => safeText(option, 256)).filter((option): option is string => option !== null)
+      : Array.isArray(raw.options) ? raw.options.slice(0, PLUGIN_INVENTORY_LIMITS.settingOptions).map((option) => safeText(option, 256)).filter((option): option is string => option !== null)
       : null;
     const labels = record(raw.option_labels);
     const normalizedLabels = Object.create(null) as Record<string, string>;
     let labelCount = 0;
     if (labels) for (const key in labels) {
       if (!Object.prototype.hasOwnProperty.call(labels, key)) continue;
-      if (labelCount >= 256) break;
+      if (labelCount >= PLUGIN_INVENTORY_LIMITS.optionLabels) break;
       labelCount += 1;
       const safeKey = safeText(key, 256);
       const safeLabel = safeText(labels[key], 256);
@@ -242,7 +265,7 @@ function normalizeSettings(value: unknown): PanelField[] {
 
 function normalizeService(value: unknown): PluginService | null {
   const raw = record(value);
-  const name = safeText(raw?.name, 40);
+  const name = safeIdentifier(raw?.name, 40);
   if (!raw || !name || !SERVICE_ID.test(name)) return null;
   const state = SERVICE_STATES.has(raw.state as PluginService["state"]) ? raw.state as PluginService["state"] : "unknown";
   const desired = raw.desired === "running" || raw.desired === "stopped" ? raw.desired : "stopped";
@@ -270,10 +293,43 @@ function normalizeService(value: unknown): PluginService | null {
   };
 }
 
+function inheritedOmission(raw: Record<string, unknown>, key: string): number {
+  return safeInteger(record(raw.omitted)?.[key]) ?? 0;
+}
+
+function excessItems(value: unknown, limit: number): number {
+  return Array.isArray(value) ? Math.max(0, value.length - limit) : 0;
+}
+
+export function pluginContributionOmissionCount(value: unknown): number {
+  const raw = record(value);
+  if (!raw) return 0;
+  return CONTRIBUTION_KINDS.reduce(
+    (total, kind) => total + excessItems(raw[kind], PLUGIN_INVENTORY_LIMITS.contributions),
+    0,
+  );
+}
+
+function settingOmissions(...collections: unknown[]): { settings: number; setting_options: number; option_labels: number } {
+  const result = { settings: 0, setting_options: 0, option_labels: 0 };
+  for (const collection of collections) {
+    if (!Array.isArray(collection)) continue;
+    result.settings += excessItems(collection, PLUGIN_INVENTORY_LIMITS.settings);
+    for (const item of collection) {
+      const setting = record(item);
+      result.setting_options += excessItems(setting?.options, PLUGIN_INVENTORY_LIMITS.settingOptions);
+      const labels = record(setting?.option_labels);
+      if (labels)
+        result.option_labels += Math.max(0, Object.keys(labels).length - PLUGIN_INVENTORY_LIMITS.optionLabels);
+    }
+  }
+  return result;
+}
+
 /** Normalize the untrusted GET /plugins row before it can reach Settings, failure panels or plugin loading. */
 export function normalizePluginEntry(value: unknown): PluginEntry | null {
   const raw = record(value);
-  const id = safeText(raw?.id, 44);
+  const id = safeIdentifier(raw?.id, 44);
   if (!raw || !id || !ID.test(id)) return null;
   const kind = raw.kind === "built-in" || raw.kind === "installed" || raw.kind === "dev" ? raw.kind : "installed";
   const state = PLUGIN_STATES.has(raw.state as PluginEntry["state"]) ? raw.state as PluginEntry["state"] : "off";
@@ -297,17 +353,31 @@ export function normalizePluginEntry(value: unknown): PluginEntry | null {
       const normalized = normalizeService(service);
       return normalized ? [normalized] : [];
     })
-  const uses = normalizePluginUses(raw.uses);
+  let invalidUses = 0;
+  const uses = normalizePluginUses(raw.uses, () => { invalidUses += 1; });
+  if (raw.uses !== undefined && !Array.isArray(raw.uses)) invalidUses += 1;
   const rawGranted = Array.isArray(raw.granted) ? raw.granted : [];
-  const granted = normalizeBoundedUnique(raw.granted, PLUGIN_INVENTORY_LIMITS.uses, normalizeUse);
+  let invalidGranted = 0;
+  const granted = normalizeBoundedUnique(raw.granted, PLUGIN_INVENTORY_LIMITS.uses, (item) => {
+    const use = normalizeUse(item);
+    if (use === null) invalidGranted += 1;
+    return use;
+  });
+  if (raw.granted !== undefined && !Array.isArray(raw.granted)) invalidGranted += 1;
+  const settingsSection = record(raw.settings_section);
+  const settingOmissionsFromInput = settingOmissions(raw.settings, settingsSection?.widgets);
   const reportedOmissions = record(raw.omitted);
   const omitted = {
     services: (safeInteger(reportedOmissions?.services) ?? 0)
       + Math.max(0, rawServices.length - PLUGIN_INVENTORY_LIMITS.services),
     uses: (safeInteger(reportedOmissions?.uses) ?? 0)
-      + Math.max(0, (Array.isArray(raw.uses) ? raw.uses.length : 0) - PLUGIN_INVENTORY_LIMITS.uses),
+      + Math.max(0, (Array.isArray(raw.uses) ? raw.uses.length : 0) - PLUGIN_INVENTORY_LIMITS.uses) + invalidUses,
     granted: (safeInteger(reportedOmissions?.granted) ?? 0)
-      + Math.max(0, rawGranted.length - PLUGIN_INVENTORY_LIMITS.uses),
+      + Math.max(0, rawGranted.length - PLUGIN_INVENTORY_LIMITS.uses) + invalidGranted,
+    settings: (safeInteger(reportedOmissions?.settings) ?? 0) + settingOmissionsFromInput.settings,
+    setting_options: (safeInteger(reportedOmissions?.setting_options) ?? 0) + settingOmissionsFromInput.setting_options,
+    option_labels: (safeInteger(reportedOmissions?.option_labels) ?? 0) + settingOmissionsFromInput.option_labels,
+    contributions: (safeInteger(reportedOmissions?.contributions) ?? 0) + pluginContributionOmissionCount(raw.contributes),
   };
   return {
     id,
@@ -325,7 +395,7 @@ export function normalizePluginEntry(value: unknown): PluginEntry | null {
     contributes: normalizePluginContributes(raw.contributes),
     services,
     settings: normalizeSettings(raw.settings),
-    settings_section: section ? { title: sectionTitle ?? "Settings" } : null,
+    settings_section: settingsSection ? { title: sectionTitle ?? "Settings" } : null,
     uses,
     granted,
     omitted,
