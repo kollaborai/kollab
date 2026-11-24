@@ -271,3 +271,46 @@ def test_cli_everywhere_skips_a_row_whose_pid_was_recycled(tmp_path, monkeypatch
     asyncio.run(_handle_cli_hub(["stop", "all", "--everywhere"]))
 
     assert [call.args[0]["identity"] for call in stop.await_args_list] == ["far"]
+
+
+def test_session_less_shutdown_names_the_selected_generation(monkeypatch):
+    """A new agent that took over the old socket must not obey a stop meant for the old one."""
+    import plugins.hub.plugin as hub_plugin
+
+    agent = _peer("amethyst")
+    agent.start_token = "darwin:1.0"
+    plugin = HubPlugin()
+    plugin._presence = SimpleNamespace(cleanup_agent=lambda a: None)
+    plugin._identity = SimpleNamespace(agent_id="me", identity="legal-ops-lead")
+    shutdown = AsyncMock(return_value=True)
+    monkeypatch.setattr(hub_plugin.AgentMessenger, "signal_shutdown", shutdown)
+
+    async def exited(agent, timeout=0):
+        return True
+
+    monkeypatch.setattr(plugin, "_wait_for_agent_exit", exited)
+
+    asyncio.run(plugin._stop_peer_agent(agent, reason="test"))
+
+    kwargs = shutdown.await_args.kwargs
+    assert kwargs.get("expected_agent_id") == agent.agent_id
+    assert kwargs.get("expected_pid") == agent.pid
+
+
+def test_typed_stop_all_skips_a_tracked_pid_from_another_generation(monkeypatch):
+    here = [_peer("amethyst")]
+    plugin, stopped = _plugin(monkeypatch, here, here)
+    stale = SimpleNamespace(pid=os.getpid(), is_alive=True)
+    monkeypatch.setattr(
+        plugin,
+        "_get_orchestrator",
+        lambda: SimpleNamespace(
+            orchestrator=SimpleNamespace(get_all_agents=lambda: {"old": stale})
+        ),
+    )
+    monkeypatch.setattr(plugin, "_presence_generation_matches", lambda s, a: False)
+
+    result = asyncio.run(plugin._handle_hub_command("stop all"))
+
+    assert stopped == []
+    assert "amethyst" in result
