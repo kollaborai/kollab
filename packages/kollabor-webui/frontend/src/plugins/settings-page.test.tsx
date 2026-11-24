@@ -11,7 +11,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginsSettings, pluginRowControls } from "./settings";
 import { createPluginLoader, listedPluginEntries } from "./loader";
-import { pluginRegistry } from "./registry";
+import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
 import type { PluginEntry } from "./sdk";
 
 const source = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "settings.tsx"), "utf8");
@@ -33,7 +33,12 @@ const plugin = (settings: unknown[]): PluginEntry => ({
 
 const CANARY = "secret-token-canary-1397";
 
-async function markupFor(entries: unknown[], pathname = "/settings", serverTime?: number): Promise<string> {
+async function markupFor(
+  entries: unknown[],
+  pathname = "/settings",
+  serverTime?: number,
+  runtimeRecords: PluginRecord[] = [],
+): Promise<string> {
   const loader = createPluginLoader(pluginRegistry, {
     list: async () => ({ plugins: entries, server_time: serverTime }),
     importModule: async () => ({}),
@@ -42,6 +47,7 @@ async function markupFor(entries: unknown[], pathname = "/settings", serverTime?
     api: { request: async () => new Response(), stream: async () => {} },
   });
   await loader.refresh();
+  for (const record of runtimeRecords) pluginRegistry.put(record);
   vi.stubGlobal("window", { location: { pathname } });
   return renderToStaticMarkup(<PluginsSettings api={{} as never} />);
 }
@@ -52,6 +58,33 @@ afterEach(() => {
 });
 
 describe("plugin settings page", () => {
+  it.each([
+    ["Built In", "built-in", false],
+    ["Installed", "installed", true],
+  ] as const)("associates custom settings with the matching kind when %s is selected", async (_label, selectedKind, showsPackageSettings) => {
+    const builtIn = { ...plugin([]), id: "voice", name: "Voice Built In", kind: "built-in", state: "ok", enabled: true } as PluginEntry;
+    const installed = { ...plugin([]), id: "voice", name: "Voice Package", kind: "installed", state: "ok", enabled: true } as PluginEntry;
+    const selected = selectedKind === "built-in" ? builtIn : installed;
+    const other = selectedKind === "built-in" ? installed : builtIn;
+    const record: PluginRecord = {
+      id: "voice",
+      name: installed.name,
+      entry: installed,
+      status: "ready",
+      error: null,
+      retries: 0,
+      k: {} as never,
+      contributions: {
+        ...EMPTY_CONTRIBUTIONS,
+        settings: { render: () => <p>Package Custom Settings</p> },
+      },
+    };
+
+    const markup = await markupFor([selected, other], "/settings", undefined, [record]);
+
+    expect(markup.includes("Package Custom Settings")).toBe(showsPackageSettings);
+  });
+
   it("shows counts for data omitted from the installed inventory", async () => {
     const entry = {
       ...plugin([]),
