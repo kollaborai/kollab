@@ -69,6 +69,40 @@ describe("pluginCommandEntries", () => {
   });
 });
 
+describe("pluginCommandConflicts", () => {
+  it("records the losing plugin and first-enabled winner for Settings", async () => {
+    const { pluginCommandConflicts } = (await import("./composer-commands")) as unknown as {
+      pluginCommandConflicts: (
+        plugins: readonly PluginRecord[],
+        reserved: ReadonlySet<string>,
+      ) => Array<{
+        pluginId: string;
+        pluginName: string;
+        commandName: string;
+        winnerPluginId: string;
+        winnerName: string;
+      }>;
+    };
+    expect(
+      pluginCommandConflicts(
+        [
+          record("alpha", [command("deploy")], true, 1),
+          record("zulu", [command("deploy")], true, 2),
+        ],
+        new Set(),
+      ),
+    ).toEqual([
+      {
+        pluginId: "zulu",
+        pluginName: "zulu",
+        commandName: "deploy",
+        winnerPluginId: "alpha",
+        winnerName: "alpha",
+      },
+    ]);
+  });
+});
+
 describe("matchPluginCommand", () => {
   const entries = pluginCommandEntries([record("hello", [command("hello"), command("hello-world")])], new Set());
 
