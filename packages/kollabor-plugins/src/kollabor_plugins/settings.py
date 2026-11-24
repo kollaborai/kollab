@@ -148,7 +148,7 @@ def _save_builtin(
 
 def save(
     plugin_id: str, values: dict, *, allow_secrets: bool = False,
-    config_service=None, save_target: str = "global",
+    config_service=None, save_target: str = "global", kind: str | None = None,
 ) -> None:
     """Serialize validation and saving with install, update, detach and removal.
 
@@ -157,15 +157,29 @@ def save(
     """
     if not isinstance(plugin_id, str):
         raise ValueError("Invalid plugin id")
+    if kind not in {None, "built-in"}:
+        raise ValueError("Invalid plugin kind")
     home = Path.home() / ".kollab"
     home.mkdir(parents=True, exist_ok=True)
     # Discovery can itself recover installs under plugins.json.lock; do it first.
     registry = _read_registry(home / "plugins.json")
-    entry = None if plugin_id in registry["plugins"] or plugin_id.endswith("@dev") else _builtin(plugin_id)
+    entry = (
+        _builtin(plugin_id)
+        if kind == "built-in"
+        or (plugin_id not in registry["plugins"] and not plugin_id.endswith("@dev"))
+        else None
+    )
     with locked_file(home / "plugins.json.lock", private=True):
         _recover_locked(home)
         registry = _read_registry(home / "plugins.json")
-        if entry is not None and plugin_id not in registry["plugins"]:
+        if kind == "built-in":
+            if entry is None:
+                raise ValueError("Built-in plugin not found")
+            _save_builtin(
+                entry, values, allow_secrets=allow_secrets,
+                config_service=config_service, save_target=save_target,
+            )
+        elif entry is not None and plugin_id not in registry["plugins"]:
             _save_builtin(
                 entry, values, allow_secrets=allow_secrets,
                 config_service=config_service, save_target=save_target,
