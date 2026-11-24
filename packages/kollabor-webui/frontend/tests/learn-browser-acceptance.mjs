@@ -226,6 +226,15 @@ export function makeFixtures(options = {}) {
         last_turn_error: null,
       });
     }
+    if (endpoint.endsWith("/web-message-queue")) {
+      return json(route, {
+        scope_id: "learn-test-queue",
+        incarnation: "learn-test-incarnation",
+        revision: 0,
+        batches: [],
+        dispatch_available: false,
+      });
+    }
     if (endpoint.endsWith("/permissions")) return json(route, { pending_prompts: [], approval_mode: "trust_all" });
     if (endpoint.endsWith("/events")) {
       const body = stagedEvents
