@@ -235,7 +235,7 @@ def test_page_after_mixed_row_skips_once(tmp_path: Path) -> None:
     """The older-page offset must count a mixed row once too.
 
     The F841 finding exposed that the older-row fixture was assigned but
-    never checked; keep its mixed-row count tied to this pagination case.
+    never checked; this assertion ties the F841 finding to the pagination case.
     """
     refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG)]
     earlier = [
