@@ -7101,6 +7101,13 @@ class HubPlugin(BasePlugin):
 
     async def _deliver_inbox_message(self, msg: HubMessage) -> bool:
         """Deliver one mailbox message; refusal leaves its file unacknowledged."""
+        if (msg.metadata or {}).get("_mailbox_delivery_uncertain") is True:
+            logger.error(
+                "Mailbox delivery %s has an uncertain outcome; preserving it "
+                "without automatic replay",
+                msg.id,
+            )
+            return False
         delivery = asyncio.create_task(self._on_message_received(msg))
         try:
             return await asyncio.shield(delivery) is not False
@@ -7133,6 +7140,16 @@ class HubPlugin(BasePlugin):
                 # restart does not replay the effect.
                 self._acknowledge_inbox_delivery({msg.id}, [msg.to])
                 exc.acknowledged_message_ids = {msg.id}
+            elif delivery.cancelled():
+                identity = getattr(self, "_identity", None)
+                agent_keys = (
+                    [identity.agent_id, identity.identity]
+                    if identity is not None
+                    else [msg.to]
+                )
+                AgentMessenger.mark_mailbox_delivery_uncertain(
+                    agent_keys, {msg.id}
+                )
             raise
         except Exception as exc:
             logger.warning(
@@ -7163,9 +7180,17 @@ class HubPlugin(BasePlugin):
         # task-cron reminders are explicitly acknowledged when stale. Do not
         # duplicate controls in the coalesced HUD block or fallback delivery.
         control_msgs = [
-            msg for msg in replay_msgs if _is_durable_control(msg.to_dict())
+            msg
+            for msg in replay_msgs
+            if _is_durable_control(msg.to_dict())
+            and (msg.metadata or {}).get("_mailbox_delivery_uncertain") is not True
         ]
-        ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
+        ordinary_msgs = [
+            msg
+            for msg in replay_msgs
+            if msg not in control_msgs
+            and (msg.metadata or {}).get("_mailbox_delivery_uncertain") is not True
+        ]
         acknowledged = acknowledged if acknowledged is not None else set()
         for msg in control_msgs:
             if await self._deliver_inbox_message(msg):
@@ -7603,7 +7628,14 @@ class HubPlugin(BasePlugin):
                                             if isinstance(data, dict)
                                             else None
                                         )
-                                        if ts is None or _is_durable_control(data):
+                                        if (
+                                            ts is None
+                                            or _is_durable_control(data)
+                                            or data.get(
+                                                "_mailbox_delivery_uncertain"
+                                            )
+                                            is True
+                                        ):
                                             all_stale = False
                                             break
                                         if ts and (now - ts) < INBOX_TTL_SECS:

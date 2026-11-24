@@ -11,6 +11,7 @@ import re
 import secrets
 import socket
 import stat
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -355,6 +356,16 @@ def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
         ordinary_files: List[Path] = []
         control_files: List[Path] = []
         for path in files:
+            try:
+                with open(path) as fh:
+                    data = json.load(fh)
+                if (
+                    isinstance(data, dict)
+                    and data.get("_mailbox_delivery_uncertain") is True
+                ):
+                    continue
+            except Exception:
+                pass
             if _is_control_cached(path):
                 control_files.append(path)
             else:
@@ -3465,6 +3476,8 @@ class AgentMessenger:
                     logger.warning("Could not clean acknowledged mailbox record")
                 continue
 
+            delivery_uncertain = data.get("_mailbox_delivery_uncertain") is True
+
             timestamp = _validated_mailbox_timestamp(data)
             if timestamp is None:
                 logger.warning("Discarding mailbox record with invalid timestamp")
@@ -3478,7 +3491,11 @@ class AgentMessenger:
             # reach normal receive so stale cron reminders are explicitly
             # ACKed and assignments are classified instead of disappearing.
             is_control = _is_durable_control(data)
-            if not is_control and (now - timestamp) > INBOX_TTL_SECS:
+            if (
+                not delivery_uncertain
+                and not is_control
+                and (now - timestamp) > INBOX_TTL_SECS
+            ):
                 expired_count += 1
                 try:
                     f.unlink()
@@ -3499,7 +3516,7 @@ class AgentMessenger:
             # The live delivery loop keeps parsed records until the receiver
             # acknowledges them. Direct callers retain the historical
             # consuming behavior by default.
-            if consume:
+            if consume and not delivery_uncertain:
                 try:
                     f.unlink()
                 except OSError:
@@ -3511,7 +3528,8 @@ class AgentMessenger:
             # current instructions. Durable controls are preserved for
             # TaskLedger classification on the normal receive path.
             if (
-                not is_control
+                not delivery_uncertain
+                and not is_control
                 and timestamp
                 and timestamp < boundary - INBOX_RESTART_GRACE_SECS
             ):
@@ -3521,6 +3539,12 @@ class AgentMessenger:
                 except OSError:
                     logger.warning("Could not discard pre-restart mailbox record")
                 continue
+
+            if delivery_uncertain:
+                msg.metadata = {
+                    **(msg.metadata or {}),
+                    "_mailbox_delivery_uncertain": True,
+                }
 
             messages.append(msg)
             message_files[msg.id] = f
@@ -3542,10 +3566,21 @@ class AgentMessenger:
         # Truthful summary accounting: "total" counts everything that
         # arrived, including pre-reboot messages reconciled away below.
         total = len(messages) + stale_preboot_count
-        controls = [
-            message for message in messages if _is_durable_control(message.to_dict())
+        uncertain = [
+            message
+            for message in messages
+            if (message.metadata or {}).get("_mailbox_delivery_uncertain") is True
         ]
-        ordinary = [message for message in messages if message not in controls]
+        controls = [
+            message
+            for message in messages
+            if message not in uncertain and _is_durable_control(message.to_dict())
+        ]
+        ordinary = [
+            message
+            for message in messages
+            if message not in controls and message not in uncertain
+        ]
 
         def _unique_senders() -> List[str]:
             return list(
@@ -3608,7 +3643,9 @@ class AgentMessenger:
                         path.unlink()
                     except OSError:
                         logger.warning("Could not discard replay-bounded mailbox record")
-            replayed_ids = {message.id for message in controls + replayed_ordinary}
+            replayed_ids = {
+                message.id for message in controls + replayed_ordinary + uncertain
+            }
             replayed = [message for message in messages if message.id in replayed_ids]
 
             summary = _build_summary(len(replayed_ordinary), dropped)
@@ -3734,6 +3771,57 @@ class AgentMessenger:
                             )
             except OSError:
                 logger.warning("Could not scan mailbox while acknowledging delivery")
+
+    @staticmethod
+    def mark_mailbox_delivery_uncertain(
+        agent_keys: List[str], message_ids: set[str]
+    ) -> None:
+        """Keep interrupted deliveries available without replaying them blindly."""
+        if not message_ids:
+            return
+        messages_dir = get_messages_dir()
+        for key in dict.fromkeys(k for k in agent_keys if k):
+            mailbox_dir = messages_dir / key
+            try:
+                paths = list(mailbox_dir.glob("*.json"))
+            except OSError:
+                logger.error("Could not scan mailbox to hold interrupted delivery")
+                continue
+            for path in paths:
+                temp_name = ""
+                try:
+                    with open(path) as fh:
+                        data = json.load(fh)
+                    if (
+                        not isinstance(data, dict)
+                        or data.get("id") not in message_ids
+                        or data.get("_mailbox_acknowledged") is True
+                    ):
+                        continue
+                    if data.get("_mailbox_delivery_uncertain") is True:
+                        continue
+                    data["_mailbox_delivery_uncertain"] = True
+                    fd, temp_name = tempfile.mkstemp(
+                        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+                    )
+                    with os.fdopen(fd, "w") as fh:
+                        json.dump(data, fh)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(temp_name, path)
+                    temp_name = ""
+                except (OSError, ValueError, TypeError) as exc:
+                    logger.error(
+                        "Could not persist uncertain mailbox delivery %s (%s)",
+                        path.name,
+                        type(exc).__name__,
+                    )
+                finally:
+                    if temp_name:
+                        try:
+                            os.unlink(temp_name)
+                        except OSError:
+                            pass
 
     @staticmethod
     def get_inbox_count(identity: str) -> int:

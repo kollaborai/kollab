@@ -344,6 +344,9 @@ there are TWO separate dedup systems:
     malformed timestamps are reported without message content and discarded
     valid records remain until delivery succeeds and the reader acknowledges
     them; interruption or refusal leaves them available for replay
+    if the receiver task itself is cancelled, the result is ambiguous: retain
+    the record with an uncertainty marker and suppress automatic replay
+    until an operator inspects it and chooses to retry or acknowledge it
     TTL-expired, restart-stale ordinary messages, and replay-cap drops are
     intentionally discarded; durable task controls retain their existing
     classification path
