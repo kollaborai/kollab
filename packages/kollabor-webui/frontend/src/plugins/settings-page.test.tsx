@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
 // @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
@@ -5,6 +6,8 @@ import path from "node:path";
 // @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginsSettings, pluginRowControls } from "./settings";
 import { createPluginLoader, listedPluginEntries } from "./loader";
@@ -454,5 +457,52 @@ describe("plugin settings page", () => {
     expect(markup).not.toContain(">Start</button>");
     expect(markup).toContain('data-disabled="" disabled=""');
     expect(markup).not.toContain(">Save</button>");
+  });
+
+  it("moves focus to the remaining plugin after the removed detail unmounts", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const voice = {
+      ...plugin([]), id: "voice", name: "Voice", kind: "built-in", enabled: true, state: "ok",
+    } as PluginEntry;
+    const entries = [plugin([]), voice];
+    const loader = createPluginLoader(pluginRegistry, {
+      list: async () => ({ plugins: entries, server_time: undefined }),
+      importModule: async () => ({}),
+      fetchText: async () => "",
+      loadCode: false,
+      api: { request: async () => new Response(), stream: async () => {} },
+    });
+    await loader.refresh();
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<PluginsSettings api={{
+        json: async () => {
+          entries.splice(0, entries.length, voice);
+          return {};
+        },
+      } as never} />));
+
+      const remove = [...document.querySelectorAll("button")]
+        .find((button) => button.textContent?.trim() === "Remove");
+      expect(remove).toBeDefined();
+      await act(async () => remove?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+      const dialog = document.querySelector('[role="dialog"]');
+      const confirmRemove = [...(dialog?.querySelectorAll("button") ?? [])]
+        .find((button) => button.textContent?.trim() === "Remove");
+      expect(confirmRemove).toBeDefined();
+      await act(async () => {
+        confirmRemove?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(document.activeElement?.getAttribute("aria-label")).toBe("Voice details");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });
