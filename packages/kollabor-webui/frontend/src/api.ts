@@ -631,10 +631,9 @@ export type SlashCommand = {
   subcommands?: SlashSubcommand[];
 };
 
-// Keep the first paint useful when the browser is connected to an older
-// engine that does not expose GET /sessions/{id}/commands yet. A current
-// engine replaces this compatibility catalog with its complete core + plugin
-// registry as soon as the request resolves.
+// Compatibility catalog for older engines that return 404 for
+// GET /sessions/{id}/commands. RuntimeShell uses it only for that unsupported
+// endpoint response and labels it as a fallback; transport failures stay visible.
 export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   {
     name: "help",

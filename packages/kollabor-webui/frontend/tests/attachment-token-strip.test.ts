@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { stripManagedTokens } from "@/components/assistant-ui/managed-tokens";
+import {
+  stripManagedTokens,
+  synchronizeComposerImageTokens,
+} from "@/components/assistant-ui/managed-tokens";
 
 describe("stripManagedTokens", () => {
   it("removes exactly the managed tokens", () => {
@@ -67,5 +70,43 @@ describe("stripManagedTokens matcher contract", () => {
   it("compiles no lookbehind/lookahead patterns (match-first only)", () => {
     expect(source).not.toContain("(?<");
     expect(source).not.toMatch(/new RegExp\(`[^`]*\(\?/);
+  });
+});
+
+describe("synchronizeComposerImageTokens", () => {
+  it("rebuilds one token per current image and removes duplicates", () => {
+    const text = "[image1]\n[image1]\n[image2]\nDescribe this picture";
+
+    expect(synchronizeComposerImageTokens(text, 1)).toBe(
+      "[image1]\nDescribe this picture",
+    );
+  });
+
+  it("removes orphaned tokens and preserves escaped literals", () => {
+    expect(
+      synchronizeComposerImageTokens(
+        "[image1]\n[[image2]]\nDescribe this picture",
+        0,
+      ),
+    ).toBe("[[image2]]\nDescribe this picture");
+  });
+
+  it("preserves user text when there are no image tokens to remove", () => {
+    const text = "  雪 café 🌱\nDescribe this picture";
+
+    expect(synchronizeComposerImageTokens(text, 0)).toBe(text);
+    expect(synchronizeComposerImageTokens(text, 1)).toBe(`[image1]\n${text}`);
+  });
+
+  it("handles very long non-ASCII drafts without changing their text", () => {
+    const text = "雪 café 🌱 ".repeat(10_000);
+
+    expect(synchronizeComposerImageTokens(text, 1)).toBe(`[image1]\n${text}`);
+  });
+
+  it("is idempotent for the same attachment count", () => {
+    const first = synchronizeComposerImageTokens("[image01]\nnotes", 1);
+
+    expect(synchronizeComposerImageTokens(first, 1)).toBe(first);
   });
 });
