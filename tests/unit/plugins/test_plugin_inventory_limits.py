@@ -245,7 +245,18 @@ def test_inventory_preserves_safe_identifiers_containing_sensitive_words(surface
         assert entry["uses"] == [value]
 
 
-@pytest.mark.parametrize("value", ["run:codex\u200b", "net:github.com\u202eevil.test"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "run:codex\u200b",
+        "net:github.com\u202eevil.test",
+        "password\u200c=hunter2",
+        "password\u200d=hunter2",
+        "pass\u00adword=hunter2",
+        "password\u2060=hunter2",
+        "password\ufeff=hunter2",
+    ],
+)
 def test_inventory_text_rejects_invisible_format_controls(value):
     from kollabor_plugins.registry import _bounded_inventory_text
 

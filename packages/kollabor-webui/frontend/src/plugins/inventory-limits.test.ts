@@ -309,7 +309,15 @@ describe("plugin inventory collection bounds", () => {
     expect(describePluginAdds(review!.manifest!)).toContain("browser code");
   });
 
-  it.each(["run:codex\u200b", "net:github.com\u202eevil.test"])(
+  it.each([
+    "run:codex\u200b",
+    "net:github.com\u202eevil.test",
+    "password\u200c=hunter2",
+    "password\u200d=hunter2",
+    "pass\u00adword=hunter2",
+    "password\u2060=hunter2",
+    "password\ufeff=hunter2",
+  ])(
     "rejects invisible controls before review text is rendered: %s",
     (value) => expect(safePluginText(value)).toBeNull(),
   );
