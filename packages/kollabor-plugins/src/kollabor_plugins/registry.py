@@ -852,7 +852,7 @@ def _normalize_setting(value: object) -> dict | None:
         "config_path": config_path or path,
         "type": field_type,
         "label": label,
-        "help": optional_text("help"),
+        "help": optional_text("help") or "",
         "value": normalized_value,
         "default": normalized_default,
         "min_value": optional_number("min_value"),
