@@ -4,6 +4,7 @@ Provides unified execution interface for terminal commands, MCP tool calls, and
 file operations with proper error handling, logging, and result processing.
 """
 
+import ast
 import asyncio
 import logging
 import math
@@ -1558,6 +1559,66 @@ def _terminal_find_escapes_workspace(
             "xargs",
             "zsh",
         }
+        inline_code_options = {
+            "awk": {"-f", "--file"},
+            "gawk": {"-f", "--file"},
+            "lua": {"-e", "--execute"},
+            "mawk": {"-f", "--file"},
+            "nawk": {"-f", "--file"},
+            "node": {"-e", "--eval"},
+            "nodejs": {"-e", "--eval"},
+            "perl": {"-e", "-E"},
+            "php": {"-r", "--run"},
+            "python": {"-c"},
+            "ruby": {"-e"},
+        }
+        process_launch = re.compile(
+            r"\b(?:system|exec|spawn|popen|subprocess\s*\.\s*"
+            r"(?:run|Popen|call|check_call|check_output)|"
+            r"proc_open|shell_exec|passthru)\s*(?:[.(]|$)",
+            re.IGNORECASE,
+        )
+
+        def python_process_uses_literal_argv(script: str) -> bool:
+            """Allow only statically named, non-shell subprocess argv calls."""
+            try:
+                tree = ast.parse(script)
+            except SyntaxError:
+                return False
+            subprocess_calls = []
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                function = node.func
+                if not (
+                    isinstance(function, ast.Attribute)
+                    and function.attr in {"run", "Popen", "call", "check_call", "check_output"}
+                    and isinstance(function.value, ast.Name)
+                    and function.value.id == "subprocess"
+                ):
+                    function_name = (
+                        function.attr if isinstance(function, ast.Attribute) else
+                        function.id if isinstance(function, ast.Name) else ""
+                    )
+                    if function_name in {"system", "exec", "spawn", "popen"}:
+                        return False
+                    continue
+                if not node.args or not isinstance(node.args[0], (ast.List, ast.Tuple)):
+                    return False
+                command = node.args[0].elts
+                if not command or not isinstance(command[0], ast.Constant):
+                    return False
+                executable = command[0].value
+                if not isinstance(executable, str) or Path(executable).name.lower() in find_names:
+                    return False
+                shell_options = [keyword.value for keyword in node.keywords if keyword.arg == "shell"]
+                if any(
+                    not isinstance(value, ast.Constant) or value.value is not False
+                    for value in shell_options
+                ):
+                    return False
+                subprocess_calls.append(node)
+            return bool(subprocess_calls)
         control_words = {"if", "then", "else", "elif", "do", "!", "--"}
         expansions = "$`{}*?[]~"
         for words in commands:
@@ -1572,6 +1633,47 @@ def _terminal_find_escapes_workspace(
                 if any(marker in word for marker in expansions):
                     return True
                 command_name = Path(word).name.lower()
+                runtime_name = command_name
+                if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", command_name):
+                    runtime_name = "python"
+                inline_options = inline_code_options.get(runtime_name)
+                if inline_options is not None:
+                    arguments = words[index + 1 :]
+                    if runtime_name in {"awk", "gawk", "mawk", "nawk"}:
+                        if any(
+                            argument in {"-f", "--file"}
+                            or argument.startswith("--file=")
+                            for argument in arguments
+                        ):
+                            script = ""
+                        else:
+                            script = " ".join(arguments)
+                    else:
+                        script_option = next(
+                            (
+                                position
+                                for position, argument in enumerate(arguments)
+                                if argument in inline_options
+                                or any(
+                                    argument.startswith(option)
+                                    and argument != option
+                                    for option in inline_options
+                                    if len(option) == 2
+                                )
+                            ),
+                            None,
+                        )
+                        script = (
+                            arguments[script_option + 1]
+                            if script_option is not None
+                            and script_option + 1 < len(arguments)
+                            else ""
+                        )
+                    if process_launch.search(script):
+                        if runtime_name == "python" and python_process_uses_literal_argv(script):
+                            pass
+                        else:
+                            return True
                 if command_name in {
                     "busybox",
                     "doas",
