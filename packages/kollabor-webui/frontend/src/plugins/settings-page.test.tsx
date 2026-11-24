@@ -85,6 +85,27 @@ describe("plugin settings page", () => {
     expect(markup.includes("Package Custom Settings")).toBe(showsPackageSettings);
   });
 
+  it.each([
+    ["stopped", true],
+    ["exited", true],
+    ["crash-stopped", true],
+    ["error", true],
+    ["running", false],
+    ["starting", false],
+    ["backoff", false],
+  ] as const)("offers Start for a service in %s state only when retry is available", async (state, offersStart) => {
+    const entry = {
+      ...plugin([]),
+      id: "service-plugin",
+      enabled: true,
+      services: [{ name: "worker", state, secrets: [], secrets_omitted: 0 }],
+    } as unknown as PluginEntry;
+
+    const markup = await markupFor([entry]);
+
+    expect(markup.includes('aria-label="Start worker"')).toBe(offersStart);
+  });
+
   it("shows counts for data omitted from the installed inventory", async () => {
     const entry = {
       ...plugin([]),
