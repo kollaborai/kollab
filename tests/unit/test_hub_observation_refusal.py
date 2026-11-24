@@ -5,7 +5,9 @@ refused observation would make a lost message look delivered.
 """
 
 import asyncio
+import builtins
 import json
+from pathlib import Path
 import time
 
 import pytest
@@ -727,5 +729,102 @@ async def test_uncertain_delivery_marker_survives_replace_failure(tmp_path):
             ["receiver"], consume=False
         )
         await plugin._deliver_inbox_batch(second)
+
+    assert effects == [message.id]
+
+
+@pytest.mark.asyncio
+async def test_receiver_is_not_run_when_delivery_marker_cannot_be_persisted(tmp_path):
+    message = HubMessage(
+        action="message", from_identity="peer", to="receiver", content="effect"
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def receive(msg):
+        effects.append(msg.id)
+        if len(effects) == 1:
+            raise asyncio.CancelledError
+
+    plugin._on_message_received = receive
+    original_open = builtins.open
+    original_replace = messenger_module.os.replace
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        record = next((tmp_path / "receiver").glob("*.json"))
+
+        def fail_open(file, mode="r", *args, **kwargs):
+            if Path(file) == record and mode == "w":
+                raise PermissionError("marker persistence denied")
+            return original_open(file, mode, *args, **kwargs)
+
+        def fail_replace(source, target):
+            if str(source).endswith(".tmp") and Path(target) == record:
+                raise PermissionError("atomic marker replacement denied")
+            return original_replace(source, target)
+
+        first = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with patch("builtins.open", side_effect=fail_open), patch(
+            "plugins.hub.messenger.os.replace", side_effect=fail_replace
+        ):
+            try:
+                await plugin._deliver_inbox_batch(first)
+            except asyncio.CancelledError:
+                pass
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        await plugin._deliver_inbox_batch(replay)
+
+    assert effects == [message.id]
+
+
+@pytest.mark.asyncio
+async def test_accepted_effect_is_not_replayed_when_ack_receipt_cannot_persist(
+    tmp_path,
+):
+    from pathlib import Path
+
+    message = HubMessage(
+        action="message", from_identity="peer", to="receiver", content="effect"
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def receive(msg):
+        effects.append(msg.id)
+
+    plugin._on_message_received = receive
+    original_open = builtins.open
+    original_unlink = Path.unlink
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        record = next((tmp_path / "receiver").glob("*.json"))
+
+        def fail_ack_unlink(path, *args, **kwargs):
+            if path == record:
+                raise PermissionError("ack unlink denied")
+            return original_unlink(path, *args, **kwargs)
+
+        def fail_receipt(file, mode="r", *args, **kwargs):
+            if Path(file) == record and mode == "w":
+                raise PermissionError("ack receipt persistence denied")
+            return original_open(file, mode, *args, **kwargs)
+
+        first = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with patch.object(Path, "unlink", new=fail_ack_unlink), patch(
+            "builtins.open", side_effect=fail_receipt
+        ):
+            await plugin._deliver_inbox_batch(first)
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        await plugin._deliver_inbox_batch(replay)
 
     assert effects == [message.id]
