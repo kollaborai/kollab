@@ -133,7 +133,7 @@ def test_cli_stop_all_names_agents_in_other_folders(tmp_path, monkeypatch, capsy
     assert stop.await_count == 0
     assert "no agents online" not in out
     assert "/work/elsewhere" in out
-    assert "kollab --hub stop all --everywhere" in out
+    assert "KOLLAB_PROJECT_ROOT=/work/elsewhere kollab --hub stop all" in out
 
 
 def test_cli_stop_all_everywhere_stops_other_folders(tmp_path, monkeypatch):
