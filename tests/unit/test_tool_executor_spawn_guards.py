@@ -6,11 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from kollabor_agent.tool_executor import (
-    ToolExecutor,
-    _is_blocked_kollab_spawn,
-    _terminal_find_escapes_workspace,
-)
+from kollabor_agent.tool_executor import ToolExecutor, _is_blocked_kollab_spawn
 
 FLAG = "tools.block_kollab_terminal_spawn"
 
@@ -407,21 +403,6 @@ def test_backtick_substitutions_do_not_hide_launches(command):
 )
 def test_literal_backticks_are_not_shell_substitutions(command):
     assert not _is_blocked_kollab_spawn(command)
-
-
-@pytest.mark.parametrize(
-    ("command", "blocked"),
-    [
-        ("cat <<'EOF'\n`find /outside -type f`\nEOF", False),
-        ("cat <<EOF\n`find /outside -type f`\nEOF", True),
-    ],
-    ids=["quoted-heredoc-text", "unquoted-heredoc-substitution"],
-)
-def test_heredoc_find_text_is_scoped_by_shell_expansion(command, blocked, tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    assert _terminal_find_escapes_workspace(command, workspace, workspace) is blocked
 
 
 @pytest.mark.parametrize("option", ["--ec", "--enc", "--encodedcommand"])

@@ -18,7 +18,10 @@ comprehensive error handling. Implements 11 file operation types:
 """
 
 import ast
+import errno
+import fnmatch
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -640,7 +643,9 @@ class FileOperationsExecutor:
             ),
         }
 
-    def execute_operation(self, operation: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_operation(
+        self, operation: Dict[str, Any], *, workspace: Optional[Path] = None
+    ) -> Dict[str, Any]:
         """Execute a file operation.
 
         Args:
@@ -716,6 +721,7 @@ class FileOperationsExecutor:
             "file_rmdir": self._execute_rmdir,
             "file_read": self._execute_read,
             "file_grep": self._execute_grep,
+            "file_find": lambda data: self._execute_find(data, workspace or self.project_root),
         }
 
         handler = handlers.get(op_type)
@@ -756,6 +762,87 @@ class FileOperationsExecutor:
             error_trace = traceback.format_exc()
             logger.error(f"Operation {op_type} failed: {error_trace}")
             return {"success": False, "error": f"Operation failed: {str(e)}"}
+
+    def _execute_find(self, operation: Dict[str, Any], workspace: Path) -> Dict[str, Any]:
+        """Match basenames beneath a pinned directory, without shell execution.
+
+        Directory descriptors and O_NOFOLLOW keep every descent attached to its
+        parent even if workspace entries are renamed or replaced during a scan.
+        There is deliberately no path, shell program or symlink-follow option.
+        """
+        pattern = operation.get("pattern")
+        if (
+            not isinstance(pattern, str) or not pattern
+            or any(char in pattern for char in ("/", "\\", "\x00"))
+            or len(pattern) > 1024
+        ):
+            return {
+                "success": False,
+                "error": "Expected a basename pattern without path separators (max 1024 characters)",
+            }
+        if (
+            os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
+            or not hasattr(os, "O_DIRECTORY") or os.scandir not in os.supports_fd
+        ):
+            return {
+                "success": False,
+                "error": "Workspace search is unavailable without safe directory descriptor traversal",
+            }
+
+        matches: list[str] = []
+        scanned = 0
+        output_chars = 0
+        truncated = False
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+        def visit(directory_fd: int, prefix: str, depth: int) -> None:
+            nonlocal scanned, output_chars, truncated
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    if scanned >= 10000 or len(matches) >= 200 or output_chars >= 12000:
+                        truncated = True
+                        return
+                    scanned += 1
+                    relative = f"{prefix}{entry.name}"
+                    if fnmatch.fnmatchcase(entry.name, pattern):
+                        encoded_size = len(json.dumps(relative)) + 2
+                        if output_chars + encoded_size > 12000:
+                            truncated = True
+                            return
+                        matches.append(relative)
+                        output_chars += encoded_size
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if depth >= 64:
+                        truncated = True
+                        continue
+                    # Never open a symlink, including one swapped in after the
+                    # is_dir check. A race or a permission error fails visibly.
+                    child_fd = os.open(entry.name, flags, dir_fd=directory_fd)
+                    try:
+                        visit(child_fd, relative + "/", depth + 1)
+                    finally:
+                        os.close(child_fd)
+
+        # Open every ancestor without following links, then hold the workspace
+        # descriptor for the complete scan. A path swap cannot redirect a child
+        # traversal. The configured workspace is the sole search authority.
+        root = Path(workspace).absolute()
+        directory_fd = os.open(root.anchor, flags)
+        try:
+            for component in root.parts[1:]:
+                if component == "..":
+                    raise OSError(errno.EINVAL, "Workspace must be canonical")
+                child_fd = os.open(component, flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = child_fd
+            visit(directory_fd, "", 0)
+        finally:
+            os.close(directory_fd)
+        return {
+            "success": True,
+            "output": json.dumps({"matches": sorted(matches), "truncated": truncated}),
+        }
 
     @staticmethod
     def _diff_text(path: Path) -> str | None:

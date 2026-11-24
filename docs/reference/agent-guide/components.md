@@ -34,7 +34,16 @@ this page holds the reference for one area. Read it before you change that area.
   - `hook.py` - Event bus integration at SECURITY priority (approval modes, risk assessment, response handling)
   - `README.md` - Permission system docs
 
+### Workspace filename discovery (`kollabor_agent`)
+
+Workspace filename discovery uses the agent package's `file-find` tool and
+`FileOperationsExecutor._execute_find`: a basename glob, a pinned workspace
+directory, and no subprocess or symlink traversal. Its result explicitly reports
+truncation. General terminal commands and session input remain unrestricted;
+see `docs/features/tools.md` for the search contract and platform limits.
+
 ### Terminal UI Package (`kollabor_tui`)
+
 - `terminal_renderer.py` - Main terminal rendering with status areas
 - `input_handler.py` - Raw mode input handling with key parsing
 - `render_layout.py` - Terminal layout management

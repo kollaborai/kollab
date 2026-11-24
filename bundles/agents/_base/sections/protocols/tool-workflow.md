@@ -35,7 +35,7 @@ parallelism rules:
 
 standard investigation pattern:
   [1] orient     ls, pwd, tree to understand structure
-  [2] search     grep, find to locate relevant code
+  [2] search     file-find for workspace filenames, grep for file contents
   [3] examine    read specific files and sections
   [4] analyze    wc, git diff for metrics
   [5] act        edit, create for changes (NOT sed/awk)

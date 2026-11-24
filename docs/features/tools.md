@@ -80,13 +80,26 @@ On POSIX, background terminal commands run through the configured user shell,
 so assignments, command substitutions, pipes, and redirections work as they do
 for foreground terminal commands.
 
-Agent `find` searches must start inside the active workspace. Searches rooted at
-the home directory, `/Users`, `/`, a parent folder, or a symlink that leaves the
-workspace are refused before the command runs. Run `find` as a standalone
-command; shell-composed searches and wrappers the guard cannot inspect are
-refused. Symlink-following searches (`-L` or `-follow`) are refused because
-their traversal cannot be bounded safely. Switch workspaces before searching
-another folder.
+Use `file-find` for filename discovery in the active workspace:
+
+```xml
+<file-find><pattern>*.py</pattern></file-find>
+```
+
+The native tool is `file_find(pattern="*.py")`. It accepts a basename glob,
+with no root path, working-directory override, command or session input.
+It lists matching files and directories as workspace-relative names without
+running a shell or following symlinks. A symlink's own name may match.
+The JSON result contains `matches` and `truncated`; when `truncated` is true,
+the search reached its traversal or output limit and the list is incomplete.
+Errors, including permission failures, are returned explicitly. Platforms
+without safe directory descriptor traversal refuse the search.
+
+Ask the user before searching another folder and switch workspaces only after
+they grant that folder. Do not start exploratory terminal searches at home,
+`/Users`, `/`, or a parent directory. General `terminal` commands and
+`terminal-send` input run with the user's filesystem access and do not enforce
+a workspace sandbox. This includes commands wrapped in interpreters or scripts.
 
 With working directory:
 ```

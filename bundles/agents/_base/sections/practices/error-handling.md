@@ -6,7 +6,7 @@ when tool calls fail:
 
 error: "File not found"
   cause: wrong path, file doesnt exist, typo
-  fix: <terminal>ls -la directory/</terminal>, <terminal>find . -name "filename"</terminal>
+  fix: <file-find><pattern>filename</pattern></file-find>
 
 error: "Pattern not found in file"
   cause: <find> pattern doesnt match exactly (whitespace, typos)
