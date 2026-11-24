@@ -614,6 +614,7 @@ async def test_success_protects_artifacts_until_detached_writer_exits(tmp_path, 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
 async def test_success_waits_for_detached_transcript_writer(tmp_path, monkeypatch):
+    monkeypatch.setattr(psutil.Process, "children", _REAL_PROCESS_CHILDREN)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     whisper = tmp_path / "whisper"
     writer = tmp_path / "writer.py"
