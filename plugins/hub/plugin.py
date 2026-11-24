@@ -15686,6 +15686,16 @@ class HubPlugin(BasePlugin):
         recorded = getattr(agent, "start_token", None)
         return bool(recorded) and process_start_token(getattr(agent, "pid", 0)) == recorded
 
+    def _withhold_signal(self, agent, session, guard: str) -> str:
+        """No signal may reach ``agent``'s pid. A session-less row whose pid
+        still runs and is not proven to be another process keeps its presence
+        and socket: the agent may still be running (#1408)."""
+        pid = getattr(agent, "pid", 0)
+        if session is None and not self._pid_recycled(agent) and self._agent_pid_alive(pid):
+            return f"not stopped: pid {pid} cannot be proven to be this agent, so no signal was sent"
+        self._cleanup_stopped_peer(agent, session)
+        return guard
+
     @staticmethod
     def _pid_recycled(agent) -> bool:
         """True when the row's pid now runs another process: its kernel start
@@ -15824,11 +15834,15 @@ class HubPlugin(BasePlugin):
                     getattr(agent, "started_at", None),
                 )
             )
-            success = await AgentMessenger.signal_shutdown(
-                agent.socket_path,
-                reason=reason,
-                timeout=3.0,
-                **generation,
+            # A session-less row that cannot name its process sends nothing a
+            # replacement on the same socket would also accept (#1408).
+            success = (session is not None or bool(generation)) and await (
+                AgentMessenger.signal_shutdown(
+                    agent.socket_path,
+                    reason=reason,
+                    timeout=3.0,
+                    **generation,
+                )
             )
         except Exception as e:
             success = False
@@ -15840,8 +15854,7 @@ class HubPlugin(BasePlugin):
                 return "stopped"
 
             if not self._may_signal(agent, session):
-                self._cleanup_stopped_peer(agent, session)
-                return guard
+                return self._withhold_signal(agent, session, guard)
 
             killed = self._escalate_agent(agent, session, signal.SIGTERM)
             if session is not None and not killed:
@@ -15855,8 +15868,7 @@ class HubPlugin(BasePlugin):
                 self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGTERM after graceful timeout)"
             if not self._may_signal(agent, session):
-                self._cleanup_stopped_peer(agent, session)
-                return guard
+                return self._withhold_signal(agent, session, guard)
 
             killed = self._escalate_agent(agent, session, signal.SIGKILL)
             if session is not None and not killed:
@@ -15870,8 +15882,7 @@ class HubPlugin(BasePlugin):
             return "stop timed out (pid survived SIGKILL)"
 
         if not self._may_signal(agent, session):
-            self._cleanup_stopped_peer(agent, session)
-            return guard
+            return self._withhold_signal(agent, session, guard)
 
         killed = self._escalate_agent(agent, session, signal.SIGTERM)
         if session is not None and not killed:
@@ -15888,8 +15899,7 @@ class HubPlugin(BasePlugin):
             return "already dead, cleaned up"
 
         if not self._may_signal(agent, session):
-            self._cleanup_stopped_peer(agent, session)
-            return guard
+            return self._withhold_signal(agent, session, guard)
 
         killed = self._escalate_agent(agent, session, signal.SIGKILL)
         if session is not None and not killed:

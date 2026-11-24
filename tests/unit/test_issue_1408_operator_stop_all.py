@@ -395,7 +395,7 @@ def test_cli_everywhere_stops_a_stuck_agent_whose_start_still_matches(tmp_path, 
     stuck = tmp_path / "other" / "stuck.json"
     stuck.write_text(json.dumps({
         "agent_id": "stuck", "identity": "stuck", "pid": os.getpid(),
-        "start_token": process_start_token(os.getpid()),
+        "start_token": process_start_token(os.getpid()), "started_at": time.time() - 900,
         "last_heartbeat": time.time() - 600,
         "socket_path": str(tmp_path / "other" / "missing.sock"), "project": "/work/elsewhere",
     }))

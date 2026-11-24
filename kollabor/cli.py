@@ -2367,6 +2367,9 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     a for a in others
                     if a.get("start_token")
                     and process_start_token(int(a.get("pid") or 0)) == a.get("start_token")
+                    and AgentMessenger.shutdown_generation(
+                        a.get("agent_id"), a.get("pid"), a.get("started_at")
+                    )
                 ]
                 unproven = [a for a in others if a not in proven]
                 agents, others = agents + proven, []
