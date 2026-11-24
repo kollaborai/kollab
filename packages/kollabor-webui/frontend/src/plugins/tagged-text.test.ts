@@ -20,6 +20,10 @@ describe("plugin tagged text", () => {
       { type: "tag", name: "todo_write", content: "real" },
     ]);
   });
+  it("does not treat an indented paragraph continuation as a code block", () => {
+    const parts = splitPluginTags("Intro line\n    <todo_write>x</todo_write>\nAfter", ["todo_write"]);
+    expect(parts).toContainEqual({ type: "tag", name: "todo_write", content: "x" });
+  });
   it("handles nested matching tags and multiple independent blocks", () => {
     expect(splitPluginTags("<x>a<x>b</x>c</x> + <x>d</x>", ["x"])).toEqual([
       { type: "tag", name: "x", content: "a<x>b</x>c" }, { type: "text", text: " + " }, { type: "tag", name: "x", content: "d" },
@@ -89,5 +93,21 @@ describe("plugin tagged text", () => {
       { type: "tag", name: "todo_write", content: "real" },
       { type: "text", text: "\n\nb `" },
     ]);
+  });
+  it("does not pair code spans across a fenced block", () => {
+    const fenced = "Use ` here\n```\ncode `\n```\n<todo_write>outside</todo_write>";
+    expect(splitPluginTags(fenced, ["todo_write"])).toContainEqual({
+      type: "tag",
+      name: "todo_write",
+      content: "outside",
+    });
+  });
+  it("does not pair code spans across separate list items", () => {
+    const listed = "- use `a\n- <todo_write>x</todo_write> and `code`";
+    expect(splitPluginTags(listed, ["todo_write"])).toContainEqual({
+      type: "tag",
+      name: "todo_write",
+      content: "x",
+    });
   });
 });
