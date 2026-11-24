@@ -37,6 +37,14 @@ describe("reservedCommandKeys", () => {
 });
 
 describe("pluginCommandEntries", () => {
+  it("reserves browser panel commands omitted from the engine list", () => {
+    const entries = pluginCommandEntries(
+      [record("alpha", [command("prompts")])],
+      reservedCommandKeys([]),
+    );
+    expect(entries).toEqual([]);
+  });
+
   it("skips reserved native names and plugins whose code has not loaded", () => {
     const entries = pluginCommandEntries(
       [record("alpha", [command("config"), command("deploy")]), record("beta", [command("ping")], false)],
