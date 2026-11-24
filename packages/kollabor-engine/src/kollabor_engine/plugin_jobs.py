@@ -307,7 +307,8 @@ class PluginJobs:
             logger.warning("Plugin staging failed: %s", type(exc).__name__)
             job["error"] = "Cannot stage plugin source; check the URL, ref, and plugin manifest"
             interrupted = await self._cleanup_staging(job)
-            job["status"] = "error"
+            if job["status"] != "cancelling":  # a cancel that arrived during cleanup owns the state
+                job["status"] = "error"
             if interrupted:
                 raise asyncio.CancelledError
         finally:
