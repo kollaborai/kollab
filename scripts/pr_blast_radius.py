@@ -61,11 +61,29 @@ def _resolve_module(name: str, module_index: dict[str, str]) -> str | None:
     return module_index.get(name) if name else None
 
 
+def _add_python_dependency(
+    dependencies: set[str],
+    name: str,
+    module_index: dict[str, str],
+    package_index: dict[str, str],
+) -> None:
+    target = _resolve_module(name, module_index)
+    if target is None:
+        return
+    dependencies.add(target)
+    parts = name.split(".")
+    for end in range(1, len(parts) + 1):
+        initializer = package_index.get(".".join(parts[:end]))
+        if initializer is not None:
+            dependencies.add(initializer)
+
+
 def _python_imports(
     tree: ast.Module,
     module_name: str,
     is_package: bool,
     module_index: dict[str, str],
+    package_index: dict[str, str],
 ) -> set[str]:
     dependencies: set[str] = set()
     current_parts = module_name.split(".") if module_name else []
@@ -74,9 +92,9 @@ def _python_imports(
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                target = _resolve_module(alias.name, module_index)
-                if target is not None:
-                    dependencies.add(target)
+                _add_python_dependency(
+                    dependencies, alias.name, module_index, package_index
+                )
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 parent_count = len(package_parts) - (node.level - 1)
@@ -94,11 +112,14 @@ def _python_imports(
                 f"{base_name}.{alias}" if base_name else alias for alias in aliases
             ] or [base_name]
             for candidate in candidates:
-                target = _resolve_module(candidate, module_index)
-                if target is None:
-                    target = _resolve_module(base_name, module_index)
-                if target is not None:
-                    dependencies.add(target)
+                resolved_name = (
+                    candidate
+                    if _resolve_module(candidate, module_index) is not None
+                    else base_name
+                )
+                _add_python_dependency(
+                    dependencies, resolved_name, module_index, package_index
+                )
     return dependencies
 
 
@@ -144,6 +165,11 @@ def build_import_graph(root: Path) -> dict[str, set[str]]:
         module_info[relative_path] = (name, is_package)
 
     graph: dict[str, set[str]] = {path: set() for path in module_info}
+    package_index = {
+        name: path
+        for path, (name, is_package) in module_info.items()
+        if name and is_package
+    }
     for path in sorted(python_paths):
         relative_path = _repo_path(root, path)
         try:
@@ -151,7 +177,9 @@ def build_import_graph(root: Path) -> dict[str, set[str]]:
         except (OSError, UnicodeError, SyntaxError) as exc:
             raise RuntimeError(f"could not parse {relative_path}") from exc
         name, is_package = module_info[relative_path]
-        graph[relative_path] = _python_imports(tree, name, is_package, module_index)
+        graph[relative_path] = _python_imports(
+            tree, name, is_package, module_index, package_index
+        )
 
     for path in sorted(_js_sources(root)):
         relative_path = _repo_path(root, path)
@@ -310,6 +338,12 @@ def _changed_paths(value: Any) -> tuple[list[str], bool]:
             complete = False
             continue
         paths.append(record["filename"])
+        previous_filename = record.get("previous_filename")
+        if previous_filename is not None:
+            if not isinstance(previous_filename, str) or not previous_filename:
+                complete = False
+            else:
+                paths.append(previous_filename)
     return paths, complete
 
 
@@ -404,13 +438,54 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
     args = parser.parse_args(argv)
 
     api = fetcher or _gh_fetcher
+    graph_error: Exception | None = None
     try:
         graph = build_import_graph(args.root)
+    except Exception as exc:
+        graph = {}
+        graph_error = exc
+        if not args.post:
+            print(f"blast-radius error: {type(exc).__name__}", file=sys.stderr)
+            return 1
+
+    try:
         pulls = _pull_numbers(api, args.repo) if args.all_open else [(args.pr, "")]
     except Exception as exc:
         print(f"blast-radius error: {type(exc).__name__}", file=sys.stderr)
         return 1
 
+    if graph_error is not None:
+        print(f"blast-radius error: {type(graph_error).__name__}", file=sys.stderr)
+        description = f"blast-radius error: {type(graph_error).__name__}"
+        for number, head_hint in pulls:
+            head_sha = head_hint
+            if not head_sha:
+                try:
+                    pull = _fetch(api, f"repos/{args.repo}/pulls/{number}")
+                    candidate = pull.get("head", {}).get("sha") if isinstance(pull, dict) else None
+                    head_sha = candidate if isinstance(candidate, str) else ""
+                except Exception:
+                    head_sha = ""
+            if head_sha:
+                try:
+                    _post_status(
+                        api, args.repo, head_sha, "failure", args.context, description
+                    )
+                except Exception as exc:
+                    print(
+                        f"blast-radius status error: {type(exc).__name__}",
+                        file=sys.stderr,
+                    )
+            print(
+                _line(
+                    number,
+                    True,
+                    [f"rule 5: comparison data incomplete ({type(graph_error).__name__})"],
+                )
+            )
+        return 1
+
+    exit_code = 0
     for number, head_hint in pulls:
         head_state = {"sha": head_hint}
         try:
@@ -428,8 +503,12 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
                         args.context,
                         f"blast-radius error: {type(exc).__name__}",
                     )
-                except Exception:
-                    pass
+                except Exception as status_exc:
+                    exit_code = 1
+                    print(
+                        f"blast-radius status error: {type(status_exc).__name__}",
+                        file=sys.stderr,
+                    )
             print(_line(number, stale, reasons))
             continue
 
@@ -441,6 +520,7 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
             except Exception as exc:
                 stale = True
                 reasons = [f"rule 5: comparison data incomplete ({type(exc).__name__})"]
+                exit_code = 1
                 try:
                     _post_status(
                         api,
@@ -450,10 +530,13 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
                         args.context,
                         f"blast-radius error: {type(exc).__name__}",
                     )
-                except Exception:
-                    pass
+                except Exception as status_exc:
+                    print(
+                        f"blast-radius status error: {type(status_exc).__name__}",
+                        file=sys.stderr,
+                    )
         print(_line(number, stale, reasons))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
