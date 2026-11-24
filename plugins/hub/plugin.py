@@ -15523,11 +15523,17 @@ class HubPlugin(BasePlugin):
             folder = getattr(agent, "project", "") or "unknown folder"
             elsewhere.setdefault(folder, []).append(agent.identity)
         if elsewhere:
+            import shlex
+
             count = sum(len(names) for names in elsewhere.values())
             lines.append(f"\nstill running: {count} agent(s) in other folders")
             for folder, names in sorted(elsewhere.items()):
                 lines.append(f"  {folder}: {', '.join(sorted(names))}")
-            lines.append("stop those too from a terminal: kollab --hub stop all --everywhere")
+                lines.append(
+                    "    stop those too: KOLLAB_PROJECT_ROOT={} kollab --hub stop all".format(
+                        shlex.quote(folder)
+                    )
+                )
         return "\n".join(lines)
 
     async def _handle_stop_command(self, rest: str, operator: bool = False) -> str:
