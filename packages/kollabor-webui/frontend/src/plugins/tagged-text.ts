@@ -8,6 +8,9 @@ const TAG = /<(\/?)([a-z][\w-]*)>/gi;
 const CONTAINER = /(?: {0,3}(?:>[ \t]?|(?:[-*+]|\d{1,9}[.)])[ \t]+))*/y;
 const FENCE_OPEN = / {0,3}(`{3,}|~{3,})/y;
 const FENCE_CLOSE = /^((?: {0,3}>)*) {0,3}(`{3,}|~{3,})\s*$/;
+const ATX_HEADING = / {0,3}#{1,6}(?:[ \t]|\r?\n|$)/y;
+const THEMATIC_BREAK = / {0,3}(?:\*(?:[ \t]*\*){2,}|-(?:[ \t]*-){2,}|_(?:[ \t]*_){2,})[ \t]*\r?(?:\n|$)/y;
+const BLOCKQUOTE = / {0,3}>[ \t]?/y;
 const BLANK_LINE = /\n(?:[ \t]*>)*[ \t\r]*\n/g;
 const INDENTED = /(?: {4}| {0,3}\t)/y;
 
@@ -109,6 +112,7 @@ function indexCodeSpanClosers(text: string): ReadonlyMap<number, number> {
         }
         previousIndentedCode = false;
         if (startsListItem(text, index)) listItems.push(index);
+        if (startsMarkdownBlock(text, index)) blockBoundaries.push(index);
       }
     }
     if (text[index] !== "`") {
@@ -144,6 +148,16 @@ function indexCodeSpanClosers(text: string): ReadonlyMap<number, number> {
     pending.set(run.length, run);
   }
   return closers;
+}
+
+/** Block markers end the paragraph, so an unmatched inline-code opener cannot hide later tags. */
+function startsMarkdownBlock(text: string, index: number): boolean {
+  ATX_HEADING.lastIndex = index;
+  if (ATX_HEADING.test(text)) return true;
+  THEMATIC_BREAK.lastIndex = index;
+  if (THEMATIC_BREAK.test(text)) return true;
+  BLOCKQUOTE.lastIndex = index;
+  return BLOCKQUOTE.test(text);
 }
 
 /** Index just past the code span that opens at this backtick run. The closer is a run of exactly the same length in the same paragraph; with none, the opening run is literal text. */
