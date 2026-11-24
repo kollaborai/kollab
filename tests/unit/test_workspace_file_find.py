@@ -145,7 +145,7 @@ def test_search_fails_closed_when_descriptor_traversal_is_unavailable(project):
 async def test_native_search_uses_the_active_workspace_and_normal_tool_hooks(project):
     bus = MagicMock()
     bus.emit_with_hooks = AsyncMock(return_value=None)
-    executor = ToolExecutor(event_bus=bus, workspace=project)
+    executor = ToolExecutor(mcp_integration=MagicMock(), event_bus=bus, workspace=project)
     executor.shell_executor.run = AsyncMock()
     executor.shell_executor.run_argv = AsyncMock()
     # An old file executor must not choose a different root after workspace changes.
@@ -173,7 +173,7 @@ def test_registered_search_has_no_command_root_or_session_capability():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("send", [False, True])
 async def test_general_terminals_preserve_harmless_programs_outside_search_scope(project, send):
-    executor = ToolExecutor(event_bus=MagicMock(), workspace=project)
+    executor = ToolExecutor(mcp_integration=MagicMock(), event_bus=MagicMock(), workspace=project)
     command = "printf '%s\\n' find | cat"
     if send:
         executor.tmux_plugin = MagicMock()
