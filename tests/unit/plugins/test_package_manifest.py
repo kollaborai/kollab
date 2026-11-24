@@ -132,3 +132,25 @@ def test_manifest_collections_fit_the_plugin_review_limits(collection, count, er
             validate_manifest(root, "0.23.0")
     else:
         assert validate_manifest(root, "0.23.0") == manifest
+
+
+def test_manifest_file_size_is_bounded_before_json_parsing(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "x" * 1_100_000,
+        "kollab": ">=0.23.0",
+        "uses": [],
+    }
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="Plugin manifest is too large"):
+        validate_manifest(root, "0.23.0")
