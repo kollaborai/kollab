@@ -1839,27 +1839,27 @@ def _row_is_generation(row: dict, selected: dict) -> bool:
 def _cleanup_presence_for_pid(
     presence_dir: Path, pid: int, selected: Optional[dict] = None
 ) -> None:
-    """Remove the presence row and socket of ``pid``; with ``selected``, only
-    while the row on disk is still that generation."""
-    from plugins.hub.presence import _presence_files
+    """Remove ``pid``'s matching presence row; leave its shared socket alone."""
+    from plugins.hub.presence import _presence_file_lock, _presence_files
 
     if not pid:
         return
     for f in _presence_files(presence_dir):
         try:
-            with open(f) as fh:
-                d = json.load(fh)
-            if d.get("pid") == pid and (
-                selected is None or _row_is_generation(d, selected)
-            ):
-                socket_path = d.get("socket_path", "")
-                f.unlink(missing_ok=True)
-                if socket_path:
-                    try:
-                        Path(socket_path).unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                break
+            # Presence writers use this stable sidecar lock around atomic
+            # replacement. Keep it through validation and unlink so a newer
+            # generation cannot take the pathname between those operations.
+            with _presence_file_lock(f):
+                with open(f) as fh:
+                    d = json.load(fh)
+                if d.get("pid") == pid and (
+                    selected is None or _row_is_generation(d, selected)
+                ):
+                    f.unlink(missing_ok=True)
+                    # The socket path is shared by agent id and can already
+                    # belong to a replacement that has not published its row.
+                    # Leave it for generation-aware stale-socket cleanup.
+                    break
         except Exception:
             pass
 
