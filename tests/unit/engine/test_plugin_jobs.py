@@ -114,6 +114,23 @@ def test_cancel_discards_ready_plugin_job(client):
     assert client.get(f"/plugins/jobs/{job_id}").status_code == 404
 
 
+@pytest.mark.parametrize("status", ["installing", "complete"])
+def test_cancel_preserves_installing_or_completed_job(client, status):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    assert _ready(client, job_id)["status"] == "ready"
+    jobs = client.app.state.plugin_jobs
+    job = jobs.jobs[job_id]
+    base = job["base"]
+    job["status"] = status
+
+    response = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert response.status_code == 409
+    assert base.exists()
+    assert jobs.jobs[job_id]["status"] == status
+
+
 def test_cancel_reserves_ready_job_while_cleanup_runs(client, monkeypatch):
     import asyncio
     import threading
