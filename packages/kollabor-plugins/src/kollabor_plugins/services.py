@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import secrets
@@ -20,7 +19,7 @@ import psutil
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file, try_lock, unlock
 
-from .packages import _ID, _SERVICE, _read_registry, files_sha256
+from .packages import _ID, _SERVICE, _read_registry, files_sha256, stop_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +345,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                 selector.register(child.stdout, selectors.EVENT_READ)
                 while selector.get_map() or child.poll() is None:
                     if stopping and not term_sent:
-                        grace = float(service.get("stop_timeout_s", 10))
+                        grace = stop_timeout(service)
                         state.update({"desired": "stopped", "status": "stopping", "stop_deadline": time.time() + grace})
                         try:
                             _write_state(state_path, state)
@@ -635,9 +634,7 @@ def control_service(
     if not verified and (_identity_alive(wrapper, wrapper=True) or _identity_alive(child)):
         raise ValueError("Service is alive without a verified wrapper")
     definition = manifest["services"][service_name]
-    timeout = definition.get("stop_timeout_s", 10) if isinstance(definition, dict) else 10
-    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
-        timeout = 10
+    timeout = stop_timeout(definition)
     already_stopping = state.get("status") == "stopping" and state.get("desired") == "stopped"
     state.update(
         {

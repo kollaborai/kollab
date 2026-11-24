@@ -82,6 +82,15 @@ _MANIFEST_KEYS = {
     "uses",
 }
 _SERVICE_KEYS = {"command", "autostart", "restart", "stop_timeout_s", "heartbeat_s", "secrets"}
+_MAX_SERVICE_SECONDS = 86400
+
+
+def stop_timeout(service: object) -> float:
+    """A service's stop grace in seconds; anything unusable falls back to the 30 s default."""
+    value = service.get("stop_timeout_s", 30) if isinstance(service, dict) else 30
+    if type(value) not in (int, float) or not 0 < value <= _MAX_SERVICE_SECONDS:
+        return 30.0
+    return float(value)
 _CONTRIBUTION_KEYS = {"menu", "views", "pages", "modals", "slash", "renderers"}
 
 
@@ -171,7 +180,8 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
             raise ValueError("Invalid service autostart")
         for key in ("stop_timeout_s", "heartbeat_s"):
             # Bounded so float() and deadline math never overflow (one day is plenty).
-            if key in service and (type(service[key]) not in (int, float) or not 0 < service[key] <= 86400):
+            value = service.get(key, 1)
+            if type(value) not in (int, float) or not 0 < value <= _MAX_SERVICE_SECONDS:
                 raise ValueError(f"Invalid service {key}")
         secrets = service.get("secrets", [])
         if not isinstance(secrets, list) or any(not isinstance(x, str) or f"secret:{x}" not in uses for x in secrets):

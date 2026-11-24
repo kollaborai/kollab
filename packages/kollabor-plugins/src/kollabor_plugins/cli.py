@@ -22,6 +22,7 @@ from .packages import (
     install_stage,
     recover_installs,
     stage_git_source,
+    stop_timeout,
     validate_manifest,
 )
 
@@ -54,7 +55,7 @@ def _stop_for_change(home: Path, plugin_id: str, services: dict) -> None:
     active = [name for name in services if _recorded_process_alive(run_dir / f"{name}.pid")]
     for name in active:
         control_service(plugin_id, name, "stop")
-    timeout = max((float(services[name].get("stop_timeout_s", 30)) for name in active), default=0) + 5
+    timeout = max((stop_timeout(services[name]) for name in active), default=0) + 5
     deadline = time.monotonic() + timeout
     while any(_recorded_process_alive(run_dir / f"{name}.pid") for name in active):
         if time.monotonic() >= deadline:
