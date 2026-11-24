@@ -618,6 +618,10 @@ def control_service(
         except ProcessLookupError:
             state["status"] = "stopped"
             _write_state(state_path, state)
+        except OSError:
+            state["status"] = "stop-failed"
+            _write_state(state_path, state)
+            raise
 
 
 def stop_services(plugin_id: str) -> None:
