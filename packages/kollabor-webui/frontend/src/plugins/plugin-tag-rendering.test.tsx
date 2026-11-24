@@ -110,6 +110,7 @@ describe("plugin tag message markdown", () => {
   it("keeps native Copy headers on code blocks around a plugin view", () => {
     const html = render("```ts\nconst before = 1;\n```\n\n<card>x</card>\n\n```ts\nconst after = 2;\n```");
 
+    expect(html).toContain("data-plugin-tag-view");
     expect((html.match(/aui-code-header-root/g) ?? []).length).toBe(2);
     expect((html.match(/>Copy</g) ?? []).length).toBe(2);
   });
