@@ -65,8 +65,8 @@ export function PluginToolPart({
   part: ToolPart;
   fallback: ReactNode;
 }) {
-  if (part.toolUI != null) return <>{fallback}</>;
   const { plugins } = usePlugins();
+  if (part.toolUI != null) return <>{fallback}</>;
   const found = findToolRenderer(plugins, part.toolName);
   if (!found) return <>{fallback}</>;
   const Render = found.spec.render;
