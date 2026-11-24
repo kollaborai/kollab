@@ -154,6 +154,7 @@ def open_main_red_issue(repo: str, run_id: str, *, gh: Gh = _run_gh) -> dict[str
     for issue in _rows(issues_payload, "issues"):
         if "pull_request" not in issue and marker in str(issue.get("body", "")):
             print(f"main red issue already exists: {issue.get('html_url', issue.get('number'))}")
+            _ensure_pr_comment(gh, repo, pull, issue)
             return issue
 
     title = f"main CI red at {sha[:7]}"
@@ -188,15 +189,25 @@ def open_main_red_issue(repo: str, run_id: str, *, gh: Gh = _run_gh) -> dict[str
         _api(gh, f"repos/{repo}/issues/{issue['number']}", method="PATCH", fields={"state": "closed"})
         print(f"closed duplicate main red issue: {keep.get('html_url', keep.get('number'))}")
         return keep
-    if pull:
-        _api(
-            gh,
-            f"repos/{repo}/issues/{pull['number']}/comments",
-            method="POST",
-            fields={"body": f"Main CI failure tracked in {issue['html_url']}"},
-        )
+    _ensure_pr_comment(gh, repo, pull, issue)
     print(f"created main red issue: {issue.get('html_url', issue.get('number'))}")
     return issue
+
+
+def _ensure_pr_comment(gh: Gh, repo: str, pull: dict[str, Any] | None, issue: dict[str, Any]) -> None:
+    """Post the PR comment that links the issue, unless it is already there."""
+    url = issue.get("html_url")
+    if not pull or not isinstance(url, str):
+        return
+    comments = _api(gh, f"repos/{repo}/issues/{pull['number']}/comments?per_page=100", paginate=True)
+    if any(url in str(row.get("body", "")) for row in _rows(comments)):
+        return
+    _api(
+        gh,
+        f"repos/{repo}/issues/{pull['number']}/comments",
+        method="POST",
+        fields={"body": f"Main CI failure tracked in {url}"},
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
