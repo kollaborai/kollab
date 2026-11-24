@@ -17,10 +17,12 @@ from .packages import (
     _SERVICE,
     _read_registry,
     _recover_locked,
+    _set_enable_order,
     _write_json,
     install_stage,
     recover_installs,
     stage_git_source,
+    stop_timeout,
     validate_manifest,
 )
 
@@ -53,7 +55,7 @@ def _stop_for_change(home: Path, plugin_id: str, services: dict) -> None:
     active = [name for name in services if _recorded_process_alive(run_dir / f"{name}.pid")]
     for name in active:
         control_service(plugin_id, name, "stop")
-    timeout = max((float(services[name].get("stop_timeout_s", 30)) for name in active), default=0) + 5
+    timeout = max((stop_timeout(services[name]) for name in active), default=0) + 5
     deadline = time.monotonic() + timeout
     while any(_recorded_process_alive(run_dir / f"{name}.pid") for name in active):
         if time.monotonic() >= deadline:
@@ -273,6 +275,7 @@ def main(argv: list[str]) -> int:
                     raise ValueError("Development approval changed during detach; try again")
                 with locked_file(dev_data / "values.json.lock", private=True):
                     del registry["dev"][args.plugin_id]
+                    _set_enable_order(registry, dev_id, False)
                     _write_json(home / "plugins.json", registry)
                     (dev_data / "values.json").unlink(missing_ok=True)
                     (dev_data / "approval.json").unlink(missing_ok=True)
@@ -295,6 +298,8 @@ def main(argv: list[str]) -> int:
                 _, current_approval = _approved_service_root(home, registry, dev_id, stopping=True)
                 if current_approval != prior_approval:
                     raise ValueError("Development approval changed; try again")
+            if dev_folder is None:
+                _set_enable_order(registry, dev_id, True)
             target = home / "plugin-data" / f"{plugin_id}@dev"
             target.mkdir(parents=True, exist_ok=True)
             with locked_file(target / "values.json.lock", private=True):
