@@ -80,10 +80,12 @@ def test_unclassified_paths_turn_on_webui():
     assert ci_changed_lanes.lanes_for(paths) == {"webui": True, "voice": False}
 
 
-def test_changes_job_pick_step_uses_fail_closed_shell():
+def test_support_job_pick_step_uses_fail_closed_shell():
     workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
     pick_step = next(
-        step for step in workflow["jobs"]["changes"]["steps"] if step.get("id") == "pick"
+        step
+        for step in workflow["jobs"]["supporting_tests"]["steps"]
+        if step.get("id") == "pick"
     )
 
     assert pick_step.get("shell") == "bash"
