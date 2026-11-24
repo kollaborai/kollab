@@ -154,3 +154,59 @@ def test_workflow_serializes_runs_for_one_commit():
     group = wf["jobs"]["open-issue"]["concurrency"]
     assert group["group"] == "main-red-${{ github.event.workflow_run.head_sha }}"
     assert group["cancel-in-progress"] is False
+
+
+def test_overlapping_runs_for_one_commit_leave_one_open_issue():
+    import threading
+
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+
+    class RacingGh(FakeGh):
+        def __init__(self):
+            super().__init__()
+            self.next_number = 100
+            self.first_reads = 0
+
+        def __call__(self, args):
+            path = args[1]
+            if path == "repos/owner/repo/issues?state=all&per_page=100":
+                with lock:
+                    self.first_reads += 1
+                    gate = self.first_reads <= 2
+                snapshot = super().__call__(args)
+                if gate:
+                    barrier.wait(timeout=5)
+                return snapshot
+            if path == "repos/owner/repo/issues" and "--method" in args:
+                with lock:
+                    self.next_number += 1
+                    number = self.next_number
+                result = json.loads(super().__call__(args))
+                result["number"] = number
+                result["html_url"] = f"https://example.test/issues/{number}"
+                with lock:
+                    self.issues[-1].update(result)
+                return json.dumps(result)
+            if path.startswith("repos/owner/repo/issues/") and "--method" in args and "PATCH" in args:
+                number = int(path.rsplit("/", 1)[1])
+                with lock:
+                    for issue in self.issues:
+                        if issue["number"] == number:
+                            issue["state"] = "closed"
+                return json.dumps({"number": number, "state": "closed"})
+            return super().__call__(args)
+
+    gh = RacingGh()
+    threads = [
+        threading.Thread(target=open_main_red_issue, args=("owner/repo", "7"), kwargs={"gh": gh})
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    open_issues = [issue for issue in gh.issues if issue.get("state") != "closed"]
+    assert len(open_issues) == 1
+    assert open_issues[0]["number"] == min(issue["number"] for issue in gh.issues)
