@@ -1,7 +1,8 @@
 // Writes the plugin SDK declarations that the bundled Hello web example type-checks against.
 // The contract is copied from the host's own types in src/plugins/sdk.ts, so the two cannot drift:
 // `--check` fails when the committed declarations are stale.
-import { readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const frontend = new URL("../", import.meta.url);
@@ -48,5 +49,12 @@ if (process.argv.includes("--check")) {
     process.exit(1);
   }
 } else {
-  await writeFile(target, declaration);
+  const targetPath = fileURLToPath(target);
+  const temporaryPath = `${targetPath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, declaration, { flag: "wx" });
+    await rename(temporaryPath, targetPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
 }
