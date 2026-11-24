@@ -469,13 +469,17 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
     home = tmp_path / ".kollab"
     root = home / "plugins" / "hello"
     root.mkdir(parents=True)
-    ready, waiting, stop_waiting = (
+    ready, waiting, stop_waiting, locked, release = (
         tmp_path / "ready",
         tmp_path / "waiting-for-registry-lock",
         tmp_path / "stop-waiting-for-registry-lock",
+        tmp_path / "registry-locked",
+        tmp_path / "release-registry-lock",
     )
     child_code = f"from pathlib import Path; import time; Path({str(ready)!r}).touch(); time.sleep(60)"
-    manifest = {"id": "hello", "services": {"worker": {"command": [sys.executable, "-c", child_code]}}}
+    manifest = {"id": "hello", "services": {"worker": {
+        "command": [sys.executable, "-c", child_code], "stop_timeout_s": 1,
+    }}}
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
     (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {
         "enabled": True,
@@ -493,6 +497,7 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
     source = "\n".join(
         [
             "import time",
+            "import sys",
             "from contextlib import contextmanager",
             "from pathlib import Path",
             "from kollabor_plugins import services",
@@ -504,7 +509,7 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
             "    with original(path, *args, **kwargs):",
             "        yield",
             "services.locked_file = gate",
-            'services.run_service("hello", "worker", "abcd")',
+            'services.run_service("hello", "worker", sys.argv[1])',
         ]
     )
     original_lock = services.locked_file
@@ -517,40 +522,67 @@ def test_stop_wins_when_wrapper_waits_for_registry_lock(tmp_path, monkeypatch):
             yield
 
     monkeypatch.setattr(services, "locked_file", wait_for_stop_lock)
+    holder_source = "\n".join(
+        [
+            "import time",
+            "from pathlib import Path",
+            "from kollabor_config.file_lock import locked_file",
+            f"with locked_file(Path({str(home / 'plugins.json.lock')!r}), private=True):",
+            f"    Path({str(locked)!r}).touch()",
+            f"    while not Path({str(release)!r}).exists():",
+            "        time.sleep(0.01)",
+        ]
+    )
     wrapper = None
+    holder = None
     stop_thread = None
     stop_errors = []
     try:
-        with file_lock.locked_file(home / "plugins.json.lock", private=True):
-            wrapper = subprocess.Popen([sys.executable, "-c", source])
-            deadline = time.monotonic() + 8
-            while not waiting.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert waiting.exists(), "wrapper did not wait for the registry lock"
-            def stop():
-                try:
-                    services.control_service("hello", "worker", "stop")
-                except Exception as exc:
-                    stop_errors.append(exc)
+        holder = subprocess.Popen([sys.executable, "-c", holder_source])
+        deadline = time.monotonic() + 5
+        while not locked.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert locked.exists(), "lock holder did not acquire the registry lock"
+        wrapper = subprocess.Popen([sys.executable, "-c", source, "abcd"])
+        deadline = time.monotonic() + 8
+        while not waiting.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert waiting.exists(), "wrapper did not wait for the registry lock"
 
-            stop_thread = threading.Thread(target=stop)
-            stop_thread.start()
-            deadline = time.monotonic() + 3
-            while not stop_waiting.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert stop_waiting.exists(), "stop did not join the startup lock"
+        def stop():
+            try:
+                services.control_service("hello", "worker", "stop")
+            except Exception as exc:
+                stop_errors.append(exc)
+
+        stop_thread = threading.Thread(target=stop)
+        stop_thread.start()
+        deadline = time.monotonic() + 3
+        while not stop_waiting.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert stop_waiting.exists(), "stop did not join the startup lock"
+        release.touch()
         stop_thread.join(timeout=5)
         assert not stop_thread.is_alive(), "stop deadlocked behind startup"
         assert not stop_errors
+        stopped_state = json.loads((run / "worker.state").read_text())
+        assert stopped_state["desired"] == "stopped", f"stop returned without recording stop: {stopped_state!r}"
         try:
             wrapper.wait(timeout=4)
         except subprocess.TimeoutExpired:
-            pytest.fail("wrapper started a service after stop had succeeded")
+            state = json.loads((run / "worker.state").read_text())
+            identity = json.loads((run / "worker.pid").read_text())
+            pytest.fail(
+                f"wrapper survived stop: after_stop={stopped_state!r}, state={state!r}, identity={identity!r}"
+            )
         state = json.loads((run / "worker.state").read_text())
         assert state["desired"] == "stopped"
     finally:
+        release.touch()
         if stop_thread is not None:
             stop_thread.join(timeout=5)
+        if holder is not None and holder.poll() is None:
+            holder.wait(timeout=3)
         if wrapper is not None and wrapper.poll() is None:
             wrapper.terminate()
             try:
