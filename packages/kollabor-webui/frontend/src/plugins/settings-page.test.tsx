@@ -48,6 +48,19 @@ afterEach(() => {
 });
 
 describe("plugin settings page", () => {
+  it("shows counts for data omitted from the installed inventory", async () => {
+    const entry = {
+      ...plugin([]),
+      omitted: { services: 1, uses: 1, granted: 1 },
+      services: [{ name: "worker", state: "stopped", secrets: [], secrets_omitted: 1 }],
+    } as unknown as PluginEntry;
+    const markup = await markupFor([entry]);
+
+    expect(markup).toContain(
+      "Inventory omitted: 1 service, 1 use declaration, 1 granted capability, 1 service secret.",
+    );
+  });
+
   it.each([
     ["entry id", (entry: Record<string, unknown>) => ({ ...entry, id: { token: CANARY } })],
     ["entry name", (entry: Record<string, unknown>) => ({ ...entry, name: CANARY })],
