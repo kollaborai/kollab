@@ -2,6 +2,7 @@
 
 A guided, fullscreen wizard that walks a new user through configuring their
 first LLM provider — no environment variables or hand-edited JSON required.
+Settings > Setup in the Web UI and desktop app also supports ChatGPT sign-in.
 
 ```
 /setup            # aliases: /onboard, /wizard
@@ -46,11 +47,20 @@ next interactive launch.
 
 ## Special routes
 
-- **OpenAI — sign in with ChatGPT**: delegates to the existing OAuth device-code
-  flow (the same one `/login openai` runs). No API key is requested.
+- **OpenAI — sign in with ChatGPT**: uses the existing OAuth device-code flow
+  used by `/login openai`. No API key or endpoint is requested.
 - **Azure / Advanced**: routed to manual `config.json` editing (see
   [`docs/providers.md`](../providers.md)), since Azure profiles need an
   endpoint + deployment that the guided flow does not capture.
+
+## Web UI sign-in
+
+Choose **OpenAI (sign in with ChatGPT)** in Settings > Setup. The wizard opens
+the device-code page, shows a code to enter, and reports waiting, success,
+expiry, denial, and network errors in the sign-in step. After sign-in, choose a
+model and save the review. Save and Activate stores the OAuth tokens, creates or
+updates the `openai-oauth` profile, and makes it active. Cancel, closing Setup,
+or selecting another provider stops the pending sign-in.
 
 ## Where things live
 
