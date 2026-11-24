@@ -33,6 +33,11 @@ def test_plugin_secret_redaction_boundaries_are_shared():
         ("manifest use", "run:GITHUB_TOKEN=" + credential, None),
         ("inventory token assignment", "GITHUB_TOKEN=" + credential, None),
         ("inventory bearer", "Bearer abc123XYZ987", None),
+        (
+            "short bearer log token",
+            "Authorization: Bearer abc123",
+            "Authorization: Bearer [redacted]",
+        ),
         ("basic settings label", "Basic settings", "Basic settings"),
         ("bearer help placeholder", "Bearer <key>", "Bearer <key>"),
         ("inventory key shape", "sk-live-abcdefghijklmnop", None),
