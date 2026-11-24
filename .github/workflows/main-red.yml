@@ -15,6 +15,9 @@ jobs:
       (github.event.workflow_run.event == 'push' ||
        github.event.workflow_run.event == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    concurrency:
+      group: main-red-${{ github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
     permissions:
       contents: read
       issues: write
