@@ -1002,3 +1002,12 @@ def test_stop_cleanup_serializes_with_replacement_publish_and_keeps_its_socket(
     assert not errors
     assert json.loads(row.read_text())["started_at"] == 200.0
     assert sock.read_text() == "replacement"
+
+
+def test_typed_stop_all_gives_each_other_folder_a_scoped_command(monkeypatch):
+    far = _peer("koordinator", project="/work/elsewhere")
+    plugin, _ = _plugin(monkeypatch, [], [far])
+
+    result = asyncio.run(plugin._handle_hub_command("stop all"))
+
+    assert "KOLLAB_PROJECT_ROOT=/work/elsewhere kollab --hub stop all" in result
