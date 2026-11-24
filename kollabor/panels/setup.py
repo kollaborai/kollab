@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, List, Optional
 from urllib.parse import urlparse
@@ -65,6 +67,9 @@ PROVIDERS: List[ProviderChoice] = [
         label="OpenAI  (sign in with ChatGPT)",
         provider="openai_responses",
         blurb="Use your ChatGPT subscription via OAuth — no API key needed.",
+        default_base_url="https://chatgpt.com/backend-api/codex",
+        default_model="gpt-5.6-luna",
+        needs_key=False,
         oauth=True,
     ),
     ProviderChoice(
@@ -113,9 +118,13 @@ PROVIDERS: List[ProviderChoice] = [
 def load_model_suggestions(provider_value: str) -> List[str]:
     """Curated model names for a provider from the shared model registry."""
     try:
-        from kollabor_ai.model_registry import get_model_registry
+        from kollabor_ai.model_registry import (
+            PROVIDER_MODEL_SOURCE,
+            get_model_registry,
+        )
 
         models = get_model_registry().get("models", {})
+        model_provider = PROVIDER_MODEL_SOURCE.get(provider_value, provider_value)
     except Exception as exc:  # registry is best-effort
         logger.debug("setup: model registry unavailable: %s", exc)
         return []
@@ -124,7 +133,7 @@ def load_model_suggestions(provider_value: str) -> List[str]:
         name
         for name, meta in models.items()
         if isinstance(meta, dict)
-        and meta.get("provider") == provider_value
+        and meta.get("provider") == model_provider
         and not meta.get("retired")
     ]
     # Stable, readable order (registry dicts are insertion-ordered already).
@@ -326,7 +335,7 @@ def _label(choice: ProviderChoice) -> str:
 
 
 def _selectable() -> list[ProviderChoice]:
-    return [p for p in PROVIDERS if not p.oauth and not p.advanced]
+    return [p for p in PROVIDERS if not p.advanced]
 
 
 def _pick(value: str) -> Optional[ProviderChoice]:
@@ -348,12 +357,21 @@ def _values(payload: dict) -> tuple[ProviderChoice, str, str, str]:
     api_key = str(values.get("api_key") or "").strip()
     base_url = str(values.get("base_url") or "").strip()
     model = str(values.get("model") or "").strip()
-    for key, value in (("api_key", api_key), ("base_url", base_url), ("model", model)):
+    oauth_model = str(values.get("oauth_model") or "").strip()
+    for key, value in (
+        ("api_key", api_key),
+        ("base_url", base_url),
+        ("model", model),
+        ("oauth_model", oauth_model),
+    ):
         if len(value) > _MAX_FIELD or not value.isprintable():
             errors[key] = "That value is not valid."
     if choice is not None:
         base_url = base_url or choice.default_base_url
-        model = model or choice.default_model
+        if choice.oauth:
+            model = oauth_model or model or choice.default_model
+        else:
+            model = model or choice.default_model
         if choice.needs_key and not api_key:
             errors.setdefault("api_key", "An API key is required.")
         if choice.base_url_required and not base_url:
@@ -374,8 +392,165 @@ class SetupPanel:
     name = "setup"
     kind = "wizard"
 
+    def __init__(self) -> None:
+        self._oauth_flows: dict[str, dict[str, Any]] = {}
+
+    async def _complete_oauth(self, flow_id: str) -> None:
+        flow = self._oauth_flows[flow_id]
+        client = flow["client"]
+        try:
+            auth = await client._poll_for_auth_code(flow["device"])
+            flow["tokens"] = await client._exchange_code(
+                auth.authorization_code, auth.code_verifier
+            )
+            flow["status"] = "signed_in"
+            flow["message"] = "Signed in to ChatGPT."
+            flow["account"] = flow["tokens"].account_id or "ChatGPT account"
+        except asyncio.CancelledError:
+            flow["status"] = "cancelled"
+            raise
+        except Exception as exc:  # surfaced as a short status, never credentials
+            text = str(exc)
+            lowered = text.lower()
+            if "expir" in lowered or "timed out waiting for authorization" in lowered:
+                flow["status"] = "expired"
+                flow["message"] = redact_error(text)
+            elif "denied" in lowered:
+                flow["status"] = "denied"
+                flow["message"] = redact_error(text)
+            elif any(word in lowered for word in ("network", "connection")) or isinstance(exc, asyncio.TimeoutError):
+                flow["status"] = "network_error"
+                flow["message"] = f"Network error: {redact_error(text)}"
+            else:
+                flow["status"] = "failed"
+                flow["message"] = redact_error(text)
+            logger.warning("setup: ChatGPT sign-in failed (%s)", type(exc).__name__)
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+    def _oauth_context(self, flow_id: str | None) -> dict[str, Any]:
+        flow = self._oauth_flows.get(flow_id or "")
+        if not flow:
+            return {}
+        return {
+            "oauth_flow_id": flow_id,
+            "verification_url": flow.get("verification_url"),
+            "user_code": flow.get("user_code"),
+            "interval": flow.get("interval"),
+            "expires_in": flow.get("expires_in"),
+            "oauth_status": flow.get("status", "waiting"),
+            "oauth_message": flow.get("message", "Waiting for sign-in…"),
+            "account": flow.get("account", ""),
+        }
+
+    async def _oauth_start(self, ctx: Any, payload: dict | None = None) -> dict:
+        from kollabor_ai.oauth.openai_oauth import (
+            DEVICE_CODE_TIMEOUT,
+            DEVICE_VERIFY_URL,
+            OpenAIOAuthClient,
+        )
+
+        previous_flow = str((payload or {}).get("flow_id") or "")
+        if previous_flow:
+            await self._oauth_cancel({"flow_id": previous_flow})
+
+        client = OpenAIOAuthClient()
+        try:
+            device = await client._request_device_code()
+        except Exception:
+            await client.close()
+            return {
+                "ok": False,
+                "message": "Network error while starting sign-in. Check your connection and try again.",
+                "panel": await self.describe(
+                    ctx,
+                    {
+                        "oauth_status": "network_error",
+                        "oauth_message": "Network error while starting sign-in. Check your connection and try again.",
+                    },
+                ),
+            }
+
+        now = time.monotonic()
+        for old_id, old in list(self._oauth_flows.items()):
+            if old.get("task") is None or old["task"].done():
+                if now - old.get("created_at", now) > 900:
+                    self._oauth_flows.pop(old_id, None)
+        if len(self._oauth_flows) >= 16:
+            await client.close()
+            return {"ok": False, "message": "Too many sign-in attempts are active. Cancel one and try again."}
+
+        flow_id = uuid.uuid4().hex
+        flow = {
+            "client": client,
+            "device": device,
+            "status": "waiting",
+            "message": "Waiting for sign-in…",
+            "verification_url": DEVICE_VERIFY_URL,
+            "user_code": device.user_code,
+            "interval": max(1, device.interval),
+            "expires_in": DEVICE_CODE_TIMEOUT,
+            "created_at": now,
+        }
+        client.status_callback = lambda status, message: flow.update(
+            status=status, message=message
+        )
+        self._oauth_flows[flow_id] = flow
+        flow["task"] = asyncio.create_task(self._complete_oauth(flow_id))
+        return {
+            "ok": True,
+            "message": "Waiting for sign-in…",
+            "flow_id": flow_id,
+            "verification_url": DEVICE_VERIFY_URL,
+            "user_code": device.user_code,
+            "interval": max(1, device.interval),
+            "expires_in": DEVICE_CODE_TIMEOUT,
+            "status": "waiting",
+            "poll": {"action": "oauth_poll", "payload": {"flow_id": flow_id}, "every_s": max(1, device.interval)},
+            "panel": await self.describe(ctx, {"flow_id": flow_id}),
+        }
+
+    async def _oauth_poll(self, ctx: Any, payload: dict) -> dict:
+        flow_id = str(payload.get("flow_id") or "")
+        flow = self._oauth_flows.get(flow_id)
+        if flow is None:
+            return {"ok": False, "message": "Sign-in expired. Start again."}
+        status = flow.get("status", "waiting")
+        pending = status in ("waiting", "network_error")
+        result = {
+            "ok": status in ("waiting", "signed_in"),
+            "status": "waiting" if status == "waiting" else ("signed_in" if status == "signed_in" else "failed"),
+            "message": flow.get("message", "Waiting for sign-in…"),
+            "panel": await self.describe(ctx, {"flow_id": flow_id}),
+        }
+        if pending:
+            result["poll"] = {
+                "action": "oauth_poll",
+                "payload": {"flow_id": flow_id},
+                "every_s": max(1, flow["device"].interval),
+            }
+        return result
+
+    async def _oauth_cancel(self, payload: dict) -> dict:
+        flow_id = str(payload.get("flow_id") or "")
+        flow = self._oauth_flows.pop(flow_id, None)
+        if flow:
+            task = flow.get("task")
+            if task and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            try:
+                await flow["client"].close()
+            except Exception:
+                pass
+        return {"ok": True, "message": "Sign-in cancelled."}
+
     async def describe(self, ctx: Any, params: dict) -> dict:
         choices = _selectable()
+        oauth_models = load_model_suggestions("openai_responses")
         steps = [
             {
                 "id": "provider",
@@ -386,9 +561,8 @@ class SetupPanel:
                         value=_label(choices[0]), options=[_label(p) for p in choices],
                     ),
                     make_field(
-                        "oauth_note", "label", "ChatGPT Sign-In",
-                        value="Run /login in a terminal to sign in with ChatGPT. "
-                        "Azure and advanced setups are configured in config.json.",
+                        "oauth_note", "label", "Azure / Advanced",
+                        value="Azure and advanced setups are configured in config.json.",
                     ),
                 ],
             },
@@ -413,21 +587,52 @@ class SetupPanel:
                 ],
             },
             {
+                "id": "oauth_sign_in",
+                "title": "Sign In",
+                "fields": [],
+                "actions": [
+                    {"id": "oauth_start", "label": "Try Again"},
+                    {"id": "oauth_cancel", "label": "Cancel"},
+                ],
+            },
+            {
                 "id": "model",
                 "title": "Model",
                 "fields": [
                     make_field(
                         "model", "text_input", "Model",
                         placeholder="Leave empty for the suggested model",
+                    ),
+                    make_field(
+                        "oauth_model", "dropdown", "Model",
+                        value=oauth_models[0] if oauth_models else "gpt-5.6-luna",
+                        options=oauth_models,
+                    ),
+                ],
+            },
+            {
+                "id": "oauth_review",
+                "title": "Review",
+                "fields": [
+                    make_field(
+                        "oauth_review_note", "label", "ChatGPT",
+                        value="Your ChatGPT sign-in and selected model will be saved and activated.",
                     )
                 ],
             },
         ]
+        context = self._oauth_context(params.get("flow_id"))
+        if not context and params.get("oauth_status"):
+            context = {
+                "oauth_status": params["oauth_status"],
+                "oauth_message": params.get("oauth_message", ""),
+            }
         return {
             "panel": self.name,
             "kind": self.kind,
             "title": "Setup",
             "steps": steps,
+            "context": context,
             "providers": [
                 {
                     "value": _label(p),
@@ -445,16 +650,47 @@ class SetupPanel:
             "actions": [
                 {"id": "test", "label": "Test Connection"},
                 {"id": "finish", "label": "Save and Activate"},
+                {"id": "oauth_start", "label": "Start Sign-In"},
+                {"id": "oauth_poll", "label": "Check Sign-In"},
+                {"id": "oauth_cancel", "label": "Cancel"},
             ],
         }
 
     async def act(self, ctx: Any, action: str, payload: dict) -> dict:
+        if action == "oauth_start":
+            return await self._oauth_start(ctx, payload)
+        if action == "oauth_poll":
+            return await self._oauth_poll(ctx, payload)
+        if action == "oauth_cancel":
+            return await self._oauth_cancel(payload)
         if action not in ("test", "finish"):
             raise unknown_action(self.name, action)
         choice, api_key, base_url, model = _values(payload)
         if action == "test":
+            if choice.oauth:
+                return error_result("Test Connection is unavailable before ChatGPT sign-in.")
             ok, message = await test_connection(choice.provider, model, api_key, base_url)
             return ok_result(message) if ok else error_result(message)
+        if choice.oauth:
+            flow_id = str(payload.get("oauth_flow_id") or "")
+            flow = self._oauth_flows.get(flow_id)
+            if not flow or flow.get("status") != "signed_in" or not flow.get("tokens"):
+                return error_result("Sign in with ChatGPT before saving this profile.")
+            from kollabor_ai.oauth import OAuthTokenStorage
+            from kollabor_ai.oauth.profile import save_openai_oauth_profile
+
+            tokens = flow["tokens"]
+            await OAuthTokenStorage().store_tokens("openai", tokens)
+            name = save_openai_oauth_profile(ctx._profile_manager, tokens, model)
+            if hasattr(ctx, "set_active_profile"):
+                await ctx.set_active_profile(name, persist=True, reload_profile=True)
+            else:
+                ctx._profile_manager.set_active_profile(name, persist=True)
+            self._oauth_flows.pop(flow_id, None)
+            return ok_result(
+                f"Provider ready: profile '{name}' (openai_responses), model {model}, active now.",
+                panel=await self.describe(ctx, {}),
+            )
         try:
             name = await create_and_activate_profile(
                 ctx._profile_manager,

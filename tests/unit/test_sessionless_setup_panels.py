@@ -41,7 +41,9 @@ async def test_setup_panel_describes_wizard_sessionless(client):
     body = response.json()
     assert body["panel"] == "setup"
     assert body["kind"] == "wizard"
-    assert [step["id"] for step in body["steps"]] == ["provider", "api_key", "endpoint", "model"]
+    assert [step["id"] for step in body["steps"]] == [
+        "provider", "api_key", "endpoint", "oauth_sign_in", "model", "oauth_review"
+    ]
 
 
 async def test_connect_panel_describes_unavailable_sessionless(client):
