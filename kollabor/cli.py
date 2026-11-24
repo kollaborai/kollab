@@ -2152,7 +2152,11 @@ async def _handle_cli_hub(hub_args: list) -> None:
         print(f"\n{len(others)} agent(s) {verb} in other folders:")
         for folder, names in sorted(folders.items()):
             print(f"  {folder}: {', '.join(sorted(names))}")
-        print("stop those too: kollab --hub stop all --everywhere")
+            print(
+                "    stop those too: KOLLAB_PROJECT_ROOT={} kollab --hub stop all".format(
+                    shlex.quote(folder)
+                )
+            )
 
     def _find_agent(identity: str) -> Optional[dict]:
         for a in _get_live_agents():
