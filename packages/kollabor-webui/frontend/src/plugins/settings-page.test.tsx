@@ -103,6 +103,42 @@ describe("plugin settings page", () => {
     expect(markup).toContain("Running · No Heartbeat for 6 min");
   });
 
+  it("starts the missed-heartbeat window at the later heartbeat monitor or heartbeat time", async () => {
+    const now = Date.now() / 1000;
+    const markup = await markupFor([{
+      ...plugin([]),
+      enabled: true,
+      services: [
+        {
+          name: "restarted-worker",
+          state: "running",
+          since: now - 7200,
+          heartbeat: null,
+          heartbeat_monitor_since: now - 30,
+          heartbeat_s: 60,
+        },
+        {
+          name: "late-heartbeat-worker",
+          state: "running",
+          since: now - 7200,
+          heartbeat: now - 180,
+          heartbeat_monitor_since: now - 30,
+          heartbeat_s: 60,
+        },
+        {
+          name: "late-monitor-worker",
+          state: "running",
+          since: now - 7200,
+          heartbeat: now - 30,
+          heartbeat_monitor_since: now - 180,
+          heartbeat_s: 60,
+        },
+      ] as PluginEntry["services"],
+    }]);
+
+    expect(markup).not.toContain("No Heartbeat");
+  });
+
   it("shows which declared secrets a background process receives", async () => {
     const markup = await markupFor([{
       ...plugin([]),
