@@ -6,11 +6,11 @@ import { findTagRenderer, findToolRenderer, tagRendererNames } from "./renderer-
 const Render = (() => null) as unknown as RendererSpec["render"];
 const k = {} as PluginApi;
 
-function record(id: string, renderers: RendererSpec[], withK = true): PluginRecord {
+function record(id: string, renderers: RendererSpec[], withK = true, enableOrder?: number): PluginRecord {
   return {
     id,
     name: id,
-    entry: {} as PluginRecord["entry"],
+    entry: (enableOrder === undefined ? {} : { enable_order: enableOrder }) as PluginRecord["entry"],
     status: "ready",
     error: null,
     retries: 0,
@@ -45,6 +45,20 @@ describe("findToolRenderer", () => {
     const second: RendererSpec = { tool: "shell", render: Render };
     const match = findToolRenderer([record("alpha", [first]), record("beta", [second])], "shell");
     expect(match?.spec).toBe(first);
+  });
+
+  it("the first enabled plugin owns both tool and tag renderers", () => {
+    const alphaTool: RendererSpec = { tool: "shell", render: Render };
+    const zuluTool: RendererSpec = { tool: "shell", render: Render };
+    const alphaTag: RendererSpec = { tag: "status-card", render: Render };
+    const zuluTag: RendererSpec = { tag: "status-card", render: Render };
+    const plugins = [
+      record("alpha", [alphaTool, alphaTag], true, 2),
+      record("zulu", [zuluTool, zuluTag], true, 1),
+    ];
+
+    expect(findToolRenderer(plugins, "shell")?.spec).toBe(zuluTool);
+    expect(findTagRenderer(plugins, "status-card")?.spec).toBe(zuluTag);
   });
 });
 

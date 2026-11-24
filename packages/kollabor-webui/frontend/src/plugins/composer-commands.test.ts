@@ -16,11 +16,11 @@ function command(name: string, description = `${name} command`): CommandSpec {
   return { name, description, run };
 }
 
-function record(id: string, commands: CommandSpec[], withK = true): PluginRecord {
+function record(id: string, commands: CommandSpec[], withK = true, enableOrder?: number): PluginRecord {
   return {
     id,
     name: id,
-    entry: {} as PluginRecord["entry"],
+    entry: (enableOrder === undefined ? {} : { enable_order: enableOrder }) as PluginRecord["entry"],
     status: "ready",
     error: null,
     retries: 0,
@@ -53,6 +53,19 @@ describe("pluginCommandEntries", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].pluginId).toBe("alpha");
     expect(entries[0].description).toBe("from alpha");
+  });
+
+  it("the first enabled plugin wins even when its name sorts later", () => {
+    const entries = pluginCommandEntries(
+      [
+        record("alpha", [command("deploy", "from alpha")], true, 2),
+        record("zulu", [command("deploy", "from zulu")], true, 1),
+      ],
+      new Set(),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].pluginId).toBe("zulu");
+    expect(entries[0].description).toBe("from zulu");
   });
 });
 
