@@ -152,8 +152,8 @@ def save(
 ) -> None:
     """Serialize validation and saving with install, update, detach and removal.
 
-    ``allow_secrets`` is reserved for the local config panel, which already
-    provides masked secret editing. Remote/plugin callers use the default.
+    ``allow_secrets`` is reserved for local UI writers, which provide masked
+    secret editing. Remote/plugin callers use the default.
     """
     if not isinstance(plugin_id, str):
         raise ValueError("Invalid plugin id")

@@ -403,7 +403,7 @@ def put_plugin_settings(
         if context is None:
             from kollabor_plugins.settings import save
 
-            save(plugin_id, values, kind=kind)
+            save(plugin_id, values, kind=kind, allow_secrets=True)
             saved = get_plugin_settings(plugin_id, kind=kind)
         else:
             context.settings.save(values)
