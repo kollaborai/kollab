@@ -461,6 +461,34 @@ def test_finished_review_job_does_not_block_the_next_review(client, managed_repo
     assert failed["job_id"] not in client.app.state.plugin_jobs.jobs
 
 
+@pytest.mark.parametrize(
+    ("status", "retained"),
+    [("error", False), ("cancelled", False), ("complete", True)],
+)
+def test_start_keeps_unacknowledged_completed_result(client, monkeypatch, status, retained):
+    import asyncio
+
+    manager = client.app.state.plugin_jobs
+    previous_id = "unacknowledged-result"
+    manager.jobs[previous_id] = {
+        "id": previous_id,
+        "action": "install",
+        "status": status,
+        "updated": time.monotonic(),
+    }
+
+    async def hold_staging(_job):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager, "_stage", hold_staging)
+    started = client.portal.call(
+        manager._start, "install", "https://example.invalid/repo"
+    )
+
+    assert started["status"] == "staging"
+    assert (previous_id in manager.jobs) is retained
+
+
 def test_expiry_leaves_cleanup_to_close_when_manager_is_closing(client, monkeypatch):
     from kollabor_engine import plugin_jobs
 
