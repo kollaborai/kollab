@@ -114,6 +114,66 @@ def test_cancel_discards_ready_plugin_job(client):
     assert client.get(f"/plugins/jobs/{job_id}").status_code == 404
 
 
+def test_cancel_reserves_ready_job_while_cleanup_runs(client, monkeypatch):
+    import asyncio
+    import threading
+
+    from fastapi import HTTPException
+
+    jobs = client.app.state.plugin_jobs
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    cleanup_started, release_cleanup = threading.Event(), threading.Event()
+    release_apply = threading.Event()
+    original_cleanup = jobs._cleanup
+
+    def slow_cleanup(job):
+        cleanup_started.set()
+        assert release_cleanup.wait(5)
+        return original_cleanup(job)
+
+    async def blocked_apply(job, commit, digest):
+        assert await asyncio.to_thread(release_apply.wait, 5)
+        return jobs._public(job)
+
+    monkeypatch.setattr(jobs, "_cleanup", slow_cleanup)
+    monkeypatch.setattr(jobs, "_apply", blocked_apply)
+
+    async def race():
+        cancel = asyncio.create_task(jobs.cancel(job_id))
+        try:
+            assert await asyncio.to_thread(cleanup_started.wait, 2)
+            duplicate_cancel = asyncio.create_task(jobs.cancel(job_id))
+            confirm = asyncio.create_task(jobs.confirm(job_id, ready["commit"], ready["files_sha256"]))
+            await asyncio.sleep(0.05)
+            assert confirm.done(), "confirm must be rejected while cancellation owns the job"
+            with pytest.raises(HTTPException) as confirm_error:
+                await confirm
+            assert confirm_error.value.status_code == 409
+            assert duplicate_cancel.done(), "a second DELETE must not enter cleanup"
+            with pytest.raises(HTTPException) as cancel_error:
+                await duplicate_cancel
+            assert cancel_error.value.status_code == 409
+        finally:
+            release_cleanup.set()
+            release_apply.set()
+            await asyncio.gather(cancel, return_exceptions=True)
+
+    asyncio.run(race())
+
+
+def test_cancel_rejects_new_work_while_manager_is_closing(client):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    assert _ready(client, job_id)["status"] == "ready"
+    client.app.state.plugin_jobs.closing = True
+
+    response = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert response.status_code == 503
+
+
 def test_cancel_stops_staging_job_and_removes_its_files(client, monkeypatch):
     import asyncio
     import threading
