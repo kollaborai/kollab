@@ -4,6 +4,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ComponentType,
   type ReactNode,
 } from "react";
 import {
@@ -77,6 +78,8 @@ import {
 } from "@/utils/approval-mode";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
+import { usePlugins, type PluginViewKey } from "@/plugins/registry";
+import { PluginMenuRows, pluginViews } from "@/plugins/surfaces";
 import {
   Select,
   SelectContent,
@@ -91,7 +94,9 @@ export type SessionView =
   | "code"
   | "git"
   | "terminal"
-  | "gallery";
+  | "gallery"
+  // A plugin's main-area tab (`k.view`, docs/specs/plugins.md): `plugin:<plugin id>:<view id>`.
+  | PluginViewKey;
 
 const VIEWS = [
   ["chat", "Chat", MessageSquare],
@@ -104,6 +109,8 @@ const VIEWS = [
 
 // Code Editor, Git and Terminal work in the chat's folder, so a chat with no folder has none of them.
 const FOLDER_VIEWS: readonly SessionView[] = ["code", "git", "terminal"];
+
+type ViewTab = readonly [SessionView, string, ComponentType<{ className?: string }>];
 
 // Whether the docked panel is open, per browser. Open unless closed here before.
 const PANEL_KEY = "kollab.session-panel";
@@ -124,8 +131,8 @@ function storeOpen(open: boolean) {
   }
 }
 
-// A panel row: small text, the width of the panel.
-const ROW = "h-7 w-full justify-start gap-2 px-2 text-xs font-normal";
+// A panel row: small text, the width of the panel. 44px tall on a touch screen.
+const ROW = "h-7 w-full justify-start gap-2 px-2 text-xs font-normal pointer-coarse:min-h-11";
 
 /**
  * The session's own column: who it is, Chat or Trajectory, and its controls.
@@ -174,7 +181,12 @@ export function SessionPanel({
 }) {
   const isMobile = useIsMobile(SIDEBAR_BREAKPOINT);
   const hasFolder = Boolean(session.workspace);
-  const views = VIEWS.filter(([id]) => hasFolder || !FOLDER_VIEWS.includes(id));
+  const plugins = usePlugins();
+  // Plugin tabs follow kollab's own; a plugin tab that needs a folder hides with Code Editor.
+  const views: readonly ViewTab[] = [
+    ...VIEWS.filter(([id]) => hasFolder || !FOLDER_VIEWS.includes(id)),
+    ...pluginViews(plugins, hasFolder),
+  ];
   const [open, setOpen] = useState(storedOpen);
   const [clearOpen, setClearOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
@@ -431,7 +443,7 @@ export function SessionPanel({
           }}
           onPick={(choice) => void changeProfile(choice)}
           disabled={!profiles.length}
-          className="h-7 text-xs"
+          className="h-7 text-xs pointer-coarse:min-h-11"
           folder={session.workspace || ""}
         />
       </div>
@@ -440,7 +452,7 @@ export function SessionPanel({
         <Select value={mode} onValueChange={(next) => void changeMode(next)}>
           <SelectTrigger
             size="sm"
-            className="h-7 w-full text-xs"
+            className="h-7 w-full text-xs pointer-coarse:min-h-11"
             aria-label="Approval mode"
             title={formatApprovalMode(mode)}
           >
@@ -490,6 +502,7 @@ export function SessionPanel({
           <Users className="size-3.5" /><span>Who Is Online</span>
           <span className="text-muted-foreground ml-auto tabular-nums">{agents === null ? "…" : agents.length}</span>
         </Button>
+        <PluginMenuRows rowClassName={ROW} onOpen={openDialog} />
         <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(onOpenSettings)}>
           <Settings2 className="size-3.5" /><span>Settings</span>
         </Button>

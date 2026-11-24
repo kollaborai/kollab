@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 _MAX_JOBS = 32
 _MAX_STAGING = 4
 _JOB_TTL = 3600
+_CLEANUP_RETRY_DELAY = 60
 _STAGE_TIMEOUT = 120
 
 
@@ -32,6 +33,8 @@ class PluginJobs:
         self.controls = controls
         self.engine_url = engine_url
         self.jobs: dict[str, dict] = {}
+        self.expired_jobs: dict[str, dict] = {}
+        self.expiring_jobs: set[str] = set()
         self.tasks: set[asyncio.Task] = set()
         self.staging_tasks: set[asyncio.Task] = set()
         self.stage_slots = asyncio.Semaphore(_MAX_STAGING)
@@ -60,18 +63,41 @@ class PluginJobs:
         for job_id, job in list(self.jobs.items()):
             if job["status"] not in {"staging", "installing"} and job["updated"] < cutoff:
                 del self.jobs[job_id]
-                self._track(asyncio.to_thread(self._cleanup, job))
+                self.expired_jobs[job_id] = job
+        for job_id, job in list(self.expired_jobs.items()):
+            if (
+                job_id not in self.expiring_jobs
+                and job.get("_cleanup_retry_at", 0) <= time.monotonic()
+            ):
+                self.expiring_jobs.add(job_id)
+                self._track(self._cleanup_expired(job_id, job))
+
+    async def _cleanup_expired(self, job_id: str, job: dict) -> None:
+        try:
+            cleaned, interrupted = await self._run_cleanup(job)
+        finally:
+            self.expiring_jobs.discard(job_id)
+        if cleaned and self.expired_jobs.get(job_id) is job:
+            del self.expired_jobs[job_id]
+        elif not cleaned:
+            job["_cleanup_retry_at"] = time.monotonic() + _CLEANUP_RETRY_DELAY
+        if interrupted:
+            raise asyncio.CancelledError
 
     @staticmethod
-    def _cleanup(job: dict) -> None:
-        base = job.pop("base", None)
-        if base is not None:
-            try:
-                shutil.rmtree(base)
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                logger.warning("Cannot clean plugin job staging directory: %s", type(exc).__name__)
+    def _cleanup(job: dict) -> bool:
+        base = job.get("base")
+        if base is None:
+            return True
+        try:
+            shutil.rmtree(base)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("Cannot clean plugin job staging directory: %s", type(exc).__name__)
+            return False
+        job.pop("base", None)
+        return True
 
     @staticmethod
     def _public(job: dict) -> dict:
@@ -128,7 +154,7 @@ class PluginJobs:
         if self.closing:
             raise HTTPException(status_code=503, detail="Plugin manager is shutting down")
         self._expire()
-        if len(self.jobs) >= _MAX_JOBS:
+        if len(self.jobs) + len(self.expired_jobs) >= _MAX_JOBS:
             raise HTTPException(status_code=429, detail="Too many plugin jobs; try again later")
         home = Path.home() / ".kollab"
         plugins = home / "plugins"
@@ -148,6 +174,7 @@ class PluginJobs:
         if self.reaper is None:
             self.reaper = asyncio.create_task(self._reap(), name="plugin-job-reaper")
         task = self._track(self._stage(job))
+        job["stage_task"] = task
         self.staging_tasks.add(task)
         task.add_done_callback(self.staging_tasks.discard)
         return self._public(job)
@@ -230,6 +257,34 @@ class PluginJobs:
             raise ValueError("Invalid plugin staging result")
         return result["result"], result["preview"]
 
+    async def _run_cleanup(self, job: dict) -> tuple[bool, bool]:
+        # Keep cleanup as an executor Future, not a Task: event-loop shutdown
+        # cancels Tasks globally, while shutdown_default_executor waits for
+        # this worker to finish.
+        cleanup = asyncio.get_running_loop().run_in_executor(None, self._cleanup, job)
+        interrupted = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # A shutdown cancellation must not publish a terminal status
+                # while the worker thread is still removing files.
+                interrupted = True
+            except Exception:
+                break
+        try:
+            cleaned = cleanup.result() is not False
+        except Exception as exc:
+            logger.warning("Cannot clean plugin job staging directory: %s", type(exc).__name__)
+            cleaned = False
+        return cleaned, interrupted
+
+    async def _cleanup_staging(self, job: dict) -> bool:
+        cleaned, interrupted = await self._run_cleanup(job)
+        if not cleaned:
+            job["warning"] = "Plugin staging files could not be removed"
+        return interrupted
+
     async def _stage(self, job: dict) -> None:
         try:
             update = None
@@ -244,17 +299,64 @@ class PluginJobs:
             job["plugin_id"] = staged["manifest"]["id"]
             job["status"] = "ready"
         except asyncio.CancelledError:
-            job["status"] = "cancelled"
-            await asyncio.to_thread(self._cleanup, job)
+            await self._cleanup_staging(job)
+            if job["status"] != "cancelling":
+                job["status"] = "cancelled"
             raise
         except Exception as exc:
             logger.warning("Plugin staging failed: %s", type(exc).__name__)
             job["error"] = "Cannot stage plugin source; check the URL, ref, and plugin manifest"
-            job["status"] = "error"
-            await asyncio.to_thread(self._cleanup, job)
+            interrupted = await self._cleanup_staging(job)
+            if job["status"] != "cancelling":  # a cancel that arrived during cleanup owns the state
+                job["status"] = "error"
+            if interrupted:
+                raise asyncio.CancelledError
         finally:
             job["updated"] = time.monotonic()
             self.hub.publish_change()
+
+    async def cancel(self, job_id: str) -> dict:
+        self._expire()
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Plugin job not found")
+        status = job["status"]
+        if status in {"cancelling", "cancelled"} and job.get("cancel_task") is not None:
+            return await asyncio.shield(job["cancel_task"])
+        if status == "cancelled" and "base" not in job:
+            return self._public(job)
+        if status not in {"staging", "ready", "cancelling", "cancelled"}:
+            raise HTTPException(status_code=409, detail="Plugin job cannot be cancelled")
+        # Terminal "cancelled" is published only after the staged files are gone (#1373).
+        job["status"] = "cancelling"
+        job["updated"] = time.monotonic()
+        stage_task = job.get("stage_task")
+        if stage_task is not None and not stage_task.done():
+            stage_task.cancel()
+
+        async def finish() -> dict:
+            try:
+                if stage_task is not None:
+                    await asyncio.gather(stage_task, return_exceptions=True)
+                cleaned, interrupted = await self._run_cleanup(job)
+                if cleaned:
+                    job.pop("warning", None)
+                    job["status"] = "cancelled"
+                else:
+                    job["warning"] = "Plugin staging files could not be removed"
+                job["updated"] = time.monotonic()
+                self.hub.publish_change()
+                if interrupted:
+                    raise asyncio.CancelledError
+                if not cleaned:
+                    raise HTTPException(status_code=503, detail="Cannot remove staged plugin files; try again")
+                return self._public(job)
+            finally:
+                job.pop("cancel_task", None)
+
+        task = self._track(finish())
+        job["cancel_task"] = task
+        return await asyncio.shield(task)
 
     async def confirm(self, job_id: str, commit: str, digest: str) -> dict:
         if self.closing:
@@ -310,7 +412,7 @@ class PluginJobs:
 
         _with_inactive_runs(context, swap)
 
-    async def _restart_after_change(self, job: dict) -> None:
+    async def _restart_after_change(self, job: dict, *, completed: bool) -> None:
         from kollabor_plugins.services import control_service, supervisor_tick
 
         plugin_id = job["plugin_id"]
@@ -321,7 +423,7 @@ class PluginJobs:
             except Exception as exc:
                 logger.warning("Plugin service restart failed: %s", type(exc).__name__)
                 job["warning"] = "A previously running service could not be restarted; check its status"
-        if job["status"] == "complete":
+        if completed:
             try:
                 await asyncio.to_thread(supervisor_tick, **options)
             except Exception as exc:
@@ -332,6 +434,7 @@ class PluginJobs:
         from kollabor_plugins.packages import EXPECT_ABSENT, install_stage
 
         changing = False
+        terminal_status: str | None = None
         try:
             if job["action"] == "update":
                 await self.dispatcher.begin_change(job["target_id"])
@@ -343,28 +446,42 @@ class PluginJobs:
                     install_stage, job["base"] / "package", job["staged"], commit, digest,
                     expected_record=EXPECT_ABSENT,
                 )
-            job["status"] = "complete"
+            terminal_status = "complete"
         except ValueError as exc:
-            job["status"] = "error"
+            terminal_status = "error"
             job["error"] = "Plugin approval, files, or active runs changed; check plugin status and stage again"
             raise HTTPException(status_code=409, detail=job["error"]) from exc
         except OSError as exc:
-            job["status"] = "error"
+            terminal_status = "error"
             job["error"] = "Cannot install plugin; check the plugin directory and try again"
             raise HTTPException(status_code=503, detail=job["error"]) from exc
         except Exception as exc:
             logger.warning("Plugin installation failed: %s", type(exc).__name__)
-            job["status"] = "error"
+            terminal_status = "error"
             job["error"] = "Cannot install plugin; stage it again"
             raise HTTPException(status_code=503, detail=job["error"]) from exc
         finally:
-            if changing:
-                await self.dispatcher.end_change(job["target_id"])
-            if job["status"] == "complete" or job.get("restart_services"):
-                await self._restart_after_change(job)
-            job["updated"] = time.monotonic()
-            await asyncio.to_thread(self._cleanup, job)
-            self.hub.publish_change()
+            try:
+                if changing:
+                    await self.dispatcher.end_change(job["target_id"])
+                if terminal_status == "complete" or job.get("restart_services"):
+                    await self._restart_after_change(
+                        job, completed=terminal_status == "complete"
+                    )
+            finally:
+                cleaned, interrupted = await self._run_cleanup(job)
+                if not cleaned:
+                    warning = "Plugin staging files could not be removed"
+                    previous_warning = job.get("warning")
+                    job["warning"] = (
+                        f"{previous_warning}; {warning}" if previous_warning else warning
+                    )
+                if terminal_status is not None:
+                    job["status"] = terminal_status
+                job["updated"] = time.monotonic()
+                self.hub.publish_change()
+                if interrupted:
+                    raise asyncio.CancelledError
         return self._public(job)
 
     async def close(self) -> None:
@@ -378,3 +495,6 @@ class PluginJobs:
             await asyncio.gather(*list(self.tasks), return_exceptions=True)
         for job in self.jobs.values():
             await asyncio.to_thread(self._cleanup, job)
+        for job_id, job in list(self.expired_jobs.items()):
+            if await asyncio.to_thread(self._cleanup, job):
+                self.expired_jobs.pop(job_id, None)

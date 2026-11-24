@@ -6,7 +6,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
-import { ComposerKeeper } from "./components/assistant-ui/composer-keeper";
+import { ComposerKeeper, forgetComposerText } from "./components/assistant-ui/composer-keeper";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 
 // Monaco and xterm are large: each view loads the first time it is opened, not with the main bundle.
@@ -50,6 +50,7 @@ import {
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, prepareRemoteOpen, targetsOn } from "@/components/shell/agent-network";
 import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
+import type { DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
@@ -77,6 +78,7 @@ import {
 } from "@/components/ui/sidebar";
 import {
   EngineApi,
+  ApiError,
 
   HISTORY_PAGE_SIZE,
   type HistoryPage,
@@ -96,6 +98,16 @@ import {
 } from "./api";
 import { applyModelChoice, pickLabel, runningKey, stateAfterPick } from "@/components/shell/model-choice";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
+import { setPluginHost, startPluginRuntime } from "@/plugins/loader";
+import { usePlugins } from "@/plugins/registry";
+import {
+  PluginModalHost,
+  PluginNotices,
+  PluginPage,
+  PluginViewHost,
+  pluginViewAvailable,
+  pluginViewGone,
+} from "@/plugins/surfaces";
 import {
   EngineRuntimeProvider,
   buildInitialState,
@@ -115,6 +127,7 @@ import {
   storeHistoryPageIfCurrent,
   clearHistoryPagesIfCurrent,
 } from "./history-cache";
+import { olderLoadFailed, olderLoadRunning, type HistoryStatus } from "./history-status";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { reuseIfEqual } from "@/utils/state-snapshot";
 import { createSessionRefreshGate } from "@/utils/session-refresh";
@@ -196,6 +209,8 @@ function RuntimeShell({
   agents,
   liveAgents,
   remoteAgents,
+  agentIsCurrent,
+  daemonNotice,
   onSessionUpdated,
   onOpenSettings,
   onOpenWelcome,
@@ -218,6 +233,8 @@ function RuntimeShell({
   agents: AgentPoolEntry[];
   /** Every running agent, one per process: the chat reads its own by its instance, never by name. */
   liveAgents: LiveAgent[];
+  agentIsCurrent: boolean;
+  daemonNotice: DaemonNoticeProps;
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
@@ -247,8 +264,20 @@ function RuntimeShell({
   const [status, setStatus] = useState<string | null>(null);
   const [panelSheetOpen, setPanelSheetOpen] = useState(false);
   const workspace = session.workspace ?? "";
-  // Code Editor, Git and Terminal work in the chat's folder; a chat without one shows Chat.
-  const shown: SessionView = !workspace && (view === "code" || view === "git" || view === "terminal") ? "chat" : view;
+  const plugins = usePlugins();
+  // Code Editor, Git and Terminal work in the chat's folder; a chat without one shows Chat. So does a chat on
+  // a plugin tab that is gone (its plugin turned off) or needs a folder this chat lacks.
+  const shown: SessionView =
+    !workspace && (view === "code" || view === "git" || view === "terminal")
+      ? "chat"
+      : view.startsWith("plugin:") && !pluginViewAvailable(plugins, view, Boolean(workspace))
+        ? "chat"
+        : view;
+  // A plugin tab that is gone for good (plugin off or failed) moves the chat to Chat, so Chat is the tab marked.
+  const viewGone = pluginViewGone(plugins, view);
+  useEffect(() => {
+    if (viewGone) setView("chat");
+  }, [viewGone, setView]);
   const [visited, setVisited] = useState({ editor: false, terminal: false });
   useEffect(() => {
     // Code and Git are one editor (same tabs and panes) with a different sidebar
@@ -303,9 +332,20 @@ function RuntimeShell({
     }
     wasRunning.current = running;
   }, [running, lastPrompt, onHistoryCleared]);
-  const [commands, setCommands] = useState<SlashCommand[]>(
-    DEFAULT_SLASH_COMMANDS,
-  );
+  const [commandCatalog, setCommandCatalog] = useState<{
+    sessionId: string;
+    status: "loading" | "ready" | "empty" | "unavailable" | "fallback";
+    commands: SlashCommand[];
+  }>({ sessionId: "", status: "loading", commands: [] });
+  const [commandCatalogRetry, setCommandCatalogRetry] = useState(0);
+  const catalogIsCurrent = commandCatalog.sessionId === session.session_id;
+  const commandCatalogStatus = catalogIsCurrent ? commandCatalog.status : "loading";
+  const welcomeCommand = DEFAULT_SLASH_COMMANDS.find((command) => command.name === "welcome");
+  const catalogIsAuthoritative = catalogIsCurrent &&
+    (commandCatalog.status === "ready" || commandCatalog.status === "fallback");
+  const commands = catalogIsAuthoritative
+    ? commandCatalog.commands
+    : welcomeCommand ? [welcomeCommand] : [];
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
@@ -319,30 +359,40 @@ function RuntimeShell({
 
   useEffect(() => {
     let mounted = true;
-    setCommands(DEFAULT_SLASH_COMMANDS);
+    setCommandCatalog({ sessionId: session.session_id, status: "loading", commands: [] });
     void api
       .listCommands(session.session_id)
       .then((result) => {
         if (!mounted) return;
-        const source = result.commands?.length
-          ? result.commands
-          : DEFAULT_SLASH_COMMANDS;
-        const welcome = DEFAULT_SLASH_COMMANDS.find(
-          (command) => command.name === "welcome",
-        );
-        setCommands([
-          ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
-          ...(welcome ? [welcome] : []),
-        ]);
+        const source = result.commands ?? [];
+        const hasCommands = source.length > 0;
+        setCommandCatalog({
+          sessionId: session.session_id,
+          status: hasCommands ? "ready" : "empty",
+          commands: hasCommands
+            ? [
+                ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
+                ...(welcomeCommand ? [welcomeCommand] : []),
+              ]
+            : [],
+        });
       })
-      .catch(() => {
-        // Keep the first-paint compatibility catalog when an older daemon does
-        // not expose the live registry yet.
+      .catch((error: unknown) => {
+        if (!mounted) return;
+        if (error instanceof ApiError && error.status === 404 && error.message === "Not Found") {
+          setCommandCatalog({
+            sessionId: session.session_id,
+            status: "fallback",
+            commands: DEFAULT_SLASH_COMMANDS,
+          });
+          return;
+        }
+        setCommandCatalog({ sessionId: session.session_id, status: "unavailable", commands: [] });
       });
     return () => {
       mounted = false;
     };
-  }, [session.session_id]);
+  }, [session.session_id, commandCatalogRetry]);
 
   return (
     <MediaSessionProvider api={api} sessionId={session.session_id}>
@@ -387,6 +437,8 @@ function RuntimeShell({
               <Thread
                 agents={targets.agents}
                 commands={commands}
+                commandCatalogStatus={commandCatalogStatus}
+                onRetryCommands={() => setCommandCatalogRetry((retry) => retry + 1)}
                 onOpenPanel={onOpenSettings}
                 onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={
@@ -410,6 +462,8 @@ function RuntimeShell({
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
             ) : shown === "gallery" ? (
               <GalleryView api={api} sessionId={session.session_id} />
+            ) : shown.startsWith("plugin:") ? (
+              <PluginViewHost viewKey={shown} session={session} />
             ) : null}
             {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
             {workspace && visited.editor ? (
@@ -420,6 +474,8 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
+                    daemonNotice={daemonNotice}
                     mode={shown === "git" ? "git" : "code"} />
                 </Suspense>
               </div>
@@ -432,6 +488,8 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
+                    daemonNotice={daemonNotice}
                   />
                 </Suspense>
               </div>
@@ -466,6 +524,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [pageRoute, setPageRoute] = useState(() => readMainPageRoute(window.location));
   const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
   const whatsNewActive = pageRoute.kind === "whats-new";
+  const pluginPage = pageRoute.kind === "plugin" ? pageRoute : null;
   const pageOpen = pageRoute.kind !== "chat";
   const previousPageOpenRef = useRef(pageOpen);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -603,11 +662,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const initialStateRef = useRef(initialState);
   initialStateRef.current = initialState;
 
-  const [historyStatus, setHistoryStatus] = useState<{
-    sessionId: string;
-    kind: "loading" | "loading-older" | "error" | "empty";
-    message: string;
-  } | null>(null);
+  const [historyStatus, setHistoryStatus] = useState<HistoryStatus>(null);
   const historyPagesRef = useRef(new Map<string, HistoryPage>());
   const historyRefreshVersion = useRef(0);
   const retryHistoryReconciliationRef = useRef<((sessionId: string) => boolean) | null>(null);
@@ -886,7 +941,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     };
     olderLoadRef.current.add(sessionId);
     if (!prefetch && activeIdRef.current === sessionId) {
-      setHistoryStatus({ sessionId, kind: "loading-older", message: "Loading older messages…" });
+      setHistoryStatus((status) => olderLoadRunning(status, sessionId));
     }
     try {
       const older = await loadOlderHistoryPage(
@@ -1013,11 +1068,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       }
       console.warn("Failed to load older history", error);
       if (!prefetch && activeIdRef.current === sessionId && stillCurrent()) {
-        setHistoryStatus({
-          sessionId,
-          kind: "error",
-          message: "Couldn't load older messages. Scroll up or retry to try again.",
-        });
+        setHistoryStatus((status) => olderLoadFailed(status, sessionId));
       }
       return false;
     } finally {
@@ -1367,6 +1418,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // The open chat's agent against the engine: older code gets a line above the chat (#968).
   const activeAgent = activeSession ? liveAgentOf(activeSession, liveAgents) : undefined;
   const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents });
+  const agentIsCurrent = Boolean(activeAgent && engineVersion && activeAgent.version === engineVersion);
   const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
   const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
   const restartActiveAgent = async () => {
@@ -1379,6 +1431,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     } catch (error) {
       setAgentRestart({ sessionId, waiting: false, failure: errorText(error), tooOld: isAgentTooOld(error) });
     }
+  };
+  const daemonNotice: DaemonNoticeProps = {
+    notice: versionNotice,
+    busy: Boolean(restartHere) && !restartHere?.failure,
+    waiting: restartHere?.waiting ?? false,
+    failure: restartHere?.failure ?? "",
+    tooOld: restartHere?.tooOld ?? false,
+    onRestart: () => void restartActiveAgent(),
   };
   // Once the agent runs the engine's version (or is gone from presence) the ask is over.
   useEffect(() => {
@@ -1634,6 +1694,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     setBusyMessage("Stopping session…");
     try {
       await api.deleteSession(sessionId);
+      forgetComposerText(sessionId);
       const result = await loadSessions();
       await refreshAgentPool();
       if (operation !== operationRef.current) return;
@@ -1803,6 +1864,22 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   const aliveKey = agents.filter((agent) => agent.active).map((agent) => agent.name).join(",");
 
+  // Web plugins (docs/specs/plugins.md): loaded once per page; they reach the chat's views and chats through the host.
+  useEffect(() => startPluginRuntime(api), []);
+  useEffect(() =>
+    setPluginHost({
+      // A plugin tab shows in the chat, so a plugin page that opens one gives way to the chat.
+      openView: (key) => {
+        returnToChat();
+        setSessionView(key);
+      },
+      openSession: (sessionId) => {
+        returnToChat();
+        void selectSession(sessionId);
+      },
+    }),
+  );
+
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
@@ -1913,6 +1990,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onSeeAllChanges={navigateToWhatsNew}
         />
         <PrChainDialog api={api} open={prChainOpen} onOpenChange={setPrChainOpen} />
+        <PluginModalHost />
         {activeSession ? (
           <AppsDialog
             api={api}
@@ -1956,7 +2034,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           className={`${contained ? "h-[calc(100%-1rem)] max-h-[calc(100%-1rem)]" : "h-[calc(100svh-1rem)] max-h-[calc(100svh-1rem)]"} min-h-0 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
         >
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
-          <div className={whatsNewActive ? "hidden" : "contents"}>
+          {pluginPage ? <PluginPage pluginId={pluginPage.plugin} pageId={pluginPage.page} onExit={returnToChat} /> : null}
+          <div className={whatsNewActive || pluginPage ? "hidden" : "contents"}>
           {welcomeGuideNotice ? (
             <NoticeBar onDismiss={() => setWelcomeGuideNotice(false)}>
               {WELCOME_GUIDE_DISMISSED_NOTICE}
@@ -2027,6 +2106,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               ) : null}
             </NoticeBar>
           ) : null}
+          <PluginNotices />
           {activeSession?.halted ? (
             <>
               <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 lg:hidden">
@@ -2047,6 +2127,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 api={api}
                 sessionId={activeSession.session_id}
                 agentIdentity={activeSession.identity}
+                harness={Boolean(activeSession.harness)}
                 initialState={initialState}
                 onStale={(stillCurrent) => resetThread(activeSession.session_id, stillCurrent)}
                 liveEvents={liveEventsRef}
@@ -2056,6 +2137,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   profiles={profiles}
                   agents={agents}
                   liveAgents={liveAgents}
+                  agentIsCurrent={agentIsCurrent}
+                  daemonNotice={daemonNotice}
                   remoteAgents={network.remote}
                   refreshSignal={refreshSignal}
                   supervisorEvents={supervisorEvents}

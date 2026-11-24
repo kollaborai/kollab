@@ -100,10 +100,17 @@ kollab --hub help                # full command list
 kollab --attach lapis@devbox     # attach over ssh: `where` on devbox + ssh -L (kollabor/attach_remote.py)
 ```
 
+Stop-all scope (#669, #875, #1408): `/hub stop all` typed in a session stops every agent in that
+session's hub folder and lists live agents in other folders; the agent `hub_stop` tool stops only
+agents its caller started. The hub folder is `/tmp/kollabor-hub/<hash>/`, keyed by `KOLLAB_PROJECT_ROOT`
+or the git root, so a test rig with its own root has its own hub.
+
 **Starting/stopping agents:**
 ```bash
 kollab --agent koordinator --detached   # start detached
 kollab --hub stop koordinator                    # stop (socket + SIGTERM fallback)
+kollab --hub stop all                            # this folder's hub; names live agents in other folders
+kollab --hub stop all --everywhere               # every folder on this machine (#1408)
 kollab --hub status                              # verify
 kollab service install                           # this folder's agent under systemd/launchd (kollabor/service.py)
 ```

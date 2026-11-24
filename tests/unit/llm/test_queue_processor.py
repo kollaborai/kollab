@@ -13,6 +13,7 @@ from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import (
     QueuedInput,
     QueueProcessor,
+    TaggedInput,
     _tool_results_requiring_followup,
 )
 from kollabor_agent.tool_executor import ToolExecutionResult
@@ -973,6 +974,25 @@ class TestQueueProcessor(unittest.TestCase):
 
         user_message = self.add_message_fn.call_args.args[0]
         self.assertEqual(user_message.metadata["operator_inputs"], [record])
+
+    def test_the_saved_row_names_each_send_it_carries(self):
+        """A steered batch saves one row for two sends; each keeps its request id (#1359)."""
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent")
+        first = {"source": "state_rpc", "timestamp": "2026-11-21T00:00:00Z", "text": "one", "request_id": "r1"}
+        second = {"source": "state_rpc", "timestamp": "2026-11-21T00:00:01Z", "text": "two", "request_id": "r2"}
+        typed = {"source": "user", "timestamp": "2026-11-21T00:00:02Z", "text": "three"}
+        bad = {"source": "state_rpc", "timestamp": "2026-11-21T00:00:03Z", "text": "four", "request_id": 4}
+        batch = [
+            TaggedInput("one", ("r1",), operator_inputs=(first,)),
+            TaggedInput("two", ("r2",), operator_inputs=(second,)),
+            TaggedInput("three", (), operator_inputs=(typed,)),
+            TaggedInput("four", (), operator_inputs=(bad,)),
+        ]
+
+        self.loop.run_until_complete(self.processor.process_message_batch(batch, "parent"))
+
+        records = self.add_message_fn.call_args.args[0].metadata["operator_inputs"]
+        self.assertEqual(records, [first, second, typed, {k: v for k, v in bad.items() if k != "request_id"}])
 
 
     def test_the_users_yes_tells_the_model_what_it_approved(self):

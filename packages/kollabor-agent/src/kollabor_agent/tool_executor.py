@@ -13,7 +13,7 @@ import shlex
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from kollabor_events.models import EventType
 
@@ -99,7 +99,7 @@ class ToolExecutionResult:
 def _is_blocked_kollab_spawn(
     command: str, *, background: bool = False, _depth: int = 0
 ) -> bool:
-    """Detect Kollab agent launches and all-agent stops through common wrappers."""
+    """Detect Kollab launches through common wrappers using a shell-text heuristic."""
     import ast
     import base64
     import re
@@ -109,6 +109,7 @@ def _is_blocked_kollab_spawn(
     shell_names = {"sh", "bash", "dash", "zsh", "ksh"}
     python_name = re.compile(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?")
     separators = {";", "&", "&&", "|", "||", "(", ")"}
+    heredoc_body_ranges: list[tuple[int, int]] = []
 
     def basename(token: str) -> str:
         return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -118,18 +119,470 @@ def _is_blocked_kollab_spawn(
             r"\b(?:kollab|main\.py|kollabor_cli_main)\b", text, re.IGNORECASE
         )
         dangerous = re.search(
-            r"--agent(?:=|\b)|--detached(?:=|\b)|"
+            r"(?<![\w-])-a\S*|(?<![\w-])-d(?==|[^\w-]|$)|"
+            r"(?<![\w-])--ag(?:e(?:n(?:t)?)?)?(?==|[^\w-]|$)|"
+            r"(?<![\w-])--det(?:a(?:c(?:h(?:e(?:d)?)?)?)?)?(?==|[^\w-]|$)|"
             r"--hub(?:=|\s+)(?:stop|kill)(?:\s+|=)all",
             text,
             re.IGNORECASE,
         )
         return bool(target and (is_background or dangerous))
 
+    def substitution_end(text: str, opening_index: int) -> int | None:
+        frames = [
+            {
+                "depth": 1,
+                "single": False,
+                "double": False,
+                "ansi": False,
+                "heredocs": [],
+            }
+        ]
+        index = opening_index + 2
+
+        def comment_starts_word(comment_index: int) -> bool:
+            previous = comment_index - 1
+            if previous < 0 or text[previous] in ";|&(":
+                return True
+            if not text[previous].isspace():
+                return False
+            if text[previous] not in " \t":
+                return True
+            slash_count = 0
+            while (
+                previous > slash_count
+                and text[previous - slash_count - 1] == "\\"
+            ):
+                slash_count += 1
+            return slash_count % 2 == 0
+
+        def heredoc_delimiter(operator_end: int) -> tuple[str, bool] | None:
+            cursor = operator_end
+            strip_tabs = text.startswith("-", cursor)
+            if strip_tabs:
+                cursor += 1
+            while cursor < len(text) and text[cursor] in " \t":
+                cursor += 1
+            delimiter: list[str] = []
+            quote: str | None = None
+            while cursor < len(text):
+                char = text[cursor]
+                if quote is not None:
+                    if char == quote:
+                        quote = None
+                    else:
+                        delimiter.append(char)
+                    cursor += 1
+                    continue
+                if char in "'\"":
+                    quote = char
+                    cursor += 1
+                    continue
+                if char == "\\":
+                    if cursor + 1 >= len(text):
+                        return None
+                    if text[cursor + 1] == "\n":
+                        cursor += 2
+                        continue
+                    delimiter.append(text[cursor + 1])
+                    cursor += 2
+                    continue
+                if char.isspace() or char in ";|&()<>":
+                    break
+                delimiter.append(char)
+                cursor += 1
+            if quote is not None or not delimiter:
+                return None
+            return "".join(delimiter), strip_tabs
+
+        def skip_heredocs(cursor: int, heredocs: list[tuple[str, bool]]) -> int | None:
+            for delimiter, strip_tabs in heredocs:
+                while cursor < len(text):
+                    line_end = text.find("\n", cursor)
+                    if line_end < 0:
+                        line_end = len(text)
+                    line = text[cursor:line_end]
+                    candidate = line.lstrip("\t") if strip_tabs else line
+                    if candidate == delimiter:
+                        cursor = line_end + 1 if line_end < len(text) else line_end
+                        break
+                    if line_end == len(text):
+                        return None
+                    cursor = line_end + 1
+                else:
+                    return None
+            return cursor
+
+        while index < len(text):
+            frame = frames[-1]
+            char = text[index]
+
+            if frame["ansi"]:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == "'":
+                    frame["ansi"] = False
+                index += 1
+                continue
+            if char == "\\" and not frame["single"]:
+                index += 2
+                continue
+            if frame["single"]:
+                if char == "'":
+                    frame["single"] = False
+                index += 1
+                continue
+            if frame["double"]:
+                if char == '"':
+                    frame["double"] = False
+                elif text.startswith("$(", index):
+                    frames.append(
+                        {
+                            "depth": 1,
+                            "single": False,
+                            "double": False,
+                            "ansi": False,
+                            "heredocs": [],
+                        }
+                    )
+                    index += 2
+                    continue
+                index += 1
+                continue
+            if text.startswith("$'", index):
+                frame["ansi"] = True
+                index += 2
+                continue
+            if char == "'":
+                frame["single"] = True
+            elif char == '"':
+                frame["double"] = True
+            elif text.startswith("<<", index) and not text.startswith("<<<", index):
+                delimiter = heredoc_delimiter(index + 2)
+                if delimiter is None:
+                    return None
+                frame["heredocs"].append(delimiter)
+                index += 2
+                continue
+            elif char == "#" and comment_starts_word(index):
+                newline = text.find("\n", index)
+                if newline < 0:
+                    return None
+                index = newline
+                continue
+            elif text.startswith(("$(", "<(", ">("), index):
+                frames.append(
+                    {
+                        "depth": 1,
+                        "single": False,
+                        "double": False,
+                        "ansi": False,
+                        "heredocs": [],
+                    }
+                )
+                index += 2
+                continue
+            elif char == "\n" and frame["heredocs"]:
+                next_index = skip_heredocs(index + 1, frame["heredocs"])
+                if next_index is None:
+                    return None
+                frame["heredocs"].clear()
+                index = next_index
+                continue
+            elif char == "(":
+                frame["depth"] += 1
+            elif char == ")":
+                frame["depth"] -= 1
+                if frame["depth"] == 0:
+                    if len(frames) == 1:
+                        return index
+                    frames.pop()
+            index += 1
+        return None
+
+    def closing_backtick(text: str, opening_index: int) -> int | None:
+        index = opening_index + 1
+        while index < len(text):
+            if text[index] == "\\":
+                index += 2
+            elif text[index] == "`":
+                return index
+            else:
+                index += 1
+        return None
+
+    def shell_substitutions_blocked(
+        text: str, is_background: bool, depth: int
+    ) -> bool:
+        in_single = False
+        in_double = False
+        pending_heredocs: list[tuple[str | None, bool, bool]] = []
+        active_heredocs: list[tuple[str | None, bool, bool]] = []
+        heredoc_header = False
+        heredoc_body_start: int | None = None
+        index = 0
+
+        def read_heredoc_delimiter(
+            operator_end: int,
+        ) -> tuple[str | None, bool, bool]:
+            delimiter_index = operator_end
+            strip_tabs = text.startswith("-", delimiter_index)
+            if strip_tabs:
+                delimiter_index += 1
+            while delimiter_index < len(text) and text[delimiter_index] in " \t":
+                delimiter_index += 1
+
+            delimiter: list[str] = []
+            quote: str | None = None
+            was_quoted = False
+            while delimiter_index < len(text):
+                char = text[delimiter_index]
+                if quote is not None:
+                    if char == quote:
+                        quote = None
+                    else:
+                        delimiter.append(char)
+                    delimiter_index += 1
+                    continue
+                if char in "'\"":
+                    quote = char
+                    was_quoted = True
+                    delimiter_index += 1
+                    continue
+                if char == "\\":
+                    was_quoted = True
+                    if delimiter_index + 1 >= len(text):
+                        return None, strip_tabs, True
+                    escaped = text[delimiter_index + 1]
+                    if escaped == "\n":
+                        delimiter_index += 2
+                        continue
+                    if (
+                        escaped == "\r"
+                        and delimiter_index + 2 < len(text)
+                        and text[delimiter_index + 2] == "\n"
+                    ):
+                        delimiter_index += 3
+                        continue
+                    delimiter.append(escaped)
+                    delimiter_index += 2
+                    continue
+                if char.isspace() or char in ";|&()<>":
+                    break
+                delimiter.append(char)
+                delimiter_index += 1
+
+            if quote is not None or not delimiter:
+                return None, strip_tabs, True
+            return "".join(delimiter), strip_tabs, not was_quoted
+
+        def read_heredoc_body(
+            body_start: int, heredoc: tuple[str | None, bool, bool]
+        ) -> tuple[str, int, int]:
+            delimiter, strip_tabs, _expands = heredoc
+            line_start = body_start
+            while line_start < len(text):
+                line_end = text.find("\n", line_start)
+                if line_end < 0:
+                    line_end = len(text)
+                line = text[line_start:line_end]
+                candidate = line.lstrip("\t") if strip_tabs else line
+                if delimiter is not None and candidate == delimiter:
+                    next_index = line_end + 1 if line_end < len(text) else line_end
+                    return text[body_start:line_start], next_index, line_start
+                if line_end == len(text):
+                    break
+                line_start = line_end + 1
+            return text[body_start:], len(text), len(text)
+
+        def heredoc_substitutions_blocked(body: str) -> bool:
+            body_index = 0
+            while body_index < len(body):
+                if (
+                    body[body_index] == "\\"
+                    and body_index + 1 < len(body)
+                    and body[body_index + 1] in {"$", "`", "\\", "\n"}
+                ):
+                    body_index += 2
+                    continue
+                if body.startswith("$(", body_index):
+                    end = substitution_end(body, body_index)
+                    nested = (
+                        body[body_index + 2 : end]
+                        if end is not None
+                        else body[body_index + 2 :]
+                    )
+                    if _is_blocked_kollab_spawn(
+                        nested, background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                    if end is None and suspicious_launch(nested, is_background):
+                        return True
+                    body_index = end + 1 if end is not None else len(body)
+                    continue
+                if body[body_index] == "`":
+                    end = closing_backtick(body, body_index)
+                    nested = (
+                        body[body_index + 1 : end]
+                        if end is not None
+                        else body[body_index + 1 :]
+                    )
+                    if _is_blocked_kollab_spawn(
+                        nested, background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                    if end is None and suspicious_launch(nested, is_background):
+                        return True
+                    body_index = end + 1 if end is not None else len(body)
+                    continue
+                body_index += 1
+            return False
+
+        def comment_starts_shell_word(comment_index: int) -> bool:
+            previous = comment_index - 1
+            while previous >= 0:
+                if (
+                    text[previous] == "\n"
+                    and previous > 0
+                    and text[previous - 1] == "\\"
+                ):
+                    previous -= 2
+                    continue
+                if (
+                    text[previous] == "\n"
+                    and previous > 1
+                    and text[previous - 1] == "\r"
+                    and text[previous - 2] == "\\"
+                ):
+                    previous -= 3
+                    continue
+                break
+            if previous < 0 or text[previous] in ";|&(":
+                return True
+            if not text[previous].isspace():
+                return False
+            if text[previous] not in " \t":
+                return True
+            slash_count = 0
+            while previous > slash_count and text[previous - slash_count - 1] == "\\":
+                slash_count += 1
+            return slash_count % 2 == 0
+
+        while index < len(text):
+            if active_heredocs and index == heredoc_body_start:
+                heredoc = active_heredocs.pop(0)
+                body_start = index
+                body, index, body_end = read_heredoc_body(index, heredoc)
+                heredoc_body_ranges.append((body_start, body_end))
+                if heredoc[2] and heredoc_substitutions_blocked(body):
+                    return True
+                heredoc_body_start = index if active_heredocs else None
+                continue
+
+            char = text[index]
+            if char == "\\" and not in_single:
+                index += 2
+                continue
+            if not in_single and not in_double and text.startswith("$'", index):
+                index += 2
+                while index < len(text):
+                    if text[index] == "\\":
+                        index += 2
+                    elif text[index] == "'":
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                continue
+            if char == "'" and not in_double:
+                in_single = not in_single
+                index += 1
+                continue
+            if char == '"' and not in_single:
+                in_double = not in_double
+                index += 1
+                continue
+
+            if (
+                not in_single
+                and not in_double
+                and text.startswith("<<", index)
+                and not text.startswith("<<<", index)
+            ):
+                pending_heredocs.append(read_heredoc_delimiter(index + 2))
+                heredoc_header = True
+            if (
+                char == "#"
+                and not in_single
+                and not in_double
+                and comment_starts_shell_word(index)
+            ):
+                newline = text.find("\n", index)
+                if newline < 0:
+                    return False
+                if heredoc_header:
+                    active_heredocs.extend(
+                        pending_heredocs or [(None, False, True)]
+                    )
+                    pending_heredocs.clear()
+                    heredoc_header = False
+                    heredoc_body_start = newline + 1
+                index = newline + 1
+                continue
+            if char == "\n":
+                if heredoc_header:
+                    active_heredocs.extend(
+                        pending_heredocs or [(None, False, True)]
+                    )
+                    pending_heredocs.clear()
+                    heredoc_header = False
+                    heredoc_body_start = index + 1
+                index += 1
+                continue
+
+            if char == "`" and not in_single:
+                end = closing_backtick(text, index)
+                nested = (
+                    text[index + 1 : end]
+                    if end is not None
+                    else text[index + 1 :]
+                )
+                if _is_blocked_kollab_spawn(
+                    nested, background=is_background, _depth=depth + 1
+                ):
+                    return True
+                if end is None and suspicious_launch(nested, is_background):
+                    return True
+                index = end + 1 if end is not None else len(text)
+                continue
+
+            is_command_substitution = not in_single and text.startswith("$(", index)
+            is_process_substitution = (
+                not in_single
+                and not in_double
+                and char in "<>"
+                and text.startswith("(", index + 1)
+            )
+            if is_command_substitution or is_process_substitution:
+                end = substitution_end(text, index)
+                body = text[index + 2 : end] if end is not None else text[index + 2 :]
+                if _is_blocked_kollab_spawn(
+                    body, background=is_background, _depth=depth + 1
+                ):
+                    return True
+                if end is None:
+                    return suspicious_launch(body, is_background)
+                index = end + 1
+                continue
+            index += 1
+        return False
+
     def blocked_args(args: list[str], is_background: bool) -> bool:
         if is_background:
             return True
         lowered = [str(arg).lower() for arg in args]
-        # Shell indirection such as eval or $(...) is outside this text guard;
+        # Shell indirection such as eval is outside this text heuristic;
         # cli_main also checks launch context at runtime.
         for index, arg in enumerate(lowered):
             if arg == "--":
@@ -190,6 +643,21 @@ def _is_blocked_kollab_spawn(
             )
             if name not in spawn_calls and not name.startswith(("spawn", "exec")):
                 continue
+
+            shell_mode: bool | None = False
+            shell_keyword = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "shell"),
+                None,
+            )
+            shell_argument = shell_keyword
+            if shell_argument is None and len(node.args) > 8:
+                shell_argument = node.args[8]
+            if shell_argument is not None:
+                try:
+                    shell_mode = bool(ast.literal_eval(shell_argument))
+                except (ValueError, TypeError):
+                    shell_mode = None
+
             for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
                 try:
                     value = ast.literal_eval(argument)
@@ -203,7 +671,16 @@ def _is_blocked_kollab_spawn(
                 elif isinstance(value, (list, tuple)) and all(
                     isinstance(item, str) for item in value
                 ):
-                    if scan_tokens(list(value), is_background, depth + 1):
+                    if shell_mode is True and value and _is_blocked_kollab_spawn(
+                        value[0], background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                    if scan_tokens(
+                        list(value),
+                        is_background,
+                        depth + 1,
+                        scan_substitutions=shell_mode is None,
+                    ):
                         return True
         return False
 
@@ -625,7 +1102,13 @@ def _is_blocked_kollab_spawn(
             return blocked_args(args, is_background)
         return False
 
-    def scan_tokens(tokens: list[str], is_background: bool, depth: int) -> bool:
+    def scan_tokens(
+        tokens: list[str],
+        is_background: bool,
+        depth: int,
+        *,
+        scan_substitutions: bool = True,
+    ) -> bool:
         if depth > 8:
             return suspicious_launch(" ".join(tokens), is_background)
         segment: list[str] = []
@@ -650,61 +1133,133 @@ def _is_blocked_kollab_spawn(
         if inspect_segment(segment, is_background, depth):
             return True
 
-        # Catch shell command substitutions without treating ordinary quoted
-        # mentions (e.g. echo 'kollab --agent') as executable commands.
-        for token in tokens:
-            nested_commands = re.findall(r"\$\(([^()]*)\)|[<>]\(([^()]*)\)", token)
-            for groups in nested_commands:
-                nested = next((group for group in groups if group), "")
-                if nested and _is_blocked_kollab_spawn(
-                    nested, background=is_background, _depth=depth + 1
-                ):
-                    return True
+        # Keep the conservative marker scan for already-tokenized argv lists.
+        # Shell strings are scanned before shlex removes their quote context.
+        if scan_substitutions:
+            for token in tokens:
+                nested_commands = re.findall(r"\$\(([^()]*)\)|[<>]\(([^()]*)\)", token)
+                for groups in nested_commands:
+                    nested = next((group for group in groups if group), "")
+                    if nested and _is_blocked_kollab_spawn(
+                        nested, background=is_background, _depth=depth + 1
+                    ):
+                        return True
         return False
 
     if _depth > 8:
         return suspicious_launch(command, background)
 
-    # Unlike shlex tokens, the original command preserves quote/escape context.
-    # Scan backticks here so spaces do not split real substitutions and single-
-    # quoted or escaped backticks remain ordinary data.
-    in_single = False
-    in_double = False
-    index = 0
-    while index < len(command):
-        char = command[index]
-        if char == "\\" and not in_single:
-            index += 2
+    if shell_substitutions_blocked(command, background, _depth):
+        return True
+
+    token_scan_command = command
+    for body_start, body_end in reversed(heredoc_body_ranges):
+        masked_body = " " * (body_end - body_start)
+        token_scan_command = (
+            token_scan_command[:body_start]
+            + masked_body
+            + token_scan_command[body_end:]
+        )
+
+    token_parts: list[str] = []
+    token_single = False
+    token_double = False
+    token_ansi = False
+    token_comment = False
+    token_index = 0
+
+    def token_comment_starts_word(comment_index: int) -> bool:
+        previous = comment_index - 1
+        while previous >= 0:
+            if (
+                token_scan_command[previous] == "\n"
+                and previous > 0
+                and token_scan_command[previous - 1] == "\\"
+            ):
+                previous -= 2
+                continue
+            if (
+                token_scan_command[previous] == "\n"
+                and previous > 1
+                and token_scan_command[previous - 1] == "\r"
+                and token_scan_command[previous - 2] == "\\"
+            ):
+                previous -= 3
+                continue
+            break
+        if previous < 0 or token_scan_command[previous] in ";|&(":
+            return True
+        if not token_scan_command[previous].isspace():
+            return False
+        if token_scan_command[previous] not in " \t":
+            return True
+        slash_count = 0
+        while (
+            previous > slash_count
+            and token_scan_command[previous - slash_count - 1] == "\\"
+        ):
+            slash_count += 1
+        return slash_count % 2 == 0
+
+    while token_index < len(token_scan_command):
+        char = token_scan_command[token_index]
+        if token_comment:
+            if char == "\n":
+                token_parts.append("\n;")
+                token_comment = False
+            else:
+                token_parts.append(char)
+            token_index += 1
             continue
-        if char == "'" and not in_double:
-            in_single = not in_single
-        elif char == '"' and not in_single:
-            in_double = not in_double
-        elif char == "`" and not in_single:
-            end = index + 1
-            while end < len(command):
-                if command[end] == "\\":
-                    end += 2
-                elif command[end] == "`":
-                    break
-                else:
-                    end += 1
-            if end < len(command):
-                if _is_blocked_kollab_spawn(
-                    command[index + 1 : end], background=background, _depth=_depth + 1
-                ):
-                    return True
-                index = end
-        index += 1
+        if token_ansi:
+            if char == "\\":
+                token_parts.append(token_scan_command[token_index : token_index + 2])
+                token_index += 2
+                continue
+            if char == "'":
+                token_ansi = False
+            token_parts.append(char)
+            token_index += 1
+            continue
+        if char == "\\" and not token_single:
+            token_parts.append(token_scan_command[token_index : token_index + 2])
+            token_index += 2
+            continue
+        if (
+            not token_single
+            and not token_double
+            and token_scan_command.startswith("$'", token_index)
+        ):
+            token_parts.append("$'")
+            token_ansi = True
+            token_index += 2
+            continue
+        if char == "'" and not token_double:
+            token_single = not token_single
+        elif char == '"' and not token_single:
+            token_double = not token_double
+        elif (
+            char == "#"
+            and not token_single
+            and not token_double
+            and token_comment_starts_word(token_index)
+        ):
+            token_comment = True
+        if char == "\n" and not token_single and not token_double:
+            token_parts.append(";\n")
+        else:
+            token_parts.append(char)
+        token_index += 1
+    token_scan_command = "".join(token_parts)
 
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer = shlex.shlex(token_scan_command, posix=True, punctuation_chars=";&|()")
         lexer.whitespace_split = True
         lexer.commenters = "#"
         tokens = list(lexer)
     except ValueError:
         return suspicious_launch(command, background)
-    return scan_tokens(tokens, background, _depth)
+    return scan_tokens(tokens, background, _depth, scan_substitutions=False)
 
 
 KOLLAB_SPAWN_BLOCK_MESSAGE = (
@@ -992,8 +1547,53 @@ class ToolExecutor:
         # Fallback: simple underscore-to-hyphen
         return tool_type.replace("_", "-")
 
+    def _is_git_only_bundle_command(
+        self, command: Optional[str], cwd: Optional[str]
+    ) -> bool:
+        """Accept only read-only Git commands for a Git-only bundle grant."""
+        if not isinstance(command, str) or not command.strip():
+            return False
+        try:
+            if len(command.encode("utf-8")) > MAX_VOICE_COMMAND_BYTES:
+                return False
+        except UnicodeEncodeError:
+            return False
+        if any(char in _SHELL_OPERATOR_CHARS for char in command):
+            return False
+
+        try:
+            argv = tuple(shlex.split(command, posix=True))
+        except ValueError:
+            return False
+        if not argv or any(not token or "\\" in token for token in argv):
+            return False
+        if argv[0] != "git":
+            return False
+
+        try:
+            root = Path(self.workspace or Path.cwd()).expanduser().resolve()
+            command_cwd = self._resolve_terminal_cwd(cwd) or root
+            command_cwd = command_cwd.resolve()
+            command_cwd.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+        if any(
+            token.split("=", 1)[0].lower() == "--no-index" for token in argv[1:]
+        ):
+            return False
+        if _git_leaves_project(argv, command_cwd, root):
+            return False
+        return not _is_hard_blocked(argv) and _is_read_only_action(
+            argv, command_cwd, root
+        )
+
     def _check_bundle_scope(
-        self, tool_type: str, tool_name: Optional[str] = None
+        self,
+        tool_type: str,
+        tool_name: Optional[str] = None,
+        command: Optional[str] = None,
+        cwd: Optional[str] = None,
     ) -> Optional[str]:
         """Check if a tool_type is allowed by the bundle scope.
 
@@ -1022,6 +1622,16 @@ class ToolExecutor:
 
         # Direct match against bundle tools
         if registry_name in self._bundle_tools:
+            return None
+
+        # ``git`` is documentation for terminal execution, but a Git-only
+        # grant must never inherit the full shell terminal capability.
+        if (
+            tool_type in {"terminal", "terminal_read"}
+            and "git" in self._bundle_tools
+            and "terminal" not in self._bundle_tools
+            and self._is_git_only_bundle_command(command, cwd)
+        ):
             return None
 
         # MCP schemas can be scoped to a single tool name as well as to the
@@ -1282,7 +1892,6 @@ class ToolExecutor:
         """
         tool_type = tool_data.get("type", "unknown")
         tool_id = tool_data.get("id", "unknown")
-
         # Native callers are normalized before reaching this method, but keep
         # the legacy alias safe for direct/older callers too. The registered
         # ``git`` definition is documentation for terminal execution, not a
@@ -1290,6 +1899,40 @@ class ToolExecutor:
         if tool_type == "git":
             tool_data = {**tool_data, "type": "terminal"}
             tool_type = "terminal"
+
+        # A Git grant is narrower than terminal access. The documented XML
+        # form is parsed as a terminal dispatch without a tool name, so route
+        # only a single shell-free Git command through the existing read-only
+        # terminal policy. This keeps Git hooks and other command execution
+        # outside the Git-only grant.
+        command = tool_data.get("command")
+        git_bundle_read_only = (
+            tool_type == "terminal"
+            and self._bundle_tools is not None
+            and "git" in self._bundle_tools
+            and "terminal" not in self._bundle_tools
+            and not tool_data.get("background")
+            and isinstance(command, str)
+            and command.strip()
+            and not any(char in _SHELL_OPERATOR_CHARS for char in command)
+        )
+        git_argv: list[str] = []
+        if git_bundle_read_only:
+            try:
+                git_argv = shlex.split(command, posix=True)
+            except ValueError:
+                git_argv = []
+            git_bundle_read_only = bool(
+                git_argv and git_argv[0].lower() in {"git", "git.exe"}
+            )
+        if git_bundle_read_only:
+            if git_argv[0].lower() == "git.exe":
+                tool_data = {
+                    **tool_data,
+                    "command": shlex.join(["git", *git_argv[1:]]),
+                }
+            tool_data = {**tool_data, "type": "terminal_read"}
+            tool_type = "terminal_read"
 
         voice_terminal_plan: VoiceTerminalPlan | None = None
         voice_terminal_timeout = self.terminal_timeout
@@ -1343,7 +1986,20 @@ class ToolExecutor:
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
-        scope_error = self._check_bundle_scope(tool_type, tool_data.get("name"))
+        # Registered Git calls already carry the narrow ``git`` capability;
+        # XML <terminal> calls have no registered name and must pass the
+        # command-aware exception in _check_bundle_scope.
+        scope_type = (
+            "git"
+            if git_bundle_read_only and tool_data.get("name") == "git"
+            else tool_type
+        )
+        scope_error = self._check_bundle_scope(
+            scope_type,
+            tool_data.get("name"),
+            tool_data.get("command"),
+            tool_data.get("cwd"),
+        )
         if scope_error:
             logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
             return ToolExecutionResult(
@@ -1353,6 +2009,17 @@ class ToolExecutor:
                 error=scope_error,
                 metadata={"scope_denied": True},
             )
+
+        git_only_terminal = (
+            self._enforce_bundle_scope
+            and self._bundle_tools is not None
+            and "git" in self._bundle_tools
+            and "terminal" not in self._bundle_tools
+            and tool_type in {"terminal", "terminal_read"}
+        )
+        if git_only_terminal:
+            tool_data = {**tool_data, "type": "terminal_read"}
+            tool_type = "terminal_read"
 
         gate_refusal = self.sandbox_gate.check(tool_data, self.workspace or Path.cwd())
         if gate_refusal:
@@ -1431,7 +2098,29 @@ class ToolExecutor:
                     _plugin_key = tool_type
                     if _plugin_key not in self._plugin_handlers:
                         _plugin_key = tool_type.replace("-", "_")
-                    if _plugin_key in self._plugin_handlers:
+                    if git_only_terminal:
+                        mark_tool_execution()
+                        read_only_tool_data = tool_data
+                        if voice_terminal_plan is not None:
+                            read_only_tool_data = {
+                                **tool_data,
+                                "command": shlex.join(
+                                    ("git", *voice_terminal_plan.argv[1:])
+                                ),
+                                "cwd": str(voice_terminal_plan.canonical_cwd),
+                            }
+                        result = await self._execute_read_only_terminal_command(
+                            read_only_tool_data
+                        )
+                        if voice_terminal_plan is not None:
+                            result.metadata.update(
+                                {
+                                    "voice_terminal_plan_id": voice_terminal_plan.plan_id,
+                                    "voice_action_digest": voice_terminal_plan.digest,
+                                    "classification": voice_terminal_plan.classification,
+                                }
+                            )
+                    elif _plugin_key in self._plugin_handlers and not git_bundle_read_only:
                         logger.debug(
                             f"Routing to plugin handler for {_plugin_key}"
                         )
@@ -1449,7 +2138,9 @@ class ToolExecutor:
                             f"About to call _execute_terminal_command for {tool_id}"
                         )
                         mark_tool_execution()
-                        if voice_terminal_plan is not None:
+                        if git_bundle_read_only:
+                            result = await self._execute_terminal_command(tool_data)
+                        elif voice_terminal_plan is not None:
                             result = await self._execute_voice_terminal_plan(
                                 tool_data,
                                 voice_terminal_plan,
@@ -3154,16 +3845,22 @@ class ToolExecutor:
     # WEB TOOLS (web-fetch, web-search)
     # ------------------------------------------------------------------
 
-    async def _execute_web_fetch(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+    async def _execute_web_fetch(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
         """Fetch a URL and return cleaned text content.
 
-        Uses aiohttp with a 30-second timeout. Content extraction follows
-        a priority chain: JSON-LD → meta tags → semantic HTML5 → readability
-        heuristic. If the extracted text is suspiciously sparse (<500 chars
+        Uses aiohttp with a 30-second timeout. Content extraction prioritizes
+        JSON-LD article bodies, semantic HTML5, and readability. JSON-LD
+        descriptions supplement the result only when longer than page text.
+        If the extracted text is suspiciously sparse (<500 chars
         from a 200 OK), retries with Playwright headless browser (if installed)
         to handle JS-rendered pages.
 
-        Output is truncated to max_chars (default 5000).
+        At most 500000 downloaded bytes are retained and decoded input is
+        capped at 2000000 bytes. A one-byte lookahead detects overflow. The
+        complete output, including its URL header and any truncation marker,
+        is capped by max_chars (default 5000, maximum 50000).
 
         Args:
             tool_data: Dict with 'url' (required), 'max_chars' (optional),
@@ -3172,12 +3869,35 @@ class ToolExecutor:
         Returns:
             ToolExecutionResult with the cleaned text or an error message.
         """
+        import zlib
+        from contextlib import asynccontextmanager
+        from urllib.parse import urljoin, urlparse
+
         import aiohttp
 
         tool_id = tool_data.get("id", "unknown")
         url = tool_data.get("url", "").strip()
-        max_chars = int(tool_data.get("max_chars", 5000))
+        max_chars = tool_data.get("max_chars", 5000)
         extract_main = tool_data.get("extract_main", True)
+
+        if isinstance(max_chars, str):
+            try:
+                max_chars = int(max_chars)
+            except ValueError:
+                max_chars = None
+
+        if (
+            isinstance(max_chars, bool)
+            or not isinstance(max_chars, int)
+            or max_chars < 1
+            or max_chars > 50_000
+        ):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error="max_chars must be an integer from 1 to 50000",
+            )
 
         if not url:
             return ToolExecutionResult(
@@ -3188,15 +3908,13 @@ class ToolExecutor:
             )
 
         # Basic URL validation
-        from urllib.parse import urlparse
-
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error=f"Invalid URL: {url}",
+                error="Invalid URL",
             )
         if parsed.scheme not in ("http", "https"):
             return ToolExecutionResult(
@@ -3207,59 +3925,324 @@ class ToolExecutor:
             )
 
         try:
+            max_download_bytes = 500_000
+            max_decoded_bytes = 2_000_000
+            redirect_statuses = {301, 302, 303, 307, 308}
             timeout = aiohttp.ClientTimeout(total=30)
+            loop = asyncio.get_running_loop()
+            total_timeout = timeout.total if timeout.total is not None else 30
+            deadline = loop.time() + total_timeout
+
+            @asynccontextmanager
+            async def request_before_deadline(
+                request_context: Any,
+            ) -> AsyncIterator[Any]:
+                async with asyncio.timeout_at(deadline):
+                    async with request_context as response:
+                        yield response
+
             headers = {
+                "Accept-Encoding": "identity, gzip, deflate",
                 "User-Agent": (
                     "Mozilla/5.0 (compatible; KollabAgent/1.0; "
                     "+https://github.com/kollaborai/kollab)"
                 ),
             }
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, headers=headers, allow_redirects=True) as resp:
-                    if resp.status >= 400:
+            async with aiohttp.ClientSession(
+                timeout=timeout, auto_decompress=False
+            ) as session:
+                current_url = url
+                downloaded = 0
+                for redirect_count in range(11):
+                    if downloaded > max_download_bytes:
                         return ToolExecutionResult(
                             tool_id=tool_id,
                             tool_type="web_fetch",
                             success=False,
-                            error=f"HTTP {resp.status} {resp.reason}",
+                            error="Response exceeded the 500000-byte download limit",
                         )
+                    async with request_before_deadline(
+                        session.get(
+                            current_url, headers=headers, allow_redirects=False
+                        )
+                    ) as resp:
+                        if resp.status in redirect_statuses:
+                            location = resp.headers.get("Location")
+                            if not location:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Redirect response had no Location header",
+                                )
+                            if redirect_count == 10:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Too many redirects",
+                                )
+                            try:
+                                redirect_length = int(
+                                    resp.headers.get("Content-Length", "")
+                                )
+                            except ValueError, TypeError:
+                                redirect_length = None
+                            if (
+                                redirect_length is not None
+                                and redirect_length > max_download_bytes - downloaded
+                            ):
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 500000-byte download limit",
+                                )
+                            while True:
+                                redirect_chunk = await resp.content.read(
+                                    min(
+                                        64 * 1024,
+                                        max_download_bytes - downloaded + 1,
+                                    )
+                                )
+                                if not redirect_chunk:
+                                    break
+                                downloaded += len(redirect_chunk)
+                                if downloaded > max_download_bytes:
+                                    return ToolExecutionResult(
+                                        tool_id=tool_id,
+                                        tool_type="web_fetch",
+                                        success=False,
+                                        error="Response exceeded the 500000-byte download limit",
+                                    )
+                            current_url = urljoin(current_url, location)
+                            redirected = urlparse(current_url)
+                            if redirected.scheme not in ("http", "https"):
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Redirect used an unsupported URL scheme",
+                                )
+                            continue
 
-                    # Content-Length check: warn on very large pages
-                    try:
-                        content_length = resp.headers.get("Content-Length", "")
-                        if content_length and int(content_length) > 500_000:
-                            logger.warning(
-                                f"web_fetch: large page {url} ({content_length} bytes)"
+                        if resp.status >= 400:
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error=f"HTTP {resp.status} {resp.reason}",
                             )
-                    except (ValueError, TypeError):
-                        pass
 
-                    final_url = str(resp.url)
-                    raw = await resp.text(errors="replace")
+                        final_url = str(resp.url)
+                        content_length = resp.headers.get("Content-Length")
+                        try:
+                            declared_length = (
+                                int(content_length) if content_length else None
+                            )
+                        except ValueError, TypeError:
+                            declared_length = None
+                        if declared_length is not None and declared_length < 0:
+                            declared_length = None
+                        if (
+                            declared_length is not None
+                            and declared_length > max_download_bytes - downloaded
+                        ):
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response exceeded the 500000-byte download limit",
+                            )
+
+                        encoding = resp.headers.get(
+                            "Content-Encoding", "identity"
+                        ).lower()
+                        decompressor = None
+                        if encoding in ("", "identity"):
+                            pass
+                        elif encoding == "gzip":
+                            decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                        elif encoding == "deflate":
+                            # Servers use both the zlib wrapper and raw DEFLATE
+                            # despite the HTTP deflate coding specifying a wrapper.
+                            decompressor = None
+                        else:
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response uses an unsupported content encoding",
+                            )
+
+                        decoded_parts = []
+                        decoded_size = 0
+                        deflate_prefix = bytearray()
+                        while True:
+                            chunk = await resp.content.read(
+                                min(64 * 1024, max_download_bytes - downloaded + 1)
+                            )
+                            if not chunk:
+                                break
+                            downloaded += len(chunk)
+                            if downloaded > max_download_bytes:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 500000-byte download limit",
+                                )
+                            if encoding == "deflate" and decompressor is None:
+                                deflate_prefix.extend(chunk)
+                                if len(deflate_prefix) < 2:
+                                    continue
+                                cmf, flg = deflate_prefix[:2]
+                                has_zlib_header = (
+                                    cmf & 0x0F == 8
+                                    and cmf >> 4 <= 7
+                                    and ((cmf << 8) | flg) % 31 == 0
+                                )
+                                window_bits = (
+                                    zlib.MAX_WBITS if has_zlib_header else -zlib.MAX_WBITS
+                                )
+                                decompressor = zlib.decompressobj(window_bits)
+                                chunk = bytes(deflate_prefix)
+                                deflate_prefix.clear()
+                            if (
+                                encoding == "gzip"
+                                and decompressor is not None
+                                and decompressor.eof
+                            ):
+                                # A gzip member can end exactly at a read boundary.
+                                decompressor = zlib.decompressobj(
+                                    16 + zlib.MAX_WBITS
+                                )
+                            if decompressor is None:
+                                decoded = chunk
+                            else:
+                                pending = chunk
+                                while True:
+                                    decoded = decompressor.decompress(
+                                        pending,
+                                        max_decoded_bytes - decoded_size + 1,
+                                    )
+                                    if decompressor.unconsumed_tail:
+                                        return ToolExecutionResult(
+                                            tool_id=tool_id,
+                                            tool_type="web_fetch",
+                                            success=False,
+                                            error="Response exceeded the 2000000-byte decoded limit",
+                                        )
+                                    decoded_size += len(decoded)
+                                    if decoded_size > max_decoded_bytes:
+                                        return ToolExecutionResult(
+                                            tool_id=tool_id,
+                                            tool_type="web_fetch",
+                                            success=False,
+                                            error="Response exceeded the 2000000-byte decoded limit",
+                                        )
+                                    decoded_parts.append(decoded)
+                                    if encoding != "gzip" or not decompressor.unused_data:
+                                        break
+                                    pending = decompressor.unused_data
+                                    decompressor = zlib.decompressobj(
+                                        16 + zlib.MAX_WBITS
+                                    )
+                            if decompressor is None:
+                                decoded_size += len(chunk)
+                                if decoded_size > max_decoded_bytes:
+                                    return ToolExecutionResult(
+                                        tool_id=tool_id,
+                                        tool_type="web_fetch",
+                                        success=False,
+                                        error="Response exceeded the 2000000-byte decoded limit",
+                                    )
+                                decoded_parts.append(chunk)
+
+                        if encoding == "gzip" and not decompressor.eof:
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response contained an incomplete gzip stream",
+                            )
+                        if encoding == "deflate" and (
+                            decompressor is None or not decompressor.eof
+                        ):
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response contained an incomplete deflate stream",
+                            )
+
+                        if decompressor is not None:
+                            tail = decompressor.flush()
+                            decoded_size += len(tail)
+                            if decoded_size > max_decoded_bytes:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 2000000-byte decoded limit",
+                                )
+                            decoded_parts.append(tail)
+
+                        charset = resp.charset
+                        if not isinstance(charset, str) or not charset:
+                            charset = "utf-8"
+                        decoded_body = b"".join(decoded_parts)
+                        try:
+                            raw = decoded_body.decode(charset, errors="replace")
+                        except LookupError:
+                            raw = decoded_body.decode("utf-8", errors="replace")
+                        break
 
             # Extract main content using priority chain
             text = self._extract_main_content(raw, extract_main)
 
             # Playwright fallback: if aiohttp got suspiciously little text
-            # from a valid response, the page may be JS-rendered.
-            if len(text) < 500:
-                pw_text = await self._playwright_fetch(url)
+            # from a valid response, render the bounded source and its
+            # byte-budgeted script subresources.
+            json_ld_body = (
+                self._extract_json_ld_article_body(raw)
+                if extract_main and 0 < len(text) < 500
+                else ""
+            )
+            if len(text) < 500 and (not json_ld_body or text != json_ld_body):
+                pw_text = await self._playwright_fetch(
+                    raw,
+                    page_url=final_url,
+                    max_chars=2_000_000,
+                    max_download_bytes=max_download_bytes - downloaded,
+                    max_decoded_bytes=max_decoded_bytes - decoded_size,
+                    deadline=deadline,
+                )
                 if pw_text and len(pw_text) > len(text):
                     text = pw_text
-                    logger.info(f"web_fetch: used Playwright fallback for {url}")
+                    logger.info("web_fetch: used Playwright fallback")
 
-            # Truncate to max_chars (accounting for the URL header)
             header = f"URL: {final_url}\n\n"
-            available = max(100, max_chars - len(header))
-            if len(text) > available:
-                text = text[:available] + "\n...[truncated]"
+            output = header + text
+            if len(output) > max_chars:
+                marker = "\n...[truncated]"
+                if max_chars > len(marker):
+                    output = output[: max_chars - len(marker)] + marker
+                else:
+                    output = output[:max_chars]
 
+            parsed_final_url = urlparse(final_url)
+            metadata_url = parsed_final_url._replace(
+                netloc=parsed_final_url.netloc.rsplit("@", 1)[-1],
+                query="",
+                fragment="",
+            ).geturl()
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=True,
-                output=header + text,
-                metadata={"url": final_url, "chars": len(text)},
+                output=output,
+                metadata={"url": metadata_url, "chars": len(output)},
             )
 
         except asyncio.TimeoutError:
@@ -3274,18 +4257,20 @@ class ToolExecutor:
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error=f"Network error: {e}",
+                error=f"Network error: {type(e).__name__}",
             )
         except Exception as e:
-            logger.error(f"web_fetch error for {url}: {e}", exc_info=True)
+            logger.error("web_fetch failed: %s", type(e).__name__, exc_info=True)
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error=f"Fetch error: {e}",
+                error=f"Fetch error: {type(e).__name__}",
             )
 
-    async def _execute_web_search(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+    async def _execute_web_search(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
         """Search the web using DuckDuckGo's HTML endpoint and return results.
 
         No API key required. Parses the top N results (title, URL, snippet)
@@ -3401,75 +4386,183 @@ class ToolExecutor:
         """Extract main content from HTML using a priority chain.
 
         Priority order:
-        1. JSON-LD structured data (articleBody / description)
+        1. JSON-LD articleBody
         2. Semantic HTML5 (<article>, <main>, <section>)
         3. Readability heuristic (highest text-to-tag ratio element)
-        4. Fallback: strip non-content tags, extract remaining text
+        4. Longer JSON-LD description, then stripped page text
 
-        Uses beautifulsoup4 with lxml parser. Falls back to regex-based
-        extraction if bs4 is not available.
+        Uses beautifulsoup4 with lxml when available and Python's built-in
+        html.parser otherwise. Falls back to regex-based extraction if bs4 is
+        not available; the regex fallback cannot inspect JSON-LD before
+        stripping scripts.
         """
         try:
             from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "lxml")
+            from bs4.exceptions import FeatureNotFound
         except ImportError:
             # bs4 not available — fall back to regex-based extraction
-            return ToolExecutor._html_to_text_regex(html)
+            return ToolExecutor._html_to_text_regex(html, extract_main=extract_main)
+
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except FeatureNotFound:
+            soup = BeautifulSoup(html, "html.parser")
+
+        if extract_main:
+            # JSON-LD lives in script tags, so read it before removing scripts.
+            article_body, description = ToolExecutor._extract_json_ld(soup)
 
         # Remove non-content elements entirely
-        for tag in soup.find_all(["script", "style", "nav", "footer", "aside",
-                                   "header", "noscript", "svg", "form",
+        for tag in soup.find_all(["script", "style", "nav", "footer",
+                                   "aside", "header", "noscript", "svg", "form",
                                    "button", "iframe"]):
             tag.decompose()
 
         if extract_main:
-            # Priority 1: JSON-LD structured data
-            text = ToolExecutor._extract_json_ld(soup)
-            if text and len(text) > 200:
-                return text
-
             # Priority 2: Semantic HTML5 — <article>, <main>
             for selector in ["article", "main", "[role='main']"]:
                 element = soup.select_one(selector)
                 if element:
                     text = ToolExecutor._soup_to_text(element)
                     if len(text) > 200:
-                        return text
+                        return article_body if len(article_body) > len(text) else text
+
+            # Preformatted samples and inline code are not page prose. A
+            # malformed inline code wrapper with block children must not hide
+            # the page content it swallowed.
+            block_tags = [
+                "p", "div", "section", "article", "main", "h1", "h2", "h3",
+                "h4", "h5", "h6", "ul", "ol", "li", "table", "blockquote",
+            ]
+            for tag in soup.find_all("pre"):
+                tag.decompose()
+
+            code_tags = soup.find_all("code")
+            code_with_blocks = [tag for tag in code_tags if tag.find(block_tags)]
+            if code_with_blocks:
+                import re
+
+                line_offsets = [0]
+                for line in html.splitlines(keepends=True):
+                    line_offsets.append(line_offsets[-1] + len(line))
+                code_tag_tokens = re.compile(r"<(/?)\s*code\b[^>]*>", re.IGNORECASE)
+
+            for tag in code_tags:
+                if tag.find(block_tags):
+                    source_line = getattr(tag, "sourceline", None)
+                    source_pos = getattr(tag, "sourcepos", None)
+                    if (
+                        source_line is None
+                        or source_pos is None
+                        or source_line < 1
+                        or source_line >= len(line_offsets)
+                    ):
+                        has_closing_tag = True
+                    else:
+                        source_start = line_offsets[source_line - 1] + source_pos
+                        tokens = code_tag_tokens.finditer(html, source_start)
+                        opening = next(tokens, None)
+                        has_closing_tag = (
+                            opening is None
+                            or opening.start() != source_start
+                            or bool(opening.group(1))
+                        )
+                        if not has_closing_tag:
+                            depth = 1
+                            for token in tokens:
+                                if token.group(1):
+                                    depth -= 1
+                                    if depth == 0:
+                                        has_closing_tag = True
+                                        break
+                                elif not token.group(0).rstrip().endswith("/>"):
+                                    depth += 1
+
+                    if has_closing_tag:
+                        tag.decompose()
+                    else:
+                        for child in list(tag.contents):
+                            if isinstance(child, str):
+                                child.extract()
+                            elif child.name not in block_tags and child.find(block_tags) is None:
+                                child.decompose()
+                        tag.unwrap()
+                else:
+                    tag.decompose()
 
             # Priority 3: Readability heuristic — find densest content block
             text = ToolExecutor._readability_extract(soup)
             if text and len(text) > 200:
-                return text
+                return article_body if len(article_body) > len(text) else text
 
-        # Priority 4: Fallback — extract all remaining text
-        return ToolExecutor._soup_to_text(soup)
+        # Prefer shorter structured candidates only when they add more than
+        # the semantic, readability, and plain-text fallbacks already found.
+        text = ToolExecutor._soup_to_text(soup)
+        if extract_main:
+            if len(article_body) > len(text):
+                return article_body
+            if len(description) > len(text):
+                return description
+        return text
 
     @staticmethod
-    def _extract_json_ld(soup) -> str:
-        """Extract articleBody or description from JSON-LD script tags."""
+    def _extract_json_ld_article_body(html: str) -> str:
+        """Return a usable JSON-LD article body when the parser is available."""
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return ""
+
+        soup = BeautifulSoup(html, "html.parser")
+        article_body, _ = ToolExecutor._extract_json_ld(soup)
+        return article_body
+
+    @staticmethod
+    def _extract_json_ld(soup) -> tuple[str, str]:
+        """Return the longest articleBody and description from JSON-LD tags."""
         import json
 
+        article_body = ""
+        description = ""
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "")
-                # Handle both single objects and arrays
-                items = data if isinstance(data, list) else [data]
-                for item in items:
+                # Handle top-level arrays and graph-wrapped JSON-LD nodes.
+                items = [data]
+                while items:
+                    item = items.pop()
+                    if isinstance(item, list):
+                        items.extend(reversed(item))
+                        continue
                     if not isinstance(item, dict):
                         continue
+                    graph = item.get("@graph")
+                    if isinstance(graph, (dict, list)):
+                        items.append(graph)
                     # Look for articleBody first (richest content)
-                    body = item.get("articleBody") or item.get("text", "")
-                    if body and len(body) > 200:
-                        # Collapse whitespace
-                        lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
-                        return "\n".join(lines)
-                    # Fall back to description
-                    desc = item.get("description", "")
-                    if desc and len(desc) > 100:
-                        return desc.strip()
+                    body = item.get("articleBody")
+                    if not isinstance(body, str) or not body.strip():
+                        body = item.get("text", "")
+                    if isinstance(body, str):
+                        # Normalize each line so padded text cannot win by length.
+                        lines = [" ".join(ln.split()) for ln in body.splitlines()]
+                        lines = [line for line in lines if line]
+                        normalized_body = "\n".join(lines)
+                        if normalized_body and len(normalized_body) > len(article_body):
+                            article_body = normalized_body
+                    # Keep the longest usable description while examining all
+                    # scripts for an article body.
+                    desc = item.get("description")
+                    if isinstance(desc, str):
+                        normalized_description = desc.strip()
+                        if (
+                            len(normalized_description) > len(description)
+                            and len(normalized_description) > 100
+                        ):
+                            description = normalized_description
             except (json.JSONDecodeError, TypeError):
                 continue
-        return ""
+        return article_body, description
 
     @staticmethod
     def _readability_extract(soup) -> str:
@@ -3523,7 +4616,7 @@ class ToolExecutor:
         return "\n".join(lines)
 
     @staticmethod
-    def _html_to_text_regex(html: str) -> str:
+    def _html_to_text_regex(html: str, extract_main: bool = True) -> str:
         """Regex-based HTML to text fallback (no bs4 dependency).
 
         Used when beautifulsoup4 is not installed.
@@ -3531,9 +4624,36 @@ class ToolExecutor:
         import html as html_mod
         import re
 
-        # Remove non-content tags entirely (tag + inner content)
+        # Unterminated script/style content runs to the end; other malformed
+        # non-content tags should not erase the rest of the page.
+        raw_content = re.compile(
+            r"<(script|style)\b[^>]*>.*?(?:</\1\s*>|$)",
+            re.DOTALL | re.IGNORECASE,
+        )
+        html = raw_content.sub("", html)
+
+        if extract_main:
+            # Remove complete pre/code blocks first, including any block tags
+            # nested inside them.
+            closed_code_blocks = re.compile(
+                r"<(pre|code)\b[^>]*>.*?</\1\s*>",
+                re.DOTALL | re.IGNORECASE,
+            )
+            html = closed_code_blocks.sub("", html)
+
+            # For unclosed wrappers, stop at the next block boundary so
+            # malformed inline markup cannot hide following page text.
+            block_start = r"(?=<\s*(?:p|div|section|article|main|h[1-6]|li|ul|ol|table|blockquote)\b)"
+            unclosed_code_blocks = re.compile(
+                r"<(pre|code)\b[^>]*>.*?(?:" + block_start + r"|$)",
+                re.DOTALL | re.IGNORECASE,
+            )
+            html = unclosed_code_blocks.sub("", html)
+
+        # Remove structural non-content elements only when their closing tag
+        # is present, so a malformed navigation tag cannot consume the page.
         non_content = re.compile(
-            r"<(script|style|nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1>",
+            r"<(nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1\s*>",
             re.DOTALL | re.IGNORECASE,
         )
         html = non_content.sub("", html)
@@ -3560,29 +4680,246 @@ class ToolExecutor:
 
         return "\n".join(lines)
 
-    async def _playwright_fetch(self, url: str) -> str:
-        """Fetch a URL using Playwright headless browser (optional).
+    async def _playwright_fetch(
+        self,
+        html: str,
+        *,
+        page_url: str,
+        max_chars: int = 2_000_000,
+        max_download_bytes: int = 500_000,
+        max_decoded_bytes: int = 2_000_000,
+        deadline: float | None = None,
+    ) -> str:
+        """Render sparse HTML with script resources under the remaining budgets.
 
-        Used as a fallback for JS-rendered pages where aiohttp returns
-        sparse content. Returns extracted text or empty string if
-        Playwright is not available or fails.
+        The main document is served from the already-bounded response. Script
+        resources are fetched through the remaining byte limits; other browser
+        requests are blocked.
         """
         try:
+            import zlib
+            from urllib.parse import urljoin, urlparse
+
+            import aiohttp
             from playwright.async_api import async_playwright
         except ImportError:
             return ""
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
-                await page.goto(url, timeout=20000, wait_until="networkidle")
-                html = await page.content()
-                await browser.close()
+            downloaded_bytes = 0
+            decoded_bytes = 0
+            resource_lock = asyncio.Lock()
+            document_served = False
+            redirect_statuses = {301, 302, 303, 307, 308}
+            request_headers = {
+                "Accept-Encoding": "identity, gzip, deflate",
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; KollabAgent/1.0; "
+                    "+https://github.com/kollaborai/kollab)"
+                ),
+            }
 
-            return self._extract_main_content(html)
+            def decode_resource(body: bytes, encoding: str, limit: int):
+                if encoding in ("", "identity"):
+                    return body if len(body) <= limit else None
+                if encoding == "gzip":
+                    window_bits = 16 + zlib.MAX_WBITS
+                elif encoding == "deflate":
+                    has_zlib_header = False
+                    if len(body) >= 2:
+                        cmf, flg = body[:2]
+                        has_zlib_header = (
+                            cmf & 0x0F == 8
+                            and cmf >> 4 <= 7
+                            and ((cmf << 8) | flg) % 31 == 0
+                        )
+                    window_bits = (
+                        zlib.MAX_WBITS if has_zlib_header else -zlib.MAX_WBITS
+                    )
+                else:
+                    return None
+
+                output = bytearray()
+                decoder = zlib.decompressobj(window_bits)
+                pending = body
+                try:
+                    while pending:
+                        decoded = decoder.decompress(
+                            pending, limit - len(output) + 1
+                        )
+                        output.extend(decoded)
+                        if len(output) > limit:
+                            return None
+                        if decoder.unconsumed_tail:
+                            pending = decoder.unconsumed_tail
+                            continue
+                        if encoding == "gzip" and decoder.eof and decoder.unused_data:
+                            pending = decoder.unused_data
+                            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                            continue
+                        pending = b""
+
+                    if not decoder.eof:
+                        return None
+                    output.extend(decoder.flush())
+                except zlib.error:
+                    return None
+                return bytes(output) if len(output) <= limit else None
+
+            async def read_bounded_body(response):
+                nonlocal downloaded_bytes
+                remaining = max_download_bytes - downloaded_bytes
+                if remaining < 0:
+                    return None
+                try:
+                    declared_length = int(response.headers.get("Content-Length", ""))
+                except (ValueError, TypeError):
+                    declared_length = None
+                if declared_length is not None and declared_length < 0:
+                    declared_length = None
+                if declared_length is not None and declared_length > remaining:
+                    downloaded_bytes = max_download_bytes
+                    return None
+
+                parts = []
+                body_size = 0
+                while True:
+                    chunk = await response.content.read(
+                        min(64 * 1024, remaining - body_size + 1)
+                    )
+                    if not chunk:
+                        break
+                    body_size += len(chunk)
+                    if body_size > remaining:
+                        downloaded_bytes = max_download_bytes
+                        return None
+                    parts.append(chunk)
+                downloaded_bytes += body_size
+                return b"".join(parts)
+
+            async def fetch_script(url: str, session):
+                nonlocal decoded_bytes
+                parsed_url = urlparse(url)
+                if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+                    return None
+
+                async with resource_lock:
+                    current_url = url
+                    for redirect_count in range(11):
+                        timeout_context = (
+                            asyncio.timeout_at(deadline)
+                            if deadline is not None
+                            else asyncio.timeout(20)
+                        )
+                        try:
+                            async with timeout_context:
+                                async with session.get(
+                                    current_url,
+                                    headers=request_headers,
+                                    allow_redirects=False,
+                                ) as response:
+                                    if response.status in redirect_statuses:
+                                        location = response.headers.get("Location")
+                                        body = await read_bounded_body(response)
+                                        if body is None or not location or redirect_count == 10:
+                                            return None
+                                        current_url = urljoin(current_url, location)
+                                        redirected_url = urlparse(current_url)
+                                        if (
+                                            redirected_url.scheme not in ("http", "https")
+                                            or not redirected_url.netloc
+                                        ):
+                                            return None
+                                        continue
+                                    if response.status >= 400:
+                                        return None
+
+                                    body = await read_bounded_body(response)
+                                    if body is None:
+                                        return None
+                                    encoding = response.headers.get(
+                                        "Content-Encoding", "identity"
+                                    ).lower().strip()
+                                    remaining_decoded = max_decoded_bytes - decoded_bytes
+                                    decoded_body = decode_resource(
+                                        body, encoding, remaining_decoded
+                                    )
+                                    if decoded_body is None:
+                                        decoded_bytes = max_decoded_bytes
+                                        return None
+                                    decoded_bytes += len(decoded_body)
+                                    response_headers = {
+                                        name: value
+                                        for name, value in response.headers.items()
+                                        if name.lower()
+                                        not in {
+                                            "connection",
+                                            "content-encoding",
+                                            "content-length",
+                                            "set-cookie",
+                                            "transfer-encoding",
+                                        }
+                                    }
+                                    return response.status, response_headers, decoded_body
+                        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                            return None
+                    return None
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=None), auto_decompress=False
+            ) as session:
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True)
+                    try:
+                        page = await browser.new_page()
+
+                        async def handle_request(route):
+                            nonlocal document_served
+                            request = route.request
+                            if request.resource_type == "document":
+                                if not document_served:
+                                    document_served = True
+                                    await route.fulfill(
+                                        status=200,
+                                        headers={
+                                            "content-type": "text/html; charset=utf-8"
+                                        },
+                                        body=html,
+                                    )
+                                else:
+                                    await route.abort()
+                                return
+                            if request.resource_type != "script":
+                                await route.abort()
+                                return
+
+                            resource = await fetch_script(request.url, session)
+                            if resource is None:
+                                await route.abort()
+                                return
+                            status, headers, body = resource
+                            await route.fulfill(
+                                status=status,
+                                headers=headers,
+                                body=body,
+                            )
+
+                        await page.route("**/*", handle_request)
+                        await page.goto(
+                            page_url,
+                            wait_until="domcontentloaded",
+                            timeout=20_000,
+                        )
+                        text = await page.locator("body").evaluate(
+                            "(body, limit) => body.innerText.slice(0, limit)",
+                            max_chars,
+                        )
+                    finally:
+                        await browser.close()
+
+            return str(text)[:max_chars]
         except Exception as e:
-            logger.debug(f"Playwright fetch failed for {url}: {e}")
+            logger.debug("Playwright fetch failed: %s", type(e).__name__)
             return ""
 
     @staticmethod

@@ -1,7 +1,7 @@
 ---
 title: "Tool Calling"
 created: 2026-02-24
-modified: 2026-09-20
+modified: 2026-11-17
 status: active
 ---
 # Tool Calling
@@ -51,6 +51,17 @@ LLM Request
 note: these are XML tags parsed by kollabor_ai.response_parser, not tools/
   directory entries. execution happens in packages/kollabor-agent/.
 
+### Web Fetch
+
+`web-fetch` compares supported JSON-LD article bodies with semantic HTML and
+readable page text before selecting the fullest candidate. It uses a JSON-LD
+description only when that description is longer than the extracted page text,
+so metadata does not mask fuller article content. Fallback text extraction
+removes script, style, `pre`, and `code` bodies. The agent package installs
+Beautiful Soup and uses Python's built-in HTML parser; lxml is not required. If
+Beautiful Soup is unavailable, the regex fallback strips script, style, `pre`,
+and `code` contents but does not extract JSON-LD.
+
 ### Terminal Commands
 
 The LLM can execute shell commands through the `terminal` XML tag.
@@ -96,6 +107,12 @@ foreground, use `<hub_spawn>` to start peers, and use `/hub stop all` to stop
 agents owned by the current caller. The `kollab` CLI applies the same setting
 to agent launches started from a tool shell.
 
+When this setting is enabled, the terminal tool's shell-text guard scans
+commands before quote context is lost. Quoted command and process-substitution
+examples are treated as literal text; shell-executed substitutions remain
+checked for blocked launches. This guard is a shell-text heuristic, not an OS
+sandbox.
+
 Execution methods:
 - tmux sessions (preferred, supports background jobs)
 - direct subprocess (fallback)
@@ -120,6 +137,20 @@ untrusted executables, and working directories outside the project are refused
 with a reason. The existing `terminal` tool keeps its normal behavior. See the
 [read-only terminal specification](../specs/agent-read-only-terminal.md) for
 the full policy.
+
+A bundle that needs Git inspection without general terminal access can grant
+`git` instead:
+
+```json
+{"tools": ["file-read", "file-grep", "git"]}
+```
+
+This permits one read-only Git command at a time, such as `git status --short`,
+including through XML `<terminal>` requests. The command uses the same
+parsed-argv policy; aliases, shell syntax, pager or external-helper options,
+credential commands, Git writes (including commits that could run repository
+hooks), remote transports, and other terminal commands are refused. Grant
+`terminal` separately when the bundle needs shell commands or Git writes.
 
 ### Workspace Switching
 
@@ -306,6 +337,19 @@ capability. The `terminal-status`, `terminal-output`, and `terminal-kill` tools
 require that grant, so an agent without terminal access cannot inspect or stop
 a session started by the operator.
 
+### Web Fetch
+
+`web-fetch` streams a response instead of buffering the full page. It retains
+at most 500000 downloaded bytes, including redirect response bodies, and reads
+at most one additional byte to detect overflow. The final response is
+additionally limited to 2000000 decompressed bytes. The optional Playwright
+fallback renders the bounded response and fetches script resources within the
+remaining byte limits; other browser requests are blocked.
+
+`max_chars` limits the complete returned output, including the URL header and
+any truncation marker. It accepts integers from 1 through 50000 and defaults to
+5000. Invalid values return an error.
+
 File location: `packages/kollabor-agent/src/kollabor_agent/`
 
 - `tool_executor.py` - Main execution engine
@@ -333,6 +377,10 @@ Tool registry format:
     }
 }
 ```
+
+The Web UI shows completed Hub MCP calls with readable tool labels. Hub tool
+rows show the recipient in the collapsed row; thread and reply ids remain in
+the expanded call details.
 
 ## On-demand Tool Loading
 

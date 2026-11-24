@@ -199,6 +199,8 @@ export function stripAgentHud(text: string): string {
 export type PermissionPrompt = {
   type?: "permission_request";
   tool_id: string;
+  permission_id?: string;
+  request_id?: string;
   tool_name: string;
   tool_type?: string;
   input?: Record<string, unknown>;
@@ -242,6 +244,12 @@ export type Profile = {
   streaming?: boolean;
   supports_tools?: boolean;
   supports_vision?: boolean;
+  last_completed_turn?: {
+    model: string;
+    effort: string;
+    completed_at: string;
+  } | null;
+  unavailable_models?: string[];
 };
 
 /** One provider profile x model x effort a session can run on (`GET /profiles/choices`). */
@@ -544,10 +552,9 @@ export type SlashCommand = {
   subcommands?: SlashSubcommand[];
 };
 
-// Keep the first paint useful when the browser is connected to an older
-// engine that does not expose GET /sessions/{id}/commands yet. A current
-// engine replaces this compatibility catalog with its complete core + plugin
-// registry as soon as the request resolves.
+// Compatibility catalog for older engines that return 404 for
+// GET /sessions/{id}/commands. RuntimeShell uses it only for that unsupported
+// endpoint response and labels it as a fallback; transport failures stay visible.
 export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   {
     name: "help",
@@ -672,6 +679,8 @@ export type SessionEvent = {
   type?: string;
   session_id?: string;
   tool_id?: string;
+  permission_id?: string;
+  request_id?: string;
   tool_name?: string;
   scope?: string;
   message?: string;
@@ -1418,16 +1427,27 @@ export class EngineApi {
    * it answers): an event that fired earlier is gone, so a caller that may
    * have missed one reloads then.
    */
-  async streamEvents(
+  streamEvents(
     sessionId: string,
     signal?: AbortSignal,
     onEvent?: (event: SessionEvent) => void,
     onOpen?: () => void,
   ): Promise<void> {
-    const response = await this.request(
-      `/sessions/${encodeURIComponent(sessionId)}/events`,
-      { method: "GET", signal },
-    );
+    return this.streamSse<SessionEvent>(`/sessions/${encodeURIComponent(sessionId)}/events`, signal, onEvent, onOpen);
+  }
+
+  /**
+   * Reads an engine SSE stream (`path`), calling `onEvent` with each frame's JSON `data`; resolves when the
+   * stream ends. Shared by the session stream above and the plugin streams (`GET /plugins/events`,
+   * `GET /plugins/{id}/events`). onOpen runs once the engine answered, after it holds the subscription.
+   */
+  async streamSse<T = unknown>(
+    path: string,
+    signal?: AbortSignal,
+    onEvent?: (event: T) => void,
+    onOpen?: () => void,
+  ): Promise<void> {
+    const response = await this.request(path, { method: "GET", signal });
     if (!response.body) throw new Error("event stream response has no body");
     onOpen?.();
     const reader = response.body.getReader();
@@ -1448,7 +1468,7 @@ export class EngineApi {
             .join("\n");
           if (!data) continue;
           try {
-            onEvent?.(JSON.parse(data) as SessionEvent);
+            onEvent?.(JSON.parse(data) as T);
           } catch {
             // Ignore keepalive/non-JSON frames while preserving the stream.
           }
@@ -1463,7 +1483,7 @@ export class EngineApi {
           .join("\n");
         if (data) {
           try {
-            onEvent?.(JSON.parse(data) as SessionEvent);
+            onEvent?.(JSON.parse(data) as T);
           } catch {
             // Ignore a partial trailing frame.
           }
@@ -1477,6 +1497,7 @@ export class EngineApi {
   respondPermission(
     sessionId: string,
     toolId: string,
+    permissionId: string,
     decision: "approve" | "deny",
     scope = "once",
   ) {
@@ -1484,7 +1505,7 @@ export class EngineApi {
       `/sessions/${encodeURIComponent(sessionId)}/permission`,
       {
         method: "POST",
-        body: JSON.stringify({ tool_id: toolId, decision, scope }),
+        body: JSON.stringify({ tool_id: toolId, permission_id: permissionId, decision, scope }),
       },
     );
   }

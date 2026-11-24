@@ -6,6 +6,7 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { learnPhoneMediaPlugin } from "./scripts/learn-phone-media-plugin";
+import { pluginRuntimePlugin } from "./scripts/plugin-runtime-plugin.ts";
 import pkg from "./package.json";
 
 
@@ -153,7 +154,7 @@ export default defineConfig(({ mode }) => {
 });
 
 const mainConfig = defineConfig({
-  plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(false), react(), tailwindcss()],
+  plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(false), react(), tailwindcss(), pluginRuntimePlugin()],
   base: "./",
   define: {
     __APP_VERSION__: __APP_VERSION__,
@@ -203,18 +204,23 @@ const mainConfig = defineConfig({
       "tests/build-provenance.test.ts",
       "tests/voice-turn-groups.test.ts",
       "tests/history-reconciliation.test.ts",
+      "tests/user-row-request-ids.test.ts",
       "tests/path-text.test.ts",
       "tests/todo-list-cache.test.ts",
       "tests/gem-headshot.test.ts",
       "tests/field-renderer-textarea.test.tsx",
       "tests/hub-note-recipient.test.tsx",
       "tests/thread-pending-images.test.ts",
+      "tests/composer-keeper.test.ts",
       "src/components/assistant-ui/tool-fallback.test.tsx",
       "src/components/assistant-ui/user-text.test.tsx",
       "src/engine-version.test.ts",
       "tests/agent-type-glyph.test.tsx",
       "tests/kollab-logo.test.tsx",
       "tests/agent-version-notice.test.tsx",
+      "tests/daemon-outdated-panels.test.tsx",
+      "tests/daemon-outdated-file-tree.test.tsx",
+      "tests/daemon-outdated-recovery.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",
       "tests/trajectory-detail-title.test.ts",
@@ -239,6 +245,15 @@ const mainConfig = defineConfig({
       "tests/setup-guide-close.test.tsx",
       "tests/setup-guide-first-run-persistence.test.tsx",
       "tests/setup-guide-followups.test.tsx",
+      "tests/plugin-runtime.test.ts",
+      "tests/plugin-touch-size.test.ts",
+      "src/plugins/registry.test.ts",
+      "src/plugins/sdk.test.ts",
+      "src/plugins/loader.test.ts",
+      "src/plugins/mount.test.tsx",
+      "src/plugins/surfaces.test.tsx",
+      "src/plugins/wiring.test.tsx",
+      "src/plugins/hello-template.test.ts",
     ],
     environment: "node",
   },

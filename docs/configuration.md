@@ -71,8 +71,16 @@ Default location for user-wide settings. Created automatically on first run.
 
 Config files are written whole (a temporary file renamed over the old one, mode
 `0600`), so kollab windows started together never read half a file. A file kollab
-cannot parse, such as a hand edit with a stray comma, is copied to
-`config.json.corrupt` before a fresh config takes its place.
+cannot read or parse, such as a hand edit with a stray comma, is treated as an
+unreadable or malformed layer rather than as missing configuration. Ordinary
+saves, startup migrations, and automatic plugin updates pause so they cannot
+replace that file with defaults. A settings save reports the affected layer and
+the recovery action without displaying configuration values. Back up the file,
+repair it as a JSON object or restore a valid backup, then reload before saving.
+If another process changes a config file after it was loaded, saving is refused;
+reload before retrying so the other writer's changes are preserved. Backups keep
+the original bytes and file mode, and a new backup does not overwrite an older
+one.
 
 ### Project Config
 
@@ -206,6 +214,33 @@ The release comes from the startup check above (cached for
 background and runs from the next launch. A failed install leaves the launch on
 the current version and shows why. Only the window you launch installs:
 detached agents and `kollab service` daemons just report the new release.
+
+### Nightly builds
+
+Every night at 09:00 UTC, when `main` has changed and its `ci/tests` passed, CI publishes a nightly build:
+the single-file binaries as a GitHub prerelease tagged `nightly-<version>`, for
+example `nightly-0.22.2.dev202611200900`. Stable installs never see one. To
+follow nightlies with the binary from `install.sh`, set:
+
+```json
+{
+  "kollabor": {
+    "updates": {
+      "include_prereleases": true,
+      "auto_update_enabled": true
+    }
+  }
+}
+```
+
+Set them in the global `~/.kollab/config.json`. With `include_prereleases` on,
+the update check, `/upgrade` and `kollab --update` take the newest release,
+nightly or stable. With `auto_update_enabled` also on, each launch installs the
+newest one first. Nightlies are binaries only: `uv tool`, `pipx`, `pip` and
+Kollab.app installs ignore `include_prereleases` and stay on releases. To
+install one nightly directly, run `KOLLAB_VERSION=<version> bash install.sh`;
+to go back, turn the setting off and run
+`KOLLAB_VERSION=<release> bash install.sh`.
 
 ## Project Data Directory
 

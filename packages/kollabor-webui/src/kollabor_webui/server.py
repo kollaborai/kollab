@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import ipaddress
 import logging
+import mimetypes
 import os
 import posixpath
+import re
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
+from email.utils import formatdate
 from pathlib import Path
 
 import anyio
@@ -43,6 +48,8 @@ _HOP_BY_HOP = {
     "trailer", "transfer-encoding", "upgrade", "host", "content-length", "date", "server",
 }
 logger = logging.getLogger(__name__)
+# The build writes exactly this tag (vite.config.ts, kollabPluginRuntime); no other inline script is allowed.
+_IMPORT_MAP = re.compile(rb'<script type="importmap">(.*?)</script>', re.S)
 NO_STORE_HEADERS = {
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
@@ -192,9 +199,17 @@ def create_app(
 
 
     class _UpdateConfig:
-        """The web server keeps no update cache: every check asks GitHub."""
+        """The web server keeps no update cache: every check asks GitHub.
+
+        The update channel is still the user's: include_prereleases comes from
+        the global config, read the same way the binary upgrade reads it (#1349).
+        """
 
         def get(self, key: str, default=None):
+            if key == "kollabor.updates.include_prereleases":
+                from kollabor.updates.auto_update import _include_prereleases
+
+                return _include_prereleases()
             return default
 
         def save_key(self, key: str, value, **_kwargs) -> bool:
@@ -365,7 +380,18 @@ def create_app(
     def page(directory: Path) -> FileResponse:
         # Always revalidated: a cached entry page keeps loading the previous
         # build's hashed assets after a rebuild. The assets themselves can cache.
-        return FileResponse(directory / "index.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
+        index = directory / "index.html"
+        headers = {"Cache-Control": "no-cache"}
+        # The import map that gives web plugins the app's React is the page's one inline
+        # script; the policy allows exactly that text by its hash (#1028).
+        try:
+            found = _IMPORT_MAP.search(index.read_bytes())
+        except OSError:
+            found = None
+        if found:
+            digest = base64.b64encode(hashlib.sha256(found.group(1)).digest()).decode()
+            headers["Content-Security-Policy"] = f"script-src 'self' 'sha256-{digest}'"
+        return FileResponse(index, media_type="text/html", headers=headers)
 
     @app.get("/")
     async def index():
@@ -373,7 +399,7 @@ def create_app(
 
     @app.get("/plugins/{plugin_id}/web/{asset_path:path}")
     async def plugin_asset(plugin_id: str, asset_path: str):
-        from kollabor_plugins.packages import _ID, _read_registry
+        from kollabor_plugins.packages import _ID, _read_registry, files_sha256_with_asset_snapshot
 
         missing = JSONResponse({"detail": "Not found"}, status_code=404)
         is_dev = plugin_id.endswith("@dev")
@@ -399,8 +425,14 @@ def create_app(
                 if not isinstance(record, dict) or not record.get("enabled") or base_id in registry["dev"]:
                     return missing
                 installed_root = (home / "plugins").resolve()
-                root = (installed_root / base_id).resolve()
+                plugin_root = installed_root / base_id
+                if plugin_root.is_symlink():
+                    return missing
+                root = plugin_root.resolve()
                 if root.parent != installed_root:
+                    return missing
+                approved_hash = record.get("files_sha256")
+                if not isinstance(approved_hash, str) or not approved_hash:
                     return missing
             web = root / "web"
             dist = web / "dist"
@@ -411,6 +443,29 @@ def create_app(
                 relative = asset.relative_to(dist.resolve())
                 if any(part.startswith(".") for part in relative.parts) or asset.suffix not in extensions:
                     return missing
+                if not is_dev:
+                    # Hash the package and capture the served bytes in one traversal, off the event loop.
+                    last_modified = asset.stat().st_mtime
+                    digest, contents = await anyio.to_thread.run_sync(
+                        files_sha256_with_asset_snapshot, root, asset
+                    )
+                    if digest != approved_hash:
+                        contents.close()
+                        return missing
+                    media_type = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
+
+                    def body():
+                        try:
+                            while chunk := contents.read(64 * 1024):
+                                yield chunk
+                        finally:
+                            contents.close()
+
+                    return StreamingResponse(
+                        body(),
+                        media_type=media_type,
+                        headers={"ETag": f'"{approved_hash}"', "Last-Modified": formatdate(last_modified, usegmt=True)},
+                    )
         except (OSError, ValueError, RuntimeError):
             return missing
         return FileResponse(asset) if asset is not None else missing
