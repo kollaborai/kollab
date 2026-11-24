@@ -7108,9 +7108,26 @@ class HubPlugin(BasePlugin):
                 msg.id,
             )
             return False
+        identity = getattr(self, "_identity", None)
+        agent_keys = (
+            [identity.agent_id, identity.identity]
+            if identity is not None
+            else [msg.to]
+        )
+        if not AgentMessenger.mark_mailbox_delivery_uncertain(agent_keys, {msg.id}):
+            logger.error(
+                "Could not persist mailbox delivery claim for %s; leaving it queued",
+                msg.id,
+            )
+            return False
         delivery = asyncio.create_task(self._on_message_received(msg))
         try:
-            return await asyncio.shield(delivery) is not False
+            accepted = await asyncio.shield(delivery) is not False
+            if not accepted:
+                AgentMessenger.clear_mailbox_delivery_uncertain(
+                    agent_keys, {msg.id}
+                )
+            return accepted
         except asyncio.CancelledError as exc:
             task = asyncio.current_task()
             accepted = False
@@ -7140,20 +7157,11 @@ class HubPlugin(BasePlugin):
                 # restart does not replay the effect.
                 self._acknowledge_inbox_delivery({msg.id}, [msg.to])
                 exc.acknowledged_message_ids = {msg.id}
-            elif delivery.cancelled():
-                identity = getattr(self, "_identity", None)
-                agent_keys = (
-                    [identity.agent_id, identity.identity]
-                    if identity is not None
-                    else [msg.to]
-                )
-                AgentMessenger.mark_mailbox_delivery_uncertain(
-                    agent_keys, {msg.id}
-                )
             raise
         except Exception as exc:
             logger.warning(
-                "Mailbox delivery failed for %s (%s); leaving it queued for retry",
+                "Mailbox delivery failed for %s (%s); preserving it without "
+                "automatic replay",
                 msg.id,
                 type(exc).__name__,
             )
@@ -7229,11 +7237,26 @@ class HubPlugin(BasePlugin):
         block = "\n".join(lines)
 
         if llm is not None and hasattr(llm, "inject_system_message"):
+            identity = getattr(self, "_identity", None)
+            agent_keys = (
+                [identity.agent_id, identity.identity]
+                if identity is not None
+                else []
+            )
+            ordinary_ids = {msg.id for msg in ordinary_msgs}
+            if not AgentMessenger.mark_mailbox_delivery_uncertain(
+                agent_keys, ordinary_ids
+            ):
+                logger.error(
+                    "Could not persist mailbox replay claim for %d message(s)",
+                    len(ordinary_ids),
+                )
+                return acknowledged
             try:
                 await llm.inject_system_message(block, subtype="inbox_replay")
-                acknowledged.update(msg.id for msg in ordinary_msgs)
+                acknowledged.update(ordinary_ids)
                 self._acknowledge_inbox_delivery(
-                    {msg.id for msg in ordinary_msgs}
+                    ordinary_ids
                 )
                 logger.info(
                     "Injected inbox replay block: %d message(s) shown "
@@ -7245,13 +7268,18 @@ class HubPlugin(BasePlugin):
             except asyncio.CancelledError as exc:
                 # LLMService queues the HUD entry before its first await, so
                 # cancellation from the injection call follows acceptance.
-                replayed_ids = {msg.id for msg in ordinary_msgs}
+                replayed_ids = ordinary_ids
                 acknowledged.update(replayed_ids)
                 self._acknowledge_inbox_delivery(replayed_ids)
                 exc.acknowledged_message_ids = acknowledged.copy()
                 raise
             except Exception as exc:
-                logger.debug("inbox replay injection failed: %s", exc)
+                logger.warning(
+                    "Inbox replay injection failed after its delivery claim; "
+                    "preserving messages for inspection (%s)",
+                    type(exc).__name__,
+                )
+                return acknowledged
 
         # Fallback: individual delivery (no inject_system_message)
         for msg in ordinary_msgs:

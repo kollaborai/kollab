@@ -3775,17 +3775,19 @@ class AgentMessenger:
     @staticmethod
     def mark_mailbox_delivery_uncertain(
         agent_keys: List[str], message_ids: set[str]
-    ) -> None:
-        """Keep interrupted deliveries available without replaying them blindly."""
+    ) -> bool:
+        """Persist a no-replay claim before invoking a mailbox receiver."""
         if not message_ids:
-            return
+            return True
         messages_dir = get_messages_dir()
+        persisted = True
         for key in dict.fromkeys(k for k in agent_keys if k):
             mailbox_dir = messages_dir / key
             try:
                 paths = list(mailbox_dir.glob("*.json"))
             except OSError:
-                logger.error("Could not scan mailbox to hold interrupted delivery")
+                logger.error("Could not scan mailbox to persist delivery claim")
+                persisted = False
                 continue
             for path in paths:
                 temp_name = ""
@@ -3808,20 +3810,62 @@ class AgentMessenger:
                         json.dump(data, fh)
                         fh.flush()
                         os.fsync(fh.fileno())
-                    try:
-                        os.replace(temp_name, path)
-                        temp_name = ""
-                    except OSError:
-                        # Some filesystems permit rewriting the record but
-                        # reject atomic replacement. Keep the uncertainty
-                        # marker durable on the existing record in that case.
-                        with open(path, "w") as fh:
-                            json.dump(data, fh)
-                            fh.flush()
-                            os.fsync(fh.fileno())
+                    os.replace(temp_name, path)
+                    temp_name = ""
                 except (OSError, ValueError, TypeError) as exc:
+                    persisted = False
                     logger.error(
                         "Could not persist uncertain mailbox delivery %s (%s)",
+                        path.name,
+                        type(exc).__name__,
+                    )
+                finally:
+                    if temp_name:
+                        try:
+                            os.unlink(temp_name)
+                        except OSError:
+                            pass
+        return persisted
+
+    @staticmethod
+    def clear_mailbox_delivery_uncertain(
+        agent_keys: List[str], message_ids: set[str]
+    ) -> None:
+        """Release a persisted no-replay claim after an explicit refusal."""
+        if not message_ids:
+            return
+        messages_dir = get_messages_dir()
+        for key in dict.fromkeys(k for k in agent_keys if k):
+            mailbox_dir = messages_dir / key
+            try:
+                paths = list(mailbox_dir.glob("*.json"))
+            except OSError:
+                logger.error("Could not scan mailbox to release delivery claim")
+                continue
+            for path in paths:
+                temp_name = ""
+                try:
+                    with open(path) as fh:
+                        data = json.load(fh)
+                    if (
+                        not isinstance(data, dict)
+                        or data.get("id") not in message_ids
+                        or data.get("_mailbox_delivery_uncertain") is not True
+                    ):
+                        continue
+                    data.pop("_mailbox_delivery_uncertain", None)
+                    fd, temp_name = tempfile.mkstemp(
+                        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+                    )
+                    with os.fdopen(fd, "w") as fh:
+                        json.dump(data, fh)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(temp_name, path)
+                    temp_name = ""
+                except (OSError, ValueError, TypeError) as exc:
+                    logger.error(
+                        "Could not release mailbox delivery claim %s (%s)",
                         path.name,
                         type(exc).__name__,
                     )

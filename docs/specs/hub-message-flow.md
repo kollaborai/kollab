@@ -342,12 +342,14 @@ there are TWO separate dedup systems:
     atomic file write (timestamp-uuid.json)
     polled every 5 seconds by _mailbox_loop
     malformed timestamps are reported without message content and discarded
-    valid records remain until delivery succeeds and the reader acknowledges
-    them; interruption or refusal leaves them available for replay
-    if the receiver task itself is cancelled, the result is ambiguous: retain
-    the record with an uncertainty marker and suppress automatic replay
-    until an operator inspects it; clear the marker to retry or remove the
-    record after confirming its effect
+    before calling a receiver, persist an uncertainty marker; if that fails,
+    skip delivery and leave the record queued
+    accepted delivery is acknowledged by removing the record or writing a
+    receipt; if acknowledgment persistence fails, the marker prevents replay
+    explicit refusal clears the marker and leaves the record available to retry
+    cancellation or an ambiguous receiver failure keeps the marker, suppressing
+    automatic replay until an operator inspects it; clear it to retry or remove
+    the record after confirming its effect
     TTL-expired, restart-stale ordinary messages, and replay-cap drops are
     intentionally discarded; durable task controls retain their existing
     classification path
