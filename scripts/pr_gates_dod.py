@@ -40,7 +40,7 @@ Configuration lives in ``.github/pr-gates.toml`` and is repo-agnostic:
    "^packages/" = ["CHANGELOG.md"]                  # regex -> required docs
 
    [pr_gates.dod.regression_profile]
-   finding_id_pattern = "\\bF\\d+\\b"               # generic finding ids
+   finding_id_pattern = "\\bF\\d{1,2}\\b"           # generic finding ids
    test_paths = ["tests/"]                          # where tests live
 
 Turning ``enabled`` off fully disables the feature: nothing is posted and
@@ -81,8 +81,11 @@ ALL_CHECKS: tuple[str, ...] = (
 
 DEFAULT_CHECK_NAME = "dod/ready-for-review"
 # Generic finding-id shape (F14, F2, ...) -- not tied to any one review
-# convention. Repos configure their own via regression_profile.
-DEFAULT_FINDING_PATTERN = r"\bF\d+\b"
+# convention. Repos configure their own via regression_profile. One or two
+# digits: ruff's pyflakes rules are F plus 3 digits (F401, F841), and review
+# verdicts quote ruff output, so a longer id would read lint codes as findings
+# (#1407). Findings numbered past F99 are not recognized.
+DEFAULT_FINDING_PATTERN = r"\bF\d{1,2}\b"
 DEFAULT_TEST_PATHS: list[str] = ["tests/"]
 # Suppressions stay unavailable unless the protected base-branch config names
 # trusted accounts explicitly.

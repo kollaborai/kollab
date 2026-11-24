@@ -60,7 +60,7 @@ code is 0).
 | `pr_gates.dod.checks` | all configured checks | Which checks run. Remove an entry to toggle that check off. |
 | `pr_gates.dod.docs_paths` | `{}` | Maps a regex over changed paths to the doc files that must be updated in the same PR. |
 | `pr_gates.dod.spec_or_fix_brief_mode` | `block` | Missing feature specs or fix briefs warn without failing in `warn` mode; `block` fails the check. |
-| `pr_gates.dod.regression_profile.finding_id_pattern` | `\bF\d+\b` | Generic finding-id shape used to identify review finding IDs. |
+| `pr_gates.dod.regression_profile.finding_id_pattern` | `\bF\d{1,2}\b` | Generic finding-id shape used to identify review finding IDs: `F` plus 1-2 digits, so ruff's 3-digit pyflakes codes (`F401`, `F841`) quoted in verdicts are never read as findings (#1407). |
 | `pr_gates.dod.regression_profile.test_paths` | `["tests/"]` | Where changed test text must reference finding IDs; this is reference hygiene only. |
 | `pr_gates.dod.regression_profile.trusted_reviewers` | `[]` | GitHub logins permitted to approve regression review and annotate reference/no-test exceptions; the PR author is never accepted. |
 
@@ -77,7 +77,7 @@ spec_or_fix_brief_mode = "warn"
 "^packages/" = ["CHANGELOG.md"]
 
 [pr_gates.dod.regression_profile]
-finding_id_pattern = "\\bF\\d+\\b"
+finding_id_pattern = "\\bF\\d{1,2}\\b"
 test_paths = ["tests/"]
 trusted_reviewers = ["owner-login"]
 ```
