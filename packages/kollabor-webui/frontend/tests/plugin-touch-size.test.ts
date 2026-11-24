@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const settingsSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/plugins/settings.tsx"), "utf8");
+const installSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/plugins/install.tsx"), "utf8");
 
 // The rule that makes plugin controls touch-sized (docs/specs/plugins.md, "Right-hand menu").
 const css = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/styles.css"), "utf8");
@@ -41,5 +42,14 @@ describe("plugin on/off switch hit area", () => {
   });
   it("no longer relies on a pseudo-element the box model does not count", () => {
     expect(settingsSource).not.toContain("pointer-coarse:before:");
+  });
+});
+
+describe("Add Plugin touch targets", () => {
+  it("keeps both source inputs at least 44px high on coarse pointers", () => {
+    const inputs = [...installSource.matchAll(/<Input\b[\s\S]*?\/>/g)].map(([input]) => input);
+    expect(inputs).toHaveLength(2);
+    for (const input of inputs)
+      expect(input).toContain("pointer-coarse:min-h-11");
   });
 });
