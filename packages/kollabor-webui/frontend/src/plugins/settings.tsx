@@ -67,26 +67,33 @@ function pluginStatus(entry: PluginEntry, record: PluginRecord | undefined): str
     : entry.enabled ? "On" : "Off";
 }
 
-function ServiceRow({ service, api, id, canControl, enabled, onError }: {
-  service: PluginService; api: EngineApi; id: string; canControl: boolean; enabled: boolean; onError: (message: string) => void;
+function ServiceRow({ service, api, id, canControl, enabled, disabled, operationBusy, onBusyChange, onError }: {
+  service: PluginService; api: EngineApi; id: string; canControl: boolean; enabled: boolean; disabled: boolean; operationBusy: boolean;
+  onBusyChange: (busy: boolean) => void; onError: (message: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string | null>(null);
   const base = `${pathFor(id)}/services/${encodeURIComponent(service.name)}`;
   const control = async (action: "start" | "stop" | "restart") => {
     setBusy(true);
+    onBusyChange(true);
+    onError(null);
     try {
       await api.json(`${base}/${action}`, { method: "POST" });
       await refreshPlugins();
+      onError(null);
     } catch (caught) {
       onError(message(caught));
       await refreshPlugins();
     } finally {
       setBusy(false);
+      onBusyChange(false);
     }
   };
   const showLog = async () => {
     setBusy(true);
+    onBusyChange(true);
+    onError(null);
     try {
       const response = await api.request(`${base}/log`);
       setLog(await response.text());
@@ -94,6 +101,7 @@ function ServiceRow({ service, api, id, canControl, enabled, onError }: {
       onError(message(caught));
     } finally {
       setBusy(false);
+      onBusyChange(false);
     }
   };
   return (
@@ -102,18 +110,18 @@ function ServiceRow({ service, api, id, canControl, enabled, onError }: {
       <span className="text-muted-foreground">{serviceStatus(service)}</span>
       {service.error ? <span className="text-destructive break-words">{service.error}</span> : null}
       <div className="ml-auto flex flex-wrap gap-1">
-        <Button type="button" variant="ghost" size="xs" className="pointer-coarse:min-h-11" aria-label={`View Log ${service.name}`} disabled={busy} onClick={() => { void showLog(); }}>View Log</Button>
+        <Button type="button" variant="ghost" size="xs" className="pointer-coarse:min-h-11" aria-label={`View Log ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void showLog(); }}>View Log</Button>
         {canControl && service.state === "running" ? (
           <>
-            {enabled ? <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Restart ${service.name}`} disabled={busy} onClick={() => { void control("restart"); }}>Restart</Button> : null}
-            <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Stop ${service.name}`} disabled={busy} onClick={() => { void control("stop"); }}>Stop</Button>
+            {enabled ? <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Restart ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void control("restart"); }}>Restart</Button> : null}
+            <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Stop ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void control("stop"); }}>Stop</Button>
           </>
         ) : null}
         {canControl && service.state === "stop-failed" ? (
-          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Retry Stop ${service.name}`} disabled={busy} onClick={() => { void control("stop"); }}>Retry Stop</Button>
+          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Retry Stop ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void control("stop"); }}>Retry Stop</Button>
         ) : null}
         {canControl && enabled && service.state !== "running" && service.state !== "stopping" && service.state !== "stop-failed" ? (
-          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Start ${service.name}`} disabled={busy} onClick={() => { void control("start"); }}>Start</Button>
+          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Start ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void control("start"); }}>Start</Button>
         ) : null}
       </div>
       <Dialog open={log !== null} onOpenChange={(open) => { if (!open) setLog(null); }}>
@@ -144,8 +152,9 @@ export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" |
   };
 }
 
-function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
-  entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; remote: boolean; onUpdate: (id: string) => void; detailRef: RefObject<HTMLElement | null>;
+function PluginDetail({ entry, record, api, remote, onUpdate, onBusyChange, operationBusy, detailRef }: {
+  entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; remote: boolean; onUpdate: (id: string) => void;
+  onBusyChange: (busy: boolean) => void; operationBusy: boolean; detailRef: RefObject<HTMLElement | null>;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -158,8 +167,12 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
   const usesCount = uses.throughKollab.length + uses.onItsOwn.length + uses.other.length;
   const SettingsView = record?.contributions.settings?.render;
   const settings = entry.settings ?? [];
+  const setOperationBusy = (value: boolean) => {
+    setBusy(value);
+    onBusyChange(value);
+  };
   const saveSettings = async () => {
-    setBusy(true);
+    setOperationBusy(true);
     setError(null);
     try {
       await savePluginSettings(api, entry, settingsDraft);
@@ -168,11 +181,11 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
     } catch (caught) {
       setError(message(caught));
     } finally {
-      setBusy(false);
+      setOperationBusy(false);
     }
   };
   const perform = async (action: "enable" | "disable" | "remove") => {
-    setBusy(true);
+    setOperationBusy(true);
     setError(null);
     try {
       await api.json(`${pathFor(entry.id)}/${action}`, { method: "POST" });
@@ -185,7 +198,7 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
       const current = listedPluginEntries().find((item) => entryKey(item) === entryKey(entry));
       if (action !== "enable" && !current?.enabled) setConfirmation(null);
     } finally {
-      setBusy(false);
+      setOperationBusy(false);
     }
   };
   const status = pluginStatus(entry, record);
@@ -198,14 +211,17 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
           <Switch
             aria-label={`${entry.name} enabled`}
             checked={entry.enabled}
-            disabled={!switchEnabled || busy}
-            onCheckedChange={(checked) => { if (checked) void perform("enable"); else setConfirmation("disable"); }}
+            disabled={!switchEnabled || busy || operationBusy}
+            onCheckedChange={(checked) => {
+              if (checked) void perform("enable");
+              else { setError(null); setConfirmation("disable"); }
+            }}
           />
         </label>
         {updateRemove ? (
           <div className="ml-auto flex flex-wrap gap-2">
-            <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button>
-            <Button type="button" size="xs" variant="ghost" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button>
+            <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={() => onUpdate(entry.id)}>Update</Button>
+            <Button type="button" size="xs" variant="ghost" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={() => { setError(null); setConfirmation("remove"); }}>Remove</Button>
           </div>
         ) : null}
       </div>
@@ -227,7 +243,7 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
           <div>
             <h3 className="text-sm font-semibold">Background Processes</h3>
             {entry.services.map((service) => (
-              <ServiceRow key={service.name} service={service} api={api} id={entry.id} canControl={services} enabled={entry.enabled} onError={setError} />
+              <ServiceRow key={service.name} service={service} api={api} id={entry.id} canControl={services && !operationBusy} enabled={entry.enabled} disabled={busy} operationBusy={operationBusy} onBusyChange={onBusyChange} onError={setError} />
             ))}
           </div>
         ) : null}
@@ -255,7 +271,7 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
                 key={field.path}
                 field={field}
                 draft={settingsDraft}
-                disabled={remote || busy || entry.state === "changed-on-disk"}
+                disabled={remote || busy || operationBusy || entry.state === "changed-on-disk"}
                 onChange={setSettingsDraft}
               />
             ))}
@@ -265,7 +281,7 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
                 variant="outline"
                 size="sm"
                 className="pointer-coarse:min-h-11"
-                disabled={busy || !Object.keys(settingsDraft).length}
+                disabled={busy || operationBusy || !Object.keys(settingsDraft).length}
                 onClick={() => { void saveSettings(); }}
               >
                 Save
@@ -281,7 +297,7 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
           </div>
         ) : null}
       </div>
-      <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open && !busy) setConfirmation(null); }}>
+      <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open && !busy && !operationBusy) setConfirmation(null); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{confirmation === "remove" ? "Remove" : "Turn off"} {entry.name}?</DialogTitle>
@@ -289,8 +305,8 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
           </DialogHeader>
           {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
           <DialogFooter>
-            <Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</Button>
-            <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || !confirmation} onClick={() => { if (confirmation) void perform(confirmation); }}>
+            <Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={() => setConfirmation(null)}>Cancel</Button>
+            <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || operationBusy || !confirmation} onClick={() => { if (confirmation) void perform(confirmation); }}>
               {confirmation === "remove" ? "Remove" : "Turn Off"}
             </Button>
           </DialogFooter>
@@ -307,7 +323,11 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
   const listId = useId();
   const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [busyPluginKey, setBusyPluginKey] = useState<string | null>(null);
   const detailRef = useRef<HTMLElement>(null);
+  const reportPluginBusy = (key: string, busy: boolean) => {
+    setBusyPluginKey((current) => busy ? key : current === key ? null : current);
+  };
   const records = new Map<string, PluginRecord>(snapshot.plugins.map((record) => [record.id, record]));
   const entries = inventory.entries;
   const groups = [
@@ -330,7 +350,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h2 className="text-muted-foreground text-xs font-semibold">{group.title}</h2>
                 {group.title === "Installed" && !snapshot.off && !remote ? (
-                  <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" onClick={() => setOperation({ action: "install" })}>
+                  <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busyPluginKey !== null} onClick={() => setOperation({ action: "install" })}>
                   Add Plugin
                   </Button>
                 ) : null}
@@ -354,6 +374,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
                       aria-label={entry.name}
                       aria-describedby={descriptionId}
                       aria-pressed={isSelected}
+                      disabled={busyPluginKey !== null}
                       onClick={() => {
                         setSelectedKey(key);
                         if (window.matchMedia("(width < 48rem)").matches) {
@@ -390,6 +411,8 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
             record={records.get(selected.id)}
             api={api}
             remote={remote}
+            operationBusy={busyPluginKey === entryKey(selected)}
+            onBusyChange={(busy) => reportPluginBusy(entryKey(selected), busy)}
             detailRef={detailRef}
             onUpdate={(pluginId) => setOperation({ action: "update", pluginId })}
           />
