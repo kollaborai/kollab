@@ -84,6 +84,22 @@ _MANIFEST_KEYS = {
 }
 _SERVICE_KEYS = {"command", "autostart", "restart", "stop_timeout_s", "heartbeat_s", "secrets"}
 _MAX_SERVICE_SECONDS = 86400
+_MAX_MANIFEST_STRING = 4096
+
+
+def _check_manifest_string_lengths(value: object) -> None:
+    """Reject oversized strings anywhere in untrusted manifest data, including nested keys."""
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            if len(current) > _MAX_MANIFEST_STRING:
+                raise ValueError(f"Manifest string exceeds {_MAX_MANIFEST_STRING} characters")
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
 
 
 def stop_timeout(service: object) -> float:
@@ -125,6 +141,7 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
         raise ValueError("Invalid plugin manifest JSON") from exc
     if not isinstance(manifest, dict):
         raise ValueError("Plugin manifest must be an object")
+    _check_manifest_string_lengths(manifest)
     try:
         required = manifest.get("kollab")
         if not isinstance(required, str) or not required:

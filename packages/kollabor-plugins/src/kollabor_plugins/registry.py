@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import math
+import re
 import sys
 import types
 from pathlib import Path
@@ -30,6 +31,38 @@ from .packages import (
 )
 
 logger = logging.getLogger(__name__)
+
+_INVENTORY_TEXT_LIMIT = 4096
+_INVENTORY_SENSITIVE_TEXT = re.compile(
+    r"(?:\b(?:secret|token|password|credential|authorization|bearer|api[_-]?key)[-_][A-Za-z0-9_-]{6,}"
+    r"|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|credential|authorization)\s*[:=]\s*\S+)",
+    re.IGNORECASE,
+)
+_PLUGIN_INVENTORY_STATES = {"ok", "error", "off", "stopping", "stop-failed", "changed-on-disk", "skipped"}
+_SERVICE_INVENTORY_STATES = {
+    "starting",
+    "running",
+    "backoff",
+    "stopping",
+    "stop-failed",
+    "exited",
+    "stopped",
+    "crash-stopped",
+    "error",
+    "unknown",
+    "failed",
+}
+_PLUGIN_INVENTORY_ERRORS = {
+    "Plugin files changed since approval",
+    "Plugin metadata could not be loaded",
+    "Python entry failed while loading; see the process log for details.",
+}
+_SERVICE_INVENTORY_ERRORS = {
+    "Could not prepare plugin engine credentials",
+    "Could not start this process. View Log for details.",
+    "Could not stop this process. Retry stopping it.",
+    "Could not verify the stop. Check the process before retrying.",
+}
 
 # These paths remain available for imports performed after plugin initialization.
 _vendor_owners: dict[str, Path] = {}
@@ -557,7 +590,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
             status = "unknown" if pid_file.exists() or pid_file.is_symlink() else "stopped"
         if status == "stop-failed" and identity is None and not (pid_file.exists() or pid_file.is_symlink()):
             status = "stopped"
-        result.append(
+        service_entry = _normalize_service_entry(
             {
                 "name": name,
                 "state": status,
@@ -568,16 +601,23 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
                 "secrets": _service_secrets(definition),
                 "heartbeat": None,
                 "heartbeat_s": heartbeat_s,
+                "heartbeat_monitor_since": None,
                 "stop_deadline": _finite_service_number(state.get("stop_deadline")) if status == "stopping" else None,
                 "error": state.get("error") if isinstance(state.get("error"), str) else None,
             }
         )
+        if service_entry is not None:
+            result.append(service_entry)
     return result
 
 
 def _service_secrets(definition: object) -> list[str]:
     raw = definition.get("secrets", []) if isinstance(definition, dict) else []
-    return [secret for secret in raw if isinstance(secret, str)] if isinstance(raw, list) else []
+    if not isinstance(raw, list):
+        return []
+    return [
+        secret for secret in raw if isinstance(secret, str) and _SYMBOL.fullmatch(secret) and len(secret) <= 64
+    ][:64]
 
 
 def _finite_service_number(value: object) -> float | None:
@@ -588,6 +628,333 @@ def _finite_service_number(value: object) -> float | None:
     except OverflowError:
         return None
     return number if math.isfinite(number) else None
+
+
+def _bounded_inventory_text(value: object, limit: int = _INVENTORY_TEXT_LIMIT) -> str | None:
+    if (
+        not isinstance(value, str)
+        or len(value) > limit
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        or _INVENTORY_SENSITIVE_TEXT.search(value)
+    ):
+        return None
+    clean = value.strip()
+    return clean or None
+
+
+def _inventory_number(value: object, minimum: float = 0, maximum: float = float("inf")) -> int | float | None:
+    if type(value) not in (int, float):
+        return None
+    try:
+        return value if math.isfinite(value) and minimum <= value <= maximum else None
+    except (OverflowError, TypeError):
+        return None
+
+
+def _normalize_service_entry(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    name = _bounded_inventory_text(value.get("name"), 40)
+    from .packages import _SERVICE
+
+    if not isinstance(name, str) or not _SERVICE.fullmatch(name):
+        return None
+    raw_state = value.get("state")
+    state = raw_state if isinstance(raw_state, str) and raw_state in _SERVICE_INVENTORY_STATES else "unknown"
+    raw_desired = value.get("desired")
+    desired = raw_desired if raw_desired in ("running", "stopped") else "stopped"
+    raw_secrets = value.get("secrets")
+    secrets = (
+        list(
+            dict.fromkeys(
+                secret
+                for secret in raw_secrets
+                if isinstance(secret, str) and _SYMBOL.fullmatch(secret) and len(secret) <= 64
+            )
+        )[:64]
+        if isinstance(raw_secrets, list)
+        else []
+    )
+    raw_error = value.get("error")
+    error = raw_error if isinstance(raw_error, str) and raw_error in _SERVICE_INVENTORY_ERRORS else None
+    return {
+        "name": name,
+        "state": state,
+        "desired": desired,
+        "pid": value.get("pid") if type(value.get("pid")) is int and value["pid"] > 0 else None,
+        "since": _inventory_number(value.get("since")),
+        "restarts": min(value["restarts"], 2_147_483_647)
+        if type(value.get("restarts")) is int and value["restarts"] >= 0
+        else 0,
+        "heartbeat": _inventory_number(value.get("heartbeat")),
+        "heartbeat_s": _inventory_number(value.get("heartbeat_s"), 0.0000000001, 86_400),
+        "heartbeat_monitor_since": _inventory_number(value.get("heartbeat_monitor_since")),
+        "stop_deadline": _inventory_number(value.get("stop_deadline")),
+        "error": error,
+        "secrets": secrets,
+    }
+
+
+def _normalize_capability(value: object) -> str | None:
+    if value in ("agents", "agents:unattended"):
+        return value
+    if not isinstance(value, str) or len(value) > 1024:
+        return None
+    if value.startswith("secret:"):
+        secret = value[7:]
+        return value if len(secret) <= 64 and _SYMBOL.fullmatch(secret) else None
+    kind, separator, detail = value.partition(":")
+    if separator and kind in {"run", "net", "files"}:
+        safe = _bounded_inventory_text(detail, 1000)
+        return f"{kind}:{safe}" if safe else None
+    if separator and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", kind) and re.fullmatch(r"[A-Za-z0-9_./,-]{1,256}", detail):
+        return value if _bounded_inventory_text(value, 1024) else None
+    return None
+
+
+def _normalize_declared(value: object) -> str | dict | None:
+    if isinstance(value, str):
+        safe = _bounded_inventory_text(value, 512)
+        return safe if safe and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", safe) else None
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, str] = {}
+    for key in ("id", "name", "tool", "tag", "label", "title"):
+        if key not in value:
+            continue
+        safe = _bounded_inventory_text(value[key], 512)
+        if not safe or (key not in {"label", "title"} and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", safe)):
+            return None
+        result[key] = safe
+    return result if any(key in result for key in ("id", "name", "tool", "tag")) else None
+
+
+def _normalize_contributes(value: object) -> dict:
+    kinds = ("menu", "views", "pages", "modals", "slash", "renderers")
+    result = {kind: [] for kind in kinds}
+    if not isinstance(value, dict):
+        return result
+    for kind in kinds:
+        items = value.get(kind)
+        if not isinstance(items, list):
+            continue
+        for item in items[:256]:
+            if kind != "menu":
+                declared = _normalize_declared(item)
+                if declared is not None:
+                    result[kind].append(declared)
+                continue
+            if not isinstance(item, dict):
+                continue
+            row_id = _bounded_inventory_text(item.get("id"), 128)
+            label = _bounded_inventory_text(item.get("label"), 256)
+            raw_open = item.get("open")
+            if not row_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", row_id) or not label:
+                continue
+            if (
+                not isinstance(raw_open, dict)
+                or len(raw_open) != 1
+                or next(iter(raw_open), None) not in {"page", "modal", "view", "url"}
+            ):
+                continue
+            target_key = next(iter(raw_open))
+            target_value = _bounded_inventory_text(raw_open[target_key], 512)
+            icon = _bounded_inventory_text(item.get("icon"), 64) if item.get("icon") is not None else None
+            if not target_value or (item.get("icon") is not None and not icon):
+                continue
+            result["menu"].append({
+                "id": row_id,
+                "label": label,
+                "open": {target_key: target_value},
+                **({"icon": icon} if icon else {}),
+            })
+    return result
+
+
+def _normalize_setting(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    field_type = value.get("type")
+    config_path = _bounded_inventory_text(value.get("config_path"), 512)
+    path = _bounded_inventory_text(value.get("path"), 512) or config_path
+    label = _bounded_inventory_text(value.get("label"), 256)
+    allowed_types = {"checkbox", "slider", "spinbox", "dropdown", "text_input", "textarea", "label"}
+    if not isinstance(field_type, str) or field_type not in allowed_types or not path or not label:
+        return None
+    secret = value.get("secret") is True
+    raw_value = value.get("value")
+    if secret or raw_value is None or type(raw_value) is bool:
+        normalized_value = None if secret else raw_value
+    elif type(raw_value) in (int, float):
+        normalized_value = _inventory_number(raw_value, -9_007_199_254_740_991, 9_007_199_254_740_991)
+    elif isinstance(raw_value, str):
+        normalized_value = _bounded_inventory_text(raw_value)
+    else:
+        normalized_value = None
+
+    raw_default = value.get("default")
+    if secret or raw_default is None or type(raw_default) is bool:
+        normalized_default = None if secret else raw_default
+    elif type(raw_default) in (int, float):
+        normalized_default = _inventory_number(raw_default, -9_007_199_254_740_991, 9_007_199_254_740_991)
+    elif isinstance(raw_default, str):
+        normalized_default = _bounded_inventory_text(raw_default)
+    else:
+        normalized_default = None
+
+    def optional_text(key: str, limit: int = 1024):
+        raw = value.get(key)
+        return None if raw is None else _bounded_inventory_text(raw, limit)
+
+    def optional_number(key: str):
+        raw = value.get(key)
+        return None if raw is None else _inventory_number(raw, -9_007_199_254_740_991, 9_007_199_254_740_991)
+
+    raw_options = value.get("options")
+    options = (
+        [clean for item in raw_options if (clean := _bounded_inventory_text(item, 256)) is not None][:256]
+        if isinstance(raw_options, list)
+        else None
+    )
+    raw_labels = value.get("option_labels")
+    option_labels = {}
+    if isinstance(raw_labels, dict):
+        for key, raw_label in list(raw_labels.items())[:256]:
+            safe_key = _bounded_inventory_text(key, 256)
+            safe_label = _bounded_inventory_text(raw_label, 256)
+            if safe_key and safe_label:
+                option_labels[safe_key] = safe_label
+    return {
+        "path": path,
+        "config_path": config_path or path,
+        "type": field_type,
+        "label": label,
+        "help": optional_text("help"),
+        "value": normalized_value,
+        "default": normalized_default,
+        "min_value": optional_number("min_value"),
+        "max_value": optional_number("max_value"),
+        "step": optional_number("step"),
+        "options": options,
+        "option_labels": option_labels if isinstance(raw_labels, dict) else None,
+        "save_path": optional_text("save_path", 512),
+        "placeholder": optional_text("placeholder"),
+        "editable": value.get("editable") is True,
+        "managed_by": optional_text("managed_by", 256),
+        "secret": secret,
+        "is_set": value.get("is_set") is True,
+        **({"action": optional_text("action", 128)} if value.get("action") is not None else {}),
+    }
+
+
+def _normalize_plugin_entry(value: object) -> dict | None:
+    """Give the API one bounded, typed shape for every plugin source."""
+    if not isinstance(value, dict):
+        return None
+    plugin_id = value.get("id")
+    if not isinstance(plugin_id, str):
+        return None
+    base_id = plugin_id.removesuffix("@dev")
+    from .packages import _ID
+
+    kind = value.get("kind")
+    kind = kind if isinstance(kind, str) and kind in {"built-in", "installed", "dev"} else "installed"
+    builtin_id = re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,39}", base_id, re.ASCII) is not None
+    valid_id = builtin_id if kind == "built-in" else _ID.fullmatch(base_id) is not None
+    if not valid_id or plugin_id not in {base_id, f"{base_id}@dev"}:
+        return None
+    raw_state = value.get("state")
+    state = raw_state if isinstance(raw_state, str) and raw_state in _PLUGIN_INVENTORY_STATES else "off"
+    raw_error = value.get("error")
+    error = raw_error if isinstance(raw_error, str) and raw_error in _PLUGIN_INVENTORY_ERRORS else None
+    if state == "error" and error is None:
+        error = "Plugin metadata could not be loaded"
+    elif state == "changed-on-disk" and error is None:
+        error = "Plugin files changed since approval"
+
+    raw_web = value.get("web")
+    web = None
+    if isinstance(raw_web, dict):
+        entry = _bounded_inventory_text(raw_web.get("entry"), 512)
+        raw_style = raw_web.get("style")
+        style = None if raw_style is None else _bounded_inventory_text(raw_style, 512)
+        digest = raw_web.get("hash")
+        def path_ok(path: object) -> bool:
+            return isinstance(path, str) and path.startswith("web/dist/") and all(
+                part not in {"", ".", ".."} for part in path.split("/")
+            )
+        if (
+            entry
+            and path_ok(entry)
+            and (raw_style is None or (style and path_ok(style)))
+            and isinstance(digest, str)
+            and re.fullmatch(r"[0-9a-fA-F]{64}", digest)
+        ):
+            web = {"entry": entry, "style": style, "hash": digest}
+
+    raw_services = value.get("services")
+    services = (
+        [service for item in raw_services[:128] if (service := _normalize_service_entry(item)) is not None]
+        if isinstance(raw_services, list)
+        else []
+    )
+    raw_uses = value.get("uses")
+    uses = (
+        list(dict.fromkeys(item for raw in raw_uses if (item := _normalize_capability(raw)) is not None))[:256]
+        if isinstance(raw_uses, list)
+        else []
+    )
+    raw_granted = value.get("granted")
+    granted = (
+        list(dict.fromkeys(item for raw in raw_granted if (item := _normalize_capability(raw)) is not None))[:256]
+        if isinstance(raw_granted, list)
+        else []
+    )
+    raw_settings = value.get("settings")
+    settings = (
+        [field for item in raw_settings[:256] if (field := _normalize_setting(item)) is not None]
+        if isinstance(raw_settings, list)
+        else []
+    )
+    section = value.get("settings_section")
+    section_title = _bounded_inventory_text(section.get("title"), 256) if isinstance(section, dict) else None
+    section_widgets = (
+        [field for item in section.get("widgets", [])[:256] if (field := _normalize_setting(item)) is not None]
+        if isinstance(section, dict) and isinstance(section.get("widgets"), list)
+        else []
+    )
+    version = _bounded_inventory_text(value.get("version"), 256)
+    source = _bounded_inventory_text(value.get("source"))
+    raw_commit = value.get("commit")
+    commit = (
+        raw_commit
+        if isinstance(raw_commit, str) and re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", raw_commit)
+        else None
+    )
+    raw_order = value.get("enable_order")
+    enable_order = raw_order if type(raw_order) is int and 0 < raw_order <= _MAX_ENABLE_ORDER else None
+    return {
+        "id": plugin_id,
+        "name": _bounded_inventory_text(value.get("name"), 256) or plugin_id,
+        "version": version,
+        "kind": kind,
+        "source": source,
+        "commit": commit,
+        "enabled": value.get("enabled") is True,
+        "enable_order": enable_order,
+        "shadowed": value.get("shadowed") is True,
+        "state": state,
+        "error": error,
+        "web": web,
+        "contributes": _normalize_contributes(value.get("contributes")),
+        "services": services,
+        "settings": settings,
+        "settings_section": {"title": section_title or "Settings", "widgets": section_widgets}
+        if isinstance(section, dict)
+        else None,
+        "uses": uses,
+        "granted": granted,
+    }
 
 
 def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
@@ -663,7 +1030,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         data = _read_registry(home / "plugins.json")
     except ValueError as exc:
         logger.warning("Cannot list installed plugins: %s", exc)
-        return entries
+        return [normalized for entry in entries if (normalized := _normalize_plugin_entry(entry)) is not None]
     enable_order = data.get("enable_order", {})
     if not isinstance(enable_order, dict):
         enable_order = {}
@@ -776,4 +1143,5 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "granted": granted,
             }
         )
-    return entries
+    normalized = [_normalize_plugin_entry(entry) for entry in entries]
+    return [entry for entry in normalized if entry is not None]

@@ -3,6 +3,7 @@ import { ApiError, type EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { normalizePluginUses, safePluginText } from "./loader";
 
 type Job = {
   job_id: string; status: "staging" | "ready" | "cancelling" | "installing" | "complete" | "error" | "cancelled";
@@ -11,7 +12,112 @@ type Job = {
   error?: string | null; warning?: string | null;
   manifest?: { name?: string; version?: string; description?: string; uses?: unknown; services?: unknown; python?: unknown; engine?: unknown; web?: unknown; agents?: unknown; contributes?: unknown; hooks?: unknown; mcp?: unknown };
 };
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const errorText = (error: unknown) => error instanceof ApiError
+  ? error.status === 404 ? "Plugin review no longer exists."
+    : error.status === 409 ? "Plugin changed during review. Stage it again."
+    : error.status === 503 ? "Plugin manager could not complete the request."
+    : `Plugin request failed (HTTP ${error.status}).`
+  : "Plugin request failed. Try again.";
+
+const JOB_STATUSES = new Set<Job["status"]>(["staging", "ready", "cancelling", "installing", "complete", "error", "cancelled"]);
+const JOB_ERRORS = new Set([
+  "Cannot stage plugin source; check the URL, ref, and plugin manifest",
+  "Plugin approval, files, or active runs changed; check plugin status and stage again",
+  "Cannot install plugin; check the plugin directory and try again",
+  "Cannot install plugin; stage it again",
+]);
+const JOB_WARNINGS = new Set([
+  "Plugin staging files could not be removed",
+  "A previously running service could not be restarted; check its status",
+  "Plugin installed, but its services could not be started; check their status",
+]);
+const PLUGIN_ID = /^[a-z0-9][a-z0-9-]{1,39}(?:@dev)?$/;
+const SERVICE_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function safeCommit(value: unknown, size: 40 | 64): string | undefined {
+  return typeof value === "string" && new RegExp(`^[0-9a-f]{${size}}$`, "i").test(value) ? value : undefined;
+}
+
+function normalizeReviewManifest(value: unknown, pluginId: string | undefined): Job["manifest"] | undefined {
+  const raw = objectRecord(value);
+  if (!raw) return undefined;
+  const services = objectRecord(raw.services);
+  const safeServices: Record<string, { secrets: string[] }> = {};
+  if (services) {
+    for (const [name, definition] of Object.entries(services).slice(0, 128)) {
+      const safeName = safePluginText(name, 40);
+      if (!safeName || !SERVICE_ID.test(safeName)) continue;
+      const service = objectRecord(definition);
+      const secrets = Array.isArray(service?.secrets)
+        ? [...new Set(service.secrets.filter((item): item is string => typeof item === "string" && SECRET_NAME.test(item)))].slice(0, 64)
+        : [];
+      safeServices[safeName] = { secrets };
+    }
+  }
+  const contributions = objectRecord(raw.contributes);
+  const safeContributions: Record<string, unknown[]> = {};
+  if (contributions) {
+    for (const kind of ["menu", "views", "pages", "modals", "slash", "renderers"] as const) {
+      const items = contributions[kind];
+      if (Array.isArray(items) && items.length) safeContributions[kind] = Array.from({ length: Math.min(items.length, 256) }, () => null);
+    }
+  }
+  const name = safePluginText(raw.name, 256) ?? pluginId ?? "Plugin";
+  const version = safePluginText(raw.version, 256) ?? undefined;
+  const description = safePluginText(raw.description) ?? undefined;
+  return {
+    name,
+    version,
+    description,
+    uses: normalizePluginUses(raw.uses),
+    services: safeServices,
+    contributes: safeContributions,
+    python: Boolean(raw.python),
+    engine: Boolean(raw.engine),
+    web: Boolean(raw.web),
+    agents: Boolean(raw.agents),
+    hooks: Boolean(raw.hooks),
+    mcp: Boolean(raw.mcp),
+  };
+}
+
+/** One safe shape for job responses before review text reaches the dialog. */
+export function normalizeReviewJob(value: unknown): Job | null {
+  const raw = objectRecord(value);
+  const jobId = safePluginText(raw?.job_id, 128);
+  if (!raw || !jobId) return null;
+  const status = JOB_STATUSES.has(raw.status as Job["status"]) ? raw.status as Job["status"] : "error";
+  const pluginId = typeof raw.plugin_id === "string" && PLUGIN_ID.test(raw.plugin_id) ? raw.plugin_id : undefined;
+  const errorText = typeof raw.error === "string" && JOB_ERRORS.has(raw.error)
+    ? raw.error
+    : status === "error" ? "Plugin review failed. Check the source and manifest, then try again." : null;
+  const warningText = typeof raw.warning === "string" && JOB_WARNINGS.has(raw.warning)
+    ? raw.warning
+    : raw.warning ? "Plugin operation completed with a warning." : null;
+  const changedFolders = Array.isArray(raw.changed_folders)
+    ? raw.changed_folders.map((folder) => safePluginText(folder, 512)).filter((folder): folder is string => folder !== null).slice(0, 256)
+    : undefined;
+  return {
+    job_id: jobId,
+    status,
+    action: raw.action === "install" || raw.action === "update" ? raw.action : undefined,
+    plugin_id: pluginId,
+    commit: safeCommit(raw.commit, 40) ?? safeCommit(raw.commit, 64),
+    files_sha256: safeCommit(raw.files_sha256, 64),
+    source: safePluginText(raw.source) ?? undefined,
+    ref: safePluginText(raw.ref, 256) ?? undefined,
+    previous_commit: safeCommit(raw.previous_commit, 40) ?? safeCommit(raw.previous_commit, 64),
+    changed_folders: changedFolders,
+    error: errorText,
+    warning: warningText,
+    manifest: normalizeReviewManifest(raw.manifest, pluginId),
+  };
+}
 
 const contributionLabels: Record<string, [string, string]> = {
   views: ["view", "views"],
@@ -109,13 +215,17 @@ export async function startReview(api: EngineApi, { action, pluginId, url, gitRe
   if (action === "install" && gitRef.trim() && url.includes("#")) throw new Error("Put the branch or tag in one field, not both.");
   const endpoint = action === "install" ? "/plugins/install" : `/plugins/${encodeURIComponent(pluginId ?? "")}/update`;
   const source = `${url.trim()}${gitRef.trim() ? `#${gitRef.trim()}` : ""}`;
-  const result = await api.json<Job>(endpoint, { method: "POST", body: JSON.stringify(action === "install" ? { source } : {}) });
-  if (!result.job_id) throw new Error("The plugin manager did not return a review job.");
+  const raw = await api.json<unknown>(endpoint, { method: "POST", body: JSON.stringify(action === "install" ? { source } : {}) });
+  const result = normalizeReviewJob(raw);
+  if (!result) throw new Error("The plugin manager did not return a review job.");
   return result;
 }
 
 export async function fetchReview(api: EngineApi, jobId: string, signal?: AbortSignal): Promise<Job> {
-  return api.json<Job>(`/plugins/jobs/${encodeURIComponent(jobId)}`, { signal });
+  const raw = await api.json<unknown>(`/plugins/jobs/${encodeURIComponent(jobId)}`, { signal });
+  const result = normalizeReviewJob(raw);
+  if (!result) throw new Error("The plugin manager returned invalid review data.");
+  return result;
 }
 
 export async function discardReview(api: EngineApi, jobId: string): Promise<void> {
@@ -202,9 +312,11 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
     if (!job || job.status !== "ready" || !job.commit || !job.files_sha256) return;
     setBusy(true); setError(null);
     try {
-      const result = await api.json<Job>(`/plugins/jobs/${encodeURIComponent(job.job_id)}/confirm`, {
+      const raw = await api.json<unknown>(`/plugins/jobs/${encodeURIComponent(job.job_id)}/confirm`, {
         method: "POST", body: JSON.stringify({ commit: job.commit, files_sha256: job.files_sha256 }),
       });
+      const result = normalizeReviewJob(raw);
+      if (!result) throw new Error("The plugin manager returned invalid review data.");
       setJob(result);
       if (result.status !== "complete") throw new Error(result.error || "The plugin manager did not complete the operation.");
       await onApplied();

@@ -140,19 +140,28 @@ def _event_response(hub: PluginEventHub, plugin_id: str | None) -> EventSourceRe
 
 @router.get("")
 def list_plugins(request: Request):
-    from kollabor_plugins.registry import plugin_entries
+    from kollabor_plugins.registry import _finite_service_number, _normalize_plugin_entry, plugin_entries
 
     entries = plugin_entries()
     for entry in entries:
+        if not isinstance(entry, dict):
+            continue
         plugin_id = entry.get("id")
         error = request.app.state.plugin_dispatcher.errors.get(plugin_id)
         if error and entry.get("state") == "ok":
-            entry["state"], entry["error"] = "error", error
+            entry["state"] = "error"
+            entry["error"] = "Python entry failed while loading; see the process log for details."
         for service in entry.get("services", []):
             if isinstance(service, dict) and isinstance(service.get("name"), str):
-                service["heartbeat"] = request.app.state.plugin_events.heartbeat(plugin_id, service["name"])
-                service["heartbeat_monitor_since"] = request.app.state.plugin_events.heartbeat_monitor_since
-    return {"schema": 1, "plugins": entries, "server_time": time.time()}
+                service["heartbeat"] = _finite_service_number(
+                    request.app.state.plugin_events.heartbeat(plugin_id, service["name"])
+                )
+                service["heartbeat_monitor_since"] = _finite_service_number(
+                    request.app.state.plugin_events.heartbeat_monitor_since
+                )
+    normalized = [_normalize_plugin_entry(entry) for entry in entries]
+    server_time = _finite_service_number(time.time())
+    return {"schema": 1, "plugins": [entry for entry in normalized if entry is not None], "server_time": server_time}
 
 
 @router.get("/events")

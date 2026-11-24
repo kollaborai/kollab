@@ -44,8 +44,8 @@ export type Declared = string | { id?: string; name?: string; tool?: string; tag
 
 export type PluginService = {
   name: string;
-  state: string;
-  desired?: string;
+  state: "starting" | "running" | "backoff" | "stopping" | "stop-failed" | "exited" | "stopped" | "crash-stopped" | "error" | "unknown" | "failed";
+  desired?: "running" | "stopped";
   pid?: number | null;
   since?: number | null;
   restarts?: number;
@@ -53,6 +53,7 @@ export type PluginService = {
   heartbeat_s?: number | null;
   heartbeat?: number | null;
   heartbeat_monitor_since?: number | null;
+  stop_deadline?: number | null;
   error?: string | null;
 };
 
@@ -65,6 +66,7 @@ export type PluginEntry = {
   source?: string | null;
   commit?: string | null;
   enabled: boolean;
+  enable_order?: number | null;
   shadowed: boolean;
   state: "ok" | "error" | "off" | "stopping" | "stop-failed" | "changed-on-disk" | "skipped";
   error: string | null;
@@ -87,7 +89,7 @@ export type PluginEntry = {
 /** `GET /plugins` response. `server_time` is Unix time in seconds. */
 export type PluginInventoryResponse = {
   plugins?: unknown;
-  server_time?: number;
+  server_time?: unknown;
 };
 
 /** The open chat, as a plugin view receives it. */

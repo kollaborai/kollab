@@ -147,6 +147,15 @@ def _write_log(path: Path, data: bytes) -> None:
         data = data[len(chunk) :]
 
 
+def _write_failure_log(path: Path, detail: str, secret_values: list[str]) -> None:
+    """Keep start diagnostics in the service log, with the same redaction and bounds as child output."""
+    log_filter = _LogFilter(secret_values)
+    payload = (detail[:8192] + "\n").encode("utf-8", "replace")
+    filtered = log_filter.feed(payload, final=True)
+    if filtered:
+        _write_log(path, filtered)
+
+
 def _valid_plugin_id(plugin_id: str) -> bool:
     return isinstance(plugin_id, str) and bool(_ID.fullmatch(plugin_id.removesuffix("@dev")))
 
@@ -306,7 +315,12 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             engine_url = _engine_url()
             context = PluginContext(plugin_id, root, home / "plugin-data" / plugin_id, manifest, grants=granted)
             token = PluginTokenFiles().mint(context)
-        except Exception:
+        except Exception as exc:
+            _write_failure_log(
+                log_path,
+                f"Could not prepare plugin engine credentials ({type(exc).__name__}): {exc}",
+                list(secret_values.values()),
+            )
             state["status"] = "error"
             state["error"] = "Could not prepare plugin engine credentials"
             _write_state(state_path, state)
@@ -330,8 +344,13 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                     command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
                 )
             except OSError as exc:
+                _write_failure_log(
+                    log_path,
+                    f"Could not start {command[0]}: {exc.strerror or type(exc).__name__}",
+                    [*secret_values.values(), token],
+                )
                 state["status"] = "error"
-                state["error"] = f"Could not start {command[0]}: {exc.strerror or type(exc).__name__}"
+                state["error"] = "Could not start this process. View Log for details."
                 _write_state(state_path, state)
                 return 1
             assert child.stdout is not None
@@ -730,7 +749,15 @@ def _record_stop_state(state_path: Path, status: str, deadline: float | None, er
         state.update({"desired": "stopped", "status": status, "stop_deadline": deadline})
         state.pop("error", None)
         if error is not None:
-            state["error"] = error
+            allowed = {
+                "Could not stop this process. Retry stopping it.",
+                "Could not verify the stop. Check the process before retrying.",
+            }
+            state["error"] = (
+                error
+                if error in allowed
+                else "Could not verify the stop. Check the process before retrying."
+            )
         _write_state(state_path, state)
     except (OSError, ValueError, TypeError) as exc:
         logger.warning("Could not record stop for %s: %s", state_path.name, exc)
