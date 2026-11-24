@@ -33,6 +33,7 @@ const OWN_REACT =
   /__(?:CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE|SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED)\s*=(?!=)/;
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const SAFE_WEB_PLUGIN_LOAD_ERROR = "This plugin's web code failed while loading. Check the browser console for details.";
 
 export type PluginInventory = { entries: readonly PluginEntry[]; error: string | null };
 
@@ -270,7 +271,8 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
           abandoned = true;
           dispose();
           if (!current(entry.id, token)) return;
-          registry.update(entry.id, (record) => ({ ...record, status: "failed", error: message(error) }));
+          console.error(`Plugin ${entry.id} web code failed while loading`, error);
+          registry.update(entry.id, (record) => ({ ...record, status: "failed", error: SAFE_WEB_PLUGIN_LOAD_ERROR }));
         },
       )
       .finally(() => {
