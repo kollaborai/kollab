@@ -112,8 +112,8 @@ computer; over PhoneLink the tab is read-only and says `Manage plugins on this c
 Background process states include `Running · 2 h`; `Stopping`; `Running · No Heartbeat for 6 min` (a process that
 promised a heartbeat and went quiet); `Exited`; `Stopped` (stopped by you); `Stopped After 5 Crashes ·
 View Log`; and `Failed to Stop`. The list row shows the same text. A running process offers Restart and Stop;
-a stopped, exited or crash-stopped one offers Start. The current service API does not return a stop deadline,
-so Settings cannot show the design's stop countdown yet.
+a stopped, exited or crash-stopped one offers Start. `GET /plugins` returns each service's
+`stop_deadline`; Settings currently shows `Stopping` without a countdown.
 
 **Add sheet.** Shown after a checked staging copy is ready, before anything is installed or run:
 
@@ -146,7 +146,8 @@ click. Nothing updates by itself. `kollab plugin dev <folder>` shows the sheet w
 **Turning a plugin off.** Off asks for confirmation. The engine refuses while a plugin agent run is
 active and asks the user to cancel those runs first; it does not cancel them or return their count.
 After the plugin is disabled, background processes stop and their rows read `Stopping` until they exit.
-The service API does not return a stop countdown. When they exit, every open page updates at once: the row
+The API returns `stop_deadline`; Settings currently shows `Stopping` without a countdown. When they exit,
+every open page updates at once: the row
 goes, a page that was open shows `PR Chain is off` with a Back to Chat button, and a chat showing its tab
 switches to Chat. If Kollab cannot signal a verified wrapper, the plugin stays off and Settings shows
 `Stop Failed`; the process may still be running. The stop returns 409 and can be retried before enabling
@@ -684,7 +685,8 @@ with `kollabor.binary.kollab_argv()` in its own session:
   those.
 - **Running and heartbeat.** With `heartbeat_s`, the state reads `Running · No Heartbeat for <n> min` once
   a `heartbeat` event (`{service: "<name>"}`) is that late.
-- **Stopping.** The supervisor sends SIGTERM to the wrapper, which passes it to its child and stops
+- **Stopping.** While a service is stopping, `GET /plugins` includes its `stop_deadline`; Settings shows
+  `Stopping` without a countdown. The supervisor sends SIGTERM to the wrapper, which passes it to its child and stops
   restarting. The child gets up to `stop_timeout_s` to finish its current step, start nothing new and
   exit; then the wrapper sends SIGKILL to whatever in its process group is still alive. Processes the
   child moved into their own session are its own to stop. If Kollab cannot signal a verified wrapper,
