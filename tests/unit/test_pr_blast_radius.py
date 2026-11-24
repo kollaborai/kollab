@@ -325,6 +325,146 @@ def test_patch_import_connects_new_pr_test_to_main_change(
     assert "rule 3:" in output
 
 
+def test_patch_parses_imports_from_every_added_python_statement(
+    tmp_path: Path, capsys
+) -> None:
+    write(tmp_path, "app/__init__.py", "")
+    write(tmp_path, "app/core.py", "VALUE = 1\n")
+    pr_files: list[dict[str, object]] = [
+        {
+            "filename": "tests/unit/test_added.py",
+            "status": "added",
+            "patch": (
+                "@@ -0,0 +1,2 @@\n"
+                "+if ready: import app.core\n"
+                '+module = importlib.import_module("app.core")\n'
+            ),
+        }
+    ]
+
+    result = pr_blast_radius.main(
+        ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+        fetcher=_comparison_fetcher(
+            pr_files, [{"filename": "app/core.py", "status": "modified"}]
+        ),
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "#7 STALE" in output
+    assert "rule 3:" in output
+
+
+def test_literal_runtime_import_in_patch_includes_package_initializers(
+    tmp_path: Path, capsys
+) -> None:
+    write(tmp_path, "app/__init__.py", "")
+    write(tmp_path, "app/core.py", "VALUE = 1\n")
+    pr_files: list[dict[str, object]] = [
+        {
+            "filename": "tests/unit/test_added.py",
+            "status": "added",
+            "patch": '+module = importlib.import_module("app.core")\n',
+        }
+    ]
+
+    result = pr_blast_radius.main(
+        ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+        fetcher=_comparison_fetcher(
+            pr_files, [{"filename": "app/__init__.py", "status": "modified"}]
+        ),
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "#7 STALE" in output
+    assert "rule 3:" in output
+
+
+def test_removed_main_module_matching_unresolved_test_import_is_rule_three_stale(
+    tmp_path: Path, capsys
+) -> None:
+    write(tmp_path, "app/__init__.py", "")
+    pr_files: list[dict[str, object]] = [
+        {
+            "filename": "tests/unit/test_removed.py",
+            "status": "added",
+            "patch": "@@ -0,0 +1 @@\n+from app.core import Widget\n",
+        }
+    ]
+
+    result = pr_blast_radius.main(
+        ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+        fetcher=_comparison_fetcher(
+            pr_files, [{"filename": "app/core.py", "status": "removed"}]
+        ),
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "#7 STALE" in output
+    assert "rule 3:" in output
+
+
+@pytest.mark.parametrize(
+    ("side", "filename", "status", "previous_filename"),
+    [
+        ("main", "../uv.lock", "modified", None),
+        ("pr", "/absolute/file.py", "modified", None),
+        ("main", "src\\file.py", "modified", None),
+        ("pr", "src//file.py", "modified", None),
+        ("main", "src/file.py\x00tail", "modified", None),
+        ("pr", "docs/new.md", "renamed", "../docs/old.md"),
+        ("main", "docs/new.md", "renamed", "docs//old.md"),
+    ],
+)
+def test_api_paths_must_be_safe_repo_relative_paths(
+    tmp_path: Path,
+    capsys,
+    side: str,
+    filename: str,
+    status: str,
+    previous_filename: str | None,
+) -> None:
+    record: dict[str, object] = {"filename": filename, "status": status}
+    if previous_filename is not None:
+        record["previous_filename"] = previous_filename
+    pr_files = [record] if side == "pr" else [{"filename": "docs/pr.md", "status": "modified"}]
+    main_files = [record] if side == "main" else [{"filename": "docs/main.md", "status": "modified"}]
+
+    result = pr_blast_radius.main(
+        ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+        fetcher=_comparison_fetcher(pr_files, main_files),
+    )
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "#7 STALE" in output
+    assert "rule 5:" in output
+
+
+def test_duplicate_main_filenames_make_comparison_rule_five_stale(
+    tmp_path: Path, capsys
+) -> None:
+    pr_files: list[dict[str, object]] = [
+        {"filename": "docs/pr.md", "status": "modified"}
+    ]
+    main_files: list[dict[str, object]] = [
+        {"filename": "src/shared.py", "status": "modified"},
+        {"filename": "src/shared.py", "status": "modified"},
+    ]
+
+    result = pr_blast_radius.main(
+        ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+        fetcher=_comparison_fetcher(pr_files, main_files),
+    )
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "#7 STALE" in output
+    assert "rule 5:" in output
+
+
 def test_changed_python_file_without_patch_is_rule_five_stale(
     tmp_path: Path, capsys
 ) -> None:
