@@ -14,6 +14,7 @@ dependencies = [
     "kollabor-config>=0.23.0",
     "kollabor-ai>=0.23.0",
     "pyyaml>=6.0",
+    "beautifulsoup4>=4.12",
 ]
 
 [tool.hatch.build.targets.wheel]

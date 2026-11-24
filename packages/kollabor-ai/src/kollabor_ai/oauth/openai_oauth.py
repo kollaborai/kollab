@@ -379,6 +379,9 @@ class OpenAIOAuthClient:
 
                     if "pending" in response_text or resp.status in (400, 403):
                         # User hasn't completed auth yet, keep polling
+                        status_callback = getattr(self, "status_callback", None)
+                        if callable(status_callback):
+                            status_callback("waiting", "Waiting for sign-in…")
                         now = time.monotonic()
                         if now - last_status_log >= 60:
                             logger.info(
@@ -402,6 +405,9 @@ class OpenAIOAuthClient:
                         continue
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                status_callback = getattr(self, "status_callback", None)
+                if callable(status_callback):
+                    status_callback("network_error", "Network error while signing in. Retrying…")
                 now = time.monotonic()
                 if now - last_status_log >= 60:
                     logger.warning("Network error during polling: %s", e)
