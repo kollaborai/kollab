@@ -184,6 +184,29 @@ def test_plugin_manifest_review_lists_reject_over_limit(surface, tmp_path, monke
         validate_manifest(root, "0.23.0")
 
 
+@pytest.mark.parametrize("use", ["unsupported", "net:token=canary", "net:host-\u200b.example"])
+def test_manifest_rejects_use_declarations_the_review_cannot_display(use, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "Example",
+        "kollab": ">=0.23.0",
+        "uses": [use],
+    }
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="Invalid uses"):
+        validate_manifest(root, "0.23.0")
+
+
 def test_manifest_file_size_is_bounded_before_json_parsing(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")

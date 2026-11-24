@@ -220,6 +220,31 @@ def test_plugin_inventory_reports_bounded_collection_omissions(surface, omitted_
     assert normalized_again["omitted"][omitted_key] == 1
 
 
+@pytest.mark.parametrize(
+    ("surface", "value"),
+    [
+        ("service", "token-refresher"),
+        ("setting_path", "plugins.example.token-length"),
+        ("capability", "net:token-exchange.example.com"),
+        ("capability", "run:password-checker"),
+        ("capability", "custom:token-counter"),
+    ],
+)
+def test_inventory_preserves_safe_identifiers_containing_sensitive_words(surface, value):
+    if surface == "service":
+        result = _normalize_service_entry({"name": value})
+        assert result is not None
+        assert result["name"] == value
+    elif surface == "setting_path":
+        result = _normalize_setting({"type": "checkbox", "path": value, "label": "Token length"})
+        assert result is not None
+        assert result["path"] == value
+    else:
+        entry = _normalize_plugin_entry({"id": "example-plugin", "uses": [value]})
+        assert entry is not None
+        assert entry["uses"] == [value]
+
+
 @pytest.mark.parametrize("value", ["run:codex\u200b", "net:github.com\u202eevil.test"])
 def test_inventory_text_rejects_invisible_format_controls(value):
     from kollabor_plugins.registry import _bounded_inventory_text
