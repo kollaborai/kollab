@@ -164,10 +164,11 @@ def apply_config_changes(
     if not changes:
         return True
     builtin_changes = {}
+    plugin_errors = []
     try:
         from kollabor_plugins.settings import apply_config_changes as apply_plugin_changes
 
-        changes = apply_plugin_changes(dict(changes))
+        changes = apply_plugin_changes(dict(changes), failures=plugin_errors)
         if route_builtin and any(key.startswith("plugins.") for key in changes):
             from kollabor_plugins.registry import plugin_entries
             from kollabor_plugins.settings import save, set_enabled
@@ -206,6 +207,9 @@ def apply_config_changes(
         logger.error("plugin settings save failed: %s", exc)
         return False
     if not changes and not builtin_changes:
+        if plugin_errors:
+            logger.error("plugin config actions failed: %s", plugin_errors)
+            return False
         return True
     if not atomic:
         for path, value in {**changes, **builtin_changes}.items():
@@ -227,6 +231,9 @@ def apply_config_changes(
             notify()
         except Exception as exc:
             logger.warning("reload notify after config save failed: %s", exc)
+    if plugin_errors:
+        logger.error("plugin config actions failed: %s", plugin_errors)
+        return False
     return True
 
 

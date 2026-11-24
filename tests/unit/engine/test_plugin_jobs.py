@@ -92,6 +92,77 @@ def test_install_job_requires_exact_commit_and_file_hash(client, managed_repo, t
     assert client.post(f"/plugins/jobs/{job_id}/confirm", json=accepted).status_code == 409
 
 
+def test_cancel_ready_job_removes_stage_and_rejects_confirmation(client, tmp_path):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    assert ready["status"] == "ready"
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    response = client.delete(f"/plugins/jobs/{job_id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert not base.exists()
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    }).status_code == 409
+    assert not (tmp_path / ".kollab" / "plugins" / "hello").exists()
+
+
+def test_cancel_reports_cleanup_failure_and_allows_retry(client, monkeypatch):
+    import shutil
+
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    original = shutil.rmtree
+
+    def fail_base(path, *args, **kwargs):
+        if path == base:
+            raise PermissionError("private path")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_base)
+    result = client.delete(f"/plugins/jobs/{job_id}")
+    assert result.status_code == 503
+    assert "private path" not in result.text
+    assert base.exists()
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    }).status_code == 409
+    monkeypatch.setattr(shutil, "rmtree", original)
+    assert client.delete(f"/plugins/jobs/{job_id}").status_code == 200
+    assert not base.exists()
+
+
+def test_cancel_staging_job_stops_worker_and_cleans_stage(client, monkeypatch):
+    import asyncio
+    import threading
+
+    entered = threading.Event()
+    cancelled = threading.Event()
+
+    async def slow_staging(*args):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(client.app.state.plugin_jobs, "_run_staging", slow_staging)
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    assert response.status_code == 202
+    assert entered.wait(2)
+    job_id = response.json()["job_id"]
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    response = client.delete(f"/plugins/jobs/{job_id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert cancelled.wait(2)
+    assert not base.exists()
+    assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "cancelled"
+
+
 def test_job_management_is_local_even_with_user_token(client):
     response = client.post("/plugins/install", headers={"x-kollab-plugin-remote": "1"},
                            json={"source": "https://example.invalid/repo"})
@@ -109,9 +180,11 @@ def test_cancel_discards_ready_plugin_job(client):
     response = client.delete(f"/plugins/jobs/{job_id}")
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"job_id": job_id, "status": "cancelled"}
+    assert response.json()["job_id"] == job_id
+    assert response.json()["status"] == "cancelled"
     assert not base.exists()
-    assert client.get(f"/plugins/jobs/{job_id}").status_code == 404
+    # The cancelled job stays queryable until it expires, so a repeated DELETE is safe.
+    assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "cancelled"
 
 
 @pytest.mark.parametrize("status", ["installing", "complete"])
@@ -144,8 +217,10 @@ def test_cancel_reserves_ready_job_while_cleanup_runs(client, monkeypatch):
     cleanup_started, release_cleanup = threading.Event(), threading.Event()
     release_apply = threading.Event()
     original_cleanup = jobs._cleanup
+    cleanups = []
 
     def slow_cleanup(job):
+        cleanups.append(job["id"])
         cleanup_started.set()
         assert release_cleanup.wait(5)
         return original_cleanup(job)
@@ -156,6 +231,8 @@ def test_cancel_reserves_ready_job_while_cleanup_runs(client, monkeypatch):
 
     monkeypatch.setattr(jobs, "_cleanup", slow_cleanup)
     monkeypatch.setattr(jobs, "_apply", blocked_apply)
+    # The finished staging task belongs to the TestClient's loop; this race runs in its own loop.
+    jobs.jobs[job_id].pop("stage_task", None)
 
     async def race():
         cancel = asyncio.create_task(jobs.cancel(job_id))
@@ -168,10 +245,11 @@ def test_cancel_reserves_ready_job_while_cleanup_runs(client, monkeypatch):
             with pytest.raises(HTTPException) as confirm_error:
                 await confirm
             assert confirm_error.value.status_code == 409
-            assert duplicate_cancel.done(), "a second DELETE must not enter cleanup"
-            with pytest.raises(HTTPException) as cancel_error:
-                await duplicate_cancel
-            assert cancel_error.value.status_code == 409
+            assert not duplicate_cancel.done(), "a second DELETE must join the running cancellation"
+            release_cleanup.set()
+            first, second = await asyncio.gather(cancel, duplicate_cancel)
+            assert first["status"] == second["status"] == "cancelled"
+            assert cleanups == [job_id], "cleanup must run once for both DELETEs"
         finally:
             release_cleanup.set()
             release_apply.set()
@@ -213,10 +291,11 @@ def test_cancel_stops_staging_job_and_removes_its_files(client, monkeypatch):
     response = client.delete(f"/plugins/jobs/{job_id}")
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"job_id": job_id, "status": "cancelled"}
+    assert response.json()["job_id"] == job_id
+    assert response.json()["status"] == "cancelled"
     assert stopped.is_set()
     assert not base.exists()
-    assert client.get(f"/plugins/jobs/{job_id}").status_code == 404
+    assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "cancelled"
 
 
 def test_install_staging_is_background_and_does_not_reveal_errors(client, monkeypatch):

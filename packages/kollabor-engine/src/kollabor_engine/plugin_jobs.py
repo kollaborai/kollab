@@ -174,7 +174,7 @@ class PluginJobs:
         if self.reaper is None:
             self.reaper = asyncio.create_task(self._reap(), name="plugin-job-reaper")
         task = self._track(self._stage(job))
-        job["_stage_task"] = task
+        job["stage_task"] = task
         self.staging_tasks.add(task)
         task.add_done_callback(self.staging_tasks.discard)
         return self._public(job)
@@ -307,12 +307,58 @@ class PluginJobs:
             logger.warning("Plugin staging failed: %s", type(exc).__name__)
             job["error"] = "Cannot stage plugin source; check the URL, ref, and plugin manifest"
             interrupted = await self._cleanup_staging(job)
-            job["status"] = "error"
+            if job["status"] != "cancelling":  # a cancel that arrived during cleanup owns the state
+                job["status"] = "error"
             if interrupted:
                 raise asyncio.CancelledError
         finally:
             job["updated"] = time.monotonic()
             self.hub.publish_change()
+
+    async def cancel(self, job_id: str) -> dict:
+        if self.closing:
+            raise HTTPException(status_code=503, detail="Plugin manager is shutting down")
+        self._expire()
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Plugin job not found")
+        status = job["status"]
+        if status in {"cancelling", "cancelled"} and job.get("cancel_task") is not None:
+            return await asyncio.shield(job["cancel_task"])
+        if status == "cancelled" and "base" not in job:
+            return self._public(job)
+        if status not in {"staging", "ready", "cancelling", "cancelled"}:
+            raise HTTPException(status_code=409, detail="Plugin job cannot be cancelled")
+        # Terminal "cancelled" is published only after the staged files are gone (#1373).
+        job["status"] = "cancelling"
+        job["updated"] = time.monotonic()
+        stage_task = job.get("stage_task")
+        if stage_task is not None and not stage_task.done():
+            stage_task.cancel()
+
+        async def finish() -> dict:
+            try:
+                if stage_task is not None:
+                    await asyncio.gather(stage_task, return_exceptions=True)
+                cleaned, interrupted = await self._run_cleanup(job)
+                if cleaned:
+                    job.pop("warning", None)
+                    job["status"] = "cancelled"
+                else:
+                    job["warning"] = "Plugin staging files could not be removed"
+                job["updated"] = time.monotonic()
+                self.hub.publish_change()
+                if interrupted:
+                    raise asyncio.CancelledError
+                if not cleaned:
+                    raise HTTPException(status_code=503, detail="Cannot remove staged plugin files; try again")
+                return self._public(job)
+            finally:
+                job.pop("cancel_task", None)
+
+        task = self._track(finish())
+        job["cancel_task"] = task
+        return await asyncio.shield(task)
 
     async def confirm(self, job_id: str, commit: str, digest: str) -> dict:
         if self.closing:
@@ -329,40 +375,6 @@ class PluginJobs:
         job["updated"] = time.monotonic()
         task = self._track(self._apply(job, commit, digest))
         return await asyncio.shield(task)
-
-    async def cancel(self, job_id: str) -> dict:
-        if self.closing:
-            raise HTTPException(status_code=503, detail="Plugin manager is shutting down")
-        task = self._track(self._cancel(job_id))
-        return await asyncio.shield(task)
-
-    async def _cancel(self, job_id: str) -> dict:
-        if self.closing:
-            raise HTTPException(status_code=503, detail="Plugin manager is shutting down")
-        self._expire()
-        job = self.jobs.get(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="Plugin job not found")
-        if job["status"] in {"installing", "complete", "cancelling"}:
-            raise HTTPException(status_code=409, detail="Plugin job can no longer be cancelled")
-
-        staging = job["status"] == "staging"
-        job["status"] = "cancelling"
-        job["updated"] = time.monotonic()
-        task = job.get("_stage_task")
-        if staging and task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-        cleaned, interrupted = await self._run_cleanup(job)
-        if self.jobs.get(job_id) is job:
-            self.jobs.pop(job_id, None)
-        if not cleaned:
-            self.expired_jobs[job_id] = job
-        self.hub.publish_change()
-        if interrupted:
-            raise asyncio.CancelledError
-        return {"job_id": job_id, "status": "cancelled"}
 
     @staticmethod
     def _install_update(job: dict, commit: str, digest: str) -> None:

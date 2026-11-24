@@ -27,12 +27,15 @@ def test_start_records_desired_and_wakes_supervisor(tmp_path, monkeypatch):
     from kollabor_plugins import services
 
     run = setup(tmp_path, monkeypatch)
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "one.state").write_text(json.dumps({"desired": "stopped", "status": "stop-failed", "error": "old"}))
     tick = Mock()
     monkeypatch.setattr(services, "supervisor_tick", tick)
     services.control_service("hello", "one", "start")
     state = json.loads((run / "one.state").read_text())
     assert state["desired"] == "running"
     assert state["status"] == "starting"
+    assert "error" not in state
     tick.assert_called_once()
     assert not (run / "two.state").exists()
 
@@ -66,12 +69,13 @@ def test_failed_stop_signal_records_retryable_status(tmp_path, monkeypatch):
         raise PermissionError("denied")
 
     monkeypatch.setattr(services.os, "kill", deny_signal)
-    with pytest.raises(PermissionError):
+    with pytest.raises(services.ServiceSignalError):
         services.control_service("hello", "one", "stop")
 
     state = json.loads((run / "one.state").read_text())
     assert state["desired"] == "stopped"
     assert state["status"] == "stop-failed"
+    assert "denied" not in json.dumps(state), "the OS error text must not reach the stored state"
 
 
 def test_unknown_action_does_not_write(tmp_path, monkeypatch):

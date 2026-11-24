@@ -95,6 +95,8 @@ describe("which plugins load", () => {
   it("only enabled, unshadowed plugins in a loadable state with something to show", () => {
     expect(isActive(entry("hello"))).toBe(true);
     expect(isActive(entry("hello", { state: "error", error: "engine part failed" }))).toBe(true);
+    expect(isActive(entry("hello", { state: "stop-failed" }))).toBe(true);
+    expect(isActive(entry("hello", { enabled: false, state: "stop-failed" }))).toBe(false);
     expect(isActive(entry("hello", { enabled: false, state: "off" }))).toBe(false);
     expect(isActive(entry("hello", { shadowed: true }))).toBe(false);
     expect(isActive(entry("hello", { state: "changed-on-disk" }))).toBe(false);
