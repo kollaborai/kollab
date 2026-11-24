@@ -559,6 +559,7 @@ def test_dispatcher_vendor_collisions_are_reported_and_released(tmp_path, monkey
     import sys
     from pathlib import Path
 
+    from kollabor_engine.routes.plugins import PluginDispatcher
     from kollabor_plugins import registry
     from kollabor_plugins.packages import files_sha256
 
@@ -645,6 +646,68 @@ def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch,
         assert client.get("/plugins/hello/api/anything").status_code == 503
     assert "Plugin engine initialization failed (ValueError)" in caplog.text
     assert "secret-value" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("exception_message", "expected_fragment", "forbidden"),
+    [
+        ("/private/tmp/account/config.json", "[path]", "/private/tmp/account/config.json"),
+        ("GITHUB_TOKEN=ghp_fakecredentialvalue123", "[redacted]", "ghp_fakecredentialvalue123"),
+    ],
+)
+def test_engine_router_failure_redacts_before_logging_and_storing(
+    tmp_path, monkeypatch, caplog, exception_message, expected_fragment, forbidden
+):
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_engine.routes.plugins import PluginDispatcher
+    from kollabor_plugins import registry
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    root = tmp_path / ".kollab" / "plugins" / "hello"
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    shutil.copytree(source, root)
+    manifest = json.loads((root / "kollab-plugin.json").read_text())
+    manifest["engine"] = "python/engine.py:make_router"
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    (root / "python" / "engine.py").write_text("def make_router(ctx):\n    return None\n")
+
+    async def fail_load(*args, **kwargs):
+        raise RuntimeError(exception_message)
+
+    monkeypatch.setattr(PluginDispatcher, "_load", fail_load)
+    (tmp_path / ".kollab" / "plugins.json").write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "hello": {
+                        "enabled": True,
+                        "files_sha256": files_sha256(root),
+                        "granted": [],
+                    }
+                },
+                "dev": {},
+            }
+        )
+    )
+    monkeypatch.setattr(
+        registry,
+        "plugin_entries",
+        lambda: [{"id": "hello", "state": "ok", "error": None, "services": []}],
+    )
+    app = create_app()
+    with TestClient(app) as client:
+        assert client.get("/plugins/hello/api/anything").status_code == 503
+
+    stored = app.state.plugin_dispatcher.errors["hello"]
+    assert expected_fragment in stored
+    assert forbidden not in stored
+    assert forbidden not in caplog.text
 
 
 def test_plugin_tokens_are_private_stable_and_scoped(tmp_path, monkeypatch):
