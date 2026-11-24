@@ -1,14 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createElement } from "react";
+import { createElement, type ReactNode } from "react";
 import {
   AssistantRuntimeProvider,
   useLocalRuntime,
   type ChatModelAdapter,
 } from "@assistant-ui/react";
+import {
+  ThreadListItemRuntimeProvider,
+  useExternalStoreRuntime,
+} from "@assistant-ui/core/react";
 import { Thread } from "@/components/assistant-ui/thread";
-import { EMPTY_CONTRIBUTIONS, type PluginRecord } from "./registry";
-import { pluginRegistry } from "./registry";
+import {
+  EMPTY_CONTRIBUTIONS,
+  pluginRegistry,
+  type PluginRecord,
+} from "./registry";
 import type { CommandSpec, PluginApi, PluginEntry } from "./sdk";
 import {
   matchPluginCommand,
@@ -18,6 +25,48 @@ import {
   pluginCommandItems,
   reservedCommandKeys,
 } from "./composer-commands";
+
+const sendCapture = vi.hoisted(() => ({
+  handlers: [] as Array<(event: { preventDefault: () => void }) => void>,
+  text: "",
+  attachments: [] as unknown[],
+  setTextCalls: 0,
+}));
+
+vi.mock("@assistant-ui/react", async (importOriginal) => {
+  const React = await import("react");
+  const actual = await importOriginal<typeof import("@assistant-ui/react")>();
+  return {
+    ...actual,
+    useAui: () => {
+      const aui = actual.useAui();
+      return {
+        ...aui,
+        composer: {
+          ...aui.composer,
+          getState: () => ({ text: sendCapture.text, attachments: sendCapture.attachments }),
+          setText: (text: string) => {
+            sendCapture.setTextCalls += 1;
+            sendCapture.text = text;
+          },
+        },
+      };
+    },
+    ComposerPrimitive: {
+      ...actual.ComposerPrimitive,
+      Send: ({
+        onClick,
+        children,
+      }: {
+        onClick?: (event: { preventDefault: () => void }) => void;
+        children?: ReactNode;
+      }) => {
+        if (onClick) sendCapture.handlers.push(onClick);
+        return React.createElement("button", null, children);
+      },
+    },
+  };
+});
 
 vi.mock("@/components/assistant-ui/composer-palette", async () => {
   const React = await import("react");
@@ -247,7 +296,7 @@ describe("pluginCommandFailure", () => {
 
 const threadAdapter: ChatModelAdapter = { run: async () => ({ content: [] }) };
 
-function putThreadCommand(name: string) {
+function putThreadCommand(name: string, run = () => {}, toast = vi.fn()) {
   pluginRegistry.put({
     id: "punctuation",
     name: "Punctuation",
@@ -255,15 +304,16 @@ function putThreadCommand(name: string) {
     status: "ready",
     error: null,
     retries: 0,
-    k: { id: "punctuation", toast: () => {} } as unknown as PluginApi,
+    k: { id: "punctuation", toast } as unknown as PluginApi,
     contributions: {
       ...EMPTY_CONTRIBUTIONS,
-      commands: [{ name, description: "A punctuation command", run: () => {} }],
+      commands: [{ name, description: "A punctuation command", run }],
     },
   });
+  return toast;
 }
 
-function ThreadHarness() {
+function LocalThreadHarness() {
   const runtime = useLocalRuntime(threadAdapter);
   return createElement(
     AssistantRuntimeProvider,
@@ -272,7 +322,26 @@ function ThreadHarness() {
   );
 }
 
+function ThreadHarness() {
+  const host = useExternalStoreRuntime({ messages: [], onNew: async () => {} });
+  return createElement(
+    AssistantRuntimeProvider,
+    { runtime: host },
+    createElement(
+      ThreadListItemRuntimeProvider,
+      { runtime: host.threads.mainItem },
+      createElement(LocalThreadHarness),
+    ),
+  );
+}
+
 afterEach(() => pluginRegistry.reset());
+afterEach(() => {
+  sendCapture.handlers.length = 0;
+  sendCapture.text = "";
+  sendCapture.attachments.length = 0;
+  sendCapture.setTextCalls = 0;
+});
 
 describe("plugin command composer labels", () => {
   it("keeps a label when a command name contains only separators", () => {
@@ -282,4 +351,31 @@ describe("plugin command composer labels", () => {
 
     expect(html).toContain(">__</span>");
   });
+
+  it.each(["throws", "rejects"] as const)(
+    "restores a plugin command draft when its handler %s",
+    async (failure) => {
+      const draft = "/publish now";
+      sendCapture.text = draft;
+      const execute = vi.fn(() => {
+        if (failure === "throws") throw new Error("offline");
+        return Promise.reject(new Error("offline"));
+      });
+      const toast = putThreadCommand("publish", execute);
+
+      renderToStaticMarkup(createElement(ThreadHarness));
+      const beforeSend = sendCapture.handlers.at(-1);
+      expect(sendCapture.handlers).not.toHaveLength(0);
+      expect(beforeSend).toBeTypeOf("function");
+      let prevented = false;
+      beforeSend?.({ preventDefault: () => { prevented = true; } });
+      expect(prevented).toBe(true);
+      expect(execute).toHaveBeenCalledWith("now");
+      if (failure === "rejects") await Promise.resolve();
+
+      expect(sendCapture.text).toBe(draft);
+      expect(sendCapture.setTextCalls).toBe(2);
+      expect(toast).toHaveBeenCalledOnce();
+    },
+  );
 });
