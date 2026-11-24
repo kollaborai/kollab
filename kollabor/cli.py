@@ -1826,7 +1826,22 @@ def _cli_is_hub_agent_context() -> bool:
         return True
 
 
-def _cleanup_presence_for_pid(presence_dir: Path, pid: int) -> None:
+def _row_is_generation(row: dict, selected: dict) -> bool:
+    """True when presence ``row`` still names the generation ``selected`` was
+    read as: same agent id, pid and start (#1408). A key the selection lacks is
+    not compared; a newer agent that took the path or pid differs in one."""
+    return all(
+        row.get(key) == selected[key]
+        for key in ("agent_id", "pid", "started_at")
+        if selected.get(key) is not None
+    )
+
+
+def _cleanup_presence_for_pid(
+    presence_dir: Path, pid: int, selected: Optional[dict] = None
+) -> None:
+    """Remove the presence row and socket of ``pid``; with ``selected``, only
+    while the row on disk is still that generation."""
     from plugins.hub.presence import _presence_files
 
     if not pid:
@@ -1835,7 +1850,9 @@ def _cleanup_presence_for_pid(presence_dir: Path, pid: int) -> None:
         try:
             with open(f) as fh:
                 d = json.load(fh)
-            if d.get("pid") == pid:
+            if d.get("pid") == pid and (
+                selected is None or _row_is_generation(d, selected)
+            ):
                 socket_path = d.get("socket_path", "")
                 f.unlink(missing_ok=True)
                 if socket_path:
@@ -1878,7 +1895,7 @@ async def stop_agent_record(
     pid = int(agent.get("pid") or 0)
 
     def cleanup() -> None:
-        _cleanup_presence_for_pid(presence_dir, pid)
+        _cleanup_presence_for_pid(presence_dir, pid, agent)
 
     ident = identity(pid) if pid else None  # captured once, at selection time
 
@@ -2033,9 +2050,21 @@ async def _handle_cli_hub(hub_args: list) -> None:
         import socket as _socket
         import time as _time
 
-        def _drop(path) -> None:
-            if cleanup:
-                path.unlink(missing_ok=True)
+        def _drop(path, snapshot=None) -> None:
+            """Remove a dead row, unless a newer agent replaced the file since
+            ``snapshot`` was read (#1408)."""
+            if not cleanup:
+                return
+            if snapshot is not None:
+                try:
+                    with open(path) as fh:
+                        if json.load(fh) != snapshot:
+                            return
+                except FileNotFoundError:
+                    return
+                except (OSError, ValueError):
+                    pass
+            path.unlink(missing_ok=True)
 
         agents = []
         for f in _presence_files(presence_dir) if paths is None else paths:
@@ -2049,13 +2078,13 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     from kollabor_config import proc_ctl
 
                     if not proc_ctl.pid_alive(pid):
-                        _drop(f)
+                        _drop(f, data)
                         continue
                 else:
                     try:
                         os.kill(pid, 0)
                     except (OSError, ProcessLookupError):
-                        _drop(f)
+                        _drop(f, data)
                         continue
                 # Pid now runs a process the row's writer is not (#1408)
                 from kollabor_agent.runtime import process_start_token
@@ -2063,7 +2092,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 recorded = data.get("start_token")
                 current = process_start_token(pid) if recorded else None
                 if current is not None and current != recorded:
-                    _drop(f)
+                    _drop(f, data)
                     continue
                 # Pid alive but heartbeat stale = recycled pid, clean up -- unless
                 # the kernel start proves the writer still runs (stuck, #575).
@@ -2086,7 +2115,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                         except Exception:
                             pass
                     if not alive:
-                        _drop(f)
+                        _drop(f, data)
                         continue
                 data["_presence_path"] = str(f)
                 agents.append(data)

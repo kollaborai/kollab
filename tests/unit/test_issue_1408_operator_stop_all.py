@@ -709,7 +709,12 @@ def test_cli_status_keeps_a_replacement_row_published_during_the_scan(tmp_path, 
     row["start_token"] = "darwin:1.0"  # not this process: the row is recycled
     path.write_text(json.dumps(row))
 
+    calls = []
+
     def start_token_then_replace(_pid):
+        if calls:  # later scans: the replacement is the live process
+            return "darwin:2.0"
+        calls.append(1)
         path.write_text(json.dumps({**row, "started_at": row["started_at"] + 50,
                                     "start_token": "darwin:2.0"}))
         return "darwin:9.9"
