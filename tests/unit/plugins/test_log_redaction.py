@@ -38,6 +38,26 @@ def test_plugin_secret_redaction_boundaries_are_shared():
             "Authorization: Bearer abc123",
             "Authorization: Bearer [redacted]",
         ),
+        (
+            "letters-only authorization bearer",
+            "Authorization: Bearer secrettoken",
+            "Authorization: Bearer [redacted]",
+        ),
+        (
+            "proxy authorization basic credential",
+            "Proxy-Authorization: Basic dXNlcjpwYXNz",
+            "Proxy-Authorization: Basic [redacted]",
+        ),
+        (
+            "token assignment with bearer credential",
+            "token: bearer abcdef",
+            "token: bearer [redacted]",
+        ),
+        (
+            "authorization basic credential",
+            "Authorization: Basic secret",
+            "Authorization: Basic [redacted]",
+        ),
         ("basic settings label", "Basic settings", "Basic settings"),
         ("bearer help placeholder", "Bearer <key>", "Bearer <key>"),
         ("inventory key shape", "sk-live-abcdefghijklmnop", None),
