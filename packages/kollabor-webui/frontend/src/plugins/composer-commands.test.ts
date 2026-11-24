@@ -414,4 +414,3 @@ describe("slash catalog notice", () => {
     },
   );
 });
-
