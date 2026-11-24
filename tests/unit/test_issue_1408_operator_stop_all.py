@@ -566,3 +566,119 @@ def test_cli_stop_ladder_never_signals_a_pid_whose_start_differs_from_the_row(mo
     finally:
         bystander.kill()
         bystander.wait()
+
+
+def _presence_in(directory):
+    from plugins.hub.presence import PresenceManager
+
+    presence = object.__new__(PresenceManager)
+    presence._presence_dir = directory
+    return presence
+
+
+def test_stop_cleanup_keeps_a_replacement_registered_under_the_same_id(tmp_path):
+    """The stopped generation exited and a new process took its id and socket:
+    the stop's cleanup leaves the newcomer's row and socket alone."""
+    import subprocess
+
+    from kollabor_agent.runtime import AgentRuntime
+
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    sock = tmp_path / "agent-x.sock"
+    sock.write_text("")
+    row = tmp_path / "agent-x.json"
+    row.write_text(json.dumps({
+        "agent_id": "agent-x", "identity": "x", "pid": os.getpid(),
+        "started_at": 200.0, "socket_path": str(sock),
+    }))
+    old = AgentRuntime(
+        agent_id="agent-x", identity="x", pid=gone.pid, started_at=100.0,
+        socket_path=str(sock),
+    )
+
+    _presence_in(tmp_path).cleanup_agent(old)
+
+    assert row.exists()
+    assert sock.exists()
+
+
+def test_stop_cleanup_keeps_the_row_of_a_process_still_running(tmp_path):
+    """A live agent never drops out of discovery because a stop cleaned up."""
+    import subprocess
+
+    from kollabor_agent.runtime import AgentRuntime, process_start_token
+
+    live = subprocess.Popen(["sleep", "30"])
+    try:
+        row = tmp_path / "agent-y.json"
+        row.write_text(json.dumps({
+            "agent_id": "agent-y", "identity": "y", "pid": live.pid,
+            "started_at": 100.0, "socket_path": "",
+        }))
+        agent = AgentRuntime(
+            agent_id="agent-y", identity="y", pid=live.pid, started_at=100.0,
+            start_token=process_start_token(live.pid) or "",
+        )
+
+        _presence_in(tmp_path).cleanup_agent(agent)
+
+        assert row.exists()
+    finally:
+        live.kill()
+        live.wait()
+
+
+def test_session_less_stop_of_an_agent_with_no_socket_yet_stops_its_process(monkeypatch):
+    """Still starting (no socket yet): stop its proven pid, never just drop its row."""
+    import signal
+    import subprocess
+
+    from kollabor_agent.runtime import process_start_token
+
+    starting = subprocess.Popen(["sleep", "30"])
+    try:
+        agent = _peer("starting")
+        agent.pid = starting.pid
+        agent.socket_path = ""
+        agent.start_token = process_start_token(starting.pid)
+        plugin = HubPlugin()
+        plugin._presence = SimpleNamespace(cleanup_agent=lambda a: None)
+        plugin._identity = SimpleNamespace(agent_id="me", identity="legal-ops-lead")
+        signals = []
+
+        def escalate(_agent, _session, sig):
+            signals.append(sig)
+            starting.kill()
+            starting.wait()
+            return True
+
+        monkeypatch.setattr(plugin, "_escalate_agent", escalate)
+
+        result = asyncio.run(plugin._stop_peer_agent(agent, reason="test"))
+
+        assert signals == [signal.SIGTERM]
+        assert "killed" in result
+    finally:
+        if starting.poll() is None:
+            starting.kill()
+            starting.wait()
+
+
+def test_named_stop_of_an_agent_with_no_socket_yet_goes_through_the_stop_ladder(monkeypatch):
+    """`/hub stop <name>` on a starting agent stops it instead of erasing its row."""
+    agent = _peer("starting")
+    agent.socket_path = ""
+    plugin = HubPlugin()
+    plugin._presence = SimpleNamespace(
+        scan_all_presence=lambda: [agent], cleanup_agent=lambda a: None
+    )
+    plugin._identity = SimpleNamespace(agent_id="me", identity="legal-ops-lead")
+    monkeypatch.setattr(plugin, "_get_orchestrator", lambda: None)
+    stop = AsyncMock(return_value="killed (SIGTERM fallback)")
+    monkeypatch.setattr(plugin, "_stop_peer_agent", stop)
+
+    result = asyncio.run(plugin._handle_stop_command("starting", operator=True))
+
+    assert stop.await_count == 1
+    assert "cleaned up" not in result
