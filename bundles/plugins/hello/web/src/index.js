@@ -3,6 +3,7 @@ import React, { useState } from "react";
 import { definePlugin } from "@kollab/plugin";
 import "./index.css";
 
+/** @param {import("@kollab/plugin").PluginRenderProps} props */
 function HelloView({ k }) {
   const [count, setCount] = useState(0);
   return React.createElement("section", { className: "hello-example" },
