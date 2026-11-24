@@ -7115,9 +7115,7 @@ class HubPlugin(BasePlugin):
                             break
                     except Exception:
                         break
-                if delivery.cancelled():
-                    accepted = delivery.cancelling() == 0
-                elif delivery.done():
+                if delivery.done() and not delivery.cancelled():
                     try:
                         accepted = delivery.result() is not False
                     except Exception as delivery_error:
@@ -7126,11 +7124,6 @@ class HubPlugin(BasePlugin):
                             msg.id,
                             type(delivery_error).__name__,
                         )
-            elif delivery.cancelled() and delivery.cancelling() == 0:
-                # A receiver may raise CancelledError after applying its effect
-                # without a cancellation request against either task.
-                accepted = True
-
             if accepted:
                 # Persist its receipt before propagating cancellation so a
                 # restart does not replay the effect.
