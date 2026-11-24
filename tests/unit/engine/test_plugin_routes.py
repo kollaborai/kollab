@@ -96,7 +96,9 @@ def test_settings_routes_select_builtin_when_package_id_collides(tmp_path, monke
     from types import SimpleNamespace
 
     from kollabor_engine.routes import plugins as plugin_routes
-    from kollabor_plugins import registry, settings as plugin_settings
+
+    from kollabor_plugins import registry
+    from kollabor_plugins import settings as plugin_settings
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")

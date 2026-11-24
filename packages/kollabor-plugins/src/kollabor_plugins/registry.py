@@ -21,10 +21,10 @@ from .discovery import PluginDiscovery
 from .factory import PluginFactory
 from .packages import (
     _ID,
+    _MAX_ENABLE_ORDER,
     _MAX_PLUGIN_SERVICE_SECRETS,
     _MAX_PLUGIN_SERVICES,
     _MAX_PLUGIN_USES,
-    _MAX_ENABLE_ORDER,
     _SYMBOL,
     _read_registry,
     _within,
@@ -952,7 +952,11 @@ def _normalize_plugin_entry(value: object) -> dict | None:
     uses = _bounded_unique(raw_uses, _MAX_PLUGIN_USES, _normalize_capability) if isinstance(raw_uses, list) else []
     omitted_uses = max(0, len(raw_uses) - _MAX_PLUGIN_USES) if isinstance(raw_uses, list) else 0
     raw_granted = value.get("granted")
-    granted = _bounded_unique(raw_granted, _MAX_PLUGIN_USES, _normalize_capability) if isinstance(raw_granted, list) else []
+    granted = (
+        _bounded_unique(raw_granted, _MAX_PLUGIN_USES, _normalize_capability)
+        if isinstance(raw_granted, list)
+        else []
+    )
     omitted_granted = max(0, len(raw_granted) - _MAX_PLUGIN_USES) if isinstance(raw_granted, list) else 0
     raw_settings = value.get("settings")
     settings = (

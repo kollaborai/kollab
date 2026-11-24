@@ -156,6 +156,7 @@ def test_cancel_reports_cleanup_failure_and_allows_retry(client, monkeypatch):
 def test_failed_cancel_cleanup_expires_and_retries(client, monkeypatch):
     import asyncio
     import shutil
+
     from kollabor_engine import plugin_jobs
 
     manager = client.app.state.plugin_jobs
