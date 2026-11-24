@@ -57,6 +57,12 @@ describe("plugin review sheet data", () => {
     expect(installSource).toContain("Commit: {job.commit}");
     expect(installSource).toContain("Files SHA-256: {job.files_sha256}");
   });
+
+  it("confirms only a ready review and sends its exact displayed commit and file hash", () => {
+    expect(installSource).toMatch(/if\s*\(!job\s*\|\|\s*job\.status\s*!==\s*"ready"\s*\|\|\s*!job\.commit\s*\|\|\s*!job\.files_sha256\)\s*return;/);
+    expect(installSource).toMatch(/body:\s*JSON\.stringify\(\{\s*commit:\s*job\.commit,\s*files_sha256:\s*job\.files_sha256\s*\}\)/);
+    expect(installSource).toMatch(/\{ready\s*\?\s*<Button[\s\S]*?void confirm\(\);[\s\S]*?:\s*null\}/);
+  });
 });
 
 describe("plugin review form state", () => {
