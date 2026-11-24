@@ -116,9 +116,16 @@ def test_cancel_discards_ready_plugin_job(client):
 
 def test_cancel_stops_staging_job_and_removes_its_files(client, monkeypatch):
     import asyncio
+    import threading
+
+    stopped = threading.Event()
 
     async def stalled(*args):
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.set()
+            raise
 
     monkeypatch.setattr(client.app.state.plugin_jobs, "_run_staging", stalled)
     response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
@@ -130,6 +137,7 @@ def test_cancel_stops_staging_job_and_removes_its_files(client, monkeypatch):
 
     assert response.status_code == 200, response.text
     assert response.json() == {"job_id": job_id, "status": "cancelled"}
+    assert stopped.is_set()
     assert not base.exists()
     assert client.get(f"/plugins/jobs/{job_id}").status_code == 404
 
