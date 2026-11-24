@@ -78,8 +78,14 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function exceedsCodePointLimit(value: string, limit: number): boolean {
+  let count = 0;
+  for (const _ of value) if (++count > limit) return true;
+  return false;
+}
+
 function safeText(value: unknown, limit = INVENTORY_TEXT_LIMIT): string | null {
-  if (typeof value !== "string" || value.length > limit || /[\u0000-\u001f\u007f]/.test(value) || INVISIBLE_CONTROLS.test(value) || SENSITIVE_TEXT.test(value))
+  if (typeof value !== "string" || exceedsCodePointLimit(value, limit) || /[\u0000-\u001f\u007f]/.test(value) || INVISIBLE_CONTROLS.test(value) || SENSITIVE_TEXT.test(value))
     return null;
   const clean = value.trim();
   return clean || null;
@@ -90,7 +96,7 @@ export function safePluginText(value: unknown, limit = INVENTORY_TEXT_LIMIT): st
 }
 
 function safeIdentifier(value: unknown, limit = INVENTORY_TEXT_LIMIT): string | null {
-  if (typeof value !== "string" || value.length > limit || /[\u0000-\u001f\u007f]/.test(value)
+  if (typeof value !== "string" || exceedsCodePointLimit(value, limit) || /[\u0000-\u001f\u007f]/.test(value)
     || INVISIBLE_CONTROLS.test(value) || EXPLICIT_SECRET_IDENTIFIER.test(value))
     return null;
   const clean = value.trim();
