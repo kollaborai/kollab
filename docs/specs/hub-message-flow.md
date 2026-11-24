@@ -341,10 +341,30 @@ there are TWO separate dedup systems:
     path: ~/.kollab/hub/messages/<agent_id>/
     atomic file write (timestamp-uuid.json)
     polled every 5 seconds by _mailbox_loop
-    ordinary messages are consumed after read
-    durable task controls stay on disk and count against capacity until
-    normal receive classification succeeds; a refusal leaves the control
-    queued for the next poll
+    malformed timestamps are reported without message content and discarded
+    reads, writes/pruning, claims, acknowledgment and refusal release share
+    one cross-process file lock for the mailbox root; no lock spans a callback
+    before calling a receiver, exclusively transition every source record from
+    queued to held by persisting an uncertainty marker; an absent, incomplete,
+    already held or acknowledged source cannot authorize an effect, even when
+    a poller still has a previously parsed batch
+    if claim persistence fails, skip delivery; a partially persisted batch
+    retains its marked records for inspection and never starts the callback
+    accepted delivery is acknowledged by removing the record or writing a
+    complete receipt using atomic replacement; if acknowledgment persistence
+    fails, the original claimed payload survives and the marker prevents replay
+    explicit refusal clears the marker and leaves the record available to retry
+    cancellation or an ambiguous receiver failure keeps the marker and payload,
+    suppressing automatic replay until an operator inspects it; coalesced
+    injection has the same rule and cancellation never proves acceptance
+    clear the marker to retry only after confirming no effect, or remove the
+    record after confirming its effect; generic async callbacks cannot provide
+    transactional exactly-once delivery, so uncertain outcomes require inspection
+    TTL-expired, restart-stale ordinary messages, and replay-cap drops are
+    intentionally discarded; durable task controls retain their existing
+    classification path
+    the orphan sweep removes empty directories with rmdir only; it never
+    recursively deletes a populated mailbox based on a directory snapshot
 
   mailbox admission:
     ordinary messages are bounded independently by INBOX_MAX_SIZE; oldest
@@ -355,7 +375,7 @@ there are TWO separate dedup systems:
     consume control capacity until they can be recovered or classified
     when that control cap is full, the new write is rejected with explicit
     backpressure; the sender may retry after the receiver drains its mailbox
-    admission is serialized per mailbox, and retrying an existing message ID
+    admission shares the mailbox root delivery lock, and retrying an existing message ID
     is idempotent; storage errors are returned as delivery failures
     this is at-least-once retry behavior, not an exactly-once effect guarantee
 

@@ -6993,11 +6993,23 @@ class HubPlugin(BasePlugin):
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
                         max_replay=self._mailbox_replay_cap(INBOX_MAX_REPLAY),
-                        retain_controls=True,
+                        consume=False,
                     )
                     if messages:
-                        await self._deliver_inbox_batch(messages)
-            except asyncio.CancelledError:
+                        acknowledged = await self._deliver_inbox_batch(messages)
+                        AgentMessenger.acknowledge_mailboxes(
+                            [self._identity.agent_id, self._identity.identity],
+                            acknowledged,
+                            persist_receipt=True,
+                        )
+            except asyncio.CancelledError as exc:
+                acknowledged = getattr(exc, "acknowledged_message_ids", set())
+                if acknowledged and self._identity:
+                    AgentMessenger.acknowledge_mailboxes(
+                        [self._identity.agent_id, self._identity.identity],
+                        acknowledged,
+                        persist_receipt=True,
+                    )
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
@@ -7043,7 +7055,7 @@ class HubPlugin(BasePlugin):
             logger.debug("mailbox replay cap check failed: %s", exc)
         return cap
 
-    async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
+    async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> set[str]:
         """Deliver a batch of offline inbox messages.
 
         When the batch starts with an inbox_summary (bounded replay), ordinary
@@ -7054,37 +7066,119 @@ class HubPlugin(BasePlugin):
         normal per-message _on_message_received path so existing live-delivery
         behaviour is preserved.
         """
-        if messages and messages[0].action == "inbox_summary":
-            await self._inject_inbox_replay(messages)
-        else:
+        acknowledged: set[str] = set()
+        try:
+            if messages and messages[0].action == "inbox_summary":
+                return await self._inject_inbox_replay(messages, acknowledged)
             for msg in messages:
-                await self._deliver_inbox_message(msg)
+                if await self._deliver_inbox_message(msg):
+                    acknowledged.add(msg.id)
+                    self._acknowledge_inbox_delivery({msg.id})
+            return acknowledged
+        except asyncio.CancelledError as exc:
+            acknowledged.update(
+                getattr(exc, "acknowledged_message_ids", set())
+            )
+            exc.acknowledged_message_ids = acknowledged.copy()
+            raise
 
-    async def _deliver_inbox_message(self, msg: HubMessage) -> None:
-        """Deliver one mailbox message and retain refused durable controls.
-
-        Ordinary messages are consumed on read and put back after a refusal.
-        Durable controls stay on disk until receive classification succeeds,
-        keeping their admission slot occupied while a refusal is retried.
-        """
-        is_control = _is_durable_control(msg.to_dict())
-        if is_control and not getattr(self, "_accepting_messages", True):
+    def _acknowledge_inbox_delivery(
+        self, message_ids: set[str], fallback_agent_keys: Optional[List[str]] = None
+    ) -> None:
+        """Persist each accepted mailbox delivery before yielding control."""
+        identity = getattr(self, "_identity", None)
+        if not message_ids:
             return
+        agent_keys = (
+            [identity.agent_id, identity.identity]
+            if identity is not None
+            else (fallback_agent_keys or [])
+        )
+        AgentMessenger.acknowledge_mailboxes(
+            agent_keys, message_ids, persist_receipt=True
+        )
 
-        accepted = await self._on_message_received(msg)
-        if is_control:
-            if accepted is False:
-                return
-            if self._identity:
-                AgentMessenger.acknowledge_mailbox_message(
-                    [self._identity.agent_id, self._identity.identity], msg
+    async def _deliver_inbox_message(self, msg: HubMessage) -> bool:
+        """Deliver one mailbox message; refusal leaves its file unacknowledged."""
+        if (msg.metadata or {}).get("_mailbox_delivery_uncertain") is True:
+            logger.error(
+                "Mailbox delivery %s has an uncertain outcome; preserving it "
+                "without automatic replay",
+                msg.id,
+            )
+            return False
+        identity = getattr(self, "_identity", None)
+        agent_keys = (
+            [identity.agent_id, identity.identity]
+            if identity is not None
+            else [msg.to]
+        )
+        if not AgentMessenger.mark_mailbox_delivery_uncertain(agent_keys, {msg.id}):
+            logger.error(
+                "Could not persist mailbox delivery claim for %s; leaving it queued",
+                msg.id,
+            )
+            return False
+        delivery = asyncio.create_task(self._on_message_received(msg))
+        try:
+            accepted = await asyncio.shield(delivery) is not False
+            if not accepted:
+                AgentMessenger.clear_mailbox_delivery_uncertain(
+                    agent_keys, {msg.id}
                 )
-            return
+            return accepted
+        except asyncio.CancelledError as exc:
+            task = asyncio.current_task()
+            accepted = False
+            refused = False
+            if task is not None and task.cancelling() > 0:
+                # Cancellation of the poll must not interrupt a receiver after
+                # it has begun applying the message. Let that delivery settle,
+                # then persist its acknowledgment before propagating cancel.
+                while not delivery.done():
+                    try:
+                        await asyncio.shield(delivery)
+                    except asyncio.CancelledError:
+                        if delivery.done():
+                            break
+                    except Exception:
+                        break
+                if delivery.done() and not delivery.cancelled():
+                    try:
+                        result = delivery.result()
+                        accepted = result is not False
+                        refused = result is False
+                    except Exception as delivery_error:
+                        logger.warning(
+                            "Mailbox delivery failed for %s (%s); leaving it queued for retry",
+                            msg.id,
+                            type(delivery_error).__name__,
+                        )
+            if accepted:
+                # Persist its receipt before propagating cancellation so a
+                # restart does not replay the effect.
+                self._acknowledge_inbox_delivery({msg.id}, [msg.to])
+                exc.acknowledged_message_ids = {msg.id}
+            elif refused:
+                # The poll was cancelled, but the shielded receiver settled
+                # with an explicit refusal. Its claim is safe to release just
+                # as it is on the ordinary completion path.
+                AgentMessenger.clear_mailbox_delivery_uncertain(
+                    agent_keys, {msg.id}
+                )
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Mailbox delivery failed for %s (%s); preserving it without "
+                "automatic replay",
+                msg.id,
+                type(exc).__name__,
+            )
+            return False
 
-        if accepted is False and self._identity:
-            await AgentMessenger.send_to_file(self._identity.identity, msg)
-
-    async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
+    async def _inject_inbox_replay(
+        self, messages: List[HubMessage], acknowledged: Optional[set[str]] = None
+    ) -> set[str]:
         """Coalesce a bounded inbox replay into a single injected block.
 
         messages[0] must be the inbox_summary; messages[1:] are the replayed
@@ -7103,14 +7197,25 @@ class HubPlugin(BasePlugin):
         # task-cron reminders are explicitly acknowledged when stale. Do not
         # duplicate controls in the coalesced HUD block or fallback delivery.
         control_msgs = [
-            msg for msg in replay_msgs if _is_durable_control(msg.to_dict())
+            msg
+            for msg in replay_msgs
+            if _is_durable_control(msg.to_dict())
+            and (msg.metadata or {}).get("_mailbox_delivery_uncertain") is not True
         ]
-        ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
+        ordinary_msgs = [
+            msg
+            for msg in replay_msgs
+            if msg not in control_msgs
+            and (msg.metadata or {}).get("_mailbox_delivery_uncertain") is not True
+        ]
+        acknowledged = acknowledged if acknowledged is not None else set()
         for msg in control_msgs:
-            await self._deliver_inbox_message(msg)
+            if await self._deliver_inbox_message(msg):
+                acknowledged.add(msg.id)
+                self._acknowledge_inbox_delivery({msg.id})
 
         if not ordinary_msgs:
-            return
+            return acknowledged
 
         llm = None
         if self.event_bus is not None:
@@ -7123,8 +7228,10 @@ class HubPlugin(BasePlugin):
         # (#581); a coalesced block would hide that from it. Deliver one by one.
         if self._agent_dispatch_mode(llm) == "acp":
             for msg in ordinary_msgs:
-                await self._deliver_inbox_message(msg)
-            return
+                if await self._deliver_inbox_message(msg):
+                    acknowledged.add(msg.id)
+                    self._acknowledge_inbox_delivery({msg.id})
+            return acknowledged
 
         lines: List[str] = [summary.content, ""]
         for msg in ordinary_msgs:
@@ -7139,21 +7246,54 @@ class HubPlugin(BasePlugin):
         block = "\n".join(lines)
 
         if llm is not None and hasattr(llm, "inject_system_message"):
+            identity = getattr(self, "_identity", None)
+            agent_keys = (
+                [identity.agent_id, identity.identity]
+                if identity is not None
+                else []
+            )
+            ordinary_ids = {msg.id for msg in ordinary_msgs}
+            if not AgentMessenger.mark_mailbox_delivery_uncertain(
+                agent_keys, ordinary_ids
+            ):
+                logger.error(
+                    "Could not persist mailbox replay claim for %d message(s)",
+                    len(ordinary_ids),
+                )
+                return acknowledged
             try:
                 await llm.inject_system_message(block, subtype="inbox_replay")
+                acknowledged.update(ordinary_ids)
+                self._acknowledge_inbox_delivery(
+                    ordinary_ids
+                )
                 logger.info(
                     "Injected inbox replay block: %d message(s) shown "
                     "(%s total queued)",
                     len(ordinary_msgs),
                     summary.metadata.get("total", "?"),
                 )
-                return
+                return acknowledged
+            except asyncio.CancelledError as exc:
+                # Cancellation says nothing about whether injection applied
+                # its effect. Keep the pre-effect claim and payload for
+                # inspection, exactly as for individual receiver failures.
+                exc.acknowledged_message_ids = acknowledged.copy()
+                raise
             except Exception as exc:
-                logger.debug("inbox replay injection failed: %s", exc)
+                logger.warning(
+                    "Inbox replay injection failed after its delivery claim; "
+                    "preserving messages for inspection (%s)",
+                    type(exc).__name__,
+                )
+                return acknowledged
 
         # Fallback: individual delivery (no inject_system_message)
         for msg in ordinary_msgs:
-            await self._deliver_inbox_message(msg)
+            if await self._deliver_inbox_message(msg):
+                acknowledged.add(msg.id)
+                self._acknowledge_inbox_delivery({msg.id})
+        return acknowledged
 
     async def _dreaming_loop(self) -> None:
         """Periodically dream when agent is idle -- distill stream into insights.
@@ -7414,13 +7554,11 @@ class HubPlugin(BasePlugin):
         Runs every 5 minutes on the coordinator only. Three jobs:
         1. Remove dead presence files (PID no longer running).
         2. Trigger pending_replies() auto-expiry (entries >24h old).
-        3. Sweep offline inbox dirs whose session has no living
-           presence file and whose messages are older than INBOX_TTL_SECS.
+        3. Remove empty offline inbox directories. Populated mailboxes are
+           owned by the reader/writer TTL and size policies, not this sweep.
 
         Scans ALL project hub directories, not just the current project.
         """
-        import shutil
-
         from kollabor_config.config_utils import get_config_directory
 
         while True:
@@ -7485,53 +7623,32 @@ class HubPlugin(BasePlugin):
                     except Exception as e:
                         logger.debug(f"pending_replies sweep error: {e}")
 
-                # --- Step 3: Sweep orphaned offline inbox dirs ---
-                # Remove inbox dirs whose messages are all older than
-                # INBOX_TTL_SECS and whose session has no living presence
-                # file. This reclaims disk from crashed/offline agents
-                # that will never reconnect to consume their inbox.
-                from .messenger import INBOX_TTL_SECS
+                # --- Step 3: Remove empty offline inbox dirs ---
+                # A directory scan cannot authorize recursive deletion: a
+                # queued control or a new arrival may still need delivery.
+                # rmdir is the filesystem's atomic empty-directory check.
+                from .file_lock import locked_file
 
-                now = time.time()
                 inboxes_removed = 0
 
                 if projects_root.exists():
                     for messages_root in projects_root.glob("*/hub/messages"):
                         if not messages_root.is_dir():
                             continue
-                        for inbox_dir in messages_root.iterdir():
-                            if not inbox_dir.is_dir():
-                                continue
-                            try:
-                                files = list(inbox_dir.glob("*.json"))
-                                if not files:
-                                    # Empty dir — remove if no presence
-                                    inbox_dir.rmdir()
+                        with locked_file(messages_root / ".delivery.lock", private=True):
+                            for inbox_dir in messages_root.iterdir():
+                                if not inbox_dir.is_dir():
                                     continue
-
-                                # Check if all messages are stale
-                                all_stale = True
-                                for mf in files:
-                                    try:
-                                        with open(mf) as f:
-                                            data = json.load(f)
-                                        ts = float(data.get("timestamp", 0) or 0)
-                                        if ts and (now - ts) < INBOX_TTL_SECS:
-                                            all_stale = False
-                                            break
-                                    except Exception:
-                                        pass  # keep dirs with unreadable files
-
-                                if all_stale:
-                                    shutil.rmtree(inbox_dir)
+                                try:
+                                    inbox_dir.rmdir()
                                     inboxes_removed += 1
-                            except Exception as e:
-                                logger.debug(f"inbox sweep: error on {inbox_dir}: {e}")
+                                except OSError:
+                                    pass  # populated or inaccessible: preserve it
 
                 if inboxes_removed:
                     logger.info(
                         f"presence sweep: removed {inboxes_removed} "
-                        f"stale offline inbox dirs"
+                        f"empty offline inbox dirs"
                     )
 
             except asyncio.CancelledError:

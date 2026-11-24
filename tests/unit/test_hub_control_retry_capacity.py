@@ -43,7 +43,7 @@ async def test_refused_control_keeps_capacity_until_receive_classifies_it(
         return False
 
     plugin._on_message_received = refuse_after_concurrent_admission
-    replay = AgentMessenger.read_mailboxes(["receiver-id", "receiver"])
+    replay = AgentMessenger.read_mailboxes(["receiver-id", "receiver"], consume=False)
     assert [message.id for message in replay] == ["accepted"]
     try:
         await plugin._deliver_inbox_batch(replay)
@@ -70,7 +70,7 @@ async def test_accepted_control_is_removed_only_after_receive_classification(
         files_during_receive.append(len(list((tmp_path / "receiver").glob("*.json"))))
 
     plugin._on_message_received = accept
-    replay = AgentMessenger.read_mailboxes(["receiver-id", "receiver"])
+    replay = AgentMessenger.read_mailboxes(["receiver-id", "receiver"], consume=False)
     await plugin._deliver_inbox_batch(replay)
 
     assert files_during_receive == [1]
