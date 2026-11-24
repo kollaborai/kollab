@@ -326,6 +326,39 @@ def test_plugin_usage_incremental_replay_and_local_day(tmp_path, monkeypatch):
         assert restarted.get("/plugins/hello/usage").status_code == 409
 
 
+@pytest.mark.parametrize(
+    ("exception_message", "expected_fragment", "forbidden"),
+    [
+        ("Cannot read /private/tmp/account/config.json", "[path]", "/private/tmp/account/config.json"),
+        ("GITHUB_TOKEN=ghp_fakecredentialvalue123", "GITHUB_TOKEN: [redacted]", "ghp_fakecredentialvalue123"),
+    ],
+)
+def test_plugin_usage_exception_logs_redact_paths_and_credentials(
+    monkeypatch, tmp_path, caplog, exception_message, expected_fragment, forbidden
+):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+    from kollabor_engine.routes import plugins as plugin_routes
+
+    context = SimpleNamespace(
+        settings=SimpleNamespace(get=lambda: {}),
+        data=tmp_path / "plugin-data",
+    )
+    monkeypatch.setattr(plugin_routes, "_package_context", lambda _plugin_id: context)
+
+    def fail_ingest(*_args):
+        raise OSError(exception_message)
+
+    monkeypatch.setattr(plugin_routes, "_ingest_plugin_usage", fail_ingest)
+    with pytest.raises(HTTPException) as raised:
+        plugin_routes.get_plugin_usage("hello")
+
+    assert raised.value.status_code == 503
+    assert expected_fragment in caplog.text
+    assert forbidden not in caplog.text
+
+
 def test_plugin_usage_is_checkpointed_in_bounded_batches(tmp_path, monkeypatch):
     import json
     import shutil
