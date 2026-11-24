@@ -19,7 +19,7 @@ const inventoryOmissionCases: Array<{
 }> = [
   {
     name: "services",
-    input: () => ({ services: Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`worker-${index}`, {}])) }),
+    input: () => ({ services: Array.from({ length: 129 }, (_, index) => ({ name: `worker-${index}` })) }),
     omitted: (entry) => entry?.omitted.services ?? 0,
   },
   {
