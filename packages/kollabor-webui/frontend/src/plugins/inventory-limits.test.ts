@@ -322,6 +322,11 @@ describe("plugin inventory collection bounds", () => {
     (value) => expect(safePluginText(value)).toBeNull(),
   );
 
+  it("counts non-BMP plugin names by code point like the backend", () => {
+    const name = "😀".repeat(200);
+    expect(normalizePluginEntry({ id: "emoji-plugin", name })?.name).toBe(name);
+  });
+
   it.each([
     ["installing", null, "Plugin installation is in progress. Wait for it to finish."],
     ["installing", "Plugin review no longer exists.", null],
