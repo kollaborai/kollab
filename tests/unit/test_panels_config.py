@@ -186,8 +186,7 @@ def test_a_secret_never_leaves_describe(home):
     config = FakeConfig({"plugins": {"hub": {"bridge_token": SECRET}}})
     view = describe(config)
 
-    field = fields_of(view)["plugins.hub.bridge_token"]
-    assert (field["value"], field["secret"], field["is_set"]) == (None, True, True)
+    assert "plugins.hub.bridge_token" not in fields_of(view)
     assert SECRET not in json.dumps(view)
 
 
@@ -215,79 +214,22 @@ def test_save_writes_each_key_notifies_and_returns_the_fresh_panel(home):
     assert "to ~/.kollab/config.json" in out["message"]
 
 
-def test_hub_arrival_wake_is_a_dropdown_that_saves_to_the_folder(home):
+def test_hub_arrival_wake_is_only_in_plugins_settings(home):
     config = FakeConfig({"plugins": {"hub": {"arrival_wake": "none"}}})
+    path = "plugins.hub.arrival_wake"
 
-    field = fields_of(describe(config))["plugins.hub.arrival_wake"]
-    assert (field["type"], field["label"], field["value"]) == (
-        "dropdown",
-        "Wake on Agent Arrival",
-        "none",
-    )
-    assert field["options"] == ["all", "koordinator", "none"] and field["editable"]
+    assert path not in fields_of(describe(config))
 
-    refused = save(config, {"plugins.hub.arrival_wake": "sometimes"}, "local")
-    assert refused["errors"] == {"plugins.hub.arrival_wake": "not one of the options"}
+    refused = save(config, {path: "koordinator"}, "local")
+    assert not refused["ok"]
+    assert refused["errors"] == {path: "unknown setting"}
+    assert config.saved == []
 
-    saved = save(config, {"plugins.hub.arrival_wake": "koordinator"}, "local")
-    assert saved["ok"]
-    assert config.saved == [("plugins.hub.arrival_wake", "koordinator", "local")]
-
-
-def test_hub_dropdowns_name_their_options_for_people_and_save_the_ids(home):
+def test_hub_plugin_fields_are_not_duplicated_in_configuration(home):
     config = FakeConfig({"plugins": {"hub": {"roster": "marketing-crew"}}})
     fields = fields_of(describe(config))
 
-    roster = fields["plugins.hub.roster"]
-    assert roster["options"] == [
-        "data-crew",
-        "finance-crew",
-        "gems",
-        "legal-crew",
-        "marketing-crew",
-        "oss-crew",
-        "people-crew",
-        "personal-crew",
-        "product-crew",
-        "research-crew",
-        "sales-crew",
-        "security-crew",
-        "social-crew",
-        "store-crew",
-        "support-crew",
-    ]
-    assert roster["option_labels"] == {
-        "data-crew": "Data Crew",
-        "finance-crew": "Finance Crew",
-        "gems": "Gems",
-        "legal-crew": "Legal Crew",
-        "marketing-crew": "Marketing Crew",
-        "oss-crew": "Open Source Crew",
-        "people-crew": "People Crew",
-        "personal-crew": "Personal Crew",
-        "product-crew": "Product Crew",
-        "research-crew": "Research Crew",
-        "sales-crew": "Sales Crew",
-        "security-crew": "Security Crew",
-        "social-crew": "Social Crew",
-        "store-crew": "Store Crew",
-        "support-crew": "Support Crew",
-    }
-    assert roster["value"] == "marketing-crew"  # the saved id, not its label
-    assert fields["plugins.hub.arrival_wake"]["option_labels"] == {
-        "all": "All",
-        "koordinator": "Koordinator",
-        "none": "None",
-    }
-    assert fields["plugins.hub.bridge_platform"]["option_labels"] == {
-        "telegram": "Telegram"
-    }
-
-    refused = save(config, {"plugins.hub.arrival_wake": "None"}, "local")
-    assert refused["errors"] == {"plugins.hub.arrival_wake": "not one of the options"}
-    save(config, {"plugins.hub.arrival_wake": "none", "plugins.hub.roster": "gems"})
-    assert ("plugins.hub.arrival_wake", "none", "global") in config.saved
-    assert ("plugins.hub.roster", "gems", "global") in config.saved
+    assert not any(path.startswith("plugins.hub.") for path in fields)
 
 
 def test_option_labels_only_name_options_and_only_dropdowns_carry_them(home):

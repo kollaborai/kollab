@@ -360,6 +360,20 @@ class ConfigPanel:
         service = _config_service(ctx)
         managed, global_settings = read_managed_state()
         sections = build_config_sections(service, managed, global_settings)
+        plugin_paths = ("plugins.", "plugin-values.", "plugin-registry.", "plugin-service.")
+        sections = [
+            {
+                **section,
+                "widgets": [
+                    row
+                    for row in section["widgets"]
+                    if not str(row.get("config_path", "")).startswith(plugin_paths)
+                ],
+            }
+            for section in sections
+            if section.get("title") != "Plugin Settings"
+        ]
+        sections = [section for section in sections if section["widgets"]]
         return {
             "panel": self.name,
             "kind": self.kind,
