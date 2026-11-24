@@ -114,4 +114,13 @@ describe("plugin tagged text", () => {
       content: "x",
     });
   });
+
+  it.each([
+    ["ATX heading", "`unfinished\n# <card>heading</card> `", "heading"],
+    ["thematic break", "`unfinished\n___\n<card>thematic</card> `", "thematic"],
+    ["list item", "`unfinished\n- <card>list</card> `", "list"],
+    ["blockquote line", "`unfinished\n> <card>quote</card> `", "quote"],
+  ])("does not pair inline code across a %s boundary", (_boundary, text, content) => {
+    expect(splitPluginTags(text, ["card"])).toContainEqual({ type: "tag", name: "card", content });
+  });
 });
