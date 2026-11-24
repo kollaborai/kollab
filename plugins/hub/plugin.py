@@ -7266,11 +7266,9 @@ class HubPlugin(BasePlugin):
                 )
                 return acknowledged
             except asyncio.CancelledError as exc:
-                # LLMService queues the HUD entry before its first await, so
-                # cancellation from the injection call follows acceptance.
-                replayed_ids = ordinary_ids
-                acknowledged.update(replayed_ids)
-                self._acknowledge_inbox_delivery(replayed_ids)
+                # Cancellation says nothing about whether injection applied
+                # its effect. Keep the pre-effect claim and payload for
+                # inspection, exactly as for individual receiver failures.
                 exc.acknowledged_message_ids = acknowledged.copy()
                 raise
             except Exception as exc:
@@ -7547,13 +7545,11 @@ class HubPlugin(BasePlugin):
         Runs every 5 minutes on the coordinator only. Three jobs:
         1. Remove dead presence files (PID no longer running).
         2. Trigger pending_replies() auto-expiry (entries >24h old).
-        3. Sweep offline inbox dirs whose session has no living
-           presence file and whose messages are older than INBOX_TTL_SECS.
+        3. Remove empty offline inbox directories. Populated mailboxes are
+           owned by the reader/writer TTL and size policies, not this sweep.
 
         Scans ALL project hub directories, not just the current project.
         """
-        import shutil
-
         from kollabor_config.config_utils import get_config_directory
 
         while True:
@@ -7618,71 +7614,32 @@ class HubPlugin(BasePlugin):
                     except Exception as e:
                         logger.debug(f"pending_replies sweep error: {e}")
 
-                # --- Step 3: Sweep orphaned offline inbox dirs ---
-                # Remove inbox dirs whose messages are all older than
-                # INBOX_TTL_SECS and whose session has no living presence
-                # file. This reclaims disk from crashed/offline agents
-                # that will never reconnect to consume their inbox.
-                from .messenger import (
-                    INBOX_TTL_SECS,
-                    _validated_mailbox_timestamp,
-                )
+                # --- Step 3: Remove empty offline inbox dirs ---
+                # A directory scan cannot authorize recursive deletion: a
+                # queued control or a new arrival may still need delivery.
+                # rmdir is the filesystem's atomic empty-directory check.
+                from .file_lock import locked_file
 
-                now = time.time()
                 inboxes_removed = 0
 
                 if projects_root.exists():
                     for messages_root in projects_root.glob("*/hub/messages"):
                         if not messages_root.is_dir():
                             continue
-                        for inbox_dir in messages_root.iterdir():
-                            if not inbox_dir.is_dir():
-                                continue
-                            try:
-                                files = list(inbox_dir.glob("*.json"))
-                                if not files:
-                                    # Empty dir — remove if no presence
-                                    inbox_dir.rmdir()
+                        with locked_file(messages_root / ".delivery.lock", private=True):
+                            for inbox_dir in messages_root.iterdir():
+                                if not inbox_dir.is_dir():
                                     continue
-
-                                # Check if all messages are stale
-                                all_stale = True
-                                for mf in files:
-                                    try:
-                                        with open(mf) as f:
-                                            data = json.load(f)
-                                        ts = (
-                                            _validated_mailbox_timestamp(data)
-                                            if isinstance(data, dict)
-                                            else None
-                                        )
-                                        if (
-                                            ts is None
-                                            or _is_durable_control(data)
-                                            or data.get(
-                                                "_mailbox_delivery_uncertain"
-                                            )
-                                            is True
-                                        ):
-                                            all_stale = False
-                                            break
-                                        if ts and (now - ts) < INBOX_TTL_SECS:
-                                            all_stale = False
-                                            break
-                                    except Exception:
-                                        all_stale = False
-                                        break  # keep dirs with unreadable files
-
-                                if all_stale:
-                                    shutil.rmtree(inbox_dir)
+                                try:
+                                    inbox_dir.rmdir()
                                     inboxes_removed += 1
-                            except Exception as e:
-                                logger.debug(f"inbox sweep: error on {inbox_dir}: {e}")
+                                except OSError:
+                                    pass  # populated or inaccessible: preserve it
 
                 if inboxes_removed:
                     logger.info(
                         f"presence sweep: removed {inboxes_removed} "
-                        f"stale offline inbox dirs"
+                        f"empty offline inbox dirs"
                     )
 
             except asyncio.CancelledError:

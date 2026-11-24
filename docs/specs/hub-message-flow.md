@@ -342,17 +342,29 @@ there are TWO separate dedup systems:
     atomic file write (timestamp-uuid.json)
     polled every 5 seconds by _mailbox_loop
     malformed timestamps are reported without message content and discarded
-    before calling a receiver, persist an uncertainty marker; if that fails,
-    skip delivery and leave the record queued
+    reads, writes/pruning, claims, acknowledgment and refusal release share
+    one cross-process file lock for the mailbox root; no lock spans a callback
+    before calling a receiver, exclusively transition every source record from
+    queued to held by persisting an uncertainty marker; an absent, incomplete,
+    already held or acknowledged source cannot authorize an effect, even when
+    a poller still has a previously parsed batch
+    if claim persistence fails, skip delivery; a partially persisted batch
+    retains its marked records for inspection and never starts the callback
     accepted delivery is acknowledged by removing the record or writing a
-    receipt; if acknowledgment persistence fails, the marker prevents replay
+    complete receipt using atomic replacement; if acknowledgment persistence
+    fails, the original claimed payload survives and the marker prevents replay
     explicit refusal clears the marker and leaves the record available to retry
-    cancellation or an ambiguous receiver failure keeps the marker, suppressing
-    automatic replay until an operator inspects it; clear it to retry or remove
-    the record after confirming its effect
+    cancellation or an ambiguous receiver failure keeps the marker and payload,
+    suppressing automatic replay until an operator inspects it; coalesced
+    injection has the same rule and cancellation never proves acceptance
+    clear the marker to retry only after confirming no effect, or remove the
+    record after confirming its effect; generic async callbacks cannot provide
+    transactional exactly-once delivery, so uncertain outcomes require inspection
     TTL-expired, restart-stale ordinary messages, and replay-cap drops are
     intentionally discarded; durable task controls retain their existing
     classification path
+    the orphan sweep removes empty directories with rmdir only; it never
+    recursively deletes a populated mailbox based on a directory snapshot
 
   off-box endpoint (optional, plugins.hub.endpoint_enabled):
     remote agent dials wss://host:port (or ws://) instead of a unix socket
