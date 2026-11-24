@@ -76,6 +76,7 @@ class PluginEventHub:
         self._lock = threading.Lock()
         self._subscribers: dict[str | None, dict[asyncio.Queue, asyncio.AbstractEventLoop]] = {}
         self._heartbeats: dict[tuple[str, str], float] = {}
+        self.heartbeat_monitor_since = time.time()
 
     def subscribe(self, plugin_id: str | None) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -150,7 +151,8 @@ def list_plugins(request: Request):
         for service in entry.get("services", []):
             if isinstance(service, dict) and isinstance(service.get("name"), str):
                 service["heartbeat"] = request.app.state.plugin_events.heartbeat(plugin_id, service["name"])
-    return {"schema": 1, "plugins": entries}
+                service["heartbeat_monitor_since"] = request.app.state.plugin_events.heartbeat_monitor_since
+    return {"schema": 1, "plugins": entries, "server_time": time.time()}
 
 
 @router.get("/events")
@@ -175,6 +177,11 @@ async def install_plugin(request: Request, body: InstallPluginRequest):
 @router.get("/jobs/{job_id}")
 async def get_plugin_job(request: Request, job_id: str):
     return request.app.state.plugin_jobs.get(job_id)
+
+
+@router.delete("/jobs/{job_id}")
+async def cancel_plugin_job(request: Request, job_id: str):
+    return await request.app.state.plugin_jobs.cancel(job_id)
 
 
 @router.post("/jobs/{job_id}/confirm")
@@ -391,6 +398,8 @@ def _service_context(plugin_id: str, service_name: str):
 
 @router.post("/{plugin_id}/services/{service_name}/{action}")
 async def plugin_service_action(request: Request, plugin_id: str, service_name: str, action: str):
+    from kollabor_plugins.services import ServiceSignalError
+
     if action not in {"start", "stop", "restart"}:
         raise HTTPException(status_code=404, detail="Plugin service action not found")
     context = _service_context(plugin_id, service_name)
@@ -398,6 +407,10 @@ async def plugin_service_action(request: Request, plugin_id: str, service_name: 
         pending = await request.app.state.plugin_service_controls.control(context, service_name, action)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="Cannot change plugin service state") from exc
+    except ServiceSignalError as exc:
+        request.app.state.plugin_events.publish_change()
+        logger.warning("Cannot signal plugin service %s/%s: %s", plugin_id, service_name, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Cannot stop plugin service; check its status and retry") from exc
     except OSError as exc:
         logger.warning("Cannot control plugin service %s/%s: %s", plugin_id, service_name, type(exc).__name__)
         raise HTTPException(status_code=503, detail="Cannot control plugin service") from exc
@@ -563,10 +576,22 @@ class RemovePluginOptions(BaseModel):
     confirm_purge: bool = False
 
 
+
+async def _publish_partial_disable(request: Request, plugin_id: str) -> None:
+    """Revoke live resources and notify clients after the registry was disabled."""
+    try:
+        await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
+    finally:
+        try:
+            await request.app.state.plugin_dispatcher.invalidate(plugin_id)
+        finally:
+            request.app.state.plugin_events.publish_change()
+
+
 @router.post("/{plugin_id}/enable")
 @router.post("/{plugin_id}/disable")
 async def set_plugin_enabled(request: Request, plugin_id: str):
-    from kollabor_plugins.services import supervisor_tick
+    from kollabor_plugins.services import ServiceStopError, supervisor_tick
 
     context = _package_context(plugin_id)
     if context is None:
@@ -593,6 +618,9 @@ async def set_plugin_enabled(request: Request, plugin_id: str):
         else:
             await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
             await request.app.state.plugin_dispatcher.invalidate(plugin_id)
+    except ServiceStopError as exc:
+        await _publish_partial_disable(request, plugin_id)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OSError as exc:
@@ -604,6 +632,8 @@ async def set_plugin_enabled(request: Request, plugin_id: str):
 
 @router.post("/{plugin_id}/remove")
 async def remove_plugin(request: Request, plugin_id: str, options: RemovePluginOptions = RemovePluginOptions()):
+    from kollabor_plugins.services import ServiceStopError
+
     context = _package_context(plugin_id)
     if context is None:
         raise HTTPException(status_code=404, detail="Plugin not found")
@@ -615,6 +645,9 @@ async def remove_plugin(request: Request, plugin_id: str, options: RemovePluginO
         if await request.app.state.plugin_dispatcher.invalidate(plugin_id):
             raise ValueError("Plugin requests are still running; retry removal when they finish")
         await asyncio.to_thread(_remove_package_checked, context, options.purge)
+    except ServiceStopError as exc:
+        await _publish_partial_disable(request, plugin_id)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         await request.app.state.plugin_dispatcher.invalidate(plugin_id)
         request.app.state.plugin_events.publish_change()
@@ -1021,23 +1054,20 @@ class PluginServiceControls:
         return True
 
     async def _finish_restart(self, context, service_name: str) -> None:
-        from kollabor_plugins.services import _recorded_process_alive, control_service
+        from kollabor_plugins import services
+        from kollabor_plugins.packages import stop_timeout
 
-        service = context.manifest["services"][service_name]
-        timeout = service.get("stop_timeout_s", 10)
-        if type(timeout) is not int or timeout < 0:
-            timeout = 10
-        deadline = time.monotonic() + timeout + 5
+        deadline = time.monotonic() + stop_timeout(context.manifest["services"][service_name]) + 5
         pid = context.data / "run" / f"{service_name}.pid"
         try:
-            while await asyncio.to_thread(_recorded_process_alive, pid):
+            while await asyncio.to_thread(services._recorded_process_alive, pid):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Service did not stop before the restart deadline")
                 await asyncio.sleep(0.25)
             async with self._lock:
                 options = {"engine_url": self.engine_url} if self.engine_url else {}
                 operation = asyncio.create_task(
-                    asyncio.to_thread(control_service, context.id, service_name, "start", **options)
+                    asyncio.to_thread(services.control_service, context.id, service_name, "start", **options)
                 )
                 try:
                     await asyncio.shield(operation)
