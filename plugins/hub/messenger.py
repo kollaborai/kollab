@@ -3433,6 +3433,28 @@ class AgentMessenger:
             return []
 
         with locked_file(msg_dir.parent / ".delivery.lock", private=True):
+            # A refusal release can be fully written but fail its atomic
+            # replacement. Keep that staged record and retry promotion on the
+            # next read instead of leaving the persisted claim stuck forever.
+            for staged in msg_dir.glob(".*.json.release.*.tmp"):
+                target_name = staged.name[1:].split(".release.", 1)[0]
+                target = msg_dir / target_name
+                try:
+                    with open(staged) as fh:
+                        staged_data = json.load(fh)
+                    with open(target) as fh:
+                        target_data = json.load(fh)
+                    if (
+                        isinstance(staged_data, dict)
+                        and isinstance(target_data, dict)
+                        and staged_data.get("id") == target_data.get("id")
+                        and staged_data.get("_mailbox_delivery_uncertain") is False
+                    ):
+                        os.replace(staged, target)
+                except (OSError, ValueError, TypeError):
+                    # Leave a failed promotion staged for the next poll.
+                    pass
+
             now = time.time()
             boundary = (
                 MESSENGER_BOOT_TS if restart_boundary is None else float(restart_boundary)
@@ -3879,6 +3901,7 @@ class AgentMessenger:
                     continue
                 for path in paths:
                     temp_name = ""
+                    preserve_temp = False
                     try:
                         with open(path) as fh:
                             data = json.load(fh)
@@ -3890,7 +3913,9 @@ class AgentMessenger:
                             continue
                         data["_mailbox_delivery_uncertain"] = False
                         fd, temp_name = tempfile.mkstemp(
-                            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+                            prefix=f".{path.name}.release.",
+                            suffix=".tmp",
+                            dir=path.parent,
                         )
                         with os.fdopen(fd, "w") as fh:
                             json.dump(data, fh)
@@ -3903,6 +3928,7 @@ class AgentMessenger:
                                 break
                             except OSError:
                                 if attempt == 1:
+                                    preserve_temp = True
                                     raise
                     except (OSError, ValueError, TypeError) as exc:
                         logger.error(
@@ -3911,7 +3937,7 @@ class AgentMessenger:
                             type(exc).__name__,
                         )
                     finally:
-                        if temp_name:
+                        if temp_name and not preserve_temp:
                             try:
                                 os.unlink(temp_name)
                             except OSError:
