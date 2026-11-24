@@ -486,9 +486,9 @@ describe("plugin settings page", () => {
       "View Log worker-a", "Restart worker-a", "Stop worker-a",
       "View Log worker-b", "Restart worker-b", "Stop worker-b",
       "View Log retry-worker", "Retry Stop retry-worker",
-      "View Log stopped-worker", "Start stopped-worker",
+      "View Log stopped-worker", "Start stopped-worker", "Start failed-worker",
     ]) expect(markup).toContain(`aria-label="${label}"`);
-    for (const name of ["starting-worker", "retrying-worker", "failed-worker", "unknown-worker"])
+    for (const name of ["starting-worker", "retrying-worker", "unknown-worker"])
       expect(markup).not.toContain(`aria-label="Start ${name}"`);
   });
 
