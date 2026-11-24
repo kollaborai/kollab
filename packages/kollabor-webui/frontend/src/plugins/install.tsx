@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { TriangleAlert } from "lucide-react";
 import { ApiError, type EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -233,7 +232,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           <DetailsList label="On Its Own" values={onItsOwn} />
           <DetailsList label="Other Declarations" values={other} />
           {job.warning ? <p className="text-sm">{job.warning}</p> : null}
-          <div className="bg-muted flex gap-3 rounded-lg p-3 text-sm"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" /><p>{PLUGIN_TRUST_NOTICE}</p></div>
+          <p className="bg-muted rounded-lg p-3 text-sm">{PLUGIN_TRUST_NOTICE}</p>
         </> : null}
         {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
         {shouldRetryPolling(job, error !== null) ? <Button type="button" variant="outline" className="pointer-coarse:min-h-11 self-start" disabled={busy} onClick={() => { setError(null); setPollVersion((version) => version + 1); }}>Check Again</Button> : null}

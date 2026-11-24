@@ -1,5 +1,4 @@
 import { useId, useRef, useState, type RefObject } from "react";
-import { Plus } from "lucide-react";
 import type { EngineApi } from "@/api";
 import { FieldRenderer, serializeDraft, type Draft } from "@/components/panels/FieldRenderer";
 import { Button } from "@/components/ui/button";
@@ -332,7 +331,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
                 <h2 className="text-muted-foreground text-xs font-semibold">{group.title}</h2>
                 {group.title === "Installed" && !snapshot.off && !remote ? (
                   <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" onClick={() => setOperation({ action: "install" })}>
-                    <Plus className="size-3" /> Add Plugin
+                  Add Plugin
                   </Button>
                 ) : null}
               </div>
