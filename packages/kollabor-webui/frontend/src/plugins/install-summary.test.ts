@@ -72,6 +72,22 @@ describe("plugin review sheet data", () => {
   });
 });
 
+describe("plugin dialog focus", () => {
+  it("returns focus to the Add Plugin, Update, View Log, or confirmation opener", () => {
+    expect(installSource).toMatch(/<DialogContent[\s\S]*?onCloseAutoFocus=\{onRestoreFocus\}/);
+    expect(settingsSource).toMatch(/onCloseAutoFocus=\{restore(?:Operation|Log|Confirmation)Focus\}/);
+    expect(settingsSource).toContain("focusReturn.current.focus()");
+    expect(settingsSource).toContain("logOpener.current.focus()");
+    expect(settingsSource).toContain("confirmationOpener.current.focus()");
+    expect(settingsSource).toContain("onRestoreFocus={restoreOperationFocus}");
+  });
+
+  it("moves focus to plugin progress when Review or Check Again disappears", () => {
+    expect(installSource).toMatch(/<p ref=\{progressRef\} tabIndex=\{-1\} role="status"/);
+    expect(installSource).toContain("progressRef.current?.focus()");
+  });
+});
+
 describe("plugin review form state", () => {
   it("keeps the source form and Review open after a failed review", () => {
     expect(reviewFormState("install", { status: "error" })).toEqual({ source: true, review: true });
