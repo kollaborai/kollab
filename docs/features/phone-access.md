@@ -48,7 +48,7 @@ capability endpoint before offering a QR code.
   `sessions`, `agents`, `profiles`, `workspaces`, `mcp`, `hub`, `sidebar`,
   `rosters`, `teams`, `prompts`, selected voice routes and `phone-app` (`API_ROOTS` in
   `kollabor_engine/phone_link.py`). A plugin route allow-list also permits plugin API
-  calls, change events, agent routes, settings, usage and redacted service logs; plugin
+  calls, change events, settings, usage and redacted service logs; plugin
   management routes remain local-only. Everything else is the computer's only:
   PhoneLink management, the network and connect panels, and updates. A lost
   phone keeps that reach until you revoke it on the computer.

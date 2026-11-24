@@ -270,19 +270,19 @@ the UI calls them Background Processes.
 
 | Entry | Lets the plugin | Kollab refuses it when undeclared |
 |---|---|---|
-| `agents` | start agent runs through `ctx.agents` or `POST /plugins/{id}/agents` | yes, on its routes and `ctx` |
-| `agents:unattended` | give those runs approval mode `trust_all` (tools run without asking) | yes, on its routes and `ctx` |
-| `secret:<NAME>` | read that one secret through `ctx.secrets`, or pass it into an agent run | yes, on its routes and `ctx` |
+| `agents` | planned agent-run permission; plugin agent runs are not implemented | not available yet |
+| `agents:unattended` | planned permission for future `trust_all` agent runs | not available yet |
+| `secret:<NAME>` | read that one secret through `ctx.secrets`; agent-run use is planned | yes, on implemented routes and `ctx` |
 | `run:<programs>` | run these programs | no |
 | `net:<hosts>` | talk to these hosts | no |
 | `files:<paths>` | read or write outside its data folder | no |
 
 The sheet's lines come from `uses`, `contributes` and each process's `secrets`; a process secret with no
-matching `secret:` entry is refused at add. A request through kollab without its entry fails with 403 naming the missing entry (`pr-chain did not
-declare agents:unattended`). That refusal covers only requests that go through kollab's routes and
-`ctx`. Plugin code runs as the user, so it could go around kollab; the add sheet says so. When a plugin
-runs coding agents of its own (pr-chain's `codex exec` and `claude -p` stages), the sheet says what they
-can do under On Its Own.
+matching `secret:` entry is refused at add. Once agent-run support exists, requests through kollab without
+the required entry will fail with 403. That refusal covers only implemented requests through kollab's
+routes and `ctx`. Plugin code runs as the user, so it could go around kollab; the add sheet says so. When a
+plugin runs coding agents of its own (pr-chain's `codex exec` and `claude -p` stages), the sheet says what
+they can do under On Its Own.
 
 ### Where plugins come from
 
@@ -354,7 +354,7 @@ All sit behind the existing bearer-token middleware.
 | `GET /plugins/{id}/usage` | today's `{date, total, cap, remaining}` | own id | yes |
 | `GET /plugins/{id}/settings?kind=...` | read the `built-in`, `installed` or `dev` store; `dev` requires an `@dev` id | own id | yes |
 | `PUT /plugins/{id}/settings?kind=...` | save the `built-in`, `installed` or `dev` store; `dev` requires an `@dev` id | own id | no |
-| `POST /plugins/{id}/agents` → `{run_id, session_id}` at once; `GET`, `DELETE .../agents/{run_id}` | agent runs | own id | yes |
+| `POST /plugins/{id}/agents` → `{run_id, session_id}`; `GET`, `DELETE .../agents/{run_id}` | not implemented; no plugin agent-run route is registered | n/a | n/a |
 | `POST /plugins/{id}/services/{name}/start`, `/stop`, `/restart` | background processes (`200` or `202`); `409` for an invalid transition, `503` if Kollab cannot signal a verified wrapper (service state becomes `stop-failed`) | own id | no |
 | `GET /plugins/{id}/services/{name}/log?tail=200` | the process log, redacted like Agent Output | own id | yes |
 | `POST /plugins/install`, `POST /plugins/{id}/update` → `{job_id}`; `GET /plugins/jobs/{job_id}` | clone or fetch into staging, check, then report the sheet facts; job status is `cancelling` while cancellation cleanup runs | no | no |
@@ -366,7 +366,7 @@ All sit behind the existing bearer-token middleware.
 `/engine` proxy and the PhoneLink bridge refuse the route for any client that is not on this computer (the proxy sees the real
 client address; the engine behind it only ever sees the proxy), and the engine refuses it on requests the
 proxy marks as forwarded. PhoneLink and relay pages can inspect plugin inventory and use plugin routes
-allowed by the route table, including plugin API calls and agent routes, but cannot install or manage plugins.
+allowed by the route table, including plugin API calls, but cannot install or manage plugins.
 
 ### Tokens and what plugin code can reach
 
@@ -407,7 +407,7 @@ Passed to `make_router(ctx)`:
 | `ctx.settings.get()`, `ctx.settings.save(values)` | its settings (the one writer, below) |
 | `ctx.events.publish(topic, data)` | SSE to its web code |
 | `ctx.notify(text, button=None)` | a NoticeBar notice in every open web UI |
-| `await ctx.agents.run(...)` | an agent run; needs `agents` |
+| `await ctx.agents.run(...)` | planned; currently raises `NotImplementedError` |
 | `ctx.secrets.get(name)` | a secret from kollab's secret store; needs `secret:<name>` |
 | `ctx.services.status()` | its own background processes |
 | `ctx.lock(name)` | a `kollabor_config.file_lock` lock in its data folder |
@@ -416,6 +416,9 @@ Background processes get `KOLLAB_PLUGIN_ID`, `KOLLAB_PLUGIN_ROOT`, `KOLLAB_PLUGI
 `KOLLAB_ENGINE_URL` and `KOLLAB_PLUGIN_TOKEN`, and read settings from `<data>/values.json`, the file every save writes.
 
 ### Agent runs
+
+This is a planned contract only. The current engine has no plugin agent-run route, and `ctx.agents.run()`
+raises `NotImplementedError`.
 
 ```json
 {
