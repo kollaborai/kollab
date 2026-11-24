@@ -410,3 +410,31 @@ def test_stop_services_still_reports_a_real_signal_error(tmp_path, monkeypatch):
     state = json.loads((run / "worker.state").read_text())
     assert state["status"] == "stop-failed"
     assert state["desired"] == "stopped"
+
+
+@pytest.mark.parametrize("bad", [10**1000, -5, "720"])
+def test_unusable_stop_timeout_on_an_approved_manifest_still_stops(tmp_path, monkeypatch, bad):
+    """A manifest approved before the bound existed must not crash the stop and leave the service running."""
+    from kollabor_plugins import services
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    manifest = {"id": "hello", "services": {"worker": {"command": ["/bin/true"], "stop_timeout_s": bad}}}
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {
+        "enabled": False, "granted": [], "files_sha256": files_sha256(root),
+    }}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    (run / "worker.pid").write_text(json.dumps({"wrapper": {"pid": 4321}}))
+    signals = []
+    monkeypatch.setattr(services, "_verified_wrapper", lambda _: True)
+    monkeypatch.setattr(services.os, "kill", lambda *args: signals.append(args))
+    before = time.time()
+    services.control_service("hello", "worker", "stop")
+    state = json.loads((run / "worker.state").read_text())
+    assert signals, "the wrapper must still be signalled"
+    assert 29 <= state["stop_deadline"] - before <= 31, "an unusable value falls back to the 30 s default"
