@@ -11,11 +11,13 @@ import re
 import secrets
 import socket
 import stat
+import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .file_lock import locked_file
 from .models import HubMessage
 from .presence import _atomic_write, get_messages_dir, get_socket_dir
 from .relay_state import failure_text
@@ -26,11 +28,14 @@ from .relay_state import failure_text
 # are evicted first at write time.
 INBOX_MAX_SIZE: int = 50
 # Hard cap on durable controls per inbox. Controls bypass ordinary replay
-# limits but must not grow without bound. Oldest controls are evicted
-# (with loud logging) when this cap is exceeded.
+# limits but must not grow without bound. Admission rejects at capacity; it
+# never evicts an accepted control before normal receive classification.
 INBOX_MAX_CONTROLS: int = 200
 # Messages older than this (seconds) are silently discarded on read.
 INBOX_TTL_SECS: int = 7 * 86400  # 7 days
+# The timestamp field is an epoch-seconds float. Keep arithmetic bounded to
+# timestamps representable by datetime, even when the stored JSON is finite.
+INBOX_MAX_TIMESTAMP: float = 253402300799.0
 # Max ordinary messages replayed to a reconnecting agent per mailbox poll.
 # Durable task controls bypass this cap and retain normal receive semantics.
 INBOX_MAX_REPLAY: int = 20
@@ -67,6 +72,37 @@ def set_restart_boundary(ts: float) -> float:
 def get_restart_boundary() -> float:
     """Return the current restart boundary (process boot by default)."""
     return MESSENGER_BOOT_TS
+
+
+def _validated_mailbox_timestamp(data: Dict[str, Any]) -> Optional[float]:
+    """Return a finite, supported epoch timestamp or ``None`` for corruption."""
+    value = data.get("timestamp")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        timestamp = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if (
+        not math.isfinite(timestamp)
+        or timestamp < 0
+        or timestamp > INBOX_MAX_TIMESTAMP
+    ):
+        return None
+    return timestamp
+
+
+def _is_acknowledged_mailbox_record(data: Any) -> bool:
+    return isinstance(data, dict) and data.get("_mailbox_acknowledged") is True
+
+
+def _is_acknowledged_mailbox_path(path: Path) -> bool:
+    try:
+        with open(path) as fh:
+            return _is_acknowledged_mailbox_record(json.load(fh))
+    except (OSError, ValueError, TypeError):
+        return False
+
 
 # Idle timeout (seconds) for the off-box read loop. An authenticated remote
 # peer that handshakes then sends nothing (or stops between actions) is dropped
@@ -277,51 +313,102 @@ def _is_durable_control(data: Any) -> bool:
     )
 
 
-# Simple cache for control classification: filename -> (is_control, mtime)
-# Invalidated on file modification to avoid stale reads.
-_control_classification_cache: Dict[str, tuple[bool, float]] = {}
+def _same_durable_payload(existing: Any, payload: dict[str, Any]) -> bool:
+    """Compare message content while ignoring mutable delivery evidence."""
+    if not isinstance(existing, dict):
+        return False
+
+    def without_delivery_metadata(data: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(data)
+        normalized.pop("_mailbox_delivery_uncertain", None)
+        metadata = normalized.get("metadata")
+        if isinstance(metadata, dict):
+            metadata = dict(metadata)
+            for key in (
+                "_queued_for", "_acked_by", "_socket_failed",
+                "_mailbox_delivery_uncertain",
+            ):
+                metadata.pop(key, None)
+            normalized["metadata"] = metadata
+        return normalized
+
+    return without_delivery_metadata(existing) == without_delivery_metadata(payload)
 
 
-def _is_control_cached(path: Path) -> bool:
-    """Check if a message file is a durable control, with mtime-based caching."""
+def _read_mailbox_record(path: Path) -> Optional[Dict[str, Any]]:
+    """Read a classifiable record; unknown records confer no deletion authority.
+
+    Admission, pruning and replay use this same boundary. Invalid records remain
+    on disk and occupy retained capacity until repaired or explicitly resolved.
+    Never cache classification: a failed or changed read must not reuse an old
+    ordinary verdict to authorize deletion.
+    """
     try:
-        stat = path.stat()
-        mtime = stat.st_mtime
-        key = str(path)
-        cached = _control_classification_cache.get(key)
-        if cached and cached[1] == mtime:
-            return cached[0]
-        # Need to read and classify
         with open(path) as fh:
             data = json.load(fh)
-        is_control = _is_durable_control(data)
-        _control_classification_cache[key] = (is_control, mtime)
-        return is_control
-    except Exception:
-        # On any error, treat as ordinary (safe default)
-        return False
+        if not isinstance(data, dict):
+            logger.warning("Preserving mailbox record %s: expected JSON object", path.name)
+            return None
+        if _is_acknowledged_mailbox_record(data):
+            return data
+        if _validated_mailbox_timestamp(data) is None:
+            logger.warning("Preserving mailbox record %s: invalid timestamp", path.name)
+            return None
+        if (
+            not isinstance(data.get("id"), str)
+            or not data["id"]
+            or not isinstance(data.get("metadata"), dict)
+        ):
+            logger.warning("Preserving mailbox record %s: invalid message fields", path.name)
+            return None
+        HubMessage.from_dict(data)
+        return data
+    except OSError as exc:
+        logger.warning(
+            "Could not read mailbox record %s; preserving it (%s)",
+            path.name,
+            type(exc).__name__,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not classify mailbox record %s; preserving it (%s)",
+            path.name,
+            type(exc).__name__,
+        )
+    return None
+
+
+class InboxCapacityError(RuntimeError):
+    """Raised when a durable control cannot be admitted to a full mailbox."""
+
+
+class InboxMessageIdConflictError(RuntimeError):
+    """Raised when a retry reuses a durable message ID for different content."""
 
 
 def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
     """Evict oldest ordinary messages while preserving durable controls.
 
     ``max_size`` bounds ordinary chatter, not task controls that still require
-    normal receive classification or an explicit stale ACK. Malformed files
-    are treated as ordinary and remain eligible for eviction.
+    normal receive classification or an explicit stale ACK. Unreadable or
+    undecodable files are treated as controls until they can be classified.
 
-    Durable controls are also capped at INBOX_MAX_CONTROLS to prevent
-    unbounded growth. Oldest controls are evicted with loud logging when
-    this cap is exceeded.
+    Durable controls are admitted separately by ``send_to_file``. This helper
+    never evicts them; capacity exhaustion rejects the new control instead.
 
-    Classification uses an mtime-based cache to avoid re-reading files
-    on every prune call.
+    Only successfully read, validated ordinary records authorize eviction.
     """
     try:
         files = sorted(msg_dir.glob("*.json"))
         ordinary_files: List[Path] = []
         control_files: List[Path] = []
         for path in files:
-            if _is_control_cached(path):
+            data = _read_mailbox_record(path)
+            if (
+                data is None
+                or _is_durable_control(data)
+                or data.get("_mailbox_delivery_uncertain") is True
+            ):
                 control_files.append(path)
             else:
                 ordinary_files.append(path)
@@ -343,23 +430,6 @@ def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
                 len(control_files),
             )
 
-        # Evict oldest controls if they exceed the hard cap
-        excess_controls = len(control_files) - INBOX_MAX_CONTROLS
-        if excess_controls > 0:
-            for path in control_files[:excess_controls]:
-                try:
-                    path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            logger.warning(
-                "Inbox prune: EVICTED %d oldest durable control(s) from %r "
-                "(control_cap=%d, controls_remaining=%d) — "
-                "controls overflow indicates delivery or classification failure",
-                excess_controls,
-                msg_dir.name,
-                INBOX_MAX_CONTROLS,
-                len(control_files) - excess_controls,
-            )
     except Exception as e:
         logger.debug(f"Inbox prune failed for {msg_dir}: {e}")
 
@@ -3358,37 +3428,89 @@ class AgentMessenger:
             return {}
 
     @staticmethod
-    async def send_to_file(target_agent_id: str, message: HubMessage) -> None:
+    async def send_to_file(target_agent_id: str, message: HubMessage) -> bool:
         """Fallback: write message to agent's filesystem mailbox.
 
-        After writing, prunes ordinary traffic to INBOX_MAX_SIZE entries
-        (oldest first). Durable task controls are preserved until classified.
+        Ordinary traffic is written and pruned to INBOX_MAX_SIZE entries
+        (oldest first). Durable task controls are admitted under the shared
+        mailbox root lock up to INBOX_MAX_CONTROLS; a full mailbox raises
+        ``InboxCapacityError`` without evicting accepted controls. Retrying an
+        identical durable message ID is idempotent. Storage failures propagate
+        so callers cannot report an unpersisted message as queued.
+
+        Returns True when the message is durably admitted, including an
+        idempotent retry. Capacity exhaustion and storage errors are explicit.
         """
-        msg_dir = get_messages_dir() / target_agent_id
-        msg_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if _validated_mailbox_timestamp(message.to_dict()) is None:
+            raise ValueError("Cannot write mailbox message with invalid timestamp")
+        messages_dir = get_messages_dir()
+        messages_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        msg_dir = messages_dir / target_agent_id
+        with locked_file(messages_dir / ".delivery.lock", private=True):
+            msg_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            payload = message.to_dict()
 
-        # Timestamp + UUID filename avoids seq race under concurrency
-        filename = f"{time.time():.6f}-{uuid.uuid4().hex[:8]}-from-{message.from_identity}.json"
+            if _is_durable_control(payload):
+                retained_count = 0
+                for path in msg_dir.glob("*.json"):
+                    existing = _read_mailbox_record(path)
+                    if (
+                        existing is None
+                        or _is_durable_control(existing)
+                        or existing.get("_mailbox_delivery_uncertain") is True
+                    ):
+                        retained_count += 1
+                    if existing is not None and existing.get("id") == message.id:
+                        if not _same_durable_payload(existing, payload):
+                            raise InboxMessageIdConflictError(
+                                "durable message ID already exists with different content"
+                            )
+                        return True
 
-        _atomic_write(msg_dir / filename, message.to_dict())
-        logger.info(f"Wrote message to mailbox: {filename}")
+                if retained_count >= INBOX_MAX_CONTROLS:
+                    logger.warning(
+                        "Durable mailbox full for %r (control_cap=%d); "
+                        "new control was not admitted",
+                        target_agent_id,
+                        INBOX_MAX_CONTROLS,
+                    )
+                    raise InboxCapacityError(
+                        "durable inbox capacity reached; retry after "
+                        "the receiver drains controls"
+                    )
 
-        # Enforce inbox size bound — evict oldest if over limit
-        _prune_inbox(msg_dir, INBOX_MAX_SIZE)
+                filename = (
+                    f"{time.time():.6f}-{uuid.uuid4().hex[:8]}-"
+                    f"from-{message.from_identity}.json"
+                )
+                _atomic_write(msg_dir / filename, payload)
+                _prune_inbox(msg_dir, INBOX_MAX_SIZE)
+                logger.info("Wrote durable control to mailbox: %s", filename)
+                return True
+
+            # Timestamp + UUID filename avoids seq race under concurrency
+            filename = f"{time.time():.6f}-{uuid.uuid4().hex[:8]}-from-{message.from_identity}.json"
+            _atomic_write(msg_dir / filename, payload)
+            logger.info(f"Wrote message to mailbox: {filename}")
+
+            # Enforce the independent ordinary-message bound.
+            _prune_inbox(msg_dir, INBOX_MAX_SIZE)
+            return True
 
     @staticmethod
     def read_mailbox(
         agent_id: str,
         max_replay: int = 0,
         restart_boundary: Optional[float] = None,
+        consume: bool = True,
     ) -> List[HubMessage]:
-        """Read and consume messages from filesystem mailbox.
+        """Read messages from filesystem mailbox.
 
         Args:
             agent_id: Agent identity or agent_id to read from.
             max_replay: If > 0, cap ordinary messages returned to this many
                 (newest first). Durable task controls bypass the cap so normal
-                receive can classify them exactly once. A synthetic
+                receive can classify them. A synthetic
                 ``inbox_summary`` reports dropped ordinary traffic. TTL also
                 applies only to ordinary traffic; controls must be classified.
             restart_boundary: Explicit restart boundary (epoch seconds).
@@ -3397,220 +3519,493 @@ class AgentMessenger:
                 clock-skew grace) are pre-reboot: they are dropped with a log
                 line and never delivered as current instructions, but durable
                 task controls are preserved for TaskLedger classification.
+            consume: Remove validated ordinary records after parsing. Controls
+                always require acknowledgment after receive classification.
+                The live delivery loop disables consumption for all records.
         """
         msg_dir = get_messages_dir() / agent_id
         if not msg_dir.exists():
             return []
 
-        now = time.time()
-        boundary = (
-            MESSENGER_BOOT_TS if restart_boundary is None else float(restart_boundary)
-        )
-        messages: List[HubMessage] = []
-        expired_count = 0
-        stale_preboot_count = 0
-
-        for f in sorted(msg_dir.glob("*.json")):
-            data: Dict[str, Any] = {}
-            try:
-                with open(f) as fh:
-                    data = json.load(fh)
-            except Exception as e:
-                logger.warning(f"Bad mailbox message {f}: {e}")
+        with locked_file(msg_dir.parent / ".delivery.lock", private=True):
+            # A refusal release can be fully written but fail its atomic
+            # replacement. Keep that staged record and retry promotion on the
+            # next read instead of leaving the persisted claim stuck forever.
+            for staged in msg_dir.glob(".*.json.release.*.tmp"):
+                target_name = staged.name[1:].split(".release.", 1)[0]
+                target = msg_dir / target_name
                 try:
-                    f.unlink()
-                except Exception:
+                    with open(staged) as fh:
+                        staged_data = json.load(fh)
+                    with open(target) as fh:
+                        target_data = json.load(fh)
+                    if (
+                        isinstance(staged_data, dict)
+                        and isinstance(target_data, dict)
+                        and staged_data.get("id") == target_data.get("id")
+                        and staged_data.get("_mailbox_delivery_uncertain") is False
+                    ):
+                        os.replace(staged, target)
+                except (OSError, ValueError, TypeError):
+                    # Leave a failed promotion staged for the next poll.
                     pass
-                continue
 
-            if not isinstance(data, dict):
-                logger.warning(
-                    "Bad mailbox message %s: expected JSON object, got %s",
-                    f,
-                    type(data).__name__,
+            now = time.time()
+            boundary = (
+                MESSENGER_BOOT_TS if restart_boundary is None else float(restart_boundary)
+            )
+            messages: List[HubMessage] = []
+            message_files: Dict[str, Path] = {}
+            expired_count = 0
+            stale_preboot_count = 0
+
+            for f in sorted(msg_dir.glob("*.json")):
+                data = _read_mailbox_record(f)
+                if data is None:
+                    continue
+
+                if _is_acknowledged_mailbox_record(data):
+                    try:
+                        f.unlink()
+                    except OSError:
+                        logger.warning("Could not clean acknowledged mailbox record")
+                    continue
+
+                delivery_uncertain = data.get("_mailbox_delivery_uncertain") is True
+
+                timestamp = _validated_mailbox_timestamp(data)
+                if timestamp is None:
+                    continue
+
+                # TTL bounds ordinary chatter only. Durable task controls must
+                # reach normal receive so stale cron reminders are explicitly
+                # ACKed and assignments are classified instead of disappearing.
+                is_control = _is_durable_control(data)
+                if (
+                    not delivery_uncertain
+                    and not is_control
+                    and (now - timestamp) > INBOX_TTL_SECS
+                ):
+                    expired_count += 1
+                    try:
+                        f.unlink()
+                    except OSError:
+                        logger.warning("Could not discard TTL-expired mailbox record")
+                    continue
+
+                try:
+                    msg = HubMessage.from_dict(data)
+                except Exception as e:
+                    logger.warning(
+                        "Could not parse mailbox record %s; preserving it (%s)",
+                        f.name,
+                        type(e).__name__,
+                    )
+                    continue
+
+                # Reading never frees a control's admission slot. Only receive
+                # classification followed by acknowledgment may retire it.
+                if consume and not is_control and not delivery_uncertain:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        logger.warning("Could not consume mailbox record after parsing")
+
+                # Issue #639: reconcile pre-restart messages against the boot
+                # boundary. Ordinary chatter written by a previous process
+                # instance is dropped with a log line — never delivered as
+                # current instructions. Durable controls are preserved for
+                # TaskLedger classification on the normal receive path.
+                if (
+                    not delivery_uncertain
+                    and not is_control
+                    and timestamp
+                    and timestamp < boundary - INBOX_RESTART_GRACE_SECS
+                ):
+                    stale_preboot_count += 1
+                    try:
+                        f.unlink()
+                    except OSError:
+                        logger.warning("Could not discard pre-restart mailbox record")
+                    continue
+
+                if delivery_uncertain:
+                    msg.metadata = {
+                        **(msg.metadata or {}),
+                        "_mailbox_delivery_uncertain": True,
+                    }
+
+                messages.append(msg)
+                message_files[msg.id] = f
+
+            if expired_count:
+                logger.info(
+                    f"Discarded {expired_count} TTL-expired inbox message(s) for {agent_id}"
                 )
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
-                continue
 
-            # TTL bounds ordinary chatter only. Durable task controls must
-            # reach normal receive so stale cron reminders are explicitly
-            # ACKed and assignments are classified instead of disappearing.
-            ts = data.get("timestamp", 0) or 0
-            is_control = _is_durable_control(data)
-            if not is_control and ts and (now - float(ts)) > INBOX_TTL_SECS:
-                expired_count += 1
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
-                continue
-
-            try:
-                msg = HubMessage.from_dict(data)
-            except Exception as e:
-                logger.warning(f"Failed to parse mailbox message {f}: {e}")
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
-                continue
-
-            # Delete after successful parse
-            try:
-                f.unlink()
-            except Exception:
-                pass
-
-            # Issue #639: reconcile pre-restart messages against the boot
-            # boundary. Ordinary chatter written by a previous process
-            # instance is dropped with a log line — never delivered as
-            # current instructions. Durable controls are preserved for
-            # TaskLedger classification on the normal receive path.
-            if (
-                not is_control
-                and ts
-                and float(ts) < boundary - INBOX_RESTART_GRACE_SECS
-            ):
-                stale_preboot_count += 1
-                continue
-
-            messages.append(msg)
-
-        if expired_count:
-            logger.info(
-                f"Discarded {expired_count} TTL-expired inbox message(s) for {agent_id}"
-            )
-
-        if stale_preboot_count:
-            logger.info(
-                "Dropped %d pre-restart inbox message(s) for %s (written before "
-                "restart boundary %.0f)",
-                stale_preboot_count,
-                agent_id,
-                boundary,
-            )
-
-        # Truthful summary accounting: "total" counts everything that
-        # arrived, including pre-reboot messages reconciled away below.
-        total = len(messages) + stale_preboot_count
-        controls = [
-            message for message in messages if _is_durable_control(message.to_dict())
-        ]
-        ordinary = [message for message in messages if message not in controls]
-
-        def _unique_senders() -> List[str]:
-            return list(
-                dict.fromkeys(
-                    m.from_identity or m.from_agent
-                    for m in messages
-                    if m.from_identity or m.from_agent
-                )
-            )
-
-        def _build_summary(showing: int, dropped: int) -> HubMessage:
-            senders = _unique_senders()
-            sender_str = ", ".join(senders[:5])
-            if len(senders) > 5:
-                sender_str += f" and {len(senders) - 5} more"
-
-            content = (
-                f"[offline inbox] {total} message(s) arrived while offline"
-                f" (senders: {sender_str or 'unknown'}). "
-                f"Showing most recent {showing} ordinary message(s) and "
-                f"{len(controls)} preserved task control(s)."
-            )
             if stale_preboot_count:
-                content += (
-                    f" {stale_preboot_count} stale pre-restart message(s) were"
-                    f" dropped (written before the last restart)."
+                logger.info(
+                    "Dropped %d pre-restart inbox message(s) for %s (written before "
+                    "restart boundary %.0f)",
+                    stale_preboot_count,
+                    agent_id,
+                    boundary,
                 )
-            if dropped:
-                content += (
-                    f" {dropped} older ordinary message(s) have been dropped"
-                    f" to prevent flooding."
+
+            # Truthful summary accounting: "total" counts everything that
+            # arrived, including pre-reboot messages reconciled away below.
+            total = len(messages) + stale_preboot_count
+            uncertain = [
+                message
+                for message in messages
+                if (message.metadata or {}).get("_mailbox_delivery_uncertain") is True
+            ]
+            controls = [
+                message
+                for message in messages
+                if message not in uncertain and _is_durable_control(message.to_dict())
+            ]
+            ordinary = [
+                message
+                for message in messages
+                if message not in controls and message not in uncertain
+            ]
+
+            def _unique_senders() -> List[str]:
+                return list(
+                    dict.fromkeys(
+                        m.from_identity or m.from_agent
+                        for m in messages
+                        if m.from_identity or m.from_agent
+                    )
                 )
-            return HubMessage(
-                action="inbox_summary",
-                from_identity="hub",
-                content=content,
-                # timestamp=0 ensures this summary sorts before all real
-                # messages when read_mailboxes does its chronological sort.
-                timestamp=0.0,
-                metadata={
-                    "total": total,
-                    "showing": showing,
-                    "controls_preserved": len(controls),
-                    "senders": senders,
-                    "dropped": dropped,
-                    "stale_preboot_dropped": stale_preboot_count,
-                },
-            )
 
-        if max_replay > 0 and len(ordinary) > max_replay:
-            replayed_ordinary = ordinary[-max_replay:]
-            dropped = len(ordinary) - len(replayed_ordinary)
-            replayed_ids = {message.id for message in controls + replayed_ordinary}
-            replayed = [message for message in messages if message.id in replayed_ids]
+            def _build_summary(showing: int, dropped: int) -> HubMessage:
+                senders = _unique_senders()
+                sender_str = ", ".join(senders[:5])
+                if len(senders) > 5:
+                    sender_str += f" and {len(senders) - 5} more"
 
-            summary = _build_summary(len(replayed_ordinary), dropped)
-            logger.info(
-                "Inbox replay bounded for %s: %d total, replaying %d ordinary "
-                "and preserving %d control(s)",
-                agent_id,
-                total,
-                len(replayed_ordinary),
-                len(controls),
-            )
-            return [summary] + replayed
+                content = (
+                    f"[offline inbox] {total} message(s) arrived while offline"
+                    f" (senders: {sender_str or 'unknown'}). "
+                    f"Showing most recent {showing} ordinary message(s) and "
+                    f"{len(controls)} preserved task control(s)."
+                )
+                if stale_preboot_count:
+                    content += (
+                        f" {stale_preboot_count} stale pre-restart message(s) were"
+                        f" dropped (written before the last restart)."
+                    )
+                if dropped:
+                    content += (
+                        f" {dropped} older ordinary message(s) have been dropped"
+                        f" to prevent flooding."
+                    )
+                return HubMessage(
+                    action="inbox_summary",
+                    from_identity="hub",
+                    content=content,
+                    # timestamp=0 ensures this summary sorts before all real
+                    # messages when read_mailboxes does its chronological sort.
+                    timestamp=0.0,
+                    metadata={
+                        "total": total,
+                        "showing": showing,
+                        "controls_preserved": len(controls),
+                        "senders": senders,
+                        "dropped": dropped,
+                        "stale_preboot_dropped": stale_preboot_count,
+                    },
+                )
 
-        if stale_preboot_count and messages:
-            # Issue #639: make pre-reboot drops visible even when bounded
-            # replay did not trigger. Delivery coalesces this summary with
-            # the surviving messages into one stale-flagged block.
-            return [_build_summary(len(ordinary), 0)] + messages
+            if max_replay > 0 and len(ordinary) > max_replay:
+                replayed_ordinary = ordinary[-max_replay:]
+                dropped = len(ordinary) - len(replayed_ordinary)
+                replayed_ordinary_ids = {message.id for message in replayed_ordinary}
+                for message in ordinary:
+                    if message.id in replayed_ordinary_ids:
+                        continue
+                    path = message_files.get(message.id)
+                    if path is not None:
+                        try:
+                            path.unlink()
+                        except OSError:
+                            logger.warning("Could not discard replay-bounded mailbox record")
+                replayed_ids = {
+                    message.id for message in controls + replayed_ordinary + uncertain
+                }
+                replayed = [message for message in messages if message.id in replayed_ids]
 
-        if stale_preboot_count:
-            logger.info(
-                "Dropped %d pre-restart inbox message(s) for %s; nothing "
-                "current remained to deliver",
-                stale_preboot_count,
-                agent_id,
-            )
+                summary = _build_summary(len(replayed_ordinary), dropped)
+                logger.info(
+                    "Inbox replay bounded for %s: %d total, replaying %d ordinary "
+                    "and preserving %d control(s)",
+                    agent_id,
+                    total,
+                    len(replayed_ordinary),
+                    len(controls),
+                )
+                return [summary] + replayed
 
-        return messages
+            if stale_preboot_count and messages:
+                # Issue #639: make pre-reboot drops visible even when bounded
+                # replay did not trigger. Delivery coalesces this summary with
+                # the surviving messages into one stale-flagged block.
+                return [_build_summary(len(ordinary), 0)] + messages
+
+            if stale_preboot_count:
+                logger.info(
+                    "Dropped %d pre-restart inbox message(s) for %s; nothing "
+                    "current remained to deliver",
+                    stale_preboot_count,
+                    agent_id,
+                )
+
+            return messages
 
     @staticmethod
     def read_mailboxes(
         agent_keys: List[str],
         max_replay: int = 0,
         restart_boundary: Optional[float] = None,
+        consume: bool = True,
     ) -> List[HubMessage]:
-        """Read and consume mailboxes for all durable addresses.
+        """Read mailboxes for all durable addresses, optionally consuming them.
 
         Agents get a fresh agent_id on restart, but their hub identity
         stays stable. Reading both prevents offline messages from being
-        stranded in the old session's mailbox.
+        stranded in the old session's mailbox. Durable controls remain counted
+        until receive classification acknowledges them, including when ordinary
+        messages are consumed. The live delivery loop consumes no records.
 
         Args:
             agent_keys: List of agent_id and identity strings to drain.
             max_replay: Forwarded to read_mailbox — caps per-inbox replay.
             restart_boundary: Forwarded to read_mailbox — pre-reboot
                 reconciliation boundary (defaults to process boot).
+            consume: Forwarded to read_mailbox. Set false to acknowledge only
+                after the returned messages have been delivered.
         """
         messages: List[HubMessage] = []
         seen: set[str] = set()
         for key in dict.fromkeys(k for k in agent_keys if k):
-            for msg in AgentMessenger.read_mailbox(
-                key, max_replay=max_replay, restart_boundary=restart_boundary
-            ):
+            try:
+                mailbox_messages = AgentMessenger.read_mailbox(
+                    key,
+                    max_replay=max_replay,
+                    restart_boundary=restart_boundary,
+                    consume=consume,
+                )
+            except Exception:
+                logger.exception("Mailbox read failed; preserving unreturned records")
+                continue
+            for msg in mailbox_messages:
                 if msg.id in seen:
                     continue
                 seen.add(msg.id)
                 messages.append(msg)
         return sorted(messages, key=lambda msg: msg.timestamp)
+
+    @staticmethod
+    def acknowledge_mailboxes(
+        agent_keys: List[str],
+        message_ids: set[str],
+        *,
+        persist_receipt: bool = False,
+    ) -> None:
+        """Consume matching mailbox records after their receiver accepts them."""
+        if not message_ids:
+            return
+        messages_dir = get_messages_dir()
+        if not messages_dir.exists():
+            return
+        with locked_file(messages_dir / ".delivery.lock", private=True):
+            for key in dict.fromkeys(k for k in agent_keys if k):
+                mailbox_dir = messages_dir / key
+                try:
+                    for path in mailbox_dir.glob("*.json"):
+                        try:
+                            with open(path) as fh:
+                                data = json.load(fh)
+                            message_id = (
+                                data.get("id") if isinstance(data, dict) else None
+                            )
+                        except (OSError, ValueError, TypeError):
+                            continue
+                        if not isinstance(message_id, str) or message_id not in message_ids:
+                            continue
+                        try:
+                            path.unlink()
+                        except OSError:
+                            if not persist_receipt:
+                                logger.warning(
+                                    "Could not acknowledge delivered mailbox record"
+                                )
+                                continue
+                            try:
+                                timestamp = _validated_mailbox_timestamp(data)
+                                receipt = {
+                                    "id": message_id,
+                                    "timestamp": timestamp or time.time(),
+                                    "_mailbox_acknowledged": True,
+                                }
+                                # Keep the claimed payload intact unless the complete
+                                # receipt can replace it. A failed in-place write
+                                # would destroy the evidence of an uncertain effect.
+                                temp_name = ""
+                                try:
+                                    fd, temp_name = tempfile.mkstemp(
+                                        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+                                    )
+                                    with os.fdopen(fd, "w") as fh:
+                                        json.dump(receipt, fh)
+                                        fh.flush()
+                                        os.fsync(fh.fileno())
+                                    os.replace(temp_name, path)
+                                    temp_name = ""
+                                finally:
+                                    if temp_name:
+                                        with contextlib.suppress(OSError):
+                                            os.unlink(temp_name)
+                            except OSError:
+                                logger.error(
+                                    "Could not persist mailbox acknowledgment"
+                                )
+                            else:
+                                logger.warning(
+                                    "Could not remove acknowledged mailbox record; "
+                                    "persisted receipt"
+                                )
+                except OSError:
+                    logger.warning("Could not scan mailbox while acknowledging delivery")
+
+    @staticmethod
+    def mark_mailbox_delivery_uncertain(
+        agent_keys: List[str], message_ids: set[str]
+    ) -> bool:
+        """Exclusively claim a complete set of queued records before any effect.
+
+        A stale parsed batch confers no ownership: every ID must still exist,
+        and none of its copies may already be claimed or acknowledged. The
+        shared lock serializes this comparison and transition across pollers.
+        A partial persistence failure holds the records already marked; no
+        receiver is invoked without the entire claim succeeding.
+        """
+        if not message_ids:
+            return False
+        messages_dir = get_messages_dir()
+        try:
+            with locked_file(messages_dir / ".delivery.lock", private=True):
+                records: List[tuple[Path, Dict[str, Any]]] = []
+                found: set[str] = set()
+                for key in dict.fromkeys(k for k in agent_keys if k):
+                    for path in (messages_dir / key).glob("*.json"):
+                        with open(path) as fh:
+                            data = json.load(fh)
+                        if not isinstance(data, dict):
+                            continue
+                        message_id = data.get("id")
+                        if not isinstance(message_id, str) or message_id not in message_ids:
+                            continue
+                        if (
+                            data.get("_mailbox_delivery_uncertain") is True
+                            or data.get("_mailbox_acknowledged") is True
+                        ):
+                            logger.warning("Mailbox delivery is already claimed")
+                            return False
+                        records.append((path, data))
+                        found.add(message_id)
+                if found != message_ids:
+                    logger.warning("Mailbox delivery source is incomplete; skipping effect")
+                    return False
+
+                for path, data in records:
+                    temp_name = ""
+                    try:
+                        data["_mailbox_delivery_uncertain"] = True
+                        fd, temp_name = tempfile.mkstemp(
+                            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+                        )
+                        with os.fdopen(fd, "w") as fh:
+                            json.dump(data, fh)
+                            fh.flush()
+                            os.fsync(fh.fileno())
+                        os.replace(temp_name, path)
+                        temp_name = ""
+                    finally:
+                        if temp_name:
+                            with contextlib.suppress(OSError):
+                                os.unlink(temp_name)
+                return True
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error(
+                "Could not persist mailbox delivery claim (%s); skipping effect",
+                type(exc).__name__,
+            )
+            return False
+
+    @staticmethod
+    def clear_mailbox_delivery_uncertain(
+        agent_keys: List[str], message_ids: set[str]
+    ) -> None:
+        """Release a persisted no-replay claim after an explicit refusal."""
+        if not message_ids:
+            return
+        messages_dir = get_messages_dir()
+        if not messages_dir.exists():
+            return
+        with locked_file(messages_dir / ".delivery.lock", private=True):
+            for key in dict.fromkeys(k for k in agent_keys if k):
+                mailbox_dir = messages_dir / key
+                try:
+                    paths = list(mailbox_dir.glob("*.json"))
+                except OSError:
+                    logger.error("Could not scan mailbox to release delivery claim")
+                    continue
+                for path in paths:
+                    temp_name = ""
+                    preserve_temp = False
+                    try:
+                        with open(path) as fh:
+                            data = json.load(fh)
+                        if (
+                            not isinstance(data, dict)
+                            or data.get("id") not in message_ids
+                            or data.get("_mailbox_delivery_uncertain") is not True
+                        ):
+                            continue
+                        data["_mailbox_delivery_uncertain"] = False
+                        fd, temp_name = tempfile.mkstemp(
+                            prefix=f".{path.name}.release.",
+                            suffix=".tmp",
+                            dir=path.parent,
+                        )
+                        with os.fdopen(fd, "w") as fh:
+                            json.dump(data, fh)
+                            fh.flush()
+                            os.fsync(fh.fileno())
+                        for attempt in range(2):
+                            try:
+                                os.replace(temp_name, path)
+                                temp_name = ""
+                                break
+                            except OSError:
+                                if attempt == 1:
+                                    preserve_temp = True
+                                    raise
+                    except (OSError, ValueError, TypeError) as exc:
+                        logger.error(
+                            "Could not release mailbox delivery claim %s (%s)",
+                            path.name,
+                            type(exc).__name__,
+                        )
+                    finally:
+                        if temp_name and not preserve_temp:
+                            try:
+                                os.unlink(temp_name)
+                            except OSError:
+                                pass
 
     @staticmethod
     def get_inbox_count(identity: str) -> int:
@@ -3622,7 +4017,11 @@ class AgentMessenger:
         if not msg_dir.exists():
             return 0
         try:
-            return sum(1 for _ in msg_dir.glob("*.json"))
+            return sum(
+                1
+                for path in msg_dir.glob("*.json")
+                if not _is_acknowledged_mailbox_path(path)
+            )
         except Exception:
             return 0
 
@@ -3641,7 +4040,11 @@ class AgentMessenger:
             for d in messages_dir.iterdir():
                 if not d.is_dir():
                     continue
-                count = sum(1 for _ in d.glob("*.json"))
+                count = sum(
+                    1
+                    for path in d.glob("*.json")
+                    if not _is_acknowledged_mailbox_path(path)
+                )
                 if count > 0:
                     counts[d.name] = count
         except Exception:
