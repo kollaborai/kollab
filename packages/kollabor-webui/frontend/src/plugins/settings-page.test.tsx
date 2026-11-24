@@ -27,9 +27,9 @@ const plugin = (settings: unknown[]): PluginEntry => ({
   settings,
 } as PluginEntry);
 
-async function markupFor(entries: PluginEntry[], pathname = "/settings"): Promise<string> {
+async function markupFor(entries: PluginEntry[], pathname = "/settings", serverTime?: number): Promise<string> {
   const loader = createPluginLoader(pluginRegistry, {
-    list: async () => ({ plugins: entries }),
+    list: async () => ({ plugins: entries, server_time: serverTime }),
     importModule: async () => ({}),
     fetchText: async () => "",
     loadCode: false,
@@ -40,7 +40,10 @@ async function markupFor(entries: PluginEntry[], pathname = "/settings"): Promis
   return renderToStaticMarkup(<PluginsSettings api={{} as never} />);
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("plugin settings page", () => {
   it("renders the engine-listed settings fields and a save action", async () => {
@@ -101,6 +104,26 @@ describe("plugin settings page", () => {
     }]);
 
     expect(markup).toContain("Running · No Heartbeat for 6 min");
+  });
+
+  it("uses engine time for heartbeat and uptime when the browser clock is ahead", async () => {
+    const engineNow = 1_800_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date((engineNow + 10 * 60) * 1000));
+    const markup = await markupFor([{
+      ...plugin([]),
+      enabled: true,
+      services: [{
+        name: "worker",
+        state: "running",
+        since: engineNow - 7200,
+        heartbeat: engineNow - 30,
+        heartbeat_s: 60,
+      } as PluginEntry["services"][number]],
+    }], "/settings", engineNow);
+
+    expect(markup).not.toContain("No Heartbeat");
+    expect(markup).toContain("Running · 2 h");
   });
 
   it("starts the missed-heartbeat window at the later heartbeat monitor or heartbeat time", async () => {
