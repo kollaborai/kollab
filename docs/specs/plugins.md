@@ -150,8 +150,8 @@ switches to Chat. If Kollab cannot signal a verified wrapper, the plugin stays o
 `Stop Failed`; the process may still be running. The stop returns 409 and can be retried before enabling
 or removing the plugin.
 
-**Notices.** A plugin can raise a NoticeBar notice: one line and one button, with no ids or version
-numbers in the text: `A pull request is waiting for your review.  [Open]`.
+**Notices.** A plugin can raise a NoticeBar notice: one line and at most one action button, plus a dismiss
+control, with no ids or version numbers in the text: `A pull request is waiting for your review.  [Open]`.
 
 **Composer and chat.** Plugin slash commands appear in the composer palette. A plugin can draw its own
 card for a tool or message it owns, such as a PR status card.
