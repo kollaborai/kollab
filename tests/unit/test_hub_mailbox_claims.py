@@ -128,6 +128,39 @@ async def test_one_owner_during_real_task_cancellation(inbox):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_poll_releases_receiver_refusal(inbox):
+    message = HubMessage(action="message", to="receiver", content="retry")
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    calls = []
+
+    async def refuse(_msg):
+        calls.append(message.id)
+        entered.set()
+        await finish.wait()
+        return False
+
+    await AgentMessenger.send_to_file("receiver", message)
+    task = asyncio.create_task(_receiver(refuse)._deliver_inbox_message(message))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        task.cancel()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        held = _queued()
+        assert [msg.id for msg in held] == [message.id]
+        assert held[0].metadata.get("_mailbox_delivery_uncertain") is not True
+    finally:
+        finish.set()
+        if not task.done():
+            task.cancel()
+
+    assert calls == [message.id]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("coalesced", [False, True])
 async def test_missing_source_is_not_permission_to_deliver(inbox, coalesced):
     effects = []
