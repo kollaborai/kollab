@@ -851,12 +851,14 @@ export type PanelWizardStep = {
   id: string;
   title: string;
   fields: PanelField[];
+  actions?: PanelAction[];
 };
 
 export type PanelWizard = PanelBase & {
   kind: "wizard";
   steps: PanelWizardStep[];
   actions?: PanelAction[];
+  context?: Record<string, unknown>;
 };
 
 export type PanelDescription = PanelForm | PanelPicker | PanelWizard;
