@@ -69,6 +69,31 @@ def test_plugin_secret_redaction_boundaries_are_shared():
     assert failures == [], "; ".join(failures)
 
 
+def test_service_output_redaction_preserves_paths_and_hides_credentials():
+    from kollabor_plugins.services import _LogFilter
+
+    cases = [
+        (
+            "KOLLAB_PLUGIN_DATA=/private/tmp/plugin-data/hello\n",
+            "KOLLAB_PLUGIN_DATA=/private/tmp/plugin-data/hello\n",
+        ),
+        (
+            "GITHUB_TOKEN=ghp_fakecredentialvalue123\n",
+            "GITHUB_TOKEN: [redacted]\n",
+        ),
+    ]
+    actual = [
+        _LogFilter([]).feed(value.encode(), final=True).decode()
+        for value, _ in cases
+    ]
+    failures = [
+        f"expected {expected!r}, got {result!r}"
+        for (_, expected), result in zip(cases, actual)
+        if result != expected
+    ]
+    assert failures == [], "; ".join(failures)
+
+
 @pytest.mark.parametrize(
     ("exception_message", "expected_fragment", "forbidden"),
     [
