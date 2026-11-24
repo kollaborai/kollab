@@ -45,10 +45,12 @@ would lose it before the terminal or Web UI could render it.
 The browser composer now accepts pasted image files through the existing
 assistant-ui attachment adapter. Each image is represented in the composer by
 an editable `[imageN]` token and a removable attachment tile; removing an
-attachment removes its token and renumbers the remaining images. The transport
-submits text and image parts together, the daemon normalizes pasted data URLs
-into bounded process-local media IDs, and provider adapters resolve those IDs
-only while building the provider-native request.
+attachment removes its token and renumbers the remaining images. When a draft
+is restored, the composer rebuilds these tokens from the current attachments;
+orphaned tokens are removed, while escaped `[[imageN]]` text remains literal.
+The transport submits text and image parts together, the daemon normalizes
+pasted data URLs into bounded process-local media IDs, and provider adapters
+resolve those IDs only while building the provider-native request.
 
 The model catalog exposes an explicit `supports_vision` boolean per model.
 Image turns are rejected before provider I/O when the active provider/model is
