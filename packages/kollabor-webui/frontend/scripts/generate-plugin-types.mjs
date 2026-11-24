@@ -14,7 +14,7 @@ const contractEnd = sdk.indexOf("/** The app's own components");
 const apiStart = sdk.indexOf("/** `k`: a plugin's handle on the app. */");
 const apiEnd = sdk.indexOf("/** What `web/dist/index.js` default-exports. */");
 const uiBody = sdk.match(/export const ui = \{([\s\S]*?)\n\};/)?.[1];
-if (contractStart < 0 || contractEnd < 0 || apiStart < 0 || apiEnd < 0 || !uiBody) {
+if (contractStart < 0 || contractEnd <= contractStart || apiStart < 0 || apiEnd <= apiStart || !uiBody) {
   throw new Error("Cannot locate the plugin SDK declarations in src/plugins/sdk.ts");
 }
 const uiNames = uiBody.split(",").map(name => name.trim()).filter(Boolean);
@@ -36,7 +36,12 @@ const declaration = [
 
 const target = new URL("../../../bundles/plugins/hello/web/src/kollab-plugin.d.ts", frontend);
 if (process.argv.includes("--check")) {
-  const current = await readFile(target, "utf8").catch(() => "");
+  let current = "";
+  try {
+    current = await readFile(target, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   if (current !== declaration) {
     console.error(`Generated plugin declarations are stale: ${fileURLToPath(target)}`);
     console.error("Run: node packages/kollabor-webui/frontend/scripts/generate-plugin-types.mjs");
