@@ -9,6 +9,7 @@ class FakeGh:
     def __init__(self, pull_requests=None):
         self.pull_requests = pull_requests or []
         self.issues = []
+        self.closed_issues = []
         self.issue_posts = []
         self.comment_posts = []
 
@@ -35,6 +36,8 @@ class FakeGh:
             return json.dumps(self.pull_requests)
         if path == "repos/owner/repo/issues?state=open&per_page=100":
             return json.dumps(self.issues)
+        if path == "repos/owner/repo/issues?state=all&per_page=100":
+            return json.dumps(self.issues + self.closed_issues)
         if path == "repos/owner/repo/issues" and "--method" in args:
             fields = [
                 args[index + 1]
@@ -101,6 +104,18 @@ def test_opens_issue_without_a_pr_link_when_sha_has_no_pr():
     issue = gh.issue_posts[0]
     assert issue["title"] == f"main CI red at {RUN_SHA[:7]}"
     assert "Pull request:" not in issue["body"]
+    assert not gh.comment_posts
+
+
+def test_closed_issue_still_deduplicates_the_same_commit():
+    gh = FakeGh()
+
+    open_main_red_issue("owner/repo", "7", gh=gh)
+    gh.closed_issues.extend(gh.issues)
+    gh.issues.clear()
+    open_main_red_issue("owner/repo", "7", gh=gh)
+
+    assert len(gh.issue_posts) == 1
     assert not gh.comment_posts
 
 
