@@ -132,6 +132,38 @@ def _merge_voice_descendants(
     return list({descendant.pid: descendant for descendant in (*first, *second)}.values())
 
 
+async def _wait_for_voice_descendants(
+    descendants: list[Any], timeout: float = 60
+) -> None:
+    """Wait for known Whisper descendants so a late transcript is not missed."""
+    import psutil
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        running = []
+        for descendant in descendants:
+            try:
+                if descendant.is_running():
+                    running.append(descendant)
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.Error as exc:
+                logger.warning(
+                    "Telegram voice descendant status failed (%s)", type(exc).__name__
+                )
+                running.append(descendant)
+        if not running:
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            for descendant in running:
+                try:
+                    descendant.kill()
+                except psutil.Error:
+                    pass
+            raise asyncio.TimeoutError
+        await asyncio.sleep(0.05)
+
+
 async def _await_shielded_task(task: asyncio.Task):
     """Finish an owned task despite repeated cancellation of its caller."""
     interrupted = False
@@ -480,6 +512,9 @@ class TelegramBridge(MessagingBridge):
                 suffix = Path(file_path).suffix or ".ogg"
                 audio_path = Path(temp_dir) / f"voice{suffix}"
                 audio_path.write_bytes(audio_resp.content)
+                transcript_path = audio_path.with_suffix(".txt")
+                transcript_path.touch(mode=0o600, exist_ok=True)
+                transcript_path.chmod(0o600)
 
                 spawn_kwargs = {
                     "stdout": asyncio.subprocess.PIPE,
@@ -540,6 +575,11 @@ class TelegramBridge(MessagingBridge):
                         descendant_stop.set()
                     if descendant_task is not None:
                         descendants, _ = await _await_shielded_task(descendant_task)
+                    if descendants:
+                        # Protect the directory while allowing only the expected
+                        # transcript file to be finished by a known descendant.
+                        os.chmod(temp_dir, 0o500)
+                        await _wait_for_voice_descendants(descendants)
                 except asyncio.TimeoutError:
                     cleanup_task = asyncio.create_task(
                         _stop_transcriber(proc, communication_task)
@@ -579,7 +619,6 @@ class TelegramBridge(MessagingBridge):
                     raise
 
                 result_stdout = stdout_bytes.decode("utf-8", errors="replace")
-                transcript_path = audio_path.with_suffix(".txt")
                 transcription = ""
                 if transcript_path.exists():
                     transcription = transcript_path.read_text().strip()
