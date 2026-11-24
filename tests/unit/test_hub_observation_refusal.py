@@ -229,7 +229,7 @@ async def test_receiver_cancellation_after_effect_is_not_retried_automatically(
 
 
 @pytest.mark.asyncio
-async def test_receiver_cancel_before_effect_stays_queued(tmp_path):
+async def test_receiver_cancel_before_effect_is_held_for_inspection(tmp_path):
     message = HubMessage(
         action="message",
         from_agent="peer-id-1",
@@ -257,6 +257,8 @@ async def test_receiver_cancel_before_effect_stays_queued(tmp_path):
         )
 
     assert [item.id for item in replay] == [message.id]
+    assert replay[0].metadata["_mailbox_delivery_uncertain"] is True
+    assert await plugin._deliver_inbox_batch(replay) == set()
 
 
 @pytest.mark.asyncio
@@ -742,9 +744,11 @@ async def test_receiver_is_not_run_when_delivery_marker_cannot_be_persisted(tmp_
     plugin = HubPlugin.__new__(HubPlugin)
     plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
 
+    failing_window = [True]
+
     async def receive(msg):
         effects.append(msg.id)
-        if len(effects) == 1:
+        if failing_window[0]:
             raise asyncio.CancelledError
 
     plugin._on_message_received = receive
@@ -774,6 +778,7 @@ async def test_receiver_is_not_run_when_delivery_marker_cannot_be_persisted(tmp_
                 await plugin._deliver_inbox_batch(first)
             except asyncio.CancelledError:
                 pass
+        failing_window[0] = False
         replay = messenger_module.AgentMessenger.read_mailboxes(
             ["receiver"], consume=False
         )
