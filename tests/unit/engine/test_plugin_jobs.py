@@ -153,6 +153,44 @@ def test_cancel_reports_cleanup_failure_and_allows_retry(client, monkeypatch):
     assert not base.exists()
 
 
+def test_failed_cancel_cleanup_expires_and_retries(client, monkeypatch):
+    import asyncio
+    import shutil
+    from kollabor_engine import plugin_jobs
+
+    manager = client.app.state.plugin_jobs
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    _ready(client, job_id)
+    job = manager.jobs[job_id]
+    base = job["base"]
+    original = shutil.rmtree
+
+    def fail_base(path, *args, **kwargs):
+        if path == base:
+            raise PermissionError("private path")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_base)
+    assert client.delete(f"/plugins/jobs/{job_id}").status_code == 503
+    assert job["status"] == "cancelling"
+    assert "cancel_task" not in job
+
+    monkeypatch.setattr(shutil, "rmtree", original)
+    monkeypatch.setattr(plugin_jobs, "_JOB_TTL", 1)
+    job["updated"] = time.monotonic() - 2
+
+    async def expire_and_wait_for_cleanup():
+        manager._expire()
+        await asyncio.gather(*list(manager.tasks))
+
+    client.portal.call(expire_and_wait_for_cleanup)
+
+    assert job_id not in manager.jobs
+    assert job_id not in manager.expired_jobs
+    assert not base.exists()
+
+
 def test_cancel_staging_job_stops_worker_and_cleans_stage(client, monkeypatch):
     import asyncio
     import threading
