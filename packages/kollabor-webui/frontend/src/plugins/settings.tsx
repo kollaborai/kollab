@@ -200,9 +200,9 @@ export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" |
   };
 }
 
-function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange, onRemoved, operationBusy, detailRef }: {
+function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange, onDirtyChange, onRemoved, operationBusy, detailRef }: {
   entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; remote: boolean; now: number; onUpdate: (id: string, opener: HTMLElement) => void;
-  onBusyChange: (busy: boolean) => void; onRemoved: () => void; operationBusy: boolean; detailRef: RefObject<HTMLElement | null>;
+  onBusyChange: (busy: boolean) => void; onDirtyChange?: (count: number) => void; onRemoved: () => void; operationBusy: boolean; detailRef: RefObject<HTMLElement | null>;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -214,6 +214,10 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
     confirmationOpener.current.focus();
   };
   const [settingsDraft, setSettingsDraft] = useState<Draft>({});
+  useEffect(() => {
+    onDirtyChange?.(Object.keys(settingsDraft).length);
+  }, [onDirtyChange, settingsDraft]);
+  useEffect(() => () => onDirtyChange?.(0), [onDirtyChange]);
   const { managed, switchEnabled, services, updateRemove } = pluginRowControls(entry, remote);
   const stopping = entry.state === "stopping";
   const failure = failureOf(entry, record);
@@ -384,7 +388,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
 }
 
 /** Settings > Plugins: every plugin the engine lists (installed, development, built in), its detail, and Add Plugin. */
-export function PluginsSettings({ api }: { api: EngineApi }) {
+export function PluginsSettings({ api, onDirtyChange }: { api: EngineApi; onDirtyChange?: (count: number) => void }) {
   const snapshot = usePlugins();
   const inventory = usePluginInventory();
   const listId = useId();
@@ -500,6 +504,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
             now={now}
             operationBusy={busyPluginKey === entryKey(selected)}
             onBusyChange={(busy) => reportPluginBusy(entryKey(selected), busy)}
+            onDirtyChange={onDirtyChange}
             onRemoved={() => setFocusAfterRemoval(true)}
             detailRef={detailRef}
             onUpdate={(pluginId, opener) => {

@@ -209,6 +209,7 @@ export function PanelHost({
   const promptsApi = useMemo(() => new PromptsApi(api), [api]);
   const [tabs, setTabs] = useState<TabMap>(freshTabs);
   const [busy, setBusy] = useState(false);
+  const [pluginDraftCount, setPluginDraftCount] = useState(0);
   const [reveal, setReveal] = useState<Reveal | null>(null);
   const [poll, setPoll] = useState<Poll | null>(null);
   const [networkSection, setNetworkSection] = useState<"overview" | "access">("overview");
@@ -476,7 +477,7 @@ export function PanelHost({
     (total, state) =>
       total +
       state.views.reduce((n, view) => n + Object.keys(view.draft).length, 0),
-    0,
+    pluginDraftCount,
   );
   const handleOpenChange = (next: boolean) => {
     if (
@@ -813,7 +814,7 @@ export function PanelHost({
               tab === "plugins" ? "flex" : "hidden",
             )}
           >
-            <PluginsSettings api={api} />
+            <PluginsSettings api={api} onDirtyChange={setPluginDraftCount} />
           </div>
           {tab === "phonelink" && open ? (
             <div role="tabpanel" aria-label="PhoneLink" className="flex min-h-0 w-full flex-1 flex-col">
