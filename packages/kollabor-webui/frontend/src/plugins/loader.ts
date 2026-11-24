@@ -21,7 +21,15 @@ import {
   type PluginRegistry,
   type PluginViewKey,
 } from "./registry";
-import { createPluginApi, followEvents, isOpenTarget, type OpenTarget, type PluginApiDeps, type PluginEntry } from "./sdk";
+import {
+  createPluginApi,
+  followEvents,
+  isOpenTarget,
+  type OpenTarget,
+  type PluginApiDeps,
+  type PluginEntry,
+  type PluginInventoryResponse,
+} from "./sdk";
 
 export const LOAD_TIMEOUT_MS = 5_000;
 
@@ -35,10 +43,14 @@ const OWN_REACT =
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const SAFE_WEB_PLUGIN_LOAD_ERROR = "This plugin's web code failed while loading. Check the browser console for details.";
 
-export type PluginInventory = { entries: readonly PluginEntry[]; error: string | null };
+export type PluginInventory = {
+  entries: readonly PluginEntry[];
+  error: string | null;
+  serverTimeOffsetSeconds: number;
+};
 
 // Every listed plugin, including off, shadowed and failed ones. The registry holds only the loaded ones.
-let inventory: PluginInventory = { entries: [], error: null };
+let inventory: PluginInventory = { entries: [], error: null, serverTimeOffsetSeconds: 0 };
 const inventoryListeners = new Set<() => void>();
 
 function setInventory(next: PluginInventory): void {
@@ -143,7 +155,7 @@ async function bundleImportsOwnReact(
 }
 
 export type LoaderDeps = {
-  list(): Promise<{ plugins?: unknown }>;
+  list(): Promise<PluginInventoryResponse>;
   importModule(url: string): Promise<unknown>;
   fetchText(url: string): Promise<string>;
   addStyle?(id: string, href: string): () => void;
@@ -285,17 +297,23 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
 
   async function reconcile(): Promise<void> {
     let entries: PluginEntry[];
+    let serverTimeOffsetSeconds: number;
     try {
-      const listed = (await deps.list()).plugins;
+      const response = await deps.list();
+      const receivedAt = Date.now() / 1000;
+      const listed = response.plugins;
+      serverTimeOffsetSeconds = typeof response.server_time === "number" && Number.isFinite(response.server_time)
+        ? response.server_time - receivedAt
+        : 0;
       entries = (Array.isArray(listed) ? listed : [])
         .filter((item): item is PluginEntry => Boolean(item) && typeof item.id === "string" && typeof item.name === "string")
         .map((item) => ({ ...item, contributes: item.contributes ?? {}, services: Array.isArray(item.services) ? item.services : [] }));
     } catch (error) {
-      setInventory({ entries: inventory.entries, error: message(error) });
+      setInventory({ entries: inventory.entries, error: message(error), serverTimeOffsetSeconds: inventory.serverTimeOffsetSeconds });
       registry.setListed(message(error));
       return;
     }
-    setInventory({ entries, error: null });
+    setInventory({ entries, error: null, serverTimeOffsetSeconds });
     // With loadCode off (PhoneLink) the list still fills, and no plugin is imported or styled.
     const active = deps.loadCode === false ? [] : entries.filter(isActive);
     const keep = new Set(active.map((entry) => entry.id));
@@ -373,7 +391,7 @@ export function startPluginRuntime(api: EngineApi, where: Pick<Location, "pathna
     return () => {};
   }
   const loader = createPluginLoader(pluginRegistry, {
-    list: () => api.json<{ plugins?: unknown }>("/plugins", { cache: "no-store" }),
+    list: () => api.json<PluginInventoryResponse>("/plugins", { cache: "no-store" }),
     loadCode: !inPhoneApp(where.pathname),
     importModule: (url) => import(/* @vite-ignore */ url),
     async fetchText(url) {

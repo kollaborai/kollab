@@ -85,6 +85,12 @@ export type PluginEntry = {
   granted?: string[];
 };
 
+/** `GET /plugins` response. `server_time` is Unix time in seconds. */
+export type PluginInventoryResponse = {
+  plugins?: unknown;
+  server_time?: number;
+};
+
 /** The open chat, as a plugin view receives it. */
 export type PluginSession = { session_id: string; workspace: string; name?: string; identity?: string };
 

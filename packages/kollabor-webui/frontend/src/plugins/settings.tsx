@@ -365,7 +365,8 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
   const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [busyPluginKey, setBusyPluginKey] = useState<string | null>(null);
-  const [now, setNow] = useState(() => Date.now() / 1000);
+  const [browserNow, setBrowserNow] = useState(() => Date.now() / 1000);
+  const now = browserNow + inventory.serverTimeOffsetSeconds;
   const operationOpener = useRef<HTMLElement | null>(null);
   const detailRef = useRef<HTMLElement>(null);
   const restoreOperationFocus = (event: Event) => {
@@ -374,7 +375,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
     operationOpener.current.focus();
   };
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now() / 1000), 60_000);
+    const timer = window.setInterval(() => setBrowserNow(Date.now() / 1000), 60_000);
     return () => window.clearInterval(timer);
   }, []);
   const reportPluginBusy = (key: string, busy: boolean) => {
