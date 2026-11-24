@@ -2115,23 +2115,94 @@ async def _handle_cli_hub(hub_args: list) -> None:
         )
 
     # --- config helpers for on/off/user ---
+    from kollabor_config.atomic_write import write_text_atomic
     from kollabor_config.config_utils import get_existing_global_config_path
+    from kollabor_config.file_lock import locked_file
 
     config_path = get_existing_global_config_path()
+    _no_config_snapshot = object()
+    config_snapshot: bytes | None | object = _no_config_snapshot
 
-    def _read_config() -> dict:
-        if config_path.exists():
-            try:
-                with open(config_path) as fh:
-                    return dict(json.load(fh))
-            except Exception:
-                return {}
-        return {}
+    def _read_config() -> dict | None:
+        nonlocal config_snapshot
+        try:
+            contents = config_path.read_bytes()
+        except FileNotFoundError:
+            config_snapshot = None
+            return {}
+        except OSError:
+            config_snapshot = _no_config_snapshot
+            return None
 
-    def _write_config(cfg: dict) -> None:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(config_path, "w") as fh:
-            json.dump(cfg, fh, indent=2)
+        config_snapshot = contents
+        try:
+            config = json.loads(contents.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return config if isinstance(config, dict) else None
+
+    def _write_config(cfg: dict) -> bool:
+        nonlocal config_snapshot
+        try:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            with locked_file(
+                config_path.with_name(config_path.name + ".lock"), private=True
+            ):
+                if config_snapshot is _no_config_snapshot:
+                    print(
+                        "Hub configuration could not be checked; it was left unchanged.",
+                        file=sys.stderr,
+                    )
+                    return False
+                try:
+                    current = config_path.read_bytes()
+                except FileNotFoundError:
+                    current = None
+                if current != config_snapshot:
+                    print(
+                        "Hub configuration changed while this command was running; "
+                        "it was left unchanged. Retry the command.",
+                        file=sys.stderr,
+                    )
+                    return False
+                if current is not None:
+                    try:
+                        existing = json.loads(current.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        print(
+                            "Hub configuration became unreadable; it was left unchanged.",
+                            file=sys.stderr,
+                        )
+                        return False
+                    if not isinstance(existing, dict):
+                        print(
+                            "Hub configuration has an invalid shape; it was left unchanged.",
+                            file=sys.stderr,
+                        )
+                        return False
+
+                contents = json.dumps(cfg, indent=2)
+                try:
+                    latest = config_path.read_bytes()
+                except FileNotFoundError:
+                    latest = None
+                if latest != current:
+                    print(
+                        "Hub configuration changed while this command was running; "
+                        "it was left unchanged. Retry the command.",
+                        file=sys.stderr,
+                    )
+                    return False
+
+                write_text_atomic(config_path, contents)
+                config_snapshot = contents.encode("utf-8")
+                return True
+        except OSError:
+            print(
+                "Hub configuration could not be saved; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return False
 
     def _set_nested(d: dict, dotpath: str, value) -> None:
         keys = dotpath.split(".")
@@ -2584,6 +2655,12 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "user":
         cfg = _read_config()
+        if cfg is None:
+            print(
+                "Hub configuration is unreadable; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return
         if not rest:
             current = _get_nested(cfg, "plugins.hub.user_name")
             if not current:
@@ -2592,20 +2669,32 @@ async def _handle_cli_hub(hub_args: list) -> None:
         else:
             new_name = " ".join(rest)
             _set_nested(cfg, "plugins.hub.user_name", new_name)
-            _write_config(cfg)
-            print(f"hub user set to: {new_name}")
+            if _write_config(cfg):
+                print(f"hub user set to: {new_name}")
 
     elif subcmd == "on":
         cfg = _read_config()
+        if cfg is None:
+            print(
+                "Hub configuration is unreadable; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return
         _set_nested(cfg, "plugins.hub.enabled", True)
-        _write_config(cfg)
-        print("hub enabled")
+        if _write_config(cfg):
+            print("hub enabled")
 
     elif subcmd == "off":
         cfg = _read_config()
+        if cfg is None:
+            print(
+                "Hub configuration is unreadable; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return
         _set_nested(cfg, "plugins.hub.enabled", False)
-        _write_config(cfg)
-        print("hub disabled")
+        if _write_config(cfg):
+            print("hub disabled")
 
     elif subcmd == "org":
         if not rest:

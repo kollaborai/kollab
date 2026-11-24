@@ -1,6 +1,9 @@
 """Configuration loading and plugin integration logic."""
 
+import hashlib
+import json
 import logging
+import os
 import re
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
@@ -19,7 +22,6 @@ from .config_utils import (
     get_local_config_directory,
     get_local_config_path,
     get_local_config_path_candidates,
-    get_project_data_dir,
     get_project_data_dir_candidates,
     get_system_prompt_content,
     get_system_prompt_path,
@@ -29,6 +31,8 @@ from .manager import ConfigManager
 # Configuration version tracking
 CONFIG_VERSION = 2  # Current version
 VERSION_KEY = "_config_version"
+ConfigFileSnapshot = tuple[int, int, int, int, int, int, Optional[str]]
+_UNTRACKED = object()
 
 
 class ConfigurationValidationError(Exception):
@@ -220,61 +224,171 @@ else:
 logger = logging.getLogger(__name__)
 
 
-def load_layered_user_config(project_path: Optional[Path] = None) -> Dict[str, Any]:
+def _config_path_key(path: Path) -> Path:
+    return Path(os.path.abspath(path))
+
+
+def _config_path_is_present(path: Path) -> bool:
+    """Treat paths that cannot be inspected as present so their read fails closed."""
+    try:
+        path.stat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _read_config_file(
+    path: Path,
+) -> tuple[Dict[str, Any], str, Optional[ConfigFileSnapshot]]:
+    """Read one JSON object and capture the exact file version without echoing its contents."""
+    try:
+        before = path.stat()
+    except FileNotFoundError:
+        return {}, "absent", None
+    except OSError:
+        return {}, "unreadable", None
+
+    try:
+        contents = path.read_bytes()
+    except OSError:
+        try:
+            after = path.stat()
+        except OSError:
+            return {}, "unreadable", None
+        return (
+            {},
+            "unreadable",
+            (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+                None,
+            ),
+        )
+
+    try:
+        after = path.stat()
+    except OSError:
+        return {}, "unreadable", None
+
+    snapshot = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+        hashlib.sha256(contents).hexdigest(),
+    )
+    if (
+        len(contents) != after.st_size
+        or (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+    ):
+        return {}, "malformed", snapshot
+
+    try:
+        config = json.loads(contents.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}, "malformed", snapshot
+    if not isinstance(config, dict):
+        return {}, "malformed", snapshot
+    return config, "valid", snapshot
+
+
+def _config_error_message(statuses: Dict[str, str]) -> Optional[str]:
+    failed = [(layer, status) for layer, status in statuses.items() if status in {"malformed", "unreadable", "changed"}]
+    if not failed:
+        return None
+    if any(status == "changed" for _, status in failed):
+        return (
+            "The configuration changed after it was loaded. Reload before saving so the other "
+            "writer's changes are preserved."
+        )
+
+    layers = ", ".join(layer for layer, _ in failed)
+    if any(status == "unreadable" for _, status in failed):
+        return (
+            f"The {layers} config file could not be read. Saving is paused to protect its contents. "
+            "Check permissions, back up or repair the file, then reload."
+        )
+    return (
+        f"The {layers} config file is malformed. Saving is paused to protect its contents. "
+        "Back up the file, repair its JSON, then reload."
+    )
+
+
+def load_layered_user_config(
+    project_path: Optional[Path] = None,
+    *,
+    statuses: Optional[Dict[str, str]] = None,
+    snapshots: Optional[Dict[Path, Optional[ConfigFileSnapshot]]] = None,
+) -> Dict[str, Any]:
     """The user config that applies in a folder: global, then its project config, then its local one.
 
-    ``project_path`` is the folder; none means the working directory. Each layer is merged on top of the
-    previous one with deep_merge, and a layer that is missing or unreadable is skipped. The terminal reads
-    these layers for the folder it runs in; the engine reads them for the folder a new session starts in,
-    which is not always its own (#957).
+    ``project_path`` is the folder; none means the working directory. Each valid layer is merged on top of
+    the previous one with deep_merge. ``statuses`` distinguishes absent, valid, malformed, and unreadable
+    files so a caller that may save can refuse to replace a layer it could not load. The terminal reads these
+    layers for the folder it runs in; the engine reads them for the folder a new session starts in, which is
+    not always its own (#957).
 
     Returns:
         Merged user configuration dictionary, or empty dict if none found.
     """
-    import json
-
     merged_config = {}
+    layer_statuses = statuses if statuses is not None else {}
+    file_snapshots = snapshots if snapshots is not None else {}
+
+    def merge_layer(layer: str, path: Path) -> None:
+        nonlocal merged_config
+        config, status, snapshot = _read_config_file(path)
+        layer_statuses[layer] = status
+        file_snapshots[_config_path_key(path)] = snapshot
+        if status == "valid":
+            merged_config = deep_merge(merged_config, config)
+            if config:
+                logger.debug("Loaded %s config layer", layer)
+        elif status in {"malformed", "unreadable"}:
+            logger.warning("Could not read %s config layer (%s)", layer, status)
 
     # Layer 1: Global config (base)
-    global_config_path = get_existing_global_config_path()
-    if global_config_path.exists():
-        try:
-            with open(global_config_path, "r") as f:
-                global_config = json.load(f)
-            if global_config:
-                merged_config = global_config
-                logger.debug(f"Loaded global config from: {global_config_path}")
-        except Exception as e:
-            logger.warning(f"Failed to load global config: {e}")
+    merge_layer("global", get_existing_global_config_path())
 
     # Layer 2: Project config (defaults for this project). The working directory's state is claimed as it
     # always was; another folder is only read, so asking about it leaves nothing behind.
     project_dirs = get_project_data_dir_candidates(project_path, create_new=project_path is None)
     project_config_path = next(
-        (path / "config.json" for path in project_dirs if (path / "config.json").exists()),
+        (
+            path / "config.json"
+            for path in project_dirs
+            if _config_path_is_present(path / "config.json")
+        ),
         project_dirs[0] / "config.json",
     )
-    if project_config_path.exists():
-        try:
-            with open(project_config_path, "r") as f:
-                project_config = json.load(f)
-            if project_config:
-                merged_config = deep_merge(merged_config, project_config)
-                logger.debug(f"Merged project config from: {project_config_path}")
-        except Exception as e:
-            logger.warning(f"Failed to load project config: {e}")
+    merge_layer("project", project_config_path)
 
     # Layer 3: Local config (override)
     local_config_path = get_local_config_directory(project_path) / "config.json"
-    if local_config_path.exists():
-        try:
-            with open(local_config_path, "r") as f:
-                local_config = json.load(f)
-            if local_config:
-                merged_config = deep_merge(merged_config, local_config)
-                logger.debug(f"Merged local config from: {local_config_path}")
-        except Exception as e:
-            logger.warning(f"Failed to load local config: {e}")
+    merge_layer("local", local_config_path)
 
     if not merged_config:
         logger.debug("No user configuration found (global, project, or local)")
@@ -306,6 +420,9 @@ class ConfigLoader:
         self.config_manager = config_manager
         self.plugin_registry = plugin_registry
         self.fast_mode = fast_mode
+        self.config_load_status: Dict[str, str] = {}
+        self.config_load_error: Optional[str] = None
+        self._config_file_snapshots: Dict[Path, Optional[ConfigFileSnapshot]] = {}
         logger.debug("ConfigLoader initialized")
 
     def get_config_version(self, config: Dict[str, Any]) -> int:
@@ -841,23 +958,76 @@ class ConfigLoader:
         Returns:
             Merged user configuration dictionary, or empty dict if none found.
         """
-        import json
-
+        self.config_load_status = {}
+        self.config_load_error = None
+        self._config_file_snapshots = {}
         # A file of its own (e.g., for testing): load only from it. One that is not there yet starts blank:
         # falling through to the layers below would copy the user's settings, keys included, into it when
         # it is created (#967).
         explicit_path = self._custom_config_path()
         if explicit_path is not None:
-            if not explicit_path.exists():
-                return {}
-            try:
-                with open(explicit_path, "r") as f:
-                    return json.load(f) or {}
-            except Exception as e:
-                logger.warning(f"Failed to load explicit config: {e}")
-                return {}
+            config, status, snapshot = _read_config_file(explicit_path)
+            self.config_load_status["explicit"] = status
+            self._config_file_snapshots[_config_path_key(explicit_path)] = snapshot
+            self.config_load_error = _config_error_message(self.config_load_status)
+            if status in {"malformed", "unreadable"}:
+                logger.warning("Could not read explicit config (%s)", status)
+            return config
 
-        return load_layered_user_config()
+        config = load_layered_user_config(
+            statuses=self.config_load_status,
+            snapshots=self._config_file_snapshots,
+        )
+        self.config_load_error = _config_error_message(self.config_load_status)
+        return config
+
+    def _check_file_for_write(
+        self, path: Path, *, allow_unreadable_current: bool = False
+    ) -> tuple[bool, Dict[str, Any]]:
+        """Check the file version and shape while the caller holds its config lock."""
+        key = _config_path_key(path)
+        expected = self._config_file_snapshots.get(key, _UNTRACKED)
+        current, status, snapshot = _read_config_file(path)
+
+        if expected is not _UNTRACKED and snapshot != expected:
+            self.config_load_status["target"] = "changed"
+            self.config_load_error = _config_error_message(self.config_load_status)
+            return False, {}
+
+        if status == "unreadable":
+            if (
+                allow_unreadable_current
+                and expected is not _UNTRACKED
+                and snapshot is not None
+                and snapshot == expected
+            ):
+                self._config_file_snapshots[key] = snapshot
+                return True, {}
+            self.config_load_status["target"] = status
+            self.config_load_error = _config_error_message(self.config_load_status)
+            return False, {}
+        if status == "malformed":
+            if not (
+                allow_unreadable_current
+                and expected is not _UNTRACKED
+                and snapshot is not None
+                and snapshot == expected
+            ):
+                self.config_load_status["target"] = status
+                self._config_file_snapshots[key] = snapshot
+                self.config_load_error = _config_error_message(self.config_load_status)
+                return False, {}
+
+        self._config_file_snapshots[key] = snapshot
+        return True, current
+
+    def _record_file_snapshot(self, path: Path) -> bool:
+        config, status, snapshot = _read_config_file(path)
+        key = _config_path_key(path)
+        self._config_file_snapshots[key] = snapshot
+        self.config_load_status["target"] = status
+        self.config_load_error = _config_error_message(self.config_load_status)
+        return status == "valid" and isinstance(config, dict)
 
     @staticmethod
     def _diff_from_defaults(
@@ -910,8 +1080,6 @@ class ConfigLoader:
         Returns:
             True if save successful, False otherwise.
         """
-        import json
-
         # JSON round-trip instead of deepcopy: strips non-serializable objects
         # (asyncio.Future, etc.) that plugins may inject at runtime.
         try:
@@ -972,18 +1140,31 @@ class ConfigLoader:
             # This prevents saving changes to the wrong layer (e.g., saving to
             # global config when local .kollab/config.json exists).
             save_path = self._get_config_save_path()
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
         try:
-            # 0600 and whole-file (write_text_atomic): API keys live in this
-            # file, and a file an older version left loose is tightened here.
-            write_text_atomic(
-                save_path, json.dumps(config_to_save, indent=2, ensure_ascii=False)
-            )
-            logger.info(f"Saved configuration to: {save_path}")
+            from .file_lock import locked_file
+
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with locked_file(save_path.with_name(save_path.name + ".lock"), private=True):
+                load_error = self.config_load_error
+                allowed, _ = self._check_file_for_write(save_path)
+                if not allowed:
+                    logger.warning("Config save refused: %s", self.config_load_error)
+                    return False
+                # 0600 and whole-file (write_text_atomic): API keys live in this
+                # file, and a file an older version left loose is tightened here.
+                write_text_atomic(
+                    save_path, json.dumps(config_to_save, indent=2, ensure_ascii=False)
+                )
+                if not self._record_file_snapshot(save_path):
+                    return False
+                if load_error:
+                    self.config_load_error = load_error
+            logger.info("Saved configuration")
             return True
         except Exception as e:
-            logger.error(f"Failed to save configuration to {save_path}: {e}")
+            if self.config_load_error is None:
+                self.config_load_error = "The configuration could not be saved. Check permissions and retry."
+            logger.error("Failed to save configuration (%s)", type(e).__name__)
             return False
 
     def _get_config_save_path(self) -> Path:
@@ -1020,8 +1201,15 @@ class ConfigLoader:
             return local_path
 
         # Check project config (middle priority)
-        project_path = get_project_data_dir() / "config.json"
-        if any((path / "config.json").exists() for path in get_project_data_dir_candidates()):
+        project_path = next(
+            (
+                path / "config.json"
+                for path in get_project_data_dir_candidates()
+                if _config_path_is_present(path / "config.json")
+            ),
+            None,
+        )
+        if project_path is not None:
             logger.debug(f"Saving to project config: {project_path}")
             return project_path
 
