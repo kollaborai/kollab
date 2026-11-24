@@ -133,3 +133,12 @@ export default definePlugin(k => {
     }
   }, 30000);
 });
+
+describe("Hello template watch process cleanup", () => {
+  it("keeps the watcher interruptible and avoids signaling an exited child", () => {
+    const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    expect(source).not.toMatch(/detached:\s*true/);
+    expect(source).toMatch(/child\.exitCode === null/);
+    expect(source).toMatch(/child\.signalCode === null/);
+  });
+});
