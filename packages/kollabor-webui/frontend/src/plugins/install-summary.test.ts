@@ -113,6 +113,16 @@ describe("plugin review after a failure", () => {
     expect(shouldRetryPolling(stagingAfterPollError, false)).toBe(false);
     expect(shouldRetryPolling({ status: "error" }, true)).toBe(false);
   });
+  it("keeps polling and offers a retry after a lost confirmation response", () => {
+    const polling = installSource.slice(installSource.indexOf("  useEffect(() => {", installSource.indexOf("const start")), installSource.indexOf("  const close ="));
+    expect(polling).toContain('job.status !== "staging" && job.status !== "installing"');
+    expect(shouldRetryPolling({ status: "installing" }, true)).toBe(true);
+  });
+  it("treats a completed job fetched after a lost confirmation response as success", () => {
+    const confirm = installSource.slice(installSource.indexOf("const confirm = async"), installSource.indexOf("const ready ="));
+    expect(confirm).toContain('current.status === "complete"');
+    expect(confirm).toContain("await onApplied()");
+  });
   it("offers another poll for a staging job after a polling error", () => {
     expect(installSource).toContain("Check Again");
     expect(installSource).toMatch(/\{shouldRetryPolling\(job, error !== null\)\s*\? <Button[\s\S]*?setPollVersion\(\(version\) => version \+ 1\);[\s\S]*>Check Again<\/Button>/);
