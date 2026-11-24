@@ -69,6 +69,7 @@ import {
   warnPluginCommandConflicts,
 } from "@/plugins/composer-commands";
 import { PluginTaggedText, PluginToolPart } from "@/plugins/renderers";
+import { slashCatalogNotice } from "./slash-catalog-notice";
 import { usePlugins } from "@/plugins/registry";
 import {
   panelCommandRequest,
@@ -1019,6 +1020,7 @@ const Composer: FC<{
     () => [...commandItems, ...pluginItems],
     [commandItems, pluginItems],
   );
+  const slashNotice = slashCatalogNotice(commandCatalogStatus, pluginItems.length > 0);
 
   const nestedCommandNames = useMemo(() => {
     const names = new Set<string>();
@@ -1180,17 +1182,9 @@ const Composer: FC<{
           emptyHint="Keep typing to refine the command search."
           onInserted={openPanelForItem}
         />
-        {composerText.trimStart().startsWith("/") && commandCatalogStatus !== "ready" ? (
+        {slashNotice && composerText.trimStart().startsWith("/") ? (
           <div role="status" className="bg-muted/50 text-muted-foreground flex items-center justify-between gap-3 px-3 py-2 text-xs">
-            <span className="min-w-0">
-              {commandCatalogStatus === "loading"
-                ? "Loading commands for this session."
-                : commandCatalogStatus === "empty"
-                  ? "No commands are available for this session. You can still type a slash command."
-                  : commandCatalogStatus === "fallback"
-                    ? "This engine does not provide a live command catalog. Showing built-in commands as a compatibility fallback."
-                    : "Commands couldn't be loaded for this session. Your draft is preserved."}
-            </span>
+            <span className="min-w-0">{slashNotice}</span>
             {(commandCatalogStatus === "fallback" || commandCatalogStatus === "unavailable") && onRetryCommands ? (
               <Button type="button" size="sm" variant="outline" onClick={onRetryCommands}>
                 Try Again
