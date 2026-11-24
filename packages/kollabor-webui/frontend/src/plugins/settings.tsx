@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { EngineApi } from "@/api";
 import { FieldRenderer, serializeDraft, type Draft } from "@/components/panels/FieldRenderer";
 import { Button } from "@/components/ui/button";
@@ -195,9 +195,9 @@ export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" |
   };
 }
 
-function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange, operationBusy, detailRef }: {
+function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange, onRemoved, operationBusy, detailRef }: {
   entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; remote: boolean; now: number; onUpdate: (id: string) => void;
-  onBusyChange: (busy: boolean) => void; operationBusy: boolean; detailRef: RefObject<HTMLElement | null>;
+  onBusyChange: (busy: boolean) => void; onRemoved: () => void; operationBusy: boolean; detailRef: RefObject<HTMLElement | null>;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -241,6 +241,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
       await api.json(`${pathFor(entry.id)}/${action}`, { method: "POST" });
       setConfirmation(null);
       await refreshPlugins();
+      if (action === "remove") onRemoved();
     } catch (caught) {
       setError(message(caught));
       await refreshPlugins();
@@ -381,10 +382,17 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
   const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [busyPluginKey, setBusyPluginKey] = useState<string | null>(null);
+  const [focusAfterRemoval, setFocusAfterRemoval] = useState(false);
   const [browserNow, setBrowserNow] = useState(() => Date.now() / 1000);
   const now = browserNow + inventory.serverTimeOffsetSeconds;
   const operationOpener = useRef<HTMLElement | null>(null);
   const detailRef = useRef<HTMLElement>(null);
+  const listRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    if (!focusAfterRemoval) return;
+    (detailRef.current ?? listRef.current)?.focus();
+    setFocusAfterRemoval(false);
+  }, [focusAfterRemoval]);
   const restoreOperationFocus = (event: Event) => {
     if (!operationOpener.current?.isConnected) return;
     event.preventDefault();
@@ -413,7 +421,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
       {inventory.error ? <p role="alert" className="text-destructive mb-4 break-words text-sm">{inventory.error}</p> : null}
       {!snapshot.listed && !snapshot.off ? <p className="text-muted-foreground mb-4 text-sm">Loading plugins…</p> : null}
       <div className="grid min-w-0 gap-5 md:grid-cols-[minmax(10rem,15rem)_minmax(0,1fr)] md:gap-6">
-        <nav aria-label="Plugin list" className="min-w-0">
+        <nav ref={listRef} tabIndex={-1} aria-label="Plugin list" className="min-w-0">
           {groups.filter((group) => group.entries.length || group.title === "Installed").map((group) => (
             <section key={group.title} className="mb-5">
               <div className="mb-2 flex items-center justify-between gap-2">
@@ -483,6 +491,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
             now={now}
             operationBusy={busyPluginKey === entryKey(selected)}
             onBusyChange={(busy) => reportPluginBusy(entryKey(selected), busy)}
+            onRemoved={() => setFocusAfterRemoval(true)}
             detailRef={detailRef}
             onUpdate={(pluginId) => {
               const active = document.activeElement;
