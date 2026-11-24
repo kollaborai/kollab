@@ -1828,12 +1828,11 @@ def _cli_is_hub_agent_context() -> bool:
 
 def _row_is_generation(row: dict, selected: dict) -> bool:
     """True when presence ``row`` still names the generation ``selected`` was
-    read as: same agent id, pid and start (#1408). A key the selection lacks is
-    not compared; a newer agent that took the path or pid differs in one."""
-    return all(
-        row.get(key) == selected[key]
-        for key in ("agent_id", "pid", "started_at")
-        if selected.get(key) is not None
+    read as: same agent id, pid and start (#1408). A selection missing any of
+    the three cannot prove it, so nothing is removed."""
+    keys = ("agent_id", "pid", "started_at")
+    return all(selected.get(key) is not None for key in keys) and all(
+        row.get(key) == selected[key] for key in keys
     )
 
 
@@ -2060,10 +2059,8 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     with open(path) as fh:
                         if json.load(fh) != snapshot:
                             return
-                except FileNotFoundError:
-                    return
                 except (OSError, ValueError):
-                    pass
+                    return  # gone or unreadable: not provably the row we read
             path.unlink(missing_ok=True)
 
         agents = []

@@ -1075,7 +1075,8 @@ grant (see below).
     - "all" stops only the peers your session started; peers launched by
       other lanes or the operator are immune (issue #669)
     - same as /hub stop <name>; /hub stop all typed by a person stops every
-      agent in that session's folder (issue #1408), the tool does not
+      agent in that session's folder (issue #1408); the tool keeps the
+      caller-owned scope
     - works for org-launched agents and any mesh peer
 
   example:
