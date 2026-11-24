@@ -99,7 +99,7 @@ def _write(directory, name, project):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{name}.json").write_text(json.dumps({
         "agent_id": name, "identity": name, "pid": os.getpid(),
-        "start_token": process_start_token(os.getpid()),
+        "start_token": process_start_token(os.getpid()), "started_at": time.time() - 5,
         "last_heartbeat": time.time(), "socket_path": str(directory / name),
         "project": project,
     }))
@@ -473,3 +473,64 @@ def test_cli_everywhere_skips_another_folders_row_it_cannot_prove(tmp_path, monk
 
     assert [call.args[0]["identity"] for call in stop.await_args_list] == ["far"]
     assert "legacy" in capsys.readouterr().out
+
+
+def test_withheld_signal_keeps_a_live_agents_presence(monkeypatch):
+    """Unproven pid still running: no signal, and its row and socket stay (no orphan)."""
+    import subprocess
+
+    import plugins.hub.plugin as hub_plugin
+
+    survivor = subprocess.Popen(["sleep", "30"])
+    try:
+        agent = _peer("tokenless")
+        agent.pid = survivor.pid
+        cleaned = []
+        plugin = HubPlugin()
+        plugin._presence = SimpleNamespace(cleanup_agent=lambda a: cleaned.append(a.identity))
+        plugin._identity = SimpleNamespace(agent_id="me", identity="legal-ops-lead")
+        monkeypatch.setattr(
+            hub_plugin.AgentMessenger, "signal_shutdown", AsyncMock(return_value=False)
+        )
+
+        result = asyncio.run(plugin._stop_peer_agent(agent, reason="test"))
+
+        assert cleaned == []
+        assert "not stopped" in result
+    finally:
+        survivor.kill()
+        survivor.wait()
+
+
+def test_session_less_stop_sends_no_unbound_shutdown(monkeypatch):
+    """No start time on the row: no shutdown that a replacement would also accept."""
+    import plugins.hub.plugin as hub_plugin
+
+    agent = _peer("partial")
+    agent.started_at = None
+    plugin = HubPlugin()
+    plugin._presence = SimpleNamespace(cleanup_agent=lambda a: None)
+    plugin._identity = SimpleNamespace(agent_id="me", identity="legal-ops-lead")
+    shutdown = AsyncMock(return_value=True)
+    monkeypatch.setattr(hub_plugin.AgentMessenger, "signal_shutdown", shutdown)
+
+    asyncio.run(plugin._stop_peer_agent(agent, reason="test"))
+
+    assert shutdown.await_count == 0
+
+
+def test_cli_everywhere_skips_a_row_without_a_start_time(tmp_path, monkeypatch, capsys):
+    from kollabor_agent.runtime import process_start_token
+
+    stop = _cli(tmp_path, monkeypatch, local=False)
+    (tmp_path / "other" / "partial.json").write_text(json.dumps({
+        "agent_id": "partial", "identity": "partial", "pid": os.getpid(),
+        "start_token": process_start_token(os.getpid()),
+        "last_heartbeat": time.time(), "project": "/work/elsewhere",
+        "socket_path": str(tmp_path / "other" / "partial"),
+    }))
+
+    asyncio.run(_handle_cli_hub(["stop", "all", "--everywhere"]))
+
+    assert [call.args[0]["identity"] for call in stop.await_args_list] == ["far"]
+    assert "partial" in capsys.readouterr().out
