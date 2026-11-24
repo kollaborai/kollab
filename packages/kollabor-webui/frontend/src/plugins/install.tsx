@@ -241,11 +241,11 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
         {job?.status === "installing" && !error ? <p ref={progressRef} tabIndex={-1} role="status" className="text-muted-foreground text-sm">Installing plugin…</p> : null}
         {job?.status === "complete" ? <p role="status" className="text-muted-foreground text-sm">Plugin {action === "install" ? "added" : "updated"}.</p> : null}
         {job?.warning ? <p role="alert" className="break-words text-sm">{job.warning}</p> : null}
-        {job?.status === "error" ? <p role="alert" className="text-destructive text-sm">{job.error || "Plugin review failed."}</p> : null}
+        {job?.status === "error" ? <p role="alert" className="text-destructive break-words text-sm">{job.error || "Plugin review failed."}</p> : null}
         {job?.status === "cancelled" ? <p role="status" className="text-muted-foreground text-sm">Plugin review was cancelled. You can start another review.</p> : null}
         {ready && job ? <>
-          <p className="text-sm font-semibold">{job.manifest?.name ?? job.plugin_id ?? "Plugin"}</p>
-          {job.manifest?.description ? <p className="text-muted-foreground text-sm">{job.manifest.description}</p> : null}
+          <p className="break-words text-sm font-semibold">{job.manifest?.name ?? job.plugin_id ?? "Plugin"}</p>
+          {job.manifest?.description ? <p className="text-muted-foreground break-words text-sm">{job.manifest.description}</p> : null}
           {job.source ? <p className="break-all text-sm">From: {job.source}{job.ref ? ` (${job.ref})` : " (default branch)"}</p> : null}
           {job.previous_commit ? <p className="break-all text-xs">Previous Commit: {job.previous_commit}</p> : null}
           <p className="break-all text-xs">Commit: {job.commit}</p><p className="break-all text-xs">Files SHA-256: {job.files_sha256}</p>

@@ -129,6 +129,19 @@ describe("plugin settings page", () => {
     expect(markup).not.toContain("Development folder:");
   });
 
+  it("shows an installed plugin version and the shadowing development folder", async () => {
+    const markup = await markupFor([{
+      ...plugin([]),
+      enabled: true,
+      shadowed: true,
+      state: "ok",
+      version: "2.3.4",
+    }]);
+
+    expect(markup).toContain("Version: 2.3.4");
+    expect(markup.match(/Shadowed by a Dev Folder/g)).toHaveLength(2);
+  });
+
   it("does not offer an enable switch for an always-on development plugin", async () => {
     const markup = await markupFor([{
       ...plugin([]),
@@ -177,6 +190,10 @@ describe("plugin settings page", () => {
         { name: "worker-b", state: "running" },
         { name: "retry-worker", state: "stop-failed" },
         { name: "stopped-worker", state: "stopped" },
+        { name: "starting-worker", state: "starting" },
+        { name: "retrying-worker", state: "backoff" },
+        { name: "failed-worker", state: "error" },
+        { name: "unknown-worker", state: "unknown" },
       ],
     }]);
 
@@ -186,6 +203,8 @@ describe("plugin settings page", () => {
       "View Log retry-worker", "Retry Stop retry-worker",
       "View Log stopped-worker", "Start stopped-worker",
     ]) expect(markup).toContain(`aria-label="${label}"`);
+    for (const name of ["starting-worker", "retrying-worker", "failed-worker", "unknown-worker"])
+      expect(markup).not.toContain(`aria-label="Start ${name}"`);
   });
 
   it("clears old service errors before the next service or confirmation action", () => {

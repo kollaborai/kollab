@@ -76,7 +76,8 @@ function pluginStatus(entry: PluginEntry, record: PluginRecord | undefined): str
   const failure = failureOf(entry, record);
   if (failure !== null)
     return record?.status === "failed" || entry.state === "error" ? "Failed to Load" : "Error";
-  return entry.state === "changed-on-disk" ? "Changed on Disk"
+  return entry.shadowed ? "Shadowed by a Dev Folder"
+    : entry.state === "changed-on-disk" ? "Changed on Disk"
     : entry.state === "stopping" ? "Stopping"
     : entry.enabled ? "On" : "Off";
 }
@@ -140,7 +141,7 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
         {canControl && service.state === "stop-failed" ? (
           <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Retry Stop ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void control("stop"); }}>Retry Stop</Button>
         ) : null}
-        {canControl && enabled && service.state !== "running" && service.state !== "stopping" && service.state !== "stop-failed" ? (
+        {canControl && enabled && ["stopped", "exited", "crash-stopped"].includes(service.state) ? (
           <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Start ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void control("start"); }}>Start</Button>
         ) : null}
       </div>
@@ -272,6 +273,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
           <PluginFailure error={failure} inset={false} onRetry={() => { if (record) retryPlugin(entry.id); else void refreshPlugins(); }} />
         ) : null}
         {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development Folder: {entry.source}</p> : null}
+        {entry.kind === "installed" && entry.version ? <p className="text-muted-foreground break-words text-xs">Version: {entry.version}</p> : null}
         {entry.services.length ? (
           <div>
             <h3 className="text-sm font-semibold">Background Processes</h3>
@@ -331,7 +333,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
       <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open && !busy && !operationBusy) setConfirmation(null); }}>
         <DialogContent onCloseAutoFocus={restoreConfirmationFocus}>
           <DialogHeader>
-            <DialogTitle>{confirmation === "remove" ? "Remove" : "Turn off"} {entry.name}?</DialogTitle>
+            <DialogTitle>{confirmation === "remove" ? "Remove" : "Turn Off"} {entry.name}?</DialogTitle>
             <DialogDescription>{confirmation === "remove" ? "Background processes will stop. Plugin requests must finish before it can be removed." : "Background processes will stop. Cancel active plugin agent runs before turning it off."}</DialogDescription>
           </DialogHeader>
           {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
@@ -383,7 +385,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
       {snapshot.off ? <p className="text-muted-foreground mb-4 text-sm">Plugins are off for this page. Remove <code>?plugins=off</code> and reload.</p> : null}
       {remote ? <p className="text-muted-foreground mb-4 text-sm">Manage plugins on this computer</p> : null}
-      {inventory.error ? <p role="alert" className="text-destructive mb-4 text-sm">{inventory.error}</p> : null}
+      {inventory.error ? <p role="alert" className="text-destructive mb-4 break-words text-sm">{inventory.error}</p> : null}
       {!snapshot.listed && !snapshot.off ? <p className="text-muted-foreground mb-4 text-sm">Loading plugins…</p> : null}
       <div className="grid min-w-0 gap-5 md:grid-cols-[minmax(10rem,15rem)_minmax(0,1fr)] md:gap-6">
         <nav aria-label="Plugin list" className="min-w-0">
