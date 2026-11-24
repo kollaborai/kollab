@@ -51,10 +51,14 @@ function elapsedLabel(seconds: number): string {
 function serviceStatus(service: PluginService, now: number): string {
   if (service.state === "running") {
     const since = typeof service.since === "number" ? service.since : null;
-    const heartbeat = typeof service.heartbeat === "number" ? service.heartbeat : since;
+    const heartbeat = typeof service.heartbeat === "number" ? service.heartbeat : null;
+    const monitorSince = typeof service.heartbeat_monitor_since === "number" ? service.heartbeat_monitor_since : null;
+    const heartbeatBaseline = heartbeat === null ? monitorSince
+      : monitorSince === null ? heartbeat
+      : Math.max(heartbeat, monitorSince);
     const interval = service.heartbeat_s;
-    if (typeof interval === "number" && interval > 0 && heartbeat !== null && now - heartbeat > interval)
-      return `Running · No Heartbeat for ${elapsedLabel(now - heartbeat)}`;
+    if (typeof interval === "number" && interval > 0 && heartbeatBaseline !== null && now - heartbeatBaseline > interval)
+      return `Running · No Heartbeat for ${elapsedLabel(now - heartbeatBaseline)}`;
     return since === null ? "Running" : `Running · ${elapsedLabel(now - since)}`;
   }
   switch (service.state) {

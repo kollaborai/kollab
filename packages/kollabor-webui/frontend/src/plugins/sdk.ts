@@ -52,6 +52,7 @@ export type PluginService = {
   secrets?: string[];
   heartbeat_s?: number | null;
   heartbeat?: number | null;
+  heartbeat_monitor_since?: number | null;
   error?: string | null;
 };
 
