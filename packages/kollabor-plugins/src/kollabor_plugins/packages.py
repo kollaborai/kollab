@@ -85,6 +85,13 @@ _MANIFEST_KEYS = {
 _SERVICE_KEYS = {"command", "autostart", "restart", "stop_timeout_s", "heartbeat_s", "secrets"}
 _MAX_SERVICE_SECONDS = 86400
 _MAX_MANIFEST_STRING = 4096
+_MAX_PLUGIN_SERVICES = 128
+_MAX_PLUGIN_SERVICE_SECRETS = 64
+_MAX_PLUGIN_USES = 256
+
+
+class ManifestReviewLimitError(ValueError):
+    """A manifest exceeds a collection limit that the review UI can display."""
 
 
 def _check_manifest_string_lengths(value: object) -> None:
@@ -162,7 +169,11 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
         if not isinstance(manifest.get(field), str) or not manifest[field].strip():
             raise ValueError(f"Invalid plugin {field}")
     uses = manifest.get("uses", [])
-    if not isinstance(uses, list) or any(not isinstance(item, str) for item in uses):
+    if not isinstance(uses, list):
+        raise ValueError("Invalid uses")
+    if len(uses) > _MAX_PLUGIN_USES:
+        raise ManifestReviewLimitError(f"Plugin manifest exceeds {_MAX_PLUGIN_USES} uses")
+    if any(not isinstance(item, str) for item in uses):
         raise ValueError("Invalid uses")
     for field in ("python", "engine"):
         if field in manifest:
@@ -192,6 +203,8 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
     services = manifest.get("services", {})
     if not isinstance(services, dict):
         raise ValueError("Invalid services")
+    if len(services) > _MAX_PLUGIN_SERVICES:
+        raise ManifestReviewLimitError(f"Plugin manifest exceeds {_MAX_PLUGIN_SERVICES} services")
     for name, service in services.items():
         if not isinstance(name, str) or not _SERVICE.fullmatch(name) or not isinstance(service, dict):
             raise ValueError("Invalid service name or definition")
@@ -210,7 +223,13 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
             if type(value) not in (int, float) or not 0 < value <= _MAX_SERVICE_SECONDS:
                 raise ValueError(f"Invalid service {key}")
         secrets = service.get("secrets", [])
-        if not isinstance(secrets, list) or any(not isinstance(x, str) or f"secret:{x}" not in uses for x in secrets):
+        if not isinstance(secrets, list):
+            raise ValueError("Undeclared service secret")
+        if len(secrets) > _MAX_PLUGIN_SERVICE_SECRETS:
+            raise ManifestReviewLimitError(
+                f"Plugin service exceeds {_MAX_PLUGIN_SERVICE_SECRETS} secrets"
+            )
+        if any(not isinstance(x, str) or f"secret:{x}" not in uses for x in secrets):
             raise ValueError("Undeclared service secret")
     for path in root.rglob("*"):
         if path.is_symlink() and not path.resolve().is_relative_to(root):

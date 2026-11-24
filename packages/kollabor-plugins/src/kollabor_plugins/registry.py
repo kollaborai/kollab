@@ -21,6 +21,9 @@ from .discovery import PluginDiscovery
 from .factory import PluginFactory
 from .packages import (
     _ID,
+    _MAX_PLUGIN_SERVICE_SECRETS,
+    _MAX_PLUGIN_SERVICES,
+    _MAX_PLUGIN_USES,
     _MAX_ENABLE_ORDER,
     _SYMBOL,
     _read_registry,
@@ -529,7 +532,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
     declared = manifest.get("services", {})
     if not isinstance(declared, dict):
         return result
-    for name in declared:
+    for name in islice(declared, _MAX_PLUGIN_SERVICES):
         if not isinstance(name, str) or not _SERVICE.fullmatch(name):
             continue
         data_dir = home / "plugin-data"
@@ -586,6 +589,12 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
             since = None
         definition = declared[name]
         heartbeat_s = heartbeat_seconds(definition)
+        raw_secrets = definition.get("secrets", []) if isinstance(definition, dict) else []
+        secrets_omitted = (
+            max(0, len(raw_secrets) - _MAX_PLUGIN_SERVICE_SECRETS)
+            if isinstance(raw_secrets, list)
+            else 0
+        )
         if status == "running" and identity is None:
             status = "unknown"
         if status == "stopping" and identity is None:
@@ -601,6 +610,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
                 "since": since,
                 "restarts": len(history) if isinstance(history, list) else 0,
                 "secrets": _service_secrets(definition),
+                "secrets_omitted": secrets_omitted,
                 "heartbeat": None,
                 "heartbeat_s": heartbeat_s,
                 "heartbeat_monitor_since": None,
@@ -618,8 +628,15 @@ def _service_secrets(definition: object) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [
-        secret for secret in raw[:64] if isinstance(secret, str) and _SYMBOL.fullmatch(secret) and len(secret) <= 64
+        secret
+        for secret in raw[:_MAX_PLUGIN_SERVICE_SECRETS]
+        if isinstance(secret, str) and _SYMBOL.fullmatch(secret) and len(secret) <= 64
     ]
+
+
+def _omitted_service_count(manifest: dict) -> int:
+    services = manifest.get("services")
+    return max(0, len(services) - _MAX_PLUGIN_SERVICES) if isinstance(services, dict) else 0
 
 
 def _finite_service_number(value: object) -> float | None:
@@ -695,9 +712,13 @@ def _normalize_service_entry(value: object) -> dict | None:
     raw_secrets = value.get("secrets")
     secrets = _bounded_unique(
         raw_secrets,
-        64,
+        _MAX_PLUGIN_SERVICE_SECRETS,
         lambda secret: secret if isinstance(secret, str) and _SYMBOL.fullmatch(secret) and len(secret) <= 64 else None,
     ) if isinstance(raw_secrets, list) else []
+    inherited_omissions = value.get("secrets_omitted")
+    secrets_omitted = inherited_omissions if type(inherited_omissions) is int and inherited_omissions > 0 else 0
+    if isinstance(raw_secrets, list):
+        secrets_omitted += max(0, len(raw_secrets) - _MAX_PLUGIN_SERVICE_SECRETS)
     raw_error = value.get("error")
     error = raw_error if isinstance(raw_error, str) and raw_error in _SERVICE_INVENTORY_ERRORS else None
     return {
@@ -715,6 +736,7 @@ def _normalize_service_entry(value: object) -> dict | None:
         "stop_deadline": _inventory_number(value.get("stop_deadline")),
         "error": error,
         "secrets": secrets,
+        "secrets_omitted": secrets_omitted,
     }
 
 
@@ -912,14 +934,25 @@ def _normalize_plugin_entry(value: object) -> dict | None:
 
     raw_services = value.get("services")
     services = (
-        [service for item in raw_services[:128] if (service := _normalize_service_entry(item)) is not None]
+        [
+            service
+            for item in raw_services[:_MAX_PLUGIN_SERVICES]
+            if (service := _normalize_service_entry(item)) is not None
+        ]
         if isinstance(raw_services, list)
         else []
     )
+    reported_omissions = value.get("omitted")
+    reported_services = reported_omissions.get("services") if isinstance(reported_omissions, dict) else 0
+    omitted_services = (reported_services if type(reported_services) is int and reported_services > 0 else 0)
+    if isinstance(raw_services, list):
+        omitted_services += max(0, len(raw_services) - _MAX_PLUGIN_SERVICES)
     raw_uses = value.get("uses")
-    uses = _bounded_unique(raw_uses, 256, _normalize_capability) if isinstance(raw_uses, list) else []
+    uses = _bounded_unique(raw_uses, _MAX_PLUGIN_USES, _normalize_capability) if isinstance(raw_uses, list) else []
+    omitted_uses = max(0, len(raw_uses) - _MAX_PLUGIN_USES) if isinstance(raw_uses, list) else 0
     raw_granted = value.get("granted")
-    granted = _bounded_unique(raw_granted, 256, _normalize_capability) if isinstance(raw_granted, list) else []
+    granted = _bounded_unique(raw_granted, _MAX_PLUGIN_USES, _normalize_capability) if isinstance(raw_granted, list) else []
+    omitted_granted = max(0, len(raw_granted) - _MAX_PLUGIN_USES) if isinstance(raw_granted, list) else 0
     raw_settings = value.get("settings")
     settings = (
         [field for item in raw_settings[:256] if (field := _normalize_setting(item)) is not None]
@@ -964,6 +997,7 @@ def _normalize_plugin_entry(value: object) -> dict | None:
         else None,
         "uses": uses,
         "granted": granted,
+        "omitted": {"services": omitted_services, "uses": omitted_uses, "granted": omitted_granted},
     }
 
 
@@ -1095,6 +1129,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "web": _web_entry(root, manifest),
                 "contributes": manifest.get("contributes", {}),
                 "services": service_entries,
+                "omitted": {"services": _omitted_service_count(manifest)},
                 "uses": manifest.get("uses", []),
                 "granted": record.get("granted", []),
             }
@@ -1149,6 +1184,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "web": _web_entry(root, manifest),
                 "contributes": manifest.get("contributes", {}),
                 "services": service_entries,
+                "omitted": {"services": _omitted_service_count(manifest)},
                 "uses": manifest.get("uses", []),
                 "granted": granted,
             }

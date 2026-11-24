@@ -86,6 +86,20 @@ function pluginStatus(entry: PluginEntry, record: PluginRecord | undefined): str
     : entry.enabled ? "On" : "Off";
 }
 
+export function pluginInventoryOmissionSummary(entry: Pick<PluginEntry, "omitted" | "services">): string | null {
+  const serviceSecretCount = entry.services.reduce((total, service) => total + service.secrets_omitted, 0);
+  const omitted = [
+    [entry.omitted.services, "service"],
+    [entry.omitted.uses, "use declaration"],
+    [entry.omitted.granted, "granted capability"],
+    [serviceSecretCount, "service secret"],
+  ] as const;
+  const details = omitted
+    .filter(([count]) => count > 0)
+    .map(([count, label]) => `${count} ${label}${count === 1 ? "" : "s"}`);
+  return details.length ? `Inventory omitted: ${details.join(", ")}.` : null;
+}
+
 function ServiceRow({ service, api, id, now, canControl, enabled, disabled, operationBusy, onBusyChange, onError }: {
   service: PluginService; api: EngineApi; id: string; now: number; canControl: boolean; enabled: boolean; disabled: boolean; operationBusy: boolean;
   onBusyChange: (busy: boolean) => void; onError: (message: string | null) => void;
@@ -200,6 +214,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
   const failure = failureOf(entry, record);
   const uses = describeUses(entry.uses);
   const usesCount = uses.throughKollab.length + uses.onItsOwn.length + uses.other.length;
+  const inventoryOmissionSummary = pluginInventoryOmissionSummary(entry);
   const SettingsView = record?.contributions.settings?.render;
   const settings = entry.settings ?? [];
   const setOperationBusy = (value: boolean) => {
@@ -271,6 +286,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
         {entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}
         {managed && entry.source ? ` · ${entry.source}` : ""}
       </p>
+      {inventoryOmissionSummary ? <p role="status" className="text-muted-foreground text-xs">{inventoryOmissionSummary}</p> : null}
       {stopping ? <p role="status" className="text-muted-foreground mt-2 text-sm">Waiting for the plugin to stop.</p> : null}
       {error && confirmation === null ? <p role="alert" className="text-destructive mt-2 break-words text-sm">{error}</p> : null}
       {entry.state === "changed-on-disk" && entry.error ? (

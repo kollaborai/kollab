@@ -42,6 +42,7 @@ const LOADABLE = new Set<PluginEntry["state"]>(["ok", "error", "stopping", "stop
 const OWN_REACT =
   /__(?:CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE|SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED)\s*=(?!=)/;
 const INVENTORY_TEXT_LIMIT = 4096;
+export const PLUGIN_INVENTORY_LIMITS = { services: 128, serviceSecrets: 64, uses: 256 } as const;
 const SENSITIVE_TEXT = /(?:\b(?:secret|token|password|credential|authorization|bearer|api[_-]?key)[-_][A-Za-z0-9_-]{6,}|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|credential|authorization)\s*[:=]\s*\S+)/i;
 const INVISIBLE_CONTROLS = /[\u200b\u202a-\u202e\u2066-\u2069]/;
 const SERVICE_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -180,7 +181,7 @@ function normalizeUse(value: unknown): string | null {
 }
 
 export function normalizePluginUses(value: unknown): string[] {
-  return normalizeBoundedUnique(value, 256, normalizeUse);
+  return normalizeBoundedUnique(value, PLUGIN_INVENTORY_LIMITS.uses, normalizeUse);
 }
 
 function normalizeSettings(value: unknown): PanelField[] {
@@ -245,9 +246,12 @@ function normalizeService(value: unknown): PluginService | null {
   const state = SERVICE_STATES.has(raw.state as PluginService["state"]) ? raw.state as PluginService["state"] : "unknown";
   const desired = raw.desired === "running" || raw.desired === "stopped" ? raw.desired : "stopped";
   const error = typeof raw.error === "string" && FIXED_SERVICE_ERRORS.has(raw.error) ? raw.error : null;
-  const secrets = normalizeBoundedUnique(raw.secrets, 64, (secret) =>
+  const rawSecrets = Array.isArray(raw.secrets) ? raw.secrets : [];
+  const secrets = normalizeBoundedUnique(raw.secrets, PLUGIN_INVENTORY_LIMITS.serviceSecrets, (secret) =>
     typeof secret === "string" && SECRET_NAME.test(secret) ? secret : null,
   );
+  const secretsOmitted = (safeInteger(raw.secrets_omitted) ?? 0)
+    + Math.max(0, rawSecrets.length - PLUGIN_INVENTORY_LIMITS.serviceSecrets);
   return {
     name,
     state,
@@ -261,6 +265,7 @@ function normalizeService(value: unknown): PluginService | null {
     stop_deadline: safeNumber(raw.stop_deadline),
     error,
     secrets,
+    secrets_omitted: secretsOmitted,
   };
 }
 
@@ -285,14 +290,24 @@ export function normalizePluginEntry(value: unknown): PluginEntry | null {
   const web = webEntry && (webRaw?.style == null || webStyle) && webHash
     ? { entry: webEntry, style: webStyle, hash: webHash }
     : null;
-  const services = Array.isArray(raw.services)
-    ? raw.services.slice(0, 128).flatMap((service) => {
+  const rawServices = Array.isArray(raw.services) ? raw.services : [];
+  const services = rawServices
+    .slice(0, PLUGIN_INVENTORY_LIMITS.services).flatMap((service) => {
       const normalized = normalizeService(service);
       return normalized ? [normalized] : [];
     })
-    : [];
   const uses = normalizePluginUses(raw.uses);
-  const granted = normalizeBoundedUnique(raw.granted, 256, normalizeUse);
+  const rawGranted = Array.isArray(raw.granted) ? raw.granted : [];
+  const granted = normalizeBoundedUnique(raw.granted, PLUGIN_INVENTORY_LIMITS.uses, normalizeUse);
+  const reportedOmissions = record(raw.omitted);
+  const omitted = {
+    services: (safeInteger(reportedOmissions?.services) ?? 0)
+      + Math.max(0, rawServices.length - PLUGIN_INVENTORY_LIMITS.services),
+    uses: (safeInteger(reportedOmissions?.uses) ?? 0)
+      + Math.max(0, (Array.isArray(raw.uses) ? raw.uses.length : 0) - PLUGIN_INVENTORY_LIMITS.uses),
+    granted: (safeInteger(reportedOmissions?.granted) ?? 0)
+      + Math.max(0, rawGranted.length - PLUGIN_INVENTORY_LIMITS.uses),
+  };
   return {
     id,
     name: safeText(raw.name, 256) ?? id,
@@ -312,6 +327,7 @@ export function normalizePluginEntry(value: unknown): PluginEntry | null {
     settings_section: section ? { title: sectionTitle ?? "Settings" } : null,
     uses,
     granted,
+    omitted,
   };
 }
 

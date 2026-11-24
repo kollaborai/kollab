@@ -8,6 +8,7 @@ import {
   normalizePluginContributes,
   normalizePluginUses,
   normalizePluginWebPath,
+  PLUGIN_INVENTORY_LIMITS,
   safePluginText,
 } from "./loader";
 
@@ -16,7 +17,9 @@ type Job = {
   action?: "install" | "update"; plugin_id?: string; commit?: string; files_sha256?: string;
   source?: string; ref?: string; previous_commit?: string; changed_folders?: string[];
   error?: string | null; warning?: string | null;
-  manifest?: { name?: string; version?: string; description?: string; uses?: unknown; services?: unknown; python?: unknown; engine?: unknown; web?: unknown; agents?: unknown; contributes?: unknown; hooks?: unknown; mcp?: unknown };
+  manifest?: { name?: string; version?: string; description?: string; uses?: unknown; services?: unknown;
+    omitted?: { services?: number; uses?: number; service_secrets?: number };
+    python?: unknown; engine?: unknown; web?: unknown; agents?: unknown; contributes?: unknown; hooks?: unknown; mcp?: unknown };
 };
 const errorText = (error: unknown) => error instanceof ApiError
   ? error.status === 404 ? "Plugin review no longer exists."
@@ -31,6 +34,7 @@ const JOB_ERRORS = new Set([
   "Plugin approval, files, or active runs changed; check plugin status and stage again",
   "Cannot install plugin; check the plugin directory and try again",
   "Cannot install plugin; stage it again",
+  "Plugin manifest exceeds the review limits (128 services, 64 secrets per service, 256 uses)",
 ]);
 const JOB_WARNINGS = new Set([
   "Plugin staging files could not be removed",
@@ -63,18 +67,26 @@ function normalizeReviewManifest(value: unknown, pluginId: string | undefined): 
   const raw = objectRecord(value);
   if (!raw) return undefined;
   const services = objectRecord(raw.services);
-  const safeServices: Record<string, { secrets: string[] }> = {};
+  const safeServices: Record<string, { secrets: string[]; secrets_omitted: number }> = {};
+  let omittedServiceSecrets = 0;
   if (services) {
-    for (const [name, definition] of boundedObjectEntries(services, 128)) {
+    for (const [name, definition] of boundedObjectEntries(services, PLUGIN_INVENTORY_LIMITS.services)) {
       const safeName = safePluginText(name, 40);
       if (!safeName || !SERVICE_ID.test(safeName)) continue;
       const service = objectRecord(definition);
-      const secrets = normalizeBoundedUnique(service?.secrets, 64, (item) =>
+      const secretValues = Array.isArray(service?.secrets) ? service.secrets : [];
+      const secretsOmitted = Math.max(0, secretValues.length - PLUGIN_INVENTORY_LIMITS.serviceSecrets);
+      omittedServiceSecrets += secretsOmitted;
+      const secrets = normalizeBoundedUnique(service?.secrets, PLUGIN_INVENTORY_LIMITS.serviceSecrets, (item) =>
         typeof item === "string" && SECRET_NAME.test(item) ? item : null,
       );
-      safeServices[safeName] = { secrets };
+      safeServices[safeName] = { secrets, secrets_omitted: secretsOmitted };
     }
   }
+  const rawUses = Array.isArray(raw.uses) ? raw.uses : [];
+  const omittedServices = services
+    ? Math.max(0, Object.keys(services).length - PLUGIN_INVENTORY_LIMITS.services)
+    : 0;
   const safeContributions = normalizePluginContributes(raw.contributes);
   const name = safePluginText(raw.name, 256) ?? pluginId ?? "Plugin";
   const version = safePluginText(raw.version, 256) ?? undefined;
@@ -85,6 +97,11 @@ function normalizeReviewManifest(value: unknown, pluginId: string | undefined): 
     description,
     uses: normalizePluginUses(raw.uses),
     services: safeServices,
+    omitted: {
+      services: omittedServices,
+      uses: Math.max(0, rawUses.length - PLUGIN_INVENTORY_LIMITS.uses),
+      service_secrets: omittedServiceSecrets,
+    },
     contributes: safeContributions,
     python: Boolean(raw.python),
     engine: Boolean(raw.engine),
@@ -146,7 +163,16 @@ export function describePluginAdds(manifest: NonNullable<Job["manifest"]>): stri
   const safeContributions = normalizePluginContributes(manifest.contributes);
   const contributions = Object.entries(safeContributions)
     .flatMap(([kind, entries]) => entries.length ? [contributionSummary(kind, entries.length)] : []);
-  const services = boundedObjectEntries(objectRecord(manifest.services) ?? {}, 128);
+  const services = boundedObjectEntries(
+    objectRecord(manifest.services) ?? {},
+    PLUGIN_INVENTORY_LIMITS.services,
+  );
+  const omitted = manifest.omitted ?? {};
+  const omissions = [
+    omitted.services ? `${omitted.services} additional service${omitted.services === 1 ? "" : "s"} omitted from this review` : null,
+    omitted.uses ? `${omitted.uses} additional use declaration${omitted.uses === 1 ? "" : "s"} omitted from this review` : null,
+    omitted.service_secrets ? `${omitted.service_secrets} additional service secret${omitted.service_secrets === 1 ? "" : "s"} omitted from this review` : null,
+  ].filter((line): line is string => line !== null);
   return [
     ...contributions,
     ...(manifest.python ? ["code that runs in every agent"] : []),
@@ -156,6 +182,7 @@ export function describePluginAdds(manifest: NonNullable<Job["manifest"]>): stri
     ...(manifest.hooks ? ["hooks"] : ["no hooks"]),
     ...(manifest.mcp ? ["MCP servers"] : ["no MCP servers"]),
     ...(services.length ? [`${services.length} background process${services.length === 1 ? "" : "es"}`] : []),
+    ...omissions,
   ];
 }
 
@@ -381,12 +408,12 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   const uses = Array.isArray(job?.manifest?.uses) ? job.manifest.uses : [];
   const { throughKollab: declaredThroughKollab, onItsOwn, other } = describeUses(uses);
   const services = job?.manifest?.services && typeof job.manifest.services === "object" && !Array.isArray(job.manifest.services)
-    ? boundedObjectEntries(objectRecord(job.manifest.services) ?? {}, 128) : [];
+    ? boundedObjectEntries(objectRecord(job.manifest.services) ?? {}, PLUGIN_INVENTORY_LIMITS.services) : [];
   const throughKollab = [
     ...declaredThroughKollab,
     ...services.flatMap(([name, value]) => {
       const service = objectRecord(value);
-      const secrets = normalizeBoundedUnique(service?.secrets, 64, (item) =>
+      const secrets = normalizeBoundedUnique(service?.secrets, PLUGIN_INVENTORY_LIMITS.serviceSecrets, (item) =>
         typeof item === "string" && SECRET_NAME.test(item) ? item : null,
       );
       return secrets.length ? [`Background process ${name} receives: ${secrets.join(", ")}.`] : [];

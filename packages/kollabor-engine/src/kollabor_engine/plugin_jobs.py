@@ -24,6 +24,9 @@ _MAX_STAGING = 4
 _JOB_TTL = 3600
 _CLEANUP_RETRY_DELAY = 60
 _STAGE_TIMEOUT = 120
+_MANIFEST_REVIEW_LIMIT_ERROR = (
+    "Plugin manifest exceeds the review limits (128 services, 64 secrets per service, 256 uses)"
+)
 
 
 class PluginJobs:
@@ -247,6 +250,8 @@ class PluginJobs:
         except BaseException:
             await cls._stop_staging_process(process)
             raise
+        if process.returncode == 2:
+            raise ValueError(_MANIFEST_REVIEW_LIMIT_ERROR)
         if process.returncode != 0 or len(output) > 1024 * 1024:
             raise ValueError("Plugin staging worker failed")
         result = json.loads(output)
@@ -305,7 +310,11 @@ class PluginJobs:
             raise
         except Exception as exc:
             logger.warning("Plugin staging failed: %s", type(exc).__name__)
-            job["error"] = "Cannot stage plugin source; check the URL, ref, and plugin manifest"
+            job["error"] = (
+                _MANIFEST_REVIEW_LIMIT_ERROR
+                if str(exc) == _MANIFEST_REVIEW_LIMIT_ERROR
+                else "Cannot stage plugin source; check the URL, ref, and plugin manifest"
+            )
             interrupted = await self._cleanup_staging(job)
             if job["status"] != "cancelling":  # a cancel that arrived during cleanup owns the state
                 job["status"] = "error"
