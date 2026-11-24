@@ -471,7 +471,10 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
       const renderer: RendererSpec = spec.tool ? { tool: spec.tool, render: spec.render } : { tag: spec.tag, render: spec.render };
       contribute((current) => ({
         ...current,
-        renderers: [...current.renderers.filter((item) => (item.tool ?? item.tag) !== name), renderer],
+        renderers: [
+          ...current.renderers.filter((item) => (spec.tool ? item.tool : item.tag) !== name),
+          renderer,
+        ],
       }));
     },
     notice,
