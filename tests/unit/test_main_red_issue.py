@@ -234,3 +234,71 @@ def test_retry_after_a_failed_comment_still_posts_the_pr_comment_once():
 
     assert len(gh.issue_posts) == 1
     assert len(gh.comment_posts) == 1
+
+
+def test_overlapping_duplicate_cleanup_retries_comment_on_surviving_issue():
+    import threading
+
+    class RacingGh(FakeGh):
+        def __init__(self):
+            super().__init__([{"number": 42, "html_url": "https://example.test/pull/42"}])
+            self.read_barrier = threading.Barrier(2)
+            self.created_barrier = threading.Barrier(2)
+            self.all_issue_reads = 0
+            self.next_number = 90
+            self.lock = threading.Lock()
+
+        def __call__(self, args):
+            path = args[1]
+            if path == "repos/owner/repo/issues?state=all&per_page=100":
+                with self.lock:
+                    self.all_issue_reads += 1
+                    call_number = self.all_issue_reads
+                    snapshot = list(self.issues + self.closed_issues)
+                if call_number <= 2:
+                    self.read_barrier.wait(timeout=5)
+                elif len(snapshot) == 1:
+                    self.created_barrier.wait(timeout=5)
+                return json.dumps(snapshot)
+            if path == "repos/owner/repo/issues" and "--method" in args:
+                with self.lock:
+                    self.next_number += 1
+                    number = self.next_number
+                result = json.loads(super().__call__(args))
+                result["number"] = number
+                result["html_url"] = f"https://example.test/issues/{number}"
+                with self.lock:
+                    self.issues[-1].update(result)
+                self.created_barrier.wait(timeout=5)
+                return json.dumps(result)
+            if path.startswith("repos/owner/repo/issues/") and "--method" in args and "PATCH" in args:
+                number = int(path.rsplit("/", 1)[1])
+                with self.lock:
+                    for issue in self.issues:
+                        if issue["number"] == number:
+                            issue["state"] = "closed"
+                return json.dumps({"number": number, "state": "closed"})
+            return super().__call__(args)
+
+    gh = RacingGh()
+    gh.fail_comment_once = True
+    errors = []
+
+    def run():
+        try:
+            open_main_red_issue("owner/repo", "7", gh=gh)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == ["comment api failed once"]
+    open_issues = [issue for issue in gh.issues if issue.get("state") != "closed"]
+    assert len(open_issues) == 1
+    assert len(gh.comment_posts) == 1
+    assert f"https://example.test/issues/{open_issues[0]['number']}" in gh.comment_posts[0]
