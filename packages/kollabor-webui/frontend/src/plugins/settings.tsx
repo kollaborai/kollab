@@ -83,6 +83,7 @@ function pluginStatus(entry: PluginEntry, record: PluginRecord | undefined): str
   return entry.shadowed ? "Shadowed by a Dev Folder"
     : entry.state === "changed-on-disk" ? "Changed on Disk"
     : entry.state === "stopping" ? "Stopping"
+    : entry.state === "stop-failed" ? "Failed to Stop"
     : entry.enabled ? "On" : "Off";
 }
 
@@ -257,7 +258,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
     <section ref={detailRef} tabIndex={-1} aria-label={`${entry.name} details`} className="min-w-0 py-1">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
-        <span className={`text-xs font-medium ${failure !== null || entry.state === "changed-on-disk" ? "text-destructive" : "text-muted-foreground"}`}>{status}</span>
+        <span className={`text-xs font-medium ${failure !== null || entry.state === "changed-on-disk" || entry.state === "stop-failed" ? "text-destructive" : "text-muted-foreground"}`}>{status}</span>
         {entry.kind !== "dev" ? (
           <label className="inline-flex pointer-coarse:flex pointer-coarse:size-11 pointer-coarse:items-center pointer-coarse:justify-center">
             <Switch
