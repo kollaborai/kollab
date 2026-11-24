@@ -450,7 +450,9 @@ def test_fallback_stop_publishes_the_shared_default_grace(tmp_path, monkeypatch)
     pid_path.write_text(json.dumps({"wrapper": {"pid": 4321}, "child": None}))
     monkeypatch.setattr(services, "_verified_wrapper", lambda _identity: True)
     monkeypatch.setattr(services.os, "kill", lambda *_args: None)
+    # The value must come from the shared helper, not a literal that happens to match it.
+    monkeypatch.setattr(services, "stop_timeout", lambda _service: 7.0)
     before = time.time()
     services._stop_unrecorded(run, pid_path)
     state = json.loads((run / "worker.state").read_text())
-    assert 29 <= state["stop_deadline"] - before <= 31
+    assert 6 <= state["stop_deadline"] - before <= 8
