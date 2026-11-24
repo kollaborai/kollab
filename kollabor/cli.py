@@ -1884,6 +1884,14 @@ async def stop_agent_record(
 
     def signal_guard() -> str:
         """F15b: "" when the selected process may still be signalled, else the refusal line."""
+        recorded = agent.get("start_token")
+        if pid and recorded:
+            # Bound to the row's writer, not to whatever holds the pid now (#1408).
+            from kollabor_agent.runtime import process_start_token
+
+            current = process_start_token(pid)
+            if current is not None and current != recorded:
+                return f"not killed: {desig} (pid {pid} now runs another process)"
         if pid and ident is None:
             if os.name == "nt":
                 # os.kill(pid, 0) sends Ctrl+C on Windows
