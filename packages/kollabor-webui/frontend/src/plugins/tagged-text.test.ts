@@ -55,10 +55,10 @@ describe("plugin tagged text", () => {
   });
   it("pairs many unclosed opens with one close in linear time", () => {
     const started = performance.now();
-    const parts = splitPluginTags("<x>".repeat(2000) + "</x>", ["x"]);
-    expect(performance.now() - started).toBeLessThan(500);
+    const parts = splitPluginTags("<x>".repeat(200000) + "</x>", ["x"]);
+    expect(performance.now() - started).toBeLessThan(1500);
     expect(parts).toEqual([
-      { type: "text", text: "<x>".repeat(1999) },
+      { type: "text", text: "<x>".repeat(199999) },
       { type: "tag", name: "x", content: "" },
     ]);
   });
