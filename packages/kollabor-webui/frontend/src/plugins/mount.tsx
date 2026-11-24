@@ -112,13 +112,28 @@ export class PluginBoundary extends Component<{ name: string; children: ReactNod
   }
 }
 
+/** Stable React identity for one plugin's renderer boundary. */
+export function pluginRendererBoundaryKey(ownerPluginId: string, renderer: string): string {
+  return JSON.stringify([ownerPluginId, renderer]);
+}
+
 /** Every plugin view, page tab and modal tab mounts through this. */
-export function PluginMount({ record, children }: { record: Pick<PluginRecord, "id" | "name">; children: ReactNode }) {
+export function PluginMount({
+  record,
+  renderer = "default",
+  children,
+}: {
+  record: Pick<PluginRecord, "id" | "name">;
+  renderer?: string;
+  children: ReactNode;
+}) {
   const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(null);
   return (
     <div data-plugin={record.id} className="flex min-h-0 min-w-0 flex-1 flex-col">
       <PluginPortalScopeContext.Provider value={{ scoped: true, container: portalContainer }}>
-        <PluginBoundary name={record.name}>{children}</PluginBoundary>
+        <PluginBoundary key={pluginRendererBoundaryKey(record.id, renderer)} name={record.name}>
+          {children}
+        </PluginBoundary>
         <div ref={setPortalContainer} data-plugin-portal-root="" className="contents" />
       </PluginPortalScopeContext.Provider>
     </div>
@@ -148,7 +163,9 @@ export function PluginTabs({
       </TabsList>
       {tabs.map((tab) => (
         <TabsContent key={tab.id} value={tab.id} className="flex min-h-0 flex-col overflow-y-auto px-4 py-3 sm:px-6">
-          <PluginMount record={record}>{record.k ? <tab.render k={record.k} session={session} /> : null}</PluginMount>
+          <PluginMount record={record} renderer={`page-tab:${tab.id}`}>
+            {record.k ? <tab.render k={record.k} session={session} /> : null}
+          </PluginMount>
         </TabsContent>
       ))}
     </Tabs>

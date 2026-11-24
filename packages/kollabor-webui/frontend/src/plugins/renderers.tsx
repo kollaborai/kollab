@@ -60,7 +60,7 @@ export function PluginToolPart({
   if (!found) return <>{fallback}</>;
   const Render = found.spec.render;
   return (
-    <PluginMount record={found.record}>
+    <PluginMount record={found.record} renderer={`tool:${part.toolName}`}>
       <Render
         k={found.k}
         toolCall={{
@@ -92,7 +92,7 @@ export function PluginTaggedText({ text }: { text: string }) {
         if (!found) return <>{`<${tag.name}>${tag.content}</${tag.name}>`}</>;
         const Render = found.spec.render;
         return (
-          <PluginMount record={found.record}>
+          <PluginMount record={found.record} renderer={`tag:${tag.name}`}>
             <Render k={found.k} tag={tag} />
           </PluginMount>
         );
