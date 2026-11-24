@@ -17,6 +17,8 @@ export type PluginService = {
   pid?: number | null;
   since?: number | null;
   restarts?: number;
+  secrets?: string[];
+  heartbeat_s?: number | null;
   heartbeat?: number | null;
   error?: string | null;
 };
@@ -43,6 +45,8 @@ export type PluginEntry = {
     renderers?: Declared[];
   };
   services: PluginService[];
+  settings?: PanelField[];
+  settings_section?: { title?: string } | null;
   uses?: string[];
   granted?: string[];
 };
