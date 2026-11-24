@@ -72,6 +72,20 @@ const boundedCases: Array<{
     })?.services[0]?.secrets ?? [],
   },
   {
+    name: "staged service secrets",
+    limit: 64,
+    make: (index: number) => `ENV_${index}`,
+    normalize: (items: unknown[]) => {
+      const review = normalizeReviewJob({
+        job_id: "review-1",
+        status: "ready",
+        manifest: { services: { worker: { secrets: items } } },
+      });
+      const services = review?.manifest?.services as Record<string, { secrets: string[] }> | undefined;
+      return services?.worker?.secrets ?? [];
+    },
+  },
+  {
     name: "changed folders",
     limit: 256,
     make: (index: number) => `folder_${index}`,
