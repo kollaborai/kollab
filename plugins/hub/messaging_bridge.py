@@ -67,8 +67,9 @@ async def _remove_voice_artifacts_after_communication(
             await asyncio.wait({communication_task}, timeout=2)
         if descendants is None:
             logger.warning(
-                "Voice descendant status unavailable; removing protected artifacts"
+                "Voice descendant status unavailable; retaining protected artifacts"
             )
+            return
         os.chmod(temp_dir, 0o700)
         await asyncio.to_thread(shutil.rmtree, temp_dir)
     except FileNotFoundError:
