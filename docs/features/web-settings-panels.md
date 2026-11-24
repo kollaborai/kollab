@@ -9,7 +9,7 @@ Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-uni
 | Tab | What it is | Where a change goes |
 | --- | --- | --- |
 | Session | This chat's model and profile override. Apply changes the session only. | Nowhere on disk. It lasts as long as the session. |
-| Configuration | Every setting, in collapsed sections with a count per section. Checkboxes, sliders, dropdowns and text fields; managed settings are read-only. | The footer saves to **Project** (`.kollab/config.json` in the workspace) or **Globally** (`~/.kollab/config.json`). The two real paths are printed on the buttons. Only values that differ from the defaults are written. |
+| Configuration | Core configuration fields, in collapsed sections with a count per section. Plugin settings have their own Plugins tab. Checkboxes, sliders, dropdowns and text fields; managed settings are read-only. | The footer saves to **Project** (`.kollab/config.json` in the workspace) or **Globally** (`~/.kollab/config.json`). The two real paths are printed on the buttons. Only values that differ from the defaults are written. |
 | Loadouts | The same list as terminal `/llm`: use one, create, edit, delete (delete asks twice). | The profile manager the terminal `/llm` uses. |
 | Model | Reasoning effort and the model picker for the active provider (terminal `/model`). | The profile manager the terminal `/model` uses. |
 | Setup | The first-run wizard as steps: provider, API key, endpoint, model, optional connection test, Save and Activate. A bad key or failed/timed-out activation shows a redacted error; a missing key jumps back to the key step. A failed activation leaves the previous profile active. | A new profile, activated, through the same code as terminal `/setup`. |

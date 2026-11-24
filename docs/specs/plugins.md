@@ -112,7 +112,8 @@ computer; over PhoneLink the tab is read-only and says `Manage plugins on this c
 Background process states include `Running · 2 h`; `Stopping`; `Running · No Heartbeat for 6 min` (a process that
 promised a heartbeat and went quiet); `Exited`; `Stopped` (stopped by you); `Stopped After 5 Crashes ·
 View Log`; and `Failed to Stop`. The list row shows the same text. A running process offers Restart and Stop;
-a stopped, exited or crash-stopped one offers Start. `GET /plugins` returns each service's
+when the plugin is enabled, a stopped, exited or crash-stopped process offers Start; a process that failed to stop offers Retry Stop.
+`GET /plugins` returns each service's
 `stop_deadline`; Settings currently shows `Stopping` without a countdown.
 
 **Add sheet.** Shown after a checked staging copy is ready, before anything is installed or run:
@@ -150,7 +151,7 @@ The API returns `stop_deadline`; Settings currently shows `Stopping` without a c
 every open page updates at once: the row
 goes, a page that was open shows `PR Chain is off` with a Back to Chat button, and a chat showing its tab
 switches to Chat. If Kollab cannot signal a verified wrapper, the plugin stays off and Settings shows
-`Stop Failed`; the process may still be running. The stop returns 409 and can be retried before enabling
+`Failed to Stop`; the process may still be running. The stop returns 409 and can be retried before enabling
 or removing the plugin.
 
 **Notices.** A plugin can raise a NoticeBar notice: one line and at most one action button, plus a dismiss
@@ -359,8 +360,8 @@ All sit behind the existing bearer-token middleware.
 "Plugin token: no" means only the user's engine token works. "Remote page: no" means the web UI's
 `/engine` proxy and the PhoneLink bridge refuse the route for any client that is not on this computer (the proxy sees the real
 client address; the engine behind it only ever sees the proxy), and the engine refuses it on requests the
-proxy marks as forwarded. PhoneLink and relay pages can inspect plugin inventory and use the read-only
-plugin surfaces allowed by the route table, but cannot install or manage plugins.
+proxy marks as forwarded. PhoneLink and relay pages can inspect plugin inventory and use plugin routes
+allowed by the route table, including plugin API calls and agent routes, but cannot install or manage plugins.
 
 ### Tokens and what plugin code can reach
 
@@ -641,7 +642,7 @@ PluginEntry = {id, name, version, kind: "built-in" | "installed" | "dev", source
                services: [{name, state: "starting" | "running" | "backoff" | "stopping" | "stop-failed" | "exited" | "stopped"
                                   | "crash-stopped" | "error" | "unknown",
                            desired, pid, since, restarts, heartbeat, heartbeat_s, heartbeat_monitor_since,
-                           stop_deadline}], uses, granted}
+                           stop_deadline, secrets}], uses, granted}
 ```
 
 `kollabor_plugins.registry.plugin_entries()` lists what the loader found: the bundled `plugins/`, loose
@@ -695,7 +696,7 @@ with `kollabor.binary.kollab_argv()` in its own session:
   file and opens a new one, keeping 3.
 
 Disable and remove are refused while plugin agent runs are active; the user cancels them before retrying.
-Remove also waits for active plugin requests to finish before deleting the package.
+Remove returns 409 while plugin requests are active; retry it after they finish.
 Running agent daemons keep a plugin's `python` part until they restart. The engine does not currently report
 which daemons still run an old plugin version or provide a Restart Agents action, so Settings hides that
 notice until the backend supplies version counts and restart controls. Each daemon picks up the change
@@ -883,7 +884,7 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
     lines wait in `usage.jsonl`, and plugin views show the app's engine-down state.
 11. **Orphaned runs and half-finished steps.** Turning a plugin off or removing it cancels its live agent
     runs after a confirm, and stopping gives each process `stop_timeout_s` to finish its step. If Kollab
-    cannot signal a verified wrapper, the plugin stays off, Settings shows `Stop Failed`, and the process
+    cannot signal a verified wrapper, the plugin stays off, Settings shows `Failed to Stop`, and the process
     may still be running until stopping succeeds.
 12. **Lost results.** Every run's state and result are written to `runs.json` with a temp file and rename
     as they change, so a restart loses nothing.
@@ -902,7 +903,7 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 | D8 | No new project-folder plugins; today's import of them is bug #1035. | maintainers, owner-approved | They need a folder-trust design the goal does not need. |
 | D9 | `uses` is a declaration. Kollab's routes and `ctx` refuse undeclared agent runs, unattended runs and secrets; nothing stops plugin code that goes around kollab, and the sheet says so. | maintainers, owner-approved | The refusal catches mistakes and attributes calls; calling it more than that would make the sheet untrue. |
 | D10 | Every update asks and confirms the exact commit and files hash; management works only from this computer; plugin agent runs ask before each tool unless unattended runs were declared and shown. | maintainers, owner-approved | Changed code that holds a granted secret is a new trust decision. An agent with a shell can do what the user can, so the honest protection is the default, not a check it can walk around. |
-| D11 | Agent runs default to 250,000 tokens, 1 hour, 4 at once and 2,000,000 tokens a day per plugin. | maintainers, owner-approved | An unattended loop with no cap can drain a week of usage; the defaults show on the sheet and change in Settings. |
+| D11 | Agent runs default to 250,000 tokens, 1 hour, 4 at once and 2,000,000 tokens a day per plugin. | maintainers, owner-approved | An unattended loop with no cap can drain a week of usage; the daemon enforces these defaults, and Settings can change them. |
 | D12 | One discovered list of plugins and their settings feeds `/config` and Settings → Plugins; the configuration menu's scanner goes. | the owner | Plugin settings must be discovered, not hard-coded, and one list keeps the terminal and the web from disagreeing. |
 
 ### Prior art

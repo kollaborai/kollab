@@ -43,6 +43,7 @@ const OWN_REACT =
   /__(?:CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE|SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED)\s*=(?!=)/;
 const INVENTORY_TEXT_LIMIT = 4096;
 const SENSITIVE_TEXT = /(?:\b(?:secret|token|password|credential|authorization|bearer|api[_-]?key)[-_][A-Za-z0-9_-]{6,}|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|credential|authorization)\s*[:=]\s*\S+)/i;
+const INVISIBLE_CONTROLS = /[\u200b\u202a-\u202e\u2066-\u2069]/;
 const SERVICE_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const DECLARATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -71,7 +72,7 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 function safeText(value: unknown, limit = INVENTORY_TEXT_LIMIT): string | null {
-  if (typeof value !== "string" || value.length > limit || /[\u0000-\u001f\u007f]/.test(value) || SENSITIVE_TEXT.test(value))
+  if (typeof value !== "string" || value.length > limit || /[\u0000-\u001f\u007f]/.test(value) || INVISIBLE_CONTROLS.test(value) || SENSITIVE_TEXT.test(value))
     return null;
   const clean = value.trim();
   return clean || null;
@@ -79,6 +80,32 @@ function safeText(value: unknown, limit = INVENTORY_TEXT_LIMIT): string | null {
 
 export function safePluginText(value: unknown, limit = INVENTORY_TEXT_LIMIT): string | null {
   return safeText(value, limit);
+}
+
+export function normalizePluginWebPath(value: unknown): string | null {
+  const path = safeText(value, 512);
+  if (!path || path.startsWith("/") || path.includes("\\")) return null;
+  const parts = path.split("/").filter((part) => part && part !== ".");
+  return parts.length >= 3 && parts[0] === "web" && parts[1] === "dist" && !parts.includes("..")
+    ? parts.join("/")
+    : null;
+}
+
+export function normalizeBoundedUnique<T>(
+  value: unknown,
+  limit: number,
+  normalize: (item: unknown) => T | null,
+): T[] {
+  if (!Array.isArray(value)) return [];
+  const result: T[] = [];
+  const seen = new Set<T>();
+  for (const item of value.slice(0, limit)) {
+    const clean = normalize(item);
+    if (clean === null || seen.has(clean)) continue;
+    seen.add(clean);
+    result.push(clean);
+  }
+  return result;
 }
 
 function safeNumber(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number | null {
@@ -114,7 +141,7 @@ function normalizeDeclared(value: unknown): string | Record<string, string> | nu
   return Object.keys(next).some((key) => ["id", "name", "tool", "tag"].includes(key)) ? next : null;
 }
 
-function normalizeContributes(value: unknown): PluginEntry["contributes"] {
+export function normalizePluginContributes(value: unknown): PluginEntry["contributes"] {
   const raw = record(value);
   const result: Record<string, unknown[]> = { menu: [], views: [], pages: [], modals: [], slash: [], renderers: [] };
   if (!raw) return result as PluginEntry["contributes"];
@@ -153,9 +180,7 @@ function normalizeUse(value: unknown): string | null {
 }
 
 export function normalizePluginUses(value: unknown): string[] {
-  return Array.isArray(value)
-    ? [...new Set(value.map(normalizeUse).filter((use): use is string => use !== null))].slice(0, 256)
-    : [];
+  return normalizeBoundedUnique(value, 256, normalizeUse);
 }
 
 function normalizeSettings(value: unknown): PanelField[] {
@@ -178,14 +203,20 @@ function normalizeSettings(value: unknown): PanelField[] {
     const optionalNumber = (field: string): number | null | undefined =>
       raw[field] === undefined ? undefined : raw[field] === null ? null : safeNumber(raw[field], -Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
     const options = raw.options === undefined ? undefined : raw.options === null ? null
-      : Array.isArray(raw.options) ? raw.options.map((option) => safeText(option, 256)).filter((option): option is string => option !== null)
+      : Array.isArray(raw.options) ? raw.options.slice(0, 256).map((option) => safeText(option, 256)).filter((option): option is string => option !== null)
       : null;
     const labels = record(raw.option_labels);
-    const optionLabels = labels ? Object.fromEntries(Object.entries(labels).flatMap(([key, text]) => {
+    const normalizedLabels = Object.create(null) as Record<string, string>;
+    let labelCount = 0;
+    if (labels) for (const key in labels) {
+      if (!Object.prototype.hasOwnProperty.call(labels, key)) continue;
+      if (labelCount >= 256) break;
+      labelCount += 1;
       const safeKey = safeText(key, 256);
-      const safeLabel = safeText(text, 256);
-      return safeKey && safeLabel ? [[safeKey, safeLabel]] : [];
-    })) : raw.option_labels === null ? null : undefined;
+      const safeLabel = safeText(labels[key], 256);
+      if (safeKey && safeLabel) normalizedLabels[safeKey] = safeLabel;
+    }
+    const optionLabels = labels ? normalizedLabels : raw.option_labels === null ? null : undefined;
     fields.push({
       type: type as PanelField["type"], path, label,
       editable: raw.editable === true,
@@ -214,9 +245,9 @@ function normalizeService(value: unknown): PluginService | null {
   const state = SERVICE_STATES.has(raw.state as PluginService["state"]) ? raw.state as PluginService["state"] : "unknown";
   const desired = raw.desired === "running" || raw.desired === "stopped" ? raw.desired : "stopped";
   const error = typeof raw.error === "string" && FIXED_SERVICE_ERRORS.has(raw.error) ? raw.error : null;
-  const secrets = Array.isArray(raw.secrets)
-    ? [...new Set(raw.secrets.filter((secret): secret is string => typeof secret === "string" && SECRET_NAME.test(secret)))].slice(0, 64)
-    : [];
+  const secrets = normalizeBoundedUnique(raw.secrets, 64, (secret) =>
+    typeof secret === "string" && SECRET_NAME.test(secret) ? secret : null,
+  );
   return {
     name,
     state,
@@ -248,10 +279,10 @@ export function normalizePluginEntry(value: unknown): PluginEntry | null {
   const section = record(raw.settings_section);
   const sectionTitle = safeText(section?.title, 256);
   const webRaw = record(raw.web);
-  const webEntry = safeText(webRaw?.entry, 512);
-  const webStyle = webRaw?.style === undefined || webRaw.style === null ? null : safeText(webRaw.style, 512);
+  const webEntry = normalizePluginWebPath(webRaw?.entry);
+  const webStyle = webRaw?.style === undefined || webRaw.style === null ? null : normalizePluginWebPath(webRaw.style);
   const webHash = typeof webRaw?.hash === "string" && /^[0-9a-f]{1,64}$/i.test(webRaw.hash) ? webRaw.hash : null;
-  const web = webEntry?.startsWith("web/dist/") && (webRaw?.style == null || webStyle?.startsWith("web/dist/")) && webHash
+  const web = webEntry && (webRaw?.style == null || webStyle) && webHash
     ? { entry: webEntry, style: webStyle, hash: webHash }
     : null;
   const services = Array.isArray(raw.services)
@@ -261,9 +292,7 @@ export function normalizePluginEntry(value: unknown): PluginEntry | null {
     })
     : [];
   const uses = normalizePluginUses(raw.uses);
-  const granted = Array.isArray(raw.granted)
-    ? [...new Set(raw.granted.map(normalizeUse).filter((grant): grant is string => grant !== null))].slice(0, 256)
-    : [];
+  const granted = normalizeBoundedUnique(raw.granted, 256, normalizeUse);
   return {
     id,
     name: safeText(raw.name, 256) ?? id,
@@ -277,7 +306,7 @@ export function normalizePluginEntry(value: unknown): PluginEntry | null {
     state,
     error,
     web,
-    contributes: normalizeContributes(raw.contributes),
+    contributes: normalizePluginContributes(raw.contributes),
     services,
     settings: normalizeSettings(raw.settings),
     settings_section: section ? { title: sectionTitle ?? "Settings" } : null,

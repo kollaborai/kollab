@@ -156,6 +156,30 @@ def _write_failure_log(path: Path, detail: str, secret_values: list[str]) -> Non
         _write_log(path, filtered)
 
 
+def _record_start_failure(
+    state_path: Path,
+    state: dict,
+    log_path: Path,
+    plugin_id: str,
+    service_name: str,
+    error: str,
+    diagnostic: str,
+    secret_values: list[str],
+) -> None:
+    state["status"] = "error"
+    state["error"] = error
+    _write_state(state_path, state)
+    try:
+        _write_failure_log(log_path, diagnostic, secret_values)
+    except OSError as exc:
+        logger.warning(
+            "Could not write failure log for plugin service %s/%s (%s)",
+            plugin_id,
+            service_name,
+            type(exc).__name__,
+        )
+
+
 def _valid_plugin_id(plugin_id: str) -> bool:
     return isinstance(plugin_id, str) and bool(_ID.fullmatch(plugin_id.removesuffix("@dev")))
 
@@ -316,14 +340,16 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             context = PluginContext(plugin_id, root, home / "plugin-data" / plugin_id, manifest, grants=granted)
             token = PluginTokenFiles().mint(context)
         except Exception as exc:
-            _write_failure_log(
+            _record_start_failure(
+                state_path,
+                state,
                 log_path,
-                f"Could not prepare plugin engine credentials ({type(exc).__name__}): {exc}",
+                plugin_id,
+                service_name,
+                "Could not prepare plugin engine credentials",
+                f"Could not prepare plugin engine credentials ({type(exc).__name__}).",
                 list(secret_values.values()),
             )
-            state["status"] = "error"
-            state["error"] = "Could not prepare plugin engine credentials"
-            _write_state(state_path, state)
             return 1
         crashes: list[float] = []
         while not stopping:
@@ -344,14 +370,16 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                     command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
                 )
             except OSError as exc:
-                _write_failure_log(
+                _record_start_failure(
+                    state_path,
+                    state,
                     log_path,
-                    f"Could not start {command[0]}: {exc.strerror or type(exc).__name__}",
+                    plugin_id,
+                    service_name,
+                    "Could not start this process. View Log for details.",
+                    f"Could not start plugin process ({type(exc).__name__}).",
                     [*secret_values.values(), token],
                 )
-                state["status"] = "error"
-                state["error"] = "Could not start this process. View Log for details."
-                _write_state(state_path, state)
                 return 1
             assert child.stdout is not None
             try:
@@ -539,7 +567,7 @@ def supervisor_tick(*, engine_url: str | None = None) -> None:
             if not isinstance(services, dict):
                 raise ValueError("Invalid services")
         except (OSError, ValueError, TypeError) as exc:
-            logger.warning("Cannot load services for plugin %s: %s", plugin_id, exc)
+            logger.warning("Cannot load services for plugin %s (%s)", plugin_id, type(exc).__name__)
             continue
         for service_name, service in services.items():
             if (
@@ -582,7 +610,7 @@ def supervisor_tick(*, engine_url: str | None = None) -> None:
                         env=wrapper_env,
                     )
                 except (OSError, ValueError, TypeError) as exc:
-                    logger.warning("Could not start service %s/%s: %s", plugin_id, service_name, exc)
+                    logger.warning("Could not start service %s/%s (%s)", plugin_id, service_name, type(exc).__name__)
                 finally:
                     unlock(fd)
             finally:
@@ -760,7 +788,7 @@ def _record_stop_state(state_path: Path, status: str, deadline: float | None, er
             )
         _write_state(state_path, state)
     except (OSError, ValueError, TypeError) as exc:
-        logger.warning("Could not record stop for %s: %s", state_path.name, exc)
+        logger.warning("Could not record stop for %s (%s)", state_path.name, type(exc).__name__)
 
 
 def _stop_unrecorded(run_dir: Path, pid_path: Path) -> bool:
@@ -774,7 +802,7 @@ def _stop_unrecorded(run_dir: Path, pid_path: Path) -> bool:
         if not isinstance(identity, dict):
             raise ValueError("Invalid service identity")
     except (OSError, ValueError, TypeError) as exc:
-        logger.warning("Could not read service %s: %s", pid_path.name, exc)
+        logger.warning("Could not read service %s (%s)", pid_path.name, type(exc).__name__)
         _record_stop_state(state_path, "stop-failed", None, unverified)
         return False
     wrapper, child = identity.get("wrapper"), identity.get("child")
@@ -787,7 +815,7 @@ def _stop_unrecorded(run_dir: Path, pid_path: Path) -> bool:
         except ProcessLookupError:
             _record_stop_state(state_path, "stopped", None)
         except OSError as exc:
-            logger.warning("Could not signal service %s: %s", pid_path.name, exc)
+            logger.warning("Could not signal service %s (%s)", pid_path.name, type(exc).__name__)
             _record_stop_state(state_path, "stop-failed", None, "Could not stop this process. Retry stopping it.")
             return False
         return True
@@ -817,12 +845,12 @@ def stop_services(plugin_id: str) -> list[str]:
         except ServiceSignalError as exc:
             # control_service already recorded stop-failed for this wrapper; do not signal it twice.
             failures.append(pid_path.stem)
-            logger.warning("Could not stop service %s: %s", pid_path.name, exc)
+            logger.warning("Could not stop service %s (%s)", pid_path.name, type(exc).__name__)
             continue
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             # Stopping a verified wrapper remains necessary even when its files
             # or state are damaged; never let a display failure orphan it.
-            logger.warning("Could not record stop for service %s: %s", pid_path.name, exc)
+            logger.warning("Could not record stop for service %s (%s)", pid_path.name, type(exc).__name__)
         if not _stop_unrecorded(run_dir, pid_path):
             failures.append(pid_path.stem)
     return failures

@@ -3,7 +3,13 @@ import { ApiError, type EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { normalizePluginUses, safePluginText } from "./loader";
+import {
+  normalizeBoundedUnique,
+  normalizePluginContributes,
+  normalizePluginUses,
+  normalizePluginWebPath,
+  safePluginText,
+} from "./loader";
 
 type Job = {
   job_id: string; status: "staging" | "ready" | "cancelling" | "installing" | "complete" | "error" | "cancelled";
@@ -39,6 +45,16 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function boundedObjectEntries(value: Record<string, unknown>, limit: number): Array<[string, unknown]> {
+  const entries: Array<[string, unknown]> = [];
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    if (entries.length >= limit) break;
+    entries.push([key, value[key]]);
+  }
+  return entries;
+}
+
 function safeCommit(value: unknown, size: 40 | 64): string | undefined {
   return typeof value === "string" && new RegExp(`^[0-9a-f]{${size}}$`, "i").test(value) ? value : undefined;
 }
@@ -49,24 +65,17 @@ function normalizeReviewManifest(value: unknown, pluginId: string | undefined): 
   const services = objectRecord(raw.services);
   const safeServices: Record<string, { secrets: string[] }> = {};
   if (services) {
-    for (const [name, definition] of Object.entries(services).slice(0, 128)) {
+    for (const [name, definition] of boundedObjectEntries(services, 128)) {
       const safeName = safePluginText(name, 40);
       if (!safeName || !SERVICE_ID.test(safeName)) continue;
       const service = objectRecord(definition);
-      const secrets = Array.isArray(service?.secrets)
-        ? [...new Set(service.secrets.filter((item): item is string => typeof item === "string" && SECRET_NAME.test(item)))].slice(0, 64)
-        : [];
+      const secrets = normalizeBoundedUnique(service?.secrets, 64, (item) =>
+        typeof item === "string" && SECRET_NAME.test(item) ? item : null,
+      );
       safeServices[safeName] = { secrets };
     }
   }
-  const contributions = objectRecord(raw.contributes);
-  const safeContributions: Record<string, unknown[]> = {};
-  if (contributions) {
-    for (const kind of ["menu", "views", "pages", "modals", "slash", "renderers"] as const) {
-      const items = contributions[kind];
-      if (Array.isArray(items) && items.length) safeContributions[kind] = Array.from({ length: Math.min(items.length, 256) }, () => null);
-    }
-  }
+  const safeContributions = normalizePluginContributes(raw.contributes);
   const name = safePluginText(raw.name, 256) ?? pluginId ?? "Plugin";
   const version = safePluginText(raw.version, 256) ?? undefined;
   const description = safePluginText(raw.description) ?? undefined;
@@ -79,7 +88,7 @@ function normalizeReviewManifest(value: unknown, pluginId: string | undefined): 
     contributes: safeContributions,
     python: Boolean(raw.python),
     engine: Boolean(raw.engine),
-    web: Boolean(raw.web),
+    web: normalizePluginWebPath(objectRecord(raw.web)?.entry) !== null,
     agents: Boolean(raw.agents),
     hooks: Boolean(raw.hooks),
     mcp: Boolean(raw.mcp),
@@ -100,7 +109,7 @@ export function normalizeReviewJob(value: unknown): Job | null {
     ? raw.warning
     : raw.warning ? "Plugin operation completed with a warning." : null;
   const changedFolders = Array.isArray(raw.changed_folders)
-    ? raw.changed_folders.map((folder) => safePluginText(folder, 512)).filter((folder): folder is string => folder !== null).slice(0, 256)
+    ? raw.changed_folders.slice(0, 256).map((folder) => safePluginText(folder, 512)).filter((folder): folder is string => folder !== null)
     : undefined;
   return {
     job_id: jobId,
@@ -134,10 +143,10 @@ function contributionSummary(kind: string, count: number): string {
 }
 
 export function describePluginAdds(manifest: NonNullable<Job["manifest"]>): string[] {
-  const contributions = manifest.contributes && typeof manifest.contributes === "object" && !Array.isArray(manifest.contributes)
-    ? Object.entries(manifest.contributes).flatMap(([kind, entries]) => Array.isArray(entries) && entries.length ? [contributionSummary(kind, entries.length)] : []) : [];
-  const services = manifest.services && typeof manifest.services === "object" && !Array.isArray(manifest.services)
-    ? Object.keys(manifest.services) : [];
+  const safeContributions = normalizePluginContributes(manifest.contributes);
+  const contributions = Object.entries(safeContributions)
+    .flatMap(([kind, entries]) => entries.length ? [contributionSummary(kind, entries.length)] : []);
+  const services = boundedObjectEntries(objectRecord(manifest.services) ?? {}, 128);
   return [
     ...contributions,
     ...(manifest.python ? ["code that runs in every agent"] : []),
@@ -181,6 +190,12 @@ export function describeUses(value: unknown): { throughKollab: string[]; onItsOw
 }
 
 export const PLUGIN_TRUST_NOTICE = "Kollab refuses requests made through Kollab that the plugin did not declare. Plugin code runs as you, as do agents with a shell; they have your files and keys and can do more. Add only plugins you trust.";
+
+export function installDismissalMessage(status: Job["status"], error: string | null): string | null {
+  return status === "installing" && error !== "Plugin review no longer exists."
+    ? "Plugin installation is in progress. Wait for it to finish."
+    : null;
+}
 
 function DetailsList({ label, values }: { label: string; values: unknown }) {
   if (!values || (Array.isArray(values) && !values.length) || (typeof values === "object" && !Object.keys(values).length)) return null;
@@ -287,6 +302,18 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
         const next = await fetchReview(api, job.job_id, controller.signal);
         if (cancelled) return;
         setJob(next);
+        if (next.status === "complete") {
+          setBusy(true);
+          try {
+            await onApplied();
+            if (!next.warning) onClose();
+          } catch {
+            setError("Plugin installed, but the plugin list could not be refreshed.");
+          } finally {
+            setBusy(false);
+          }
+          return;
+        }
         if (shouldPollReview(next)) timer = setTimeout(() => { void poll(); }, 750);
       } catch (caught) { if (!cancelled) setError(errorText(caught)); }
     };
@@ -294,14 +321,20 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
     return () => { cancelled = true; controller.abort(); if (timer) clearTimeout(timer); };
   }, [api, job?.job_id, job?.status, pollVersion]);
   const close = () => {
-    if (busy || job?.status === "installing") return;
+    if (busy) return;
+    if (job?.status === "installing") {
+      const message = installDismissalMessage(job.status, error);
+      if (message) { setError(message); return; }
+      onClose();
+      return;
+    }
     if (job && (job.status === "staging" || job.status === "ready" || job.status === "cancelling")) {
       setBusy(true); setError(null);
       const cleanup = job.status === "ready"
         ? discardReview(api, job.job_id)
         : discardReviewForDismissal(api, job.job_id);
       void cleanup.then(onClose).catch((caught) => {
-        if (caught instanceof ApiError && caught.status === 409 && job.status === "ready") { onClose(); return; }
+        if (caught instanceof ApiError && caught.status === 409) { onClose(); return; }
         setError(errorText(caught));
       }).finally(() => setBusy(false));
       return;
@@ -311,6 +344,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   const confirm = async () => {
     if (!job || job.status !== "ready" || !job.commit || !job.files_sha256) return;
     setBusy(true); setError(null);
+    let installed = false;
     try {
       const raw = await api.json<unknown>(`/plugins/jobs/${encodeURIComponent(job.job_id)}/confirm`, {
         method: "POST", body: JSON.stringify({ commit: job.commit, files_sha256: job.files_sha256 }),
@@ -319,9 +353,14 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
       if (!result) throw new Error("The plugin manager returned invalid review data.");
       setJob(result);
       if (result.status !== "complete") throw new Error(result.error || "The plugin manager did not complete the operation.");
+      installed = true;
       await onApplied();
       if (!result.warning) onClose();
     } catch (caught) {
+      if (installed) {
+        setError("Plugin installed, but the plugin list could not be refreshed.");
+        return;
+      }
       const fallback = errorText(caught);
       try {
         const current = await fetchReview(api, job.job_id);
@@ -342,21 +381,24 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   const uses = Array.isArray(job?.manifest?.uses) ? job.manifest.uses : [];
   const { throughKollab: declaredThroughKollab, onItsOwn, other } = describeUses(uses);
   const services = job?.manifest?.services && typeof job.manifest.services === "object" && !Array.isArray(job.manifest.services)
-    ? Object.entries(job.manifest.services) : [];
+    ? boundedObjectEntries(objectRecord(job.manifest.services) ?? {}, 128) : [];
   const throughKollab = [
     ...declaredThroughKollab,
     ...services.flatMap(([name, value]) => {
-      if (!value || typeof value !== "object" || !("secrets" in value) || !Array.isArray(value.secrets)) return [];
-      const secrets = value.secrets.filter((item: unknown): item is string => typeof item === "string");
+      const service = objectRecord(value);
+      const secrets = normalizeBoundedUnique(service?.secrets, 64, (item) =>
+        typeof item === "string" && SECRET_NAME.test(item) ? item : null,
+      );
       return secrets.length ? [`Background process ${name} receives: ${secrets.join(", ")}.`] : [];
     }),
   ];
   const form = reviewFormState(action, job, error !== null);
+  const missingInstallingJob = job?.status === "installing" && error === "Plugin review no longer exists.";
   return <Dialog open onOpenChange={open => { if (!open) close(); }}>
     <DialogContent onCloseAutoFocus={onRestoreFocus} className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
         <DialogDescription>Review the exact source and permissions before anything is installed or run.</DialogDescription></DialogHeader>
-      <div tabIndex={0} aria-label="Plugin review details" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+      <div role="region" tabIndex={0} aria-label="Plugin review details" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
         {form.source ? <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Git URL<Input className="pointer-coarse:min-h-11" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label>
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Branch or Tag<Input className="pointer-coarse:min-h-11" value={gitRef} onChange={event => setGitRef(event.target.value)} placeholder="Default branch" /></label>
@@ -384,7 +426,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
         {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
         {shouldRetryPolling(job, error !== null) ? <Button type="button" variant="outline" className="pointer-coarse:min-h-11 self-start" disabled={busy} onClick={() => { setError(null); setPollVersion((version) => version + 1); requestAnimationFrame(() => progressRef.current?.focus()); }}>Check Again</Button> : null}
       </div>
-      <DialogFooter><Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={close}>{job?.status === "complete" ? "Close" : "Cancel"}</Button>
+      <DialogFooter><Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy || (job?.status === "installing" && !missingInstallingJob)} onClick={close}>{job?.status === "installing" && !missingInstallingJob ? "Installing…" : job?.status === "complete" || missingInstallingJob ? "Close" : "Cancel"}</Button>
                 {form.review ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || (action === "install" && !url.trim())} onClick={() => { void start(); }}>{action === "update" ? "Review Again" : "Review"}</Button> : null}
          {ready ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void confirm(); }}>{action === "install" ? "Add Plugin" : "Update"}</Button> : null}
       </DialogFooter>

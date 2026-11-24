@@ -9,7 +9,8 @@ import math
 import re
 import sys
 import types
-from pathlib import Path
+from itertools import islice
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Sequence, Type
 
 from kollabor_events.dict_utils import deep_merge
@@ -38,6 +39,7 @@ _INVENTORY_SENSITIVE_TEXT = re.compile(
     r"|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|credential|authorization)\s*[:=]\s*\S+)",
     re.IGNORECASE,
 )
+_INVENTORY_INVISIBLE_CONTROLS = re.compile(r"[\u200b\u202a-\u202e\u2066-\u2069]")
 _PLUGIN_INVENTORY_STATES = {"ok", "error", "off", "stopping", "stop-failed", "changed-on-disk", "skipped"}
 _SERVICE_INVENTORY_STATES = {
     "starting",
@@ -616,8 +618,8 @@ def _service_secrets(definition: object) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [
-        secret for secret in raw if isinstance(secret, str) and _SYMBOL.fullmatch(secret) and len(secret) <= 64
-    ][:64]
+        secret for secret in raw[:64] if isinstance(secret, str) and _SYMBOL.fullmatch(secret) and len(secret) <= 64
+    ]
 
 
 def _finite_service_number(value: object) -> float | None:
@@ -635,11 +637,38 @@ def _bounded_inventory_text(value: object, limit: int = _INVENTORY_TEXT_LIMIT) -
         not isinstance(value, str)
         or len(value) > limit
         or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        or _INVENTORY_INVISIBLE_CONTROLS.search(value)
         or _INVENTORY_SENSITIVE_TEXT.search(value)
     ):
         return None
     clean = value.strip()
     return clean or None
+
+
+def _normalize_web_dist_path(value: object) -> str | None:
+    if not isinstance(value, str) or "\\" in value or value.startswith("/"):
+        return None
+    path = PurePosixPath(value)
+    parts = path.parts
+    if len(parts) < 3 or parts[:2] != ("web", "dist") or ".." in parts:
+        return None
+    return path.as_posix()
+
+
+def _bounded_values(values: list, limit: int, normalize) -> list:
+    return [clean for item in islice(values, limit) if (clean := normalize(item)) is not None]
+
+
+def _bounded_unique(values: list, limit: int, normalize) -> list:
+    result = []
+    seen = set()
+    for item in islice(values, limit):
+        clean = normalize(item)
+        if clean is None or clean in seen:
+            continue
+        seen.add(clean)
+        result.append(clean)
+    return result
 
 
 def _inventory_number(value: object, minimum: float = 0, maximum: float = float("inf")) -> int | float | None:
@@ -664,17 +693,11 @@ def _normalize_service_entry(value: object) -> dict | None:
     raw_desired = value.get("desired")
     desired = raw_desired if raw_desired in ("running", "stopped") else "stopped"
     raw_secrets = value.get("secrets")
-    secrets = (
-        list(
-            dict.fromkeys(
-                secret
-                for secret in raw_secrets
-                if isinstance(secret, str) and _SYMBOL.fullmatch(secret) and len(secret) <= 64
-            )
-        )[:64]
-        if isinstance(raw_secrets, list)
-        else []
-    )
+    secrets = _bounded_unique(
+        raw_secrets,
+        64,
+        lambda secret: secret if isinstance(secret, str) and _SYMBOL.fullmatch(secret) and len(secret) <= 64 else None,
+    ) if isinstance(raw_secrets, list) else []
     raw_error = value.get("error")
     error = raw_error if isinstance(raw_error, str) and raw_error in _SERVICE_INVENTORY_ERRORS else None
     return {
@@ -812,14 +835,14 @@ def _normalize_setting(value: object) -> dict | None:
 
     raw_options = value.get("options")
     options = (
-        [clean for item in raw_options if (clean := _bounded_inventory_text(item, 256)) is not None][:256]
+        _bounded_values(raw_options, 256, lambda item: _bounded_inventory_text(item, 256))
         if isinstance(raw_options, list)
         else None
     )
     raw_labels = value.get("option_labels")
     option_labels = {}
     if isinstance(raw_labels, dict):
-        for key, raw_label in list(raw_labels.items())[:256]:
+        for key, raw_label in islice(raw_labels.items(), 256):
             safe_key = _bounded_inventory_text(key, 256)
             safe_label = _bounded_inventory_text(raw_label, 256)
             if safe_key and safe_label:
@@ -875,18 +898,13 @@ def _normalize_plugin_entry(value: object) -> dict | None:
     raw_web = value.get("web")
     web = None
     if isinstance(raw_web, dict):
-        entry = _bounded_inventory_text(raw_web.get("entry"), 512)
+        entry = _normalize_web_dist_path(_bounded_inventory_text(raw_web.get("entry"), 512))
         raw_style = raw_web.get("style")
-        style = None if raw_style is None else _bounded_inventory_text(raw_style, 512)
+        style = None if raw_style is None else _normalize_web_dist_path(_bounded_inventory_text(raw_style, 512))
         digest = raw_web.get("hash")
-        def path_ok(path: object) -> bool:
-            return isinstance(path, str) and path.startswith("web/dist/") and all(
-                part not in {"", ".", ".."} for part in path.split("/")
-            )
         if (
             entry
-            and path_ok(entry)
-            and (raw_style is None or (style and path_ok(style)))
+            and (raw_style is None or style)
             and isinstance(digest, str)
             and re.fullmatch(r"[0-9a-fA-F]{64}", digest)
         ):
@@ -899,17 +917,9 @@ def _normalize_plugin_entry(value: object) -> dict | None:
         else []
     )
     raw_uses = value.get("uses")
-    uses = (
-        list(dict.fromkeys(item for raw in raw_uses if (item := _normalize_capability(raw)) is not None))[:256]
-        if isinstance(raw_uses, list)
-        else []
-    )
+    uses = _bounded_unique(raw_uses, 256, _normalize_capability) if isinstance(raw_uses, list) else []
     raw_granted = value.get("granted")
-    granted = (
-        list(dict.fromkeys(item for raw in raw_granted if (item := _normalize_capability(raw)) is not None))[:256]
-        if isinstance(raw_granted, list)
-        else []
-    )
+    granted = _bounded_unique(raw_granted, 256, _normalize_capability) if isinstance(raw_granted, list) else []
     raw_settings = value.get("settings")
     settings = (
         [field for item in raw_settings[:256] if (field := _normalize_setting(item)) is not None]

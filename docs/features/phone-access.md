@@ -47,9 +47,9 @@ capability endpoint before offering a QR code.
 - A phone runs the app and reaches the engine roots that app calls:
   `sessions`, `agents`, `profiles`, `workspaces`, `mcp`, `hub`, `sidebar`,
   `rosters`, `teams`, `prompts`, selected voice routes and `phone-app` (`API_ROOTS` in
-  `kollabor_engine/phone_link.py`). A separate read-only plugin route allow-list also
-  exposes plugin inventory, change events and redacted service logs; plugin management
-  routes remain local-only. Everything else is the computer's only:
+  `kollabor_engine/phone_link.py`). A plugin route allow-list also permits plugin API
+  calls, change events, agent routes, settings, usage and redacted service logs; plugin
+  management routes remain local-only. Everything else is the computer's only:
   PhoneLink management, the network and connect panels, and updates. A lost
   phone keeps that reach until you revoke it on the computer.
 - A phone is a trusted app viewer/controller, not an agent-network member.
