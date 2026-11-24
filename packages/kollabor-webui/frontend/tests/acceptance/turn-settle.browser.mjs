@@ -570,7 +570,7 @@ try {
       const box = t.page.getByLabel("Message input");
       await box.fill("what");
       await box.press("Control+Enter");
-      await t.waitFor((s) => s.users === "hello|what", "the message Ctrl+Enter sent");
+      await t.waitFor((s) => s.users === "hello" && s.queued === "Queued what", "the message Ctrl+Enter queued");
       await t.page.getByText("Queued", { exact: true }).waitFor();
       assert.equal(await t.page.getByRole("button", { name: "Send Now" }).count(), 0, "no Send Now on a harness session");
       for (let n = 0; n < 8; n++) {
@@ -656,11 +656,11 @@ try {
       assert.equal(await requests(), 1, "picking a slash menu row sent nothing");
       await box.fill("what");
       await box.press("Enter");
-      await t.waitFor((s) => s.users === "hello|what" && s.errors === "0", "the message Enter sent")
-        .catch(() => assert.fail("Enter did not send the message"));
+      await t.waitFor((s) => s.users === "hello" && s.queued === "Queued what" && s.errors === "0", "the message Enter queued")
+        .catch(() => assert.fail("Enter did not queue the message"));
       assert.equal(await box.inputValue(), "", "the message box is empty after the send");
       await t.page.getByText("Queued", { exact: true }).waitFor({ timeout: 3000 })
-        .catch(() => assert.fail("the message Enter sent does not say it is queued"));
+        .catch(() => assert.fail("the message Enter does not say it is queued"));
       assert.equal(await requests(), 1, "a message sent with Enter waits for the turn to end");
       await box.fill("now");
       await box.press("Control+Enter");
