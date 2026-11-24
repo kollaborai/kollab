@@ -146,7 +146,7 @@ export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" |
   const live = !remote && !entry.shadowed && entry.state !== "stopping";
   return {
     managed,
-    switchEnabled: live && entry.state !== "changed-on-disk",
+    switchEnabled: live && entry.kind !== "dev" && entry.state !== "changed-on-disk",
     services: managed && live,
     updateRemove: managed && live && entry.kind === "installed",
   };
@@ -207,17 +207,19 @@ function PluginDetail({ entry, record, api, remote, onUpdate, onBusyChange, oper
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
         <span className={`text-xs font-medium ${failure !== null || entry.state === "changed-on-disk" ? "text-destructive" : "text-muted-foreground"}`}>{status}</span>
-        <label className="inline-flex pointer-coarse:flex pointer-coarse:size-11 pointer-coarse:items-center pointer-coarse:justify-center">
-          <Switch
-            aria-label={`${entry.name} enabled`}
-            checked={entry.enabled}
-            disabled={!switchEnabled || busy || operationBusy}
-            onCheckedChange={(checked) => {
-              if (checked) void perform("enable");
-              else { setError(null); setConfirmation("disable"); }
-            }}
-          />
-        </label>
+        {entry.kind !== "dev" ? (
+          <label className="inline-flex pointer-coarse:flex pointer-coarse:size-11 pointer-coarse:items-center pointer-coarse:justify-center">
+            <Switch
+              aria-label={`${entry.name} enabled`}
+              checked={entry.enabled}
+              disabled={!switchEnabled || busy || operationBusy}
+              onCheckedChange={(checked) => {
+                if (checked) void perform("enable");
+                else { setError(null); setConfirmation("disable"); }
+              }}
+            />
+          </label>
+        ) : null}
         {updateRemove ? (
           <div className="ml-auto flex flex-wrap gap-2">
             <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={() => onUpdate(entry.id)}>Update</Button>
