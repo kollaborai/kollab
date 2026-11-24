@@ -18,6 +18,28 @@ _JS_IMPORT = re.compile(
     r"\bimport\s*\(\s*(['\"])(\.[^'\"]+)\3\s*\)"
 )
 _JS_SUFFIXES = (".ts", ".tsx", ".js", ".mjs")
+_DYNAMIC_MODULE_CALLS = {"import_module", "__import__", "run_module"}
+_DYNAMIC_DIRECTORY_CALLS = {"glob", "rglob", "iterdir", "walk", "listdir"}
+_DYNAMIC_CALL_IN_PATCH = re.compile(
+    r"\b(?:import_module|__import__|spec_from_file_location|exec_module|"
+    r"run_path|run_module|glob|rglob|iterdir|walk|listdir)\s*\("
+)
+
+
+class _ImportGraph(dict[str, set[str]]):
+    def __init__(
+        self,
+        graph: dict[str, set[str]],
+        dynamic: set[str],
+        module_index: dict[str, str],
+        package_index: dict[str, str],
+        package_src_roots: list[Path],
+    ) -> None:
+        super().__init__(graph)
+        self.dynamic = dynamic
+        self.module_index = module_index
+        self.package_index = package_index
+        self.package_src_roots = package_src_roots
 
 
 def _repo_path(root: Path, path: Path) -> str:
@@ -82,6 +104,121 @@ def _add_python_dependency(
             dependencies.add(initializer)
 
 
+def _dynamic_import_aliases(tree: ast.Module) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    relevant_modules = {"builtins", "glob", "importlib", "importlib.util", "os", "runpy"}
+    relevant_names = _DYNAMIC_MODULE_CALLS | {
+        "spec_from_file_location",
+        "exec_module",
+        "run_path",
+        "glob",
+        "rglob",
+        "iterdir",
+        "walk",
+        "listdir",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.split(".")[0]
+                imported_name = alias.name if alias.asname else bound_name
+                if imported_name in relevant_modules:
+                    aliases[bound_name] = imported_name
+        elif isinstance(node, ast.ImportFrom) and node.module in relevant_modules:
+            for alias in node.names:
+                if alias.name in relevant_names:
+                    aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _call_name(node: ast.Call, aliases: dict[str, str] | None = None) -> str | None:
+    def dotted_name(value: ast.AST) -> str | None:
+        if isinstance(value, ast.Name):
+            return value.id
+        if isinstance(value, ast.Attribute):
+            prefix = dotted_name(value.value)
+            return f"{prefix}.{value.attr}" if prefix else None
+        return None
+
+    name = dotted_name(node.func)
+    if name is None and isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    if name is None:
+        return None
+    aliases = aliases or {}
+    first, separator, remainder = name.partition(".")
+    if first in aliases:
+        return aliases[first] + (f".{remainder}" if separator else "")
+    return aliases.get(name, name)
+
+
+def _call_argument(
+    node: ast.Call, position: int, keyword_names: set[str]
+) -> ast.AST | None:
+    if len(node.args) > position:
+        return node.args[position]
+    return next(
+        (keyword.value for keyword in node.keywords if keyword.arg in keyword_names),
+        None,
+    )
+
+
+def _literal_string(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _module_resolves(
+    name: str, module_index: dict[str, str], package_index: dict[str, str]
+) -> bool:
+    dependencies: set[str] = set()
+    _add_python_dependency(dependencies, name, module_index, package_index)
+    return bool(dependencies)
+
+
+def _is_dynamic_load_call(
+    root: Path,
+    node: ast.Call,
+    module_index: dict[str, str],
+    package_index: dict[str, str],
+    aliases: dict[str, str] | None = None,
+) -> bool:
+    name = _call_name(node, aliases)
+    short_name = name.rsplit(".", 1)[-1] if name else None
+    if short_name in _DYNAMIC_MODULE_CALLS:
+        argument = _call_argument(node, 0, {"name", "name_or_path", "mod_name"})
+        module_name = _literal_string(argument)
+        return module_name is None or not _module_resolves(
+            module_name, module_index, package_index
+        )
+    if short_name == "spec_from_file_location":
+        argument = _call_argument(node, 1, {"location"})
+        path = _literal_string(argument)
+        return path is None or _existing_repo_file(root, path) is None
+    if short_name == "run_path":
+        argument = _call_argument(node, 0, {"path_name"})
+        path = _literal_string(argument)
+        return path is None or _existing_repo_file(root, path) is None
+    if short_name == "exec_module":
+        return True
+    if short_name not in _DYNAMIC_DIRECTORY_CALLS:
+        return False
+
+    if short_name in {"glob", "rglob", "iterdir"} and isinstance(
+        node.func, ast.Attribute
+    ):
+        if short_name == "glob" and name == "glob.glob":
+            argument = _call_argument(node, 0, {"pathname"})
+            path = _literal_string(argument)
+            return path is None or _existing_repo_file(root, path) is None
+        return True
+
+    argument = _call_argument(node, 0, {"path", "pathname"})
+    path = _literal_string(argument)
+    return path is None or _existing_repo_file(root, path) is None
+
+
 def _python_imports(
     tree: ast.Module,
     module_name: str,
@@ -92,6 +229,7 @@ def _python_imports(
     dependencies: set[str] = set()
     current_parts = module_name.split(".") if module_name else []
     package_parts = current_parts if is_package else current_parts[:-1]
+    call_aliases = _dynamic_import_aliases(tree)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -126,9 +264,12 @@ def _python_imports(
                         dependencies.add(target)
                 continue
 
-            aliases = [alias.name for alias in node.names if alias.name != "*"]
+            imported_names = [
+                alias.name for alias in node.names if alias.name != "*"
+            ]
             candidates = [
-                f"{base_name}.{alias}" if base_name else alias for alias in aliases
+                f"{base_name}.{alias}" if base_name else alias
+                for alias in imported_names
             ] or [base_name]
             for candidate in candidates:
                 resolved_name = (
@@ -139,6 +280,17 @@ def _python_imports(
                 _add_python_dependency(
                     dependencies, resolved_name, module_index, package_index
                 )
+        elif isinstance(node, ast.Call) and (
+            (_call_name(node, call_aliases) or "").rsplit(".", 1)[-1]
+            in _DYNAMIC_MODULE_CALLS
+        ):
+            module_name = _literal_string(
+                _call_argument(node, 0, {"name", "name_or_path", "mod_name"})
+            )
+            if module_name is not None:
+                target = _resolve_module(module_name, module_index)
+                if target is not None:
+                    dependencies.add(target)
     return dependencies
 
 
@@ -226,8 +378,16 @@ def _resolve_js_import(root: Path, importer: Path, specifier: str) -> str | None
     return None
 
 
-def build_import_graph(root: Path) -> dict[str, set[str]]:
-    """Build a static Python and frontend import graph without importing code."""
+def _build_import_analysis(
+    root: Path,
+) -> tuple[
+    dict[str, set[str]],
+    set[str],
+    dict[str, str],
+    dict[str, str],
+    list[Path],
+]:
+    """Build the import graph and its statically resolvable loader context."""
     root = root.resolve()
     python_paths, package_src_roots = _python_sources(root)
     module_index: dict[str, str] = {}
@@ -245,6 +405,7 @@ def build_import_graph(root: Path) -> dict[str, set[str]]:
         for path, (name, is_package) in module_info.items()
         if name and is_package
     }
+    dynamic_paths: set[str] = set()
     for path in sorted(python_paths):
         relative_path = _repo_path(root, path)
         try:
@@ -256,9 +417,22 @@ def build_import_graph(root: Path) -> dict[str, set[str]]:
             tree, name, is_package, module_index, package_index
         )
         nodes = list(ast.walk(tree))
+        aliases = _dynamic_import_aliases(tree)
         parents = {
             child: node for node in nodes for child in ast.iter_child_nodes(node)
         }
+        if any(
+            isinstance(node, ast.Call)
+            and _is_dynamic_load_call(
+                root,
+                node,
+                module_index,
+                package_index,
+                aliases,
+            )
+            for node in nodes
+        ):
+            dynamic_paths.add(relative_path)
         glob_calls = {
             node
             for node in nodes
@@ -315,7 +489,21 @@ def build_import_graph(root: Path) -> dict[str, set[str]]:
             if target is not None:
                 dependencies.add(target)
         graph[relative_path] = dependencies
-    return graph
+    return graph, dynamic_paths, module_index, package_index, package_src_roots
+
+
+def build_import_graph(
+    root: Path, dynamic: set[str] | None = None
+) -> dict[str, set[str]]:
+    """Build a static Python and frontend import graph without importing code."""
+    graph, dynamic_paths, module_index, package_index, package_src_roots = (
+        _build_import_analysis(root)
+    )
+    if dynamic is not None:
+        dynamic.update(dynamic_paths)
+    return _ImportGraph(
+        graph, dynamic_paths, module_index, package_index, package_src_roots
+    )
 
 
 def reverse_closure(graph: dict[str, set[str]], files: Iterable[str]) -> set[str]:
@@ -373,11 +561,19 @@ def _without_changes(paths: Iterable[str]) -> set[str]:
     }
 
 
+def _is_non_docs_change(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    if path.startswith(("docs/", "changes/")):
+        return False
+    return not (len(parts) == 1 and parts[0].endswith(".md"))
+
+
 def decide(
     pr_files: Iterable[str],
     main_files: Iterable[str],
     graph: dict[str, set[str]],
     complete: bool = True,
+    dynamic: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[bool, list[str]]:
     """Apply the five stale rules to changed paths and their test impact."""
     pr_paths = _without_changes(pr_files)
@@ -402,6 +598,22 @@ def decide(
     if pr_frontend and main_frontend:
         examples = pr_frontend | main_frontend
         reasons.append(f"rule 4: both sides touch frontend ({_examples(examples)})")
+
+    pr_non_docs = {path for path in pr_paths if _is_non_docs_change(path)}
+    main_non_docs = {path for path in main_paths if _is_non_docs_change(path)}
+    dynamic_changes = {
+        path
+        for path in dynamic
+        if path.endswith(".py")
+        and (
+            (path in pr_paths and main_non_docs)
+            or (path in main_paths and pr_non_docs)
+        )
+    }
+    if dynamic_changes:
+        reasons.append(
+            f"rule 5: cannot analyze dynamic loading in {sorted(dynamic_changes)[0]}"
+        )
 
     if not complete:
         reasons.append("rule 5: comparison data incomplete")
@@ -506,6 +718,55 @@ def _changed_paths(value: Any) -> tuple[list[str], bool]:
     return paths, complete
 
 
+def _patch_imports(
+    filename: str,
+    patch: str,
+    root: Path,
+    module_index: dict[str, str],
+    package_index: dict[str, str],
+    package_src_roots: list[Path],
+) -> tuple[set[str], bool, bool]:
+    dependencies: set[str] = set()
+    complete = True
+    dynamic = False
+    try:
+        module_name, is_package = _module_name(
+            root / PurePosixPath(filename), root, package_src_roots
+        )
+    except ValueError:
+        return dependencies, False, False
+
+    for line in patch.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        source = line[1:].lstrip()
+        if not source:
+            continue
+        looks_like_import = re.match(r"(?:import|from)\b", source) is not None
+        try:
+            tree = ast.parse(source, filename=filename)
+        except SyntaxError:
+            if looks_like_import:
+                complete = False
+            if _DYNAMIC_CALL_IN_PATCH.search(source):
+                dynamic = True
+            continue
+
+        if looks_like_import:
+            dependencies.update(
+                _python_imports(
+                    tree, module_name, is_package, module_index, package_index
+                )
+            )
+        aliases = _dynamic_import_aliases(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _is_dynamic_load_call(
+                root, node, module_index, package_index, aliases
+            ):
+                dynamic = True
+    return dependencies, complete, dynamic
+
+
 def _default_branch(fetcher: Callable[..., Any], repo: str) -> str:
     repository = _fetch(fetcher, f"repos/{repo}")
     if not isinstance(repository, dict):
@@ -520,6 +781,11 @@ def _inspect_pr(
     graph: dict[str, set[str]],
     fetcher: Callable[..., Any],
     head_state: dict[str, str],
+    root: Path,
+    dynamic: set[str],
+    module_index: dict[str, str],
+    package_index: dict[str, str],
+    package_src_roots: list[Path],
     selection_error: str | None = None,
     pull_detail: dict[str, Any] | None = None,
 ) -> tuple[bool, list[str]]:
@@ -562,7 +828,12 @@ def _inspect_pr(
     pr_records = _records(
         _fetch(fetcher, f"repos/{repo}/pulls/{number}/files?per_page=100", paginate=True)
     )
-    if len(pr_records) < changed_files:
+    filenames = [
+        record.get("filename")
+        for record in pr_records
+        if isinstance(record.get("filename"), str)
+    ]
+    if len(pr_records) != changed_files or len(set(filenames)) != len(pr_records):
         raise ValueError("pull request file list is incomplete")
     main_comparison = _fetch(
         fetcher, f"repos/{repo}/compare/{merge_base_sha}...{base_ref}"
@@ -571,7 +842,43 @@ def _inspect_pr(
         raise ValueError("invalid base comparison response")
     pr_paths, pr_complete = _changed_paths(pr_records)
     main_paths, main_complete = _changed_paths(main_comparison.get("files"))
-    return decide(pr_paths, main_paths, graph, complete=pr_complete and main_complete)
+    pr_graph = {path: set(dependencies) for path, dependencies in graph.items()}
+    pr_dynamic = set(dynamic)
+    for record in pr_records:
+        filename = record.get("filename")
+        status = record.get("status")
+        if (
+            not isinstance(filename, str)
+            or not filename.endswith(".py")
+            or status not in {"added", "modified", "renamed"}
+        ):
+            continue
+        if status == "renamed" and type(record.get("changes")) is int:
+            if record["changes"] == 0:
+                continue
+        patch = record.get("patch")
+        if not isinstance(patch, str):
+            pr_complete = False
+            continue
+        dependencies, patch_complete, patch_dynamic = _patch_imports(
+            filename,
+            patch,
+            root,
+            module_index,
+            package_index,
+            package_src_roots,
+        )
+        pr_graph.setdefault(filename, set()).update(dependencies)
+        pr_complete = pr_complete and patch_complete
+        if patch_dynamic:
+            pr_dynamic.add(filename)
+    return decide(
+        pr_paths,
+        main_paths,
+        pr_graph,
+        complete=pr_complete and main_complete,
+        dynamic=pr_dynamic,
+    )
 
 
 def _post_status(
@@ -645,8 +952,17 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
 
     api = fetcher or _gh_fetcher
     graph_error: Exception | None = None
+    dynamic: set[str] = set()
+    module_index: dict[str, str] = {}
+    package_index: dict[str, str] = {}
+    package_src_roots: list[Path] = []
     try:
         graph = build_import_graph(args.root)
+        if isinstance(graph, _ImportGraph):
+            dynamic = set(graph.dynamic)
+            module_index = graph.module_index
+            package_index = graph.package_index
+            package_src_roots = graph.package_src_roots
     except Exception as exc:
         graph = {}
         graph_error = exc
@@ -766,6 +1082,11 @@ def main(argv: list[str] | None = None, fetcher: Callable[..., Any] | None = Non
                 graph,
                 api,
                 head_state,
+                root=args.root.resolve(),
+                dynamic=dynamic,
+                module_index=module_index,
+                package_index=package_index,
+                package_src_roots=package_src_roots,
                 selection_error=selection_error,
                 pull_detail=single_pull_detail,
             )
