@@ -146,7 +146,9 @@ working and will be cancelled. Its loop may take up to 40 min to finish its curr
 is working` for one) [Turn Off] [Cancel]. While its background processes finish their step, the row reads
 `Stopping · 12 min left` and its page stays. When they exit, every open page updates at once: the row
 goes, a page that was open shows `PR Chain is off` with a Back to Chat button, and a chat showing its tab
-switches to Chat.
+switches to Chat. If Kollab cannot signal a verified wrapper, the plugin stays off and Settings shows
+`Stop Failed`; the process may still be running. The stop returns 409 and can be retried before enabling
+or removing the plugin.
 
 **Notices.** A plugin can raise a NoticeBar notice: one line and one button, with no ids or version
 numbers in the text: `A pull request is waiting for your review.  [Open]`.
@@ -873,7 +875,9 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 10. **Engine down.** Background processes and their restarts keep going, agent-run limits hold, usage
     lines wait in `usage.jsonl`, and plugin views show the app's engine-down state.
 11. **Orphaned runs and half-finished steps.** Turning a plugin off or removing it cancels its live agent
-    runs after a confirm, and stopping gives each process `stop_timeout_s` to finish its step.
+    runs after a confirm, and stopping gives each process `stop_timeout_s` to finish its step. If Kollab
+    cannot signal a verified wrapper, the plugin stays off, Settings shows `Stop Failed`, and the process
+    may still be running until stopping succeeds.
 12. **Lost results.** Every run's state and result are written to `runs.json` with a temp file and rename
     as they change, so a restart loses nothing.
 
