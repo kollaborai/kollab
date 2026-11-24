@@ -109,10 +109,19 @@ LINKED_ISSUE_RE = re.compile(
 TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
 # Ruff's pyflakes rules share the finding-id shape (F63, F7, F82). The code list a
 # lint flag selects or ignores (ruff check --select E9,F63,F7,F82) names rules,
-# not findings (#1024). Only that flag context counts: the same list in prose can
-# be either, so it stays findings.
+# not findings (#1024). Short ids in prose (F63,F7,F82) can be either, so they
+# stay findings.
 RULE_SELECTION_RE = re.compile(
     r"--(?:extend-)?(?:select|ignore)(?:=|\s+)['\"]?([A-Z]+\d*(?:,[A-Z]+\d*)*)"
+)
+# Ruff output lists full rule codes (letters plus 3-4 digits: E501, I001, F841).
+# A list of two or more of them with at least one non-F code is lint output, so
+# its F codes are rules too (#1407). An all-F list still counts as findings.
+LINT_CODE_RE = re.compile(r"\b[A-Z]{1,4}\d{3,4}\b")
+LINT_LIST_RE = re.compile(
+    r"\b[A-Z]{1,4}\d{3,4}(?:(?:\s*[,/]\s*|\s+)(?:and\s+)?"
+    r"(?:(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?"
+    r"[A-Z]{1,4}\d{3,4}\b)+"
 )
 
 
@@ -455,8 +464,13 @@ def _mentions_finding(content: str, finding: str) -> bool:
 
 
 def _finding_matches(pattern: re.Pattern[str], body: str) -> list[re.Match[str]]:
-    """Finding-id matches in body, outside lint flag rule selections (#1024)."""
+    """Finding-id matches outside lint rule selections (#1024) and ruff lists (#1407)."""
     selections = [run.span(1) for run in RULE_SELECTION_RE.finditer(body)]
+    selections += [
+        run.span()
+        for run in LINT_LIST_RE.finditer(body)
+        if any(not code.startswith("F") for code in LINT_CODE_RE.findall(run.group(0)))
+    ]
     return [
         match
         for match in pattern.finditer(body)
