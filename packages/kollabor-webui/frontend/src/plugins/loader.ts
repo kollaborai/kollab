@@ -559,6 +559,7 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
   const attempts = new Map<string, Attempt>();
   const pending = new Set<Promise<void>>();
   let queue: Promise<void> = Promise.resolve();
+  let stopped = false;
 
   const current = (id: string, token: symbol) => attempts.get(id)?.token === token;
   const find = (id: string) => registry.getSnapshot().plugins.find((record) => record.id === id);
@@ -661,10 +662,12 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
   }
 
   async function reconcile(): Promise<void> {
+    if (stopped) return;
     let entries: PluginEntry[];
     let serverTimeOffsetSeconds: number;
     try {
       const response = await deps.list();
+      if (stopped) return;
       const receivedAt = Date.now() / 1000;
       const inventoryResponse = record(response);
       const listed = inventoryResponse?.plugins;
@@ -680,6 +683,7 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
           return normalized ? [normalized] : [];
         });
     } catch (error) {
+      if (stopped) return;
       setInventory({ entries: inventory.entries, error: message(error), serverTimeOffsetSeconds: inventory.serverTimeOffsetSeconds });
       registry.setListed(message(error));
       return;
@@ -701,6 +705,7 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
   return {
     /** Reads `GET /plugins` and adds, replaces or removes plugins to match. */
     refresh(): Promise<void> {
+      if (stopped) return Promise.resolve();
       const run = queue.then(reconcile);
       queue = run.catch(() => {});
       return run;
@@ -731,6 +736,7 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
       while (pending.size) await Promise.all([...pending]);
     },
     stop() {
+      stopped = true;
       for (const attempt of attempts.values()) attempt.dispose();
       attempts.clear();
     },
