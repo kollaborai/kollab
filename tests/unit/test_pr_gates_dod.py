@@ -951,6 +951,51 @@ def test_regression_test_counts_a_rule_list_quoted_in_prose_1024(tmp_path: Path)
     )
 
 
+def test_finding_ids_have_one_or_two_digits_1407() -> None:
+    # #1407: ruff's pyflakes rules are F plus 3 digits (F401, F811, F841), so a
+    # finding id is F plus 1-2 digits and the two can never be confused.
+    sample = "F1 F7 F63 F99 F100 F401 F811 F841 F3292"
+    for pattern in (
+        pr_gates_dod.DEFAULT_FINDING_PATTERN,
+        pr_gates_dod.load_config(CONFIG_FILE).regression.finding_id_pattern,
+    ):
+        assert re.findall(pattern, sample) == ["F1", "F7", "F63", "F99"], pattern
+
+
+def test_regression_test_ignores_ruff_diagnostic_lists_1407(tmp_path: Path) -> None:
+    # #1407: verdicts on #1277 and #1124 report ruff output with full rule codes;
+    # F841, F401 and F811 there are lint diagnostics, not review findings.
+    cfg = regression_cfg(tmp_path)
+    for body in (
+        "ruff check -> 8 diagnostics, all on unchanged lines (six E501, I001, F841)",
+        "ruff check --no-cache -> 9 diagnostics; 7 E501, I001, and F841 are on unchanged lines",
+        "Ruff on the added tests reported I001/F401/F811 at this line",
+    ):
+        report = pr_gates_dod.evaluate(
+            cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+        )
+        assert "regression_test" not in report.failed_names(), (
+            body,
+            report.detail_for("regression_test"),
+        )
+
+
+def test_regression_test_keeps_findings_beside_ruff_codes_1407(tmp_path: Path) -> None:
+    # Findings next to ruff codes still count, declared or in prose.
+    cfg = regression_cfg(tmp_path)
+    for body, ids in (
+        ("Finding IDs: F84 and E501", "F84"),
+        ("F12 and E501 are separate findings", "F12"),
+        ("ruff: E501, F841 on unchanged lines. F3: the retry loop never stops", "F3"),
+    ):
+        report = pr_gates_dod.evaluate(
+            cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+        )
+        assert report.detail_for("regression_test") == (
+            f"no changed test text references finding id(s): {ids} under tests/"
+        ), body
+
+
 # --- report shape -----------------------------------------------------------
 
 
