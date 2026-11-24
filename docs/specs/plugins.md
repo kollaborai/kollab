@@ -292,7 +292,7 @@ follows the ref recorded at add.
 | Path | Holds | Written by |
 |---|---|---|
 | `~/.kollab/plugins/<id>/` | the installed plugin, a clean copy at the pinned commit | `add`, `update` |
-| `~/.kollab/plugins.json` | `{"plugins": {"<id>": {"source", "ref", "commit", "files_sha256", "enabled", "granted": [...], "added", "updated"}}, "dev": {"<id>": "<folder>"}, "enable_order": {"<id>": <int>}, "enable_counter": <int>}`; the plugin enabled first wins slash-command conflicts | kollab, under `kollabor_config.file_lock` |
+| `~/.kollab/plugins.json` | `{"plugins": {"<id>": {"source", "ref", "commit", "files_sha256", "enabled", "granted": [...], "added", "updated"}}, "dev": {"<id>": "<folder>"}, "enable_order": {"<id>": <int>, "<id>@dev": <int>}, "enable_counter": <int>}`; the plugin enabled first wins slash-command conflicts | kollab, under `kollabor_config.file_lock` |
 | `~/.kollab/plugin-data/<id>/` | the plugin's own state (`KOLLAB_PLUGIN_DATA`); kept on update and remove | the plugin |
 | `~/.kollab/plugin-data/<id>/values.json` | the plugin's settings values: the only store for them | kollab (see Settings) |
 | `~/.kollab/plugin-data/<id>/run/` | `token` (0600), `<process>.pid`, `<process>.state`, `<process>.log`, `runs.json`, `usage.jsonl`, `usage-<date>.json` | kollab, and `usage.jsonl` appends from the plugin |
@@ -344,12 +344,12 @@ All sit behind the existing bearer-token middleware.
 | `GET /plugins/{id}/settings` | read its settings | own id | yes |
 | `PUT /plugins/{id}/settings` | save its settings (Settings below) | own id | no |
 | `POST /plugins/{id}/agents` → `{run_id, session_id}` at once; `GET`, `DELETE .../agents/{run_id}` | agent runs | own id | yes |
-| `POST /plugins/{id}/services/{name}/start`, `/stop`, `/restart` | background processes | own id | no |
+| `POST /plugins/{id}/services/{name}/start`, `/stop`, `/restart` | background processes (`200` or `202`); `409` for an invalid transition, `503` if Kollab cannot signal a verified wrapper (service state becomes `stop-failed`) | own id | no |
 | `GET /plugins/{id}/services/{name}/log?tail=200` | the process log, redacted like Agent Output | own id | yes |
 | `POST /plugins/install`, `POST /plugins/{id}/update` → `{job_id}`; `GET /plugins/jobs/{job_id}` | clone or fetch into staging, check, then report the sheet facts; job status is `cancelling` while cancellation cleanup runs | no | no |
 | `DELETE /plugins/jobs/{job_id}` | cancel a staging or ready job; `200` after cleanup, `404` if missing, `409` if it cannot be cancelled, `503` if staged files cannot be removed | no | no |
 | `POST /plugins/jobs/{job_id}/confirm` | `{commit, files_sha256}`: refused unless both match the staged copy; then move into place | no | no |
-| `POST /plugins/{id}/enable`, `/disable`, `/remove` | manage | no | no |
+| `POST /plugins/{id}/enable`, `/disable`, `/remove` | manage; `409` if a service cannot be stopped during disable/remove (the plugin remains off and the stop can be retried); `503` for an I/O failure | no | no |
 
 "Plugin token: no" means only the user's engine token works. "Remote page: no" means the web UI's
 `/engine` proxy and the PhoneLink bridge refuse the route for any client that is not on this computer (the proxy sees the real
@@ -380,7 +380,9 @@ The web UI server serves `GET /plugins/{id}/web/{path}` only from the plugin's `
 files ending in `.js`, `.mjs`, `.css`, `.png`, `.woff2` or `.json`, never a dotfile, and with
 `X-Content-Type-Options: nosniff`. The route is registered before the app's catch-all route and uses the
 same `_safe_asset` containment check as the app's own files, so a symlink that leaves `web/dist/` is
-refused. The web UI sends `Content-Security-Policy: script-src 'self'` plus the import map's hash, so no
+refused. For installed plugins, each request also checks the full package hash against the approved
+`files_sha256`; a mismatch returns 404. Development plugin assets remain unpinned. The web UI sends
+`Content-Security-Policy: script-src 'self'` plus the import map's hash, so no
 inline script or `eval` runs on the page. An HTML file is never served, so nothing in a plugin folder can open
 a page of its own on the web UI's origin. Asset URLs carry `?v=<hash of the file>`.
 
@@ -680,7 +682,8 @@ with `kollabor.binary.kollab_argv()` in its own session:
 - **Stopping.** The supervisor sends SIGTERM to the wrapper, which passes it to its child and stops
   restarting. The child gets up to `stop_timeout_s` to finish its current step, start nothing new and
   exit; then the wrapper sends SIGKILL to whatever in its process group is still alive. Processes the
-  child moved into their own session are its own to stop.
+  child moved into their own session are its own to stop. If Kollab cannot signal a verified wrapper,
+  the service reports `stop-failed`; retry stopping it before enabling or removing the plugin.
 - **Logs.** The wrapper owns `run/<process>.log`: it writes the child's output, and at 10 MB renames the
   file and opens a new one, keeping 3.
 
@@ -833,7 +836,7 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
     agent runs ask before each tool unless the sheet showed `agents:unattended`.
 16. If Turn Off is pressed while the loop is in a stage, then the row reads `Stopping` with the time left,
     the page stays, and both go when the loop exits; a second Turn On while it stops is refused with
-    `PR Chain is still stopping`.
+    `Plugin is stopping or still has a running service; wait before enabling it`.
 17. If someone edits a file in `~/.kollab/plugins/pr-chain/`, then the next load refuses the plugin with
     `Changed on Disk` until it is updated or added again.
 18. If a PR title holds `"><img src=x onerror=alert(1)>`, then every plugin view shows it as plain text.
