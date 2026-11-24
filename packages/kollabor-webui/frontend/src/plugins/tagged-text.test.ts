@@ -24,6 +24,10 @@ describe("plugin tagged text", () => {
     const parts = splitPluginTags("Intro line\n    <todo_write>x</todo_write>\nAfter", ["todo_write"]);
     expect(parts).toContainEqual({ type: "tag", name: "todo_write", content: "x" });
   });
+  it("does not treat a nested list item as an indented code block", () => {
+    const parts = splitPluginTags("- top\n    - <todo_write>x</todo_write>", ["todo_write"]);
+    expect(parts).toContainEqual({ type: "tag", name: "todo_write", content: "x" });
+  });
   it("handles nested matching tags and multiple independent blocks", () => {
     expect(splitPluginTags("<x>a<x>b</x>c</x> + <x>d</x>", ["x"])).toEqual([
       { type: "tag", name: "x", content: "a<x>b</x>c" }, { type: "text", text: " + " }, { type: "tag", name: "x", content: "d" },
