@@ -232,6 +232,57 @@ def test_hub_plugin_fields_are_not_duplicated_in_configuration(home):
     assert not any(path.startswith("plugins.hub.") for path in fields)
 
 
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        ("plugins.voice.mode", "quiet"),
+        ("plugins.voice.enabled", False),
+    ],
+)
+def test_builtin_config_changes_preserve_kind_when_installed_plugin_id_collides(
+    tmp_path, monkeypatch, path, value,
+):
+    from kollabor_plugins import registry, services, settings
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    registry_path = home / "plugins.json"
+    registry_path.write_text(
+        json.dumps({"plugins": {"voice": {"enabled": True}}, "dev": {}}),
+        encoding="utf-8",
+    )
+    builtin = {
+        "id": "voice",
+        "kind": "built-in",
+        "settings": [
+            {"path": "plugins.voice.enabled", "type": "checkbox", "editable": True},
+            {"path": "plugins.voice.mode", "type": "text_input", "editable": True},
+        ],
+    }
+    builtin_writes = []
+    package_writes = []
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [builtin])
+    monkeypatch.setattr(settings, "_builtin", lambda plugin_id: builtin if plugin_id == "voice" else None)
+    monkeypatch.setattr(
+        settings,
+        "_save_builtin",
+        lambda entry, values, **kwargs: builtin_writes.append((entry["id"], values)),
+    )
+    monkeypatch.setattr(
+        settings,
+        "_save_locked",
+        lambda plugin_id, values: package_writes.append((plugin_id, values)),
+    )
+    monkeypatch.setattr(services, "stop_services", lambda _plugin_id: [])
+
+    assert apply_config_changes(FakeConfig(), {path: value}, "global")
+
+    assert builtin_writes == [("voice", {path: value})]
+    assert package_writes == []
+    assert json.loads(registry_path.read_text(encoding="utf-8"))["plugins"]["voice"]["enabled"] is True
+
+
 def test_option_labels_only_name_options_and_only_dropdowns_carry_them(home):
     for field in fields_of(describe(FakeConfig())).values():
         labels = field["option_labels"]
