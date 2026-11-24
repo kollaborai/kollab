@@ -629,8 +629,9 @@ registry replaces it, and `GET /plugins` serves the same entries:
 ```
 PluginEntry = {id, name, version, kind: "built-in" | "installed" | "dev", source, commit, enabled, enable_order, shadowed,
                state: "ok" | "error" | "off" | "stopping" | "stop-failed" | "changed-on-disk" | "skipped", error, settings: [make_field fields],
-               web: {entry, style, hash} | null, contributes: {menu, views, pages, modals, commands},
-               services: [{name, state: "running" | "stopping" | "stop-failed" | "exited" | "stopped" | "crash-stopped" | "unknown",
+               web: {entry, style, hash} | null, contributes: {menu, views, pages, modals, slash, renderers},
+               services: [{name, state: "starting" | "running" | "backoff" | "stopping" | "stop-failed" | "exited" | "stopped"
+                                  | "crash-stopped" | "error" | "unknown",
                            desired, pid, since, restarts, heartbeat, heartbeat_s, heartbeat_monitor_since,
                            stop_deadline}], uses, granted}
 ```
