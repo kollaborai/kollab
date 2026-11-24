@@ -8,14 +8,16 @@ network or a running daemon.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import copy
+import inspect
 import json
 import re
 import sys
 import types
 from collections.abc import Iterable, Iterator
-from typing import Any
+from typing import Any, Dict, List, Optional, Union, get_type_hints
 from unittest.mock import ANY, AsyncMock
 
 import pytest
@@ -48,10 +50,26 @@ def test_close_current_event_loop_releases_policy_resource() -> None:
     policy.set_event_loop(loop)
 
     _close_current_event_loop()
-
     assert loop.is_closed()
     with pytest.raises(RuntimeError, match="no current event loop"):
         policy.get_event_loop()
+
+
+def test_sent_media_annotations_allow_only_string_fields_and_boolean_failure():
+    slot_type = Dict[str, Union[str, bool]]
+    helper_hints = get_type_hints(messages._assistant_update_message_state)
+    assert helper_hints["submitted_media"] == Optional[List[List[slot_type]]]
+    assert get_type_hints(messages._save_sent_media)["return"] == List[slot_type]
+
+    transport = ast.parse(inspect.getsource(messages.assistant_transport))
+    local_annotations = [
+        ast.unparse(node.annotation)
+        for node in ast.walk(transport)
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "submitted_media"
+    ]
+    assert local_annotations == ["List[List[_SentMediaSlot]]"]
 
 
 class _FakeCancellationSignal:
