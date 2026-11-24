@@ -302,3 +302,34 @@ def test_overlapping_duplicate_cleanup_retries_comment_on_surviving_issue():
     assert len(open_issues) == 1
     assert len(gh.comment_posts) == 1
     assert f"https://example.test/issues/{open_issues[0]['number']}" in gh.comment_posts[0]
+
+
+def test_retry_cleans_existing_duplicate_markers():
+    class ExistingDuplicatesGh(FakeGh):
+        def __call__(self, args):
+            path = args[1]
+            if path.startswith("repos/owner/repo/issues/") and "--method" in args and "PATCH" in args:
+                number = int(path.rsplit("/", 1)[1])
+                for issue in self.issues:
+                    if issue["number"] == number:
+                        issue["state"] = "closed"
+                return json.dumps({"number": number, "state": "closed"})
+            return super().__call__(args)
+
+    gh = ExistingDuplicatesGh([{"number": 42, "html_url": "https://example.test/pull/42"}])
+    gh.issues = [
+        {
+            "number": number,
+            "html_url": f"https://example.test/issues/{number}",
+            "body": f"<!-- main-red:{RUN_SHA} -->",
+        }
+        for number in (90, 91)
+    ]
+
+    issue = open_main_red_issue("owner/repo", "7", gh=gh)
+
+    open_issues = [row for row in gh.issues if row.get("state") != "closed"]
+    assert issue["number"] == 90
+    assert [row["number"] for row in open_issues] == [90]
+    assert len(gh.comment_posts) == 1
+    assert "https://example.test/issues/90" in gh.comment_posts[0]
