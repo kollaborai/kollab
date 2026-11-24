@@ -42,6 +42,8 @@ def test_plugin_dist_asset_served_with_nosniff(assets):
     assert response.text == "export default 1"
     assert "javascript" in response.headers["content-type"]
     assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["etag"]
+    assert response.headers["last-modified"]
 
 
 @pytest.mark.parametrize("path", ["page.html", ".secret.js", "escape.js", "missing.js", "nested/.secret.js"])

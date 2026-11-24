@@ -13,6 +13,7 @@ import posixpath
 import re
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
+from email.utils import formatdate
 from pathlib import Path
 
 import anyio
@@ -444,6 +445,7 @@ def create_app(
                     return missing
                 if not is_dev:
                     # Hash the package and capture the served bytes in one traversal, off the event loop.
+                    last_modified = asset.stat().st_mtime
                     digest, contents = await anyio.to_thread.run_sync(
                         files_sha256_with_asset_snapshot, root, asset
                     )
@@ -459,7 +461,11 @@ def create_app(
                         finally:
                             contents.close()
 
-                    return StreamingResponse(body(), media_type=media_type)
+                    return StreamingResponse(
+                        body(),
+                        media_type=media_type,
+                        headers={"ETag": f'"{approved_hash}"', "Last-Modified": formatdate(last_modified, usegmt=True)},
+                    )
         except (OSError, ValueError, RuntimeError):
             return missing
         return FileResponse(asset) if asset is not None else missing
