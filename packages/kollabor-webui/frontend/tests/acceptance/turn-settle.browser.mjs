@@ -625,9 +625,8 @@ try {
         `the message's row ${waiting} was taken down when it was sent: ${JSON.stringify(drawn)}`);
       await t.page.close();
     },
-    // Enter in the message box sends while the agent works, as the Send button
-    // does: the message waits for the turn to end. Ctrl+Enter (Cmd+Enter on a
-    // Mac) sends it, and every message waiting before it, at once. Shift+Enter
+    // Enter in the message box queues while the agent works. Ctrl+Enter
+    // (Cmd+Enter on a Mac) queues and requests Send Now for the batch. Shift+Enter
     // still starts a new line, and Enter on an open slash menu still picks
     // its row (#1102, #1365).
     async "sends on Enter while the agent works"() {
@@ -664,17 +663,14 @@ try {
       assert.equal(await requests(), 1, "a message sent with Enter waits for the turn to end");
       await box.fill("now");
       await box.press("Control+Enter");
-      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
-        .catch(() => assert.fail("Ctrl+Enter did not send the waiting messages at once"));
-      const second = await t.page.evaluate(() => ({
-        texts: window.transport.request.commands.map((command) => command.message.parts[0].text),
-        cancels: window.cancels, running: document.getElementById("running")?.textContent,
-      }));
-      assert.deepEqual(second.texts, ["what", "now"]);
-      assert.equal(second.cancels, 0, "the agent's turn was not stopped");
-      assert.equal(second.running, "running");
-      assert.equal(await box.inputValue(), "", "the message box is empty after the send");
-      await t.waitFor((s) => s.users === "hello|what|now" && s.errors === "0", "the sent messages");
+      await t.waitFor((s) => s.queued === "Queued what|now", "Ctrl+Enter queues the message and requests Send Now");
+      assert.equal(await requests(), 1, "busy composer messages do not start another assistant transport");
+      assert.equal(await box.inputValue(), "", "the message box is empty after the queue admission");
+      assert.deepEqual(await t.page.evaluate(() => window.queueAdmissions), [
+        { text: "what", sendNow: false },
+        { text: "now", sendNow: true },
+      ]);
+      assert.equal(await t.page.locator("#users").innerText(), "hello", "queued messages are separate from transcript history");
       await t.page.close();
     },
     // Stop still stops the agent's turn, and a message waiting behind it is not sent.
