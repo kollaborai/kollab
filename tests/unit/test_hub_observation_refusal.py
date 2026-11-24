@@ -699,7 +699,7 @@ async def test_accepted_delivery_is_not_replayed_when_unlink_fails(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_uncertain_delivery_marker_survives_replace_failure(tmp_path):
+async def test_replace_failure_blocks_delivery_until_marker_can_be_persisted(tmp_path):
     message = HubMessage(
         action="message", from_identity="peer", to="receiver", content="effect"
     )
@@ -725,13 +725,18 @@ async def test_uncertain_delivery_marker_survives_replace_failure(tmp_path):
             first = messenger_module.AgentMessenger.read_mailboxes(
                 ["receiver"], consume=False
             )
-            with pytest.raises(asyncio.CancelledError):
-                await plugin._deliver_inbox_batch(first)
+            assert await plugin._deliver_inbox_batch(first) == set()
+            assert effects == []
 
         second = messenger_module.AgentMessenger.read_mailboxes(
             ["receiver"], consume=False
         )
-        await plugin._deliver_inbox_batch(second)
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._deliver_inbox_batch(second)
+        third = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        await plugin._deliver_inbox_batch(third)
 
     assert effects == [message.id]
 
