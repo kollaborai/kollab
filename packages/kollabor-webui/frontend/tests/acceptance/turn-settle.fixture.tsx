@@ -12,6 +12,8 @@ declare global {
     transport?: Transport;
     /** Every request the page sent, oldest first. */
     transports: Transport[];
+    /** Busy-composer messages admitted to the synthetic daemon queue. */
+    queueAdmissions: Array<{ text: string; sendNow: boolean }>;
     /** How many times the page asked the engine to stop the agent's turn. */
     cancels: number;
     /** Wire-level request and turn ordering for Send Now acceptance. */
@@ -20,6 +22,7 @@ declare global {
 }
 type Transport = { request: { state?: EngineState; commands?: Array<{ message?: unknown }> }; push: (frame: string) => void; close: () => void; aborted: boolean };
 window.transports = [];
+window.queueAdmissions = [];
 window.cancels = 0;
 window.order = [];
 
@@ -119,7 +122,7 @@ function Branched() {
   return branches > 1 ? <span className="branched">{branches}</span> : null;
 }
 
-function Probe() {
+function Probe({ queued }: { queued: readonly string[] }) {
   const aui = useAui();
   const running = useAuiState((s) => s.thread.isRunning);
   const assistant = useAuiState(texts("assistant"));
@@ -141,6 +144,7 @@ function Probe() {
       <div id="running">{running ? "running" : "idle"}</div>
       <div id="assistant">{assistant}</div>
       <div id="users">{users}</div>
+      <div id="queued">{queued.length ? `Queued ${queued.join("|")}` : ""}</div>
       <div id="errors">{errors}</div>
       <div id="tools">{tools}</div>
       <div id="ids">{ids}</div>
@@ -152,6 +156,7 @@ function Probe() {
 function Fixture() {
   const [state, setState] = useState(initialState);
   const [remounts, setRemounts] = useState(0);
+  const [queued, setQueued] = useState<string[]>([]);
   // `window` says the rows are only the newest of a longer history: its first
   // row's position and the history's row count.
   window.setHistory = (messages, window) => setState({
@@ -171,8 +176,25 @@ function Fixture() {
         liveEvents={liveEvents}
         {...sessionKind}
       >
-        <Probe />
-        {realChat ? <Thread commands={commands} attachmentsEnabled={false} /> : null}
+        <Probe queued={queued} />
+        {realChat ? <Thread
+          commands={commands}
+          attachmentsEnabled={false}
+          onQueueBusyMessage={async ({ text, sendNow }) => {
+            window.queueAdmissions.push({ text, sendNow });
+            setQueued((current) => [...current, text]);
+            return {
+              admitted: true,
+              batchId: "fixture-batch",
+              requestId: `fixture-${window.queueAdmissions.length}`,
+              operationId: `operation-${window.queueAdmissions.length}`,
+              scopeId: "fixture-scope",
+              incarnation: "fixture-incarnation",
+              planKey: `fixture-plan-${window.queueAdmissions.length}`,
+              sendNowStatus: sendNow ? "not-accepted" : "not-requested",
+            };
+          }}
+        /> : null}
       </EngineRuntimeProvider>
     </>
   );
