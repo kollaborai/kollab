@@ -61,10 +61,12 @@ import {
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   matchPluginCommand,
+  pluginCommandConflicts,
   pluginCommandEntries,
   pluginCommandFailure,
   pluginCommandItems,
   reservedCommandKeys,
+  warnPluginCommandConflicts,
 } from "@/plugins/composer-commands";
 import { PluginTaggedText, PluginToolPart } from "@/plugins/renderers";
 import { usePlugins } from "@/plugins/registry";
@@ -703,6 +705,25 @@ const Composer: FC<{
     () => pluginCommandEntries(plugins, reservedCommandKeys(commands)),
     [plugins, commands],
   );
+  const pluginConflicts = useMemo(
+    () => pluginCommandConflicts(plugins, reservedCommandKeys(commands)),
+    [plugins, commands],
+  );
+  const reportedPluginConflicts = useRef(new Set<string>());
+  useEffect(() => {
+    const current = new Set<string>();
+    const newConflicts = pluginConflicts.filter((conflict) => {
+      const key = JSON.stringify([
+        conflict.commandName.toLowerCase(),
+        conflict.winnerPluginId,
+        conflict.pluginId,
+      ]);
+      current.add(key);
+      return !reportedPluginConflicts.current.has(key);
+    });
+    reportedPluginConflicts.current = current;
+    warnPluginCommandConflicts(newConflicts);
+  }, [pluginConflicts]);
 
   // A loaded plugin's /command typed in the composer runs here instead of
   // going to the agent. Returns true when it handled the submit.

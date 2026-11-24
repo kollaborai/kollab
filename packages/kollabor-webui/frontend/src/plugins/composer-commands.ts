@@ -99,6 +99,16 @@ export function pluginCommandConflicts(
   return resolvePluginCommands(plugins, reserved).conflicts;
 }
 
+/** Warn when another loaded plugin already owns a slash command. */
+export function warnPluginCommandConflicts(conflicts: readonly PluginCommandConflict[]): void {
+  for (const conflict of conflicts) {
+    console.warn(
+      `Plugin command /${conflict.commandName} from ${conflict.pluginName} (${conflict.pluginId}) is hidden; ` +
+        `${conflict.winnerName} (${conflict.winnerPluginId}) wins.`,
+    );
+  }
+}
+
 /** The plugin command a message runs (`/name args`), or null. Whole name, any case. */
 export function matchPluginCommand(
   text: string,
