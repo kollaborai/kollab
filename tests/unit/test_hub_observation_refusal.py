@@ -355,12 +355,14 @@ async def test_delivery_failure_is_held_for_inspection_after_restart(
         to="*", content="RETRY_AFTER_DELIVERY_FAILURE",
     )
     failed_plugin = HubPlugin.__new__(HubPlugin)
+    failed_plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
 
     async def fail_delivery(_message):
         raise RuntimeError("simulated delivery failure")
 
     failed_plugin._on_message_received = fail_delivery
     restarted_plugin = HubPlugin.__new__(HubPlugin)
+    restarted_plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
     restarted_plugin._on_message_received = AsyncMock(return_value=None)
     with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
         await messenger_module.AgentMessenger.send_to_file("receiver", message)
