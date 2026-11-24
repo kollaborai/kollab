@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_CONTRIBUTIONS, type PluginRecord } from "./registry";
 import type { CommandSpec, PluginApi } from "./sdk";
 import {
   matchPluginCommand,
+  pluginCommandConflicts,
   pluginCommandEntries,
   pluginCommandFailure,
   pluginCommandItems,
@@ -11,6 +12,8 @@ import {
 
 const k = {} as PluginApi;
 const run = () => undefined;
+
+afterEach(() => vi.restoreAllMocks());
 
 function command(name: string, description = `${name} command`): CommandSpec {
   return { name, description, run };
@@ -108,6 +111,33 @@ describe("pluginCommandConflicts", () => {
         winnerName: "alpha",
       },
     ]);
+  });
+
+  it("warns with the command, losing plugin and winner", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const module = (await import("./composer-commands")) as unknown as {
+      warnPluginCommandConflicts: (
+        conflicts: ReturnType<typeof pluginCommandConflicts>,
+      ) => void;
+    };
+    expect(module.warnPluginCommandConflicts).toBeTypeOf("function");
+    if (typeof module.warnPluginCommandConflicts !== "function") return;
+
+    module.warnPluginCommandConflicts(
+      pluginCommandConflicts(
+        [
+          record("winner", [command("deploy")], true, 1),
+          record("loser", [command("deploy")], true, 2),
+        ],
+        new Set(),
+      ),
+    );
+
+    expect(warning).toHaveBeenCalledOnce();
+    const message = String(warning.mock.calls[0]?.[0] ?? "");
+    expect(message).toContain("/deploy");
+    expect(message).toContain("loser");
+    expect(message).toContain("winner");
   });
 });
 
