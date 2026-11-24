@@ -447,10 +447,10 @@ Background processes get `KOLLAB_PLUGIN_ID`, `KOLLAB_PLUGIN_ROOT`, `KOLLAB_PLUGI
   secret-looking (the filter the Code terminal uses, #987), `HOME`, `PATH` or start with `KOLLAB_`,
   `PYTHON`, `LD_` or `DYLD_`; then each granted secret. `SSH_AUTH_SOCK` and every other inherited
   variable stay out.
-- The engine starts the daemon through `DaemonPool` with `KOLLAB_USAGE_LANE=plugin:<id>` and
-  `KOLLAB_USAGE_PR=<labels.pr>` (usage ledger, #723). Plugin agent time, token and concurrency limits
-  are intended settings; the current engine does not enforce them. The engine sends the brief and stops
-  the daemon at `turn_complete`; the conversation stays on disk.
+- Once plugin agent runs are implemented, the engine is intended to start the daemon through `DaemonPool`
+  with `KOLLAB_USAGE_LANE=plugin:<id>` and `KOLLAB_USAGE_PR=<labels.pr>` (usage ledger, #723), send the
+  brief, and stop it at `turn_complete`. The current engine has no plugin agent run path and does not set
+  those values. Plugin agent time, token, and concurrency limits are intended settings and are not enforced.
 - Each run is a row in `run/runs.json` (run id, session id, daemon pid and start time, deadline, cap,
   status, tokens so far, and the result when it ends), rewritten whole with the atomic write helper
   under a sibling `runs.json.lock`. The daemon writes its own end state and result when it finishes, is
