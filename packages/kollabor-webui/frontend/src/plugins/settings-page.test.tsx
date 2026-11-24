@@ -170,7 +170,7 @@ describe("plugin settings page", () => {
       managed: true,
       switchEnabled: false,
       services: false,
-      updateRemove: false,
+      updateRemove: true,
     });
   });
 
