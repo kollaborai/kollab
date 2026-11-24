@@ -151,11 +151,27 @@ def open_main_red_issue(repo: str, run_id: str, *, gh: Gh = _run_gh) -> dict[str
         f"repos/{repo}/issues?state=all&per_page=100",
         paginate=True,
     )
-    for issue in _rows(issues_payload, "issues"):
-        if "pull_request" not in issue and marker in str(issue.get("body", "")):
-            print(f"main red issue already exists: {issue.get('html_url', issue.get('number'))}")
-            _ensure_pr_comment(gh, repo, pull, issue)
-            return issue
+    existing = [
+        issue
+        for issue in _rows(issues_payload, "issues")
+        if "pull_request" not in issue and marker in str(issue.get("body", ""))
+    ]
+    if existing:
+        keep = min(existing, key=lambda row: row["number"])
+        has_open_issue = any(row.get("state") != "closed" for row in existing)
+        if keep.get("state") == "closed" and has_open_issue:
+            _api(gh, f"repos/{repo}/issues/{keep['number']}", method="PATCH", fields={"state": "open"})
+        for duplicate in existing:
+            if duplicate is not keep and duplicate.get("state") != "closed":
+                _api(
+                    gh,
+                    f"repos/{repo}/issues/{duplicate['number']}",
+                    method="PATCH",
+                    fields={"state": "closed"},
+                )
+        print(f"main red issue already exists: {keep.get('html_url', keep.get('number'))}")
+        _ensure_pr_comment(gh, repo, pull, keep)
+        return keep
 
     title = f"main CI red at {sha[:7]}"
     if pull:
