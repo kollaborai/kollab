@@ -185,6 +185,24 @@ def test_cancel_reports_cleanup_failure_and_allows_retry(client, monkeypatch):
     assert not base.exists()
 
 
+@pytest.mark.parametrize("status", ["error", "cancelled"])
+def test_cancel_retries_cleanup_for_terminal_jobs_with_staged_files(client, status):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    _ready(client, job_id)
+    job = client.app.state.plugin_jobs.jobs[job_id]
+    job["status"] = status
+    if status == "error":
+        job["warning"] = "Plugin staging files could not be removed"
+    base = job["base"]
+
+    result = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert result.status_code == 200, result.text
+    assert result.json()["status"] == "cancelled"
+    assert not base.exists()
+
+
 def test_failed_cancel_cleanup_expires_and_retries(client, monkeypatch):
     import asyncio
     import shutil
