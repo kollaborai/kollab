@@ -122,7 +122,7 @@ export async function discardReview(api: EngineApi, jobId: string): Promise<void
   try {
     await api.json(`/plugins/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
   } catch (caught) {
-    if (!(caught instanceof ApiError) || caught.status !== 404) throw caught;
+    if (!(caught instanceof ApiError) || (caught.status !== 404 && caught.status !== 409)) throw caught;
   }
 }
 
@@ -143,7 +143,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   const start = async () => {
     setBusy(true); setError(null);
     try {
-      if (job && job.status !== "installing" && job.status !== "complete")
+      if (job && (job.status === "staging" || job.status === "ready"))
         await discardReview(api, job.job_id);
       setJob(null);
       const result = await startReview(api, { action, pluginId, url, gitRef });
@@ -177,15 +177,15 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
   }, [api, job?.job_id, job?.status, pollVersion]);
   const close = () => {
     if (busy || job?.status === "installing") return;
-    if (!job || job.status === "complete") {
-      onClose();
+    if (job && (job.status === "staging" || job.status === "ready")) {
+      setBusy(true); setError(null);
+      void discardReview(api, job.job_id).then(onClose).catch((caught) => {
+        if (caught instanceof ApiError && caught.status === 409) { onClose(); return; }
+        setError(errorText(caught));
+      }).finally(() => setBusy(false));
       return;
     }
-    setBusy(true); setError(null);
-    void discardReview(api, job.job_id).then(onClose).catch((caught) => {
-      if (caught instanceof ApiError && caught.status === 409) { onClose(); return; }
-      setError(errorText(caught));
-    }).finally(() => setBusy(false));
+    onClose();
   };
   const confirm = async () => {
     if (!job || job.status !== "ready" || !job.commit || !job.files_sha256) return;
