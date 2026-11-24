@@ -14,7 +14,7 @@ const entry = (id: string, enabled: boolean, web: PluginEntry["web"] = null): Pl
   web,
   contributes: web ? { views: ["panel"] } : {},
   services: [],
-  omitted: { services: 0, uses: 0, granted: 0 },
+  omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
 });
 
 const deps = (list: LoaderDeps["list"], extra: Partial<LoaderDeps> = {}): LoaderDeps =>

@@ -32,7 +32,7 @@ function entry(id: string, extra: Partial<PluginEntry> = {}): PluginEntry {
       pages: [{ id: "main", title: "Main" }],
     },
     services: [],
-    omitted: { services: 0, uses: 0, granted: 0 },
+    omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
     ...extra,
   };
 }

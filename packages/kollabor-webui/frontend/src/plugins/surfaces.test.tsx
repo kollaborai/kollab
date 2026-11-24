@@ -56,7 +56,7 @@ function put(id: string, name: string, extra: Partial<PluginRecord> = {}, entry:
       web: { entry: "web/dist/index.js", hash: "abc" },
       contributes: { menu: [{ id, label: name, icon: "git-pull-request", open: { page: "main" } }] },
       services: [],
-      omitted: { services: 0, uses: 0, granted: 0 },
+      omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
       ...entry,
     },
     status: "ready",
