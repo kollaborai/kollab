@@ -342,7 +342,7 @@ jobs:
         lane: [core, learn, topics, notices]
         include:
           - lane: core
-            suites: agent-sidebar,sidebar-footer,remote-chat-lifecycle,team-launch,profile-rows,profile-copy,scrollbar-chrome
+            suites: agent-sidebar,sidebar-footer,remote-chat-lifecycle,team-launch,profile-rows,profile-copy,plugins,scrollbar-chrome
           - lane: learn
             suites: learn,learn-loadouts
           - lane: topics
