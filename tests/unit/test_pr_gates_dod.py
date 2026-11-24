@@ -951,6 +951,51 @@ def test_regression_test_counts_a_rule_list_quoted_in_prose_1024(tmp_path: Path)
     )
 
 
+def test_regression_test_ignores_ruff_diagnostic_lists_1407(tmp_path: Path) -> None:
+    # #1407: verdicts on #1277 and #1124 report ruff output as a list of full rule
+    # codes; F841, F401 and F811 there are lint diagnostics, not review findings.
+    cfg = regression_cfg(tmp_path)
+    for body in (
+        "ruff check -> 8 diagnostics, all on unchanged lines (six E501, I001, F841)",
+        "ruff check --no-cache -> 9 diagnostics; 7 E501, I001, and F841 are on unchanged lines",
+        "Ruff on the added tests reported I001/F401/F811 at this line",
+    ):
+        report = pr_gates_dod.evaluate(
+            cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+        )
+        assert "regression_test" not in report.failed_names(), (
+            body,
+            report.detail_for("regression_test"),
+        )
+
+
+def test_regression_test_keeps_a_finding_beside_a_ruff_diagnostic_list_1407(
+    tmp_path: Path,
+) -> None:
+    # Only the full codes inside the lint list are skipped; a finding id next to it stays.
+    cfg = regression_cfg(tmp_path)
+    body = "ruff: E501, F841 on unchanged lines. F3: the retry loop never stops"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no changed test text references finding id(s): F3 under tests/"
+    )
+
+
+def test_regression_test_keeps_an_all_f_full_code_list_1407(tmp_path: Path) -> None:
+    # Boundary: without a non-F rule code in the list nothing marks it as lint output,
+    # so it fails closed like the #1024 prose case.
+    cfg = regression_cfg(tmp_path)
+    body = "F401, F811 remain open"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no changed test text references finding id(s): F401, F811 under tests/"
+    )
+
+
 # --- report shape -----------------------------------------------------------
 
 
