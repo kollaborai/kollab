@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -82,6 +83,39 @@ def test_installed_plugin_asset_is_not_served_after_approved_files_change(tmp_pa
         assert client.get("/plugins/hello/web/lazy.js").status_code == 200
         asset.write_text("modified after approval")
         assert client.get("/plugins/hello/web/lazy.js").status_code == 404
+
+
+def test_installed_asset_hash_streams_unrelated_package_files(tmp_path, monkeypatch):
+    from kollabor_webui import server
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    root = home / "plugins/hello"
+    dist = root / "web/dist"
+    dist.mkdir(parents=True)
+    asset = dist / "main.js"
+    asset.write_text("export default 1")
+    payload = root / "model.bin"
+    with payload.open("wb") as stream:
+        stream.truncate(8 * 1024 * 1024)
+    write_registry(home, root)
+
+    original_read_bytes = Path.read_bytes
+
+    def reject_large_read(path):
+        if path == payload:
+            raise AssertionError("unrelated package files must be hashed in chunks")
+        return original_read_bytes(path)
+
+    def reject_buffered_response(*_args, **_kwargs):
+        raise AssertionError("installed assets must be streamed")
+
+    monkeypatch.setattr(Path, "read_bytes", reject_large_read)
+    monkeypatch.setattr(server, "Response", reject_buffered_response)
+    with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
+        response = client.get("/plugins/hello/web/main.js")
+    assert response.status_code == 200
+    assert response.text == "export default 1"
 
 
 def test_asset_snapshot_preserves_hash_contract_and_handles_empty_or_missing(tmp_path):
