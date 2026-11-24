@@ -318,6 +318,7 @@ class TestSpawnGuardPresenceScan(unittest.IsolatedAsyncioTestCase):
             "agent_id": agent_id,
             "identity": "sapphire",
             "pid": 9999999,  # Almost certainly dead
+            "started_at": time.time() - 60,  # real agents always write it (#1408)
             "socket_path": "",
             "last_heartbeat": time.time(),
             "state": "idle",
