@@ -233,3 +233,13 @@ def test_plugin_inventory_boundary_normalizes_every_field_and_bounds_manifest_st
             failures.append(f"manifest {label}: accepted a string longer than 4096 characters")
 
     assert failures == [], "; ".join(failures)
+
+
+def test_normalized_setting_keeps_help_a_string_for_terminal_search():
+    # the terminal config view lowercases help text, so an absent help must stay a string
+    setting = registry._normalize_setting(
+        {"type": "checkbox", "config_path": "plugins.demo.enabled", "label": "Enabled"}
+    )
+
+    assert setting is not None
+    assert isinstance(setting["help"], str)
