@@ -996,6 +996,21 @@ def test_regression_test_keeps_an_all_f_full_code_list_1407(tmp_path: Path) -> N
     )
 
 
+def test_regression_test_keeps_a_declared_finding_in_a_full_code_list_1407(
+    tmp_path: Path,
+) -> None:
+    # Review finding F1 on #1409: a line that declares findings keeps its ids, even
+    # when the list also holds a non-F rule code (as #1024 keeps "Finding IDs: F7,I001").
+    cfg = regression_cfg(tmp_path)
+    body = "Finding IDs: F841 and E501"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no changed test text references finding id(s): F841 under tests/"
+    )
+
+
 # --- report shape -----------------------------------------------------------
 
 
