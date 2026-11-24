@@ -49,6 +49,52 @@ def test_no_plugins_disables_engine_plugin_routes(monkeypatch):
     assert inventory_calls == []
 
 
+@pytest.mark.parametrize(
+    ("action", "warning"),
+    [("install", None), ("update", "Plugin installed with a service warning")],
+)
+def test_completed_job_route_survives_starting_another_review(
+    tmp_path, monkeypatch, action, warning
+):
+    import asyncio
+    import time
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    with TestClient(create_app()) as client:
+        manager = client.app.state.plugin_jobs
+        previous_id = f"completed-{action}"
+        previous = {
+            "id": previous_id,
+            "action": action,
+            "status": "complete",
+            "updated": time.monotonic(),
+            "commit": "a" * 40,
+            "files_sha256": "b" * 64,
+            "manifest": {"id": "hello", "name": "Hello"},
+            "plugin_id": "hello",
+        }
+        if warning is not None:
+            previous["warning"] = warning
+        manager.jobs[previous_id] = previous
+
+        async def hold_staging(_job):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(manager, "_stage", hold_staging)
+        started = client.post(
+            "/plugins/install", json={"source": "https://example.invalid/repo"}
+        )
+        assert started.status_code == 202, started.text
+
+        recovered = client.get(f"/plugins/jobs/{previous_id}")
+        assert recovered.status_code == 200, recovered.text
+        assert recovered.json()["status"] == "complete"
+        assert recovered.json()["action"] == action
+        assert recovered.json().get("warning") == warning
+
+
 def test_plugin_settings_read_installed_development_and_builtin(tmp_path, monkeypatch):
     import json
     import shutil
