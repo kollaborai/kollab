@@ -124,7 +124,9 @@ function build(
   polys: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
   hooks: GlassHooks,
 ) {
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  // The canvas is tiny (~40 css px), so supersample: render at 3x or the screen's ratio and let
+  // the browser scale it down. Smooths the thin bevel highlights and the refracted backdrop.
+  renderer.setPixelRatio(Math.min(Math.max(window.devicePixelRatio || 1, 3), 4));
   renderer.toneMapping = NeutralToneMapping;
 
   const scene = new Scene();
