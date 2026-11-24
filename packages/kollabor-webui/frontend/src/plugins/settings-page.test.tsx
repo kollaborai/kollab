@@ -151,6 +151,19 @@ describe("plugin settings page", () => {
     });
   });
 
+  it("allows a narrow plugin row to wrap long service statuses", async () => {
+    const markup = await markupFor([{
+      ...plugin([]),
+      name: "Phone Bridge",
+      enabled: true,
+      services: [{ name: "phone-bridge-worker", state: "crash-stopped" }],
+    }]);
+
+    expect(markup).toContain("phone-bridge-worker");
+    expect(markup).toContain("Stopped After 5 Crashes");
+    expect(markup).toMatch(/<button[^>]*class="[^"]*whitespace-normal/);
+  });
+
   it("explains the different blockers for turning off and removing a plugin", () => {
     expect(source).toMatch(/confirmation === "remove" \? "Background processes will stop\. Plugin requests must finish before it can be removed\." : "Background processes will stop\. Cancel active plugin agent runs before turning it off\."/);
   });
