@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { EngineApi } from "@/api";
 import { FieldRenderer, serializeDraft, type Draft } from "@/components/panels/FieldRenderer";
 import { Button } from "@/components/ui/button";
@@ -394,6 +394,7 @@ export function PluginsSettings({ api, onDirtyChange }: { api: EngineApi; onDirt
   const listId = useId();
   const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedDraftCount, setSelectedDraftCount] = useState(0);
   const [busyPluginKey, setBusyPluginKey] = useState<string | null>(null);
   const [focusAfterRemoval, setFocusAfterRemoval] = useState(false);
   const [browserNow, setBrowserNow] = useState(() => Date.now() / 1000);
@@ -418,6 +419,10 @@ export function PluginsSettings({ api, onDirtyChange }: { api: EngineApi; onDirt
   const reportPluginBusy = (key: string, busy: boolean) => {
     setBusyPluginKey((current) => busy ? key : current === key ? null : current);
   };
+  const reportSelectedDraftCount = useCallback((count: number) => {
+    setSelectedDraftCount(count);
+    onDirtyChange?.(count);
+  }, [onDirtyChange]);
   const records = new Map<string, PluginRecord>(snapshot.plugins.map((record) => [entryKey(record.entry), record]));
   const entries = inventory.entries;
   const groups = [
@@ -466,6 +471,9 @@ export function PluginsSettings({ api, onDirtyChange }: { api: EngineApi; onDirt
                       aria-pressed={isSelected}
                       disabled={busyPluginKey !== null}
                       onClick={() => {
+                        if (!isSelected && selectedDraftCount > 0 && !window.confirm(
+                          `Discard ${selectedDraftCount} unsaved change${selectedDraftCount === 1 ? "" : "s"}?`,
+                        )) return;
                         setSelectedKey(key);
                         if (window.matchMedia("(width < 48rem)").matches) {
                           requestAnimationFrame(() => {
@@ -504,7 +512,7 @@ export function PluginsSettings({ api, onDirtyChange }: { api: EngineApi; onDirt
             now={now}
             operationBusy={busyPluginKey === entryKey(selected)}
             onBusyChange={(busy) => reportPluginBusy(entryKey(selected), busy)}
-            onDirtyChange={onDirtyChange}
+            onDirtyChange={reportSelectedDraftCount}
             onRemoved={() => setFocusAfterRemoval(true)}
             detailRef={detailRef}
             onUpdate={(pluginId, opener) => {
