@@ -101,50 +101,52 @@ left sidebar under a group named after the plugin (`PR Chain  2 Agent Runs`, or 
 and Trajectory show its work live. Run states read Working, Done, Timed Out, Token Limit Reached, Failed or
 Cancelled.
 
-**Settings → Plugins.** A new Settings tab lists every plugin in two groups, Built In (Hub, Voice, MCP
-and the rest of the bundled `plugins/`) and Installed: name, version, source, an on/off switch, its
-Background Processes with their state, what the plugin uses, and its settings form. Buttons: Add Plugin,
-and Update and Remove for installed plugins. Add Plugin takes a git URL. Plugin settings move here from
+**Settings → Plugins.** A new Settings tab lists every plugin in Installed, Development and Built In
+(Hub, Voice, MCP and the rest of the bundled `plugins/`) groups. Its detail shows name, version, source,
+an on/off switch, Background Processes with their state, what the plugin uses, and its settings form.
+Buttons: Add Plugin, and Update and Remove for installed plugins. Add Plugin takes a git URL. Plugin settings move here from
 Settings → Configuration, which keeps only kollab's own settings, so each field shows in one place.
 Installing, updating, removing and turning plugins on or off work only from a page opened on this
 computer; over PhoneLink the tab is read-only and says `Manage plugins on this computer`.
 
-Background process states: `Running · 2 h`; `Stopping · 12 min left`; `Running · No Heartbeat for 6 min` (a process that
+Background process states include `Running · 2 h`; `Stopping`; `Running · No Heartbeat for 6 min` (a process that
 promised a heartbeat and went quiet); `Exited`; `Stopped` (stopped by you); `Stopped After 5 Crashes ·
-View Log`. The list row shows the same text. A running process offers Restart and Stop; a stopped, exited
-or crash-stopped one offers Start.
+View Log`; and `Failed to Stop`. The list row shows the same text. A running process offers Restart and Stop;
+a stopped, exited or crash-stopped one offers Start. The current service API does not return a stop deadline,
+so Settings cannot show the design's stop countdown yet.
 
-**Add sheet.** Shown before anything is copied or run:
+**Add sheet.** Shown after a checked staging copy is ready, before anything is installed or run:
 
 ```
 Add PR Chain?
 From            github.com/<owner>/kollab-pr-chain (main)
                 commit 3f2a9c1e8d0b4c6a9e7f2b1d5c3a8e9f0b6d4c2a · files 9b1c04e2
 Adds            a right-menu row and a page · code that runs in every agent · engine routes
-                1 background process · 1 slash command · 6 agents · no hooks · no MCP servers
+                1 background process · 1 slash command · agent definitions · no hooks · no MCP servers
 Through Kollab  runs agents with your loadouts
                 agents that run tools without asking; they can do anything you can
                 its loop holds the secret GITHUB_TOKEN; its stage agents run without it, as you
 On Its Own      runs gh, git, codex, claude, python3 and pgrep; its coding agents use a shell without asking
                 reads ~/.kollab/config.json to stop a chain when it changes
                 talks to github.com and raw.githubusercontent.com
-Limits          250,000 tokens and 1 hour per agent run · 4 runs at once
-                Daily Token Cap 2,000,000 tokens: kollab agent runs plus the usage the plugin reports;
-                unreported spend is not capped
 Kollab refuses requests made through kollab that the plugin did not declare. It cannot stop plugin
 code, or an agent with a shell, from doing more: they run as you, with your files and keys.
 Add only plugins you trust.
 [Add Plugin]  [Cancel]
 ```
 
+The staged-job API currently returns the manifest, changed folders, pinned commit and file hash, but not
+numeric agent limits, changed-file details or the number of agent definitions. The sheet shows only facts
+the API supplies; those additional values remain open until the engine returns them.
+
 Every update shows the same sheet with the commit range and the folders that changed, and waits for a
 click. Nothing updates by itself. `kollab plugin dev <folder>` shows the sheet with
 `From  Dev Folder (not pinned)`.
 
-**Turning a plugin off.** With agent runs working, Off asks first: `Turn off PR Chain? 2 agent runs are
-working and will be cancelled. Its loop may take up to 40 min to finish its current step.` (`1 agent run
-is working` for one) [Turn Off] [Cancel]. While its background processes finish their step, the row reads
-`Stopping · 12 min left` and its page stays. When they exit, every open page updates at once: the row
+**Turning a plugin off.** Off asks for confirmation. The engine refuses while a plugin agent run is
+active and asks the user to cancel those runs first; it does not cancel them or return their count.
+After the plugin is disabled, background processes stop and their rows read `Stopping` until they exit.
+The service API does not return a stop countdown. When they exit, every open page updates at once: the row
 goes, a page that was open shows `PR Chain is off` with a Back to Chat button, and a chat showing its tab
 switches to Chat.
 
@@ -348,13 +350,14 @@ All sit behind the existing bearer-token middleware.
 | `GET /plugins/{id}/services/{name}/log?tail=200` | the process log, redacted like Agent Output | own id | yes |
 | `POST /plugins/install`, `POST /plugins/{id}/update` → `{job_id}`; `GET /plugins/jobs/{job_id}` | clone or fetch into staging, check, then report the sheet facts | no | no |
 | `POST /plugins/jobs/{job_id}/confirm` | `{commit, files_sha256}`: refused unless both match the staged copy; then move into place | no | no |
+| `DELETE /plugins/jobs/{job_id}` | cancel an unconfirmed plugin review and remove its staging files | no | no |
 | `POST /plugins/{id}/enable`, `/disable`, `/remove` | manage | no | no |
 
 "Plugin token: no" means only the user's engine token works. "Remote page: no" means the web UI's
 `/engine` proxy and the PhoneLink bridge refuse the route for any client that is not on this computer (the proxy sees the real
 client address; the engine behind it only ever sees the proxy), and the engine refuses it on requests the
-proxy marks as forwarded. A page opened over PhoneLink or the relay can use plugins but never install or
-manage them.
+proxy marks as forwarded. PhoneLink and relay pages can inspect plugin inventory and use the read-only
+plugin surfaces allowed by the route table, but cannot install or manage plugins.
 
 ### Tokens and what plugin code can reach
 
@@ -579,8 +582,9 @@ background processes; the `python` part reaches agents when they restart.
 - A manifest `icon` names one of a short list of lucide icons (`frontend/src/plugins/mount.tsx`); any
   other name shows a puzzle piece. A modal uses the Settings dialog surface until `dialog.tsx` has its
   full-screen phone variant.
-- PhoneLink's phone app loads no plugin code yet: it cannot `import()` from the computer, so Scenario 9 is
-  still open.
+- PhoneLink's phone app does not import plugin code. It can list the engine inventory and view service logs;
+  loading plugin contributions into the phone app remains open because the phone cannot `import()` from the
+  computer.
 
 ### Settings
 
@@ -681,10 +685,11 @@ with `kollabor.binary.kollab_argv()` in its own session:
 - **Logs.** The wrapper owns `run/<process>.log`: it writes the child's output, and at 10 MB renames the
   file and opens a new one, keeping 3.
 
-Disable and remove first ask about live agent runs, cancel them, then stop the plugin's processes.
-Running agent daemons keep a plugin's `python` part until they restart: after Off or Update, Settings →
-Plugins shows `3 agents still run the old version` with Restart Agents, and each daemon picks up the
-change when it restarts.
+Disable and remove are refused while plugin agent runs are active; the user cancels them before retrying.
+Running agent daemons keep a plugin's `python` part until they restart. The engine does not currently report
+which daemons still run an old plugin version or provide a Restart Agents action, so Settings hides that
+notice until the backend supplies version counts and restart controls. Each daemon picks up the change
+when it restarts.
 Update stops processes the same way, swaps the folder, and starts them again.
 
 ### pr-chain as a plugin
@@ -812,8 +817,8 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
    meanwhile.
 8. If two plugins register the same slash command, then the one enabled first keeps it and the other's
    Settings row says `/deploy is taken by Deploy Bot`. Turning off the first frees it for the second.
-9. If the page is open on a phone through PhoneLink, then plugins load and work, `k.api` goes through
-   `/engine`, and Settings → Plugins is read-only with `Manage plugins on this computer`.
+9. If the page is open on a phone through PhoneLink, then plugin code is not imported, plugin inventory and
+   allowed service logs are readable, and Settings → Plugins is read-only with `Manage plugins on this computer`.
 10. If a plugin needs a newer kollab than the one running, then `add` refuses with `PR Chain needs kollab
     0.23.0 or newer; this is 0.22.1`.
 11. If the page URL has `?plugins=off` or kollab starts with `--no-plugins`, then no plugin code runs in

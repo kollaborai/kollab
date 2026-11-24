@@ -873,7 +873,7 @@ Where they show:
   action, the sidebar link) is pushed onto `PanelHost`'s stack like any other
   `open`, and that tab's calls go through the same switch. The sidebar link
   opens Settings on Network with `connect-halt` pushed (intent `halt`); with
-  no chat open, Settings shows only the Network tab and its root is
+  no chat open, Settings shows Network and Plugins, and its Network root is
   `connect-halt` for the sidebar's folder.
 - A chat on a waiter shows `Network halted by <device>. Resume needs a person
   on two machines: Settings → Network.` and runs no turn. The engine lists the
