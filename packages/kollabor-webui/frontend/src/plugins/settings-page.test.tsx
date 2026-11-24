@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PanelHost } from "@/components/panels/PanelHost";
 import { PluginsSettings, pluginRowControls } from "./settings";
 import { createPluginLoader, listedPluginEntries } from "./loader";
 import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
@@ -611,6 +612,78 @@ describe("plugin settings page", () => {
     } finally {
       await act(async () => root.unmount());
       host.remove();
+    }
+  });
+
+  it("asks before closing Settings when a plugin setting draft is dirty", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("matchMedia", () => ({
+      matches: false,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const entry = {
+      ...plugin([{
+        type: "checkbox",
+        label: "Enabled in settings",
+        path: "plugin-values.hello.enabled",
+        value: false,
+        editable: true,
+      }]),
+      state: "ok",
+      enabled: true,
+    } as PluginEntry;
+    const loader = createPluginLoader(pluginRegistry, {
+      list: async () => ({ plugins: [entry], server_time: undefined }),
+      importModule: async () => ({}),
+      fetchText: async () => "",
+      loadCode: false,
+      api: { request: async () => new Response(), stream: async () => {} },
+    });
+    await loader.refresh();
+
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    const onOpenChange = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<PanelHost
+        api={{} as never}
+        session={{ session_id: "", workspace: null } as never}
+        profiles={[]}
+        open
+        onOpenChange={onOpenChange}
+        tab="plugins"
+        onTabChange={() => {}}
+        intent={null}
+        onChanged={() => {}}
+        onSessionUpdated={() => {}}
+      />));
+
+      const settingSwitch = document.querySelector(
+        '[data-field="plugin-values.hello.enabled"] [role="switch"]',
+      );
+      expect(settingSwitch).not.toBeNull();
+      await act(async () => {
+        settingSwitch?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(document.querySelector('[aria-label="Unsaved change"]')).not.toBeNull();
+
+      const close = document.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]');
+      expect(close).toBeDefined();
+      await act(async () => {
+        close?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(confirm).toHaveBeenCalledWith("Discard 1 unsaved change?");
+      expect(onOpenChange).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      pluginRegistry.reset();
     }
   });
 });
