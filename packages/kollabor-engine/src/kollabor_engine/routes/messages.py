@@ -16,7 +16,7 @@ import uuid
 import weakref
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not-found]
@@ -41,6 +41,8 @@ from ..session_context import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["messages"])
 
+
+_SentMediaSlot = Dict[str, Union[str, bool]]
 
 
 def _request_read_context(request: Request | None) -> SessionReadContext | None:
@@ -710,7 +712,7 @@ def _assistant_message_content(command: Dict[str, Any]) -> MessageContent:
     return ""
 
 
-def _save_sent_media(content: MessageContent, session_id: str) -> List[Dict[str, Any]]:
+def _save_sent_media(content: MessageContent, session_id: str) -> List[_SentMediaSlot]:
     """Store image parts and return one dense media slot per attempted part.
 
     Empty for a text-only message or when this engine keeps no local
@@ -725,7 +727,7 @@ def _save_sent_media(content: MessageContent, session_id: str) -> List[Dict[str,
     from .. import media_store
 
     conversations_dir = get_project_data_dir() / "conversations"
-    slots: List[Dict[str, Any]] = []
+    slots: List[_SentMediaSlot] = []
     for part in content:
         if not isinstance(part, dict) or part.get("type") != "image":
             continue
@@ -939,7 +941,7 @@ def _assistant_update_message_state(
     submitted_contents: List[MessageContent],
     parts: List[Dict[str, Any]],
     status: Optional[Dict[str, str]],
-    submitted_media: Optional[List[List[Dict[str, str]]]] = None,
+    submitted_media: Optional[List[List[_SentMediaSlot]]] = None,
     submitted_request_ids: Optional[List[str]] = None,
     submitted_row_ids: Optional[List[Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
@@ -1816,7 +1818,7 @@ async def assistant_transport(
         submitted_contents: List[MessageContent] = []
         # Per-submission stored-image refs (#1088), parallel to
         # submitted_contents: saved at send time so the bytes outlive the turn.
-        submitted_media: List[List[Dict[str, str]]] = []
+        submitted_media: List[List[_SentMediaSlot]] = []
         # The request id of each submission, parallel to submitted_contents (#1359).
         submitted_request_ids: List[str] = []
         # The request ID the daemon says owns each submitted user row.
