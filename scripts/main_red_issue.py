@@ -148,7 +148,7 @@ def open_main_red_issue(repo: str, run_id: str, *, gh: Gh = _run_gh) -> dict[str
     marker = f"<!-- main-red:{sha} -->"
     issues_payload = _api(
         gh,
-        f"repos/{repo}/issues?state=open&per_page=100",
+        f"repos/{repo}/issues?state=all&per_page=100",
         paginate=True,
     )
     for issue in _rows(issues_payload, "issues"):
