@@ -158,7 +158,7 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
     registry.remove(id);
   }
 
-  function load(entry: PluginEntry, retries: number): Promise<void> {
+  function load(entry: PluginEntry, retries: number, listedOrder: number): Promise<void> {
     attempts.get(entry.id)?.dispose();
     const token = Symbol(entry.id);
     let staged: Contributions = EMPTY_CONTRIBUTIONS;
@@ -190,6 +190,7 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
       id: entry.id,
       name: entry.name,
       entry,
+      listedOrder,
       status: web ? "loading" : "ready",
       error: null,
       retries,
@@ -262,12 +263,12 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
     const active = entries.filter(isActive);
     const keep = new Set(active.map((entry) => entry.id));
     for (const { id } of registry.getSnapshot().plugins) if (!keep.has(id)) drop(id);
-    for (const entry of active) {
+    active.forEach((entry, listedOrder) => {
       // The same build stays as it is; its row reads the new state (Stopping, Failed to Load ...).
       if (find(entry.id) && attempts.get(entry.id)?.hash === (entry.web?.hash ?? null))
-        registry.update(entry.id, (record) => ({ ...record, name: entry.name, entry }));
-      else void load(entry, 0);
-    }
+        registry.update(entry.id, (record) => ({ ...record, name: entry.name, entry, listedOrder }));
+      else void load(entry, 0, listedOrder);
+    });
     registry.setListed(null);
   }
 
@@ -281,7 +282,9 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
     /** Imports a plugin again, as `?v=<hash>&retry=<n>`. */
     retry(id: string): Promise<void> {
       const record = find(id);
-      return record ? load(record.entry, record.retries + 1) : Promise.resolve();
+      if (!record) return Promise.resolve();
+      const inputOrder = registry.getSnapshot().plugins.findIndex((item) => item.id === id);
+      return load(record.entry, record.retries + 1, record.listedOrder ?? Math.max(inputOrder, 0));
     },
     /** An engine notice (`ctx.notify`) for a loaded plugin. */
     notice(data: unknown) {
