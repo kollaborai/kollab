@@ -310,7 +310,7 @@ jobs:
         lane: [core, learn, topics, notices]
         include:
           - lane: core
-            suites: agent-sidebar,sidebar-footer,remote-chat-lifecycle,team-launch,profile-rows,profile-copy
+            suites: agent-sidebar,sidebar-footer,remote-chat-lifecycle,team-launch,profile-rows,profile-copy,plugins
           - lane: learn
             suites: learn,learn-loadouts
           - lane: topics
