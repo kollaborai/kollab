@@ -146,8 +146,8 @@ describe("plugin dialog focus", () => {
 
 describe("plugin scroll regions", () => {
   it("gives the review details and service log named keyboard scroll targets", () => {
-    expect(installSource).toMatch(/<div tabIndex=\{0\} aria-label="Plugin review details" className="[^"]*overflow-y-auto/);
-    expect(settingsSource).toMatch(/<pre tabIndex=\{0\} aria-label=\{`\$\{service\.name\} log`\} className="[^"]*overflow-auto/);
+    expect(installSource).toMatch(/<div role="region" tabIndex=\{0\} aria-label="Plugin review details" className="[^"]*overflow-y-auto/);
+    expect(settingsSource).toMatch(/<pre role="region" tabIndex=\{0\} aria-label=\{`\$\{service\.name\} log`\} className="[^"]*overflow-auto/);
   });
 });
 
