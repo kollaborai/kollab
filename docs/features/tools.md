@@ -51,6 +51,17 @@ LLM Request
 note: these are XML tags parsed by kollabor_ai.response_parser, not tools/
   directory entries. execution happens in packages/kollabor-agent/.
 
+### Web Fetch
+
+`web-fetch` compares supported JSON-LD article bodies with semantic HTML and
+readable page text before selecting the fullest candidate. It uses a JSON-LD
+description only when that description is longer than the extracted page text,
+so metadata does not mask fuller article content. Fallback text extraction
+removes script, style, `pre`, and `code` bodies. The agent package installs
+Beautiful Soup and uses Python's built-in HTML parser; lxml is not required. If
+Beautiful Soup is unavailable, the regex fallback strips script, style, `pre`,
+and `code` contents but does not extract JSON-LD.
+
 ### Terminal Commands
 
 The LLM can execute shell commands through the `terminal` XML tag.
