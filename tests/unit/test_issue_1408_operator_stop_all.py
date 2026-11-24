@@ -142,3 +142,60 @@ def test_cli_status_names_agents_in_other_folders(tmp_path, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "local" in out
     assert "/work/elsewhere" in out
+
+
+def test_typed_stop_all_from_a_tool_shell_keeps_caller_scope(monkeypatch):
+    """`printf '/hub stop all' | kollab` from an agent's terminal tool is not the operator."""
+    here = [_peer("amethyst")]
+    plugin, stopped = _plugin(monkeypatch, here, here)
+    monkeypatch.setenv("KOLLAB_TOOL_SHELL", "1")
+
+    asyncio.run(plugin._handle_hub_command("stop all"))
+
+    assert stopped == []
+
+
+def test_typed_stop_all_under_a_hub_agent_process_keeps_caller_scope(monkeypatch):
+    """Markers stripped, but a parent process is a hub agent: still not the operator."""
+    for var in ("KOLLAB_TOOL_SHELL", "KOLLAB_AGENT_PID"):
+        monkeypatch.delenv(var, raising=False)
+    here = [_peer("amethyst")]
+    parent = _peer("launcher")
+    parent.pid = os.getppid()
+    plugin, stopped = _plugin(monkeypatch, here, here + [parent])
+
+    asyncio.run(plugin._handle_hub_command("stop all"))
+
+    assert stopped == []
+
+
+def test_session_less_stop_never_signals_a_recycled_pid(monkeypatch):
+    """The pid now belongs to another process (start token differs): no SIGTERM/SIGKILL."""
+    import subprocess
+
+    import plugins.hub.plugin as hub_plugin
+
+    bystander = subprocess.Popen(["sleep", "30"])
+    try:
+        agent = _peer("ghost")
+        agent.pid = bystander.pid
+        agent.start_token = "darwin:1.0"  # the process that wrote the row is gone
+        agent.socket_path = "/nonexistent/ghost.sock"
+        plugin = HubPlugin()
+        plugin._presence = SimpleNamespace(cleanup_agent=lambda a: None)
+        plugin._identity = SimpleNamespace(agent_id="me", identity="legal-ops-lead")
+        signals = []
+        monkeypatch.setattr(
+            plugin, "_escalate_agent", lambda a, s, sig: signals.append(sig) or True
+        )
+        monkeypatch.setattr(
+            hub_plugin.AgentMessenger, "signal_shutdown", AsyncMock(return_value=False)
+        )
+
+        asyncio.run(plugin._stop_peer_agent(agent, reason="test"))
+
+        assert signals == []
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
