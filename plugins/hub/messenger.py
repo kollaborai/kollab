@@ -3888,7 +3888,7 @@ class AgentMessenger:
                             or data.get("_mailbox_delivery_uncertain") is not True
                         ):
                             continue
-                        data.pop("_mailbox_delivery_uncertain", None)
+                        data["_mailbox_delivery_uncertain"] = False
                         fd, temp_name = tempfile.mkstemp(
                             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
                         )
@@ -3896,8 +3896,14 @@ class AgentMessenger:
                             json.dump(data, fh)
                             fh.flush()
                             os.fsync(fh.fileno())
-                        os.replace(temp_name, path)
-                        temp_name = ""
+                        for attempt in range(2):
+                            try:
+                                os.replace(temp_name, path)
+                                temp_name = ""
+                                break
+                            except OSError:
+                                if attempt == 1:
+                                    raise
                     except (OSError, ValueError, TypeError) as exc:
                         logger.error(
                             "Could not release mailbox delivery claim %s (%s)",
