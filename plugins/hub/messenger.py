@@ -28,8 +28,8 @@ from .relay_state import failure_text
 # are evicted first at write time.
 INBOX_MAX_SIZE: int = 50
 # Hard cap on durable controls per inbox. Controls bypass ordinary replay
-# limits but must not grow without bound. Oldest controls are evicted
-# (with loud logging) when this cap is exceeded.
+# limits but must not grow without bound. Admission rejects at capacity; it
+# never evicts an accepted control before normal receive classification.
 INBOX_MAX_CONTROLS: int = 200
 # Messages older than this (seconds) are silently discarded on read.
 INBOX_TTL_SECS: int = 7 * 86400  # 7 days
@@ -313,61 +313,102 @@ def _is_durable_control(data: Any) -> bool:
     )
 
 
-# Simple cache for control classification: filename -> (is_control, mtime)
-# Invalidated on file modification to avoid stale reads.
-_control_classification_cache: Dict[str, tuple[bool, float]] = {}
+def _same_durable_payload(existing: Any, payload: dict[str, Any]) -> bool:
+    """Compare message content while ignoring mutable delivery evidence."""
+    if not isinstance(existing, dict):
+        return False
+
+    def without_delivery_metadata(data: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(data)
+        normalized.pop("_mailbox_delivery_uncertain", None)
+        metadata = normalized.get("metadata")
+        if isinstance(metadata, dict):
+            metadata = dict(metadata)
+            for key in (
+                "_queued_for", "_acked_by", "_socket_failed",
+                "_mailbox_delivery_uncertain",
+            ):
+                metadata.pop(key, None)
+            normalized["metadata"] = metadata
+        return normalized
+
+    return without_delivery_metadata(existing) == without_delivery_metadata(payload)
 
 
-def _is_control_cached(path: Path) -> bool:
-    """Check if a message file is a durable control, with mtime-based caching."""
+def _read_mailbox_record(path: Path) -> Optional[Dict[str, Any]]:
+    """Read a classifiable record; unknown records confer no deletion authority.
+
+    Admission, pruning and replay use this same boundary. Invalid records remain
+    on disk and occupy retained capacity until repaired or explicitly resolved.
+    Never cache classification: a failed or changed read must not reuse an old
+    ordinary verdict to authorize deletion.
+    """
     try:
-        stat = path.stat()
-        mtime = stat.st_mtime
-        key = str(path)
-        cached = _control_classification_cache.get(key)
-        if cached and cached[1] == mtime:
-            return cached[0]
-        # Need to read and classify
         with open(path) as fh:
             data = json.load(fh)
-        is_control = _is_durable_control(data)
-        _control_classification_cache[key] = (is_control, mtime)
-        return is_control
-    except Exception:
-        # On any error, treat as ordinary (safe default)
-        return False
+        if not isinstance(data, dict):
+            logger.warning("Preserving mailbox record %s: expected JSON object", path.name)
+            return None
+        if _is_acknowledged_mailbox_record(data):
+            return data
+        if _validated_mailbox_timestamp(data) is None:
+            logger.warning("Preserving mailbox record %s: invalid timestamp", path.name)
+            return None
+        if (
+            not isinstance(data.get("id"), str)
+            or not data["id"]
+            or not isinstance(data.get("metadata"), dict)
+        ):
+            logger.warning("Preserving mailbox record %s: invalid message fields", path.name)
+            return None
+        HubMessage.from_dict(data)
+        return data
+    except OSError as exc:
+        logger.warning(
+            "Could not read mailbox record %s; preserving it (%s)",
+            path.name,
+            type(exc).__name__,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not classify mailbox record %s; preserving it (%s)",
+            path.name,
+            type(exc).__name__,
+        )
+    return None
+
+
+class InboxCapacityError(RuntimeError):
+    """Raised when a durable control cannot be admitted to a full mailbox."""
+
+
+class InboxMessageIdConflictError(RuntimeError):
+    """Raised when a retry reuses a durable message ID for different content."""
 
 
 def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
     """Evict oldest ordinary messages while preserving durable controls.
 
     ``max_size`` bounds ordinary chatter, not task controls that still require
-    normal receive classification or an explicit stale ACK. Malformed files
-    are treated as ordinary and remain eligible for eviction.
+    normal receive classification or an explicit stale ACK. Unreadable or
+    undecodable files are treated as controls until they can be classified.
 
-    Durable controls are also capped at INBOX_MAX_CONTROLS to prevent
-    unbounded growth. Oldest controls are evicted with loud logging when
-    this cap is exceeded.
+    Durable controls are admitted separately by ``send_to_file``. This helper
+    never evicts them; capacity exhaustion rejects the new control instead.
 
-    Classification uses an mtime-based cache to avoid re-reading files
-    on every prune call.
+    Only successfully read, validated ordinary records authorize eviction.
     """
     try:
         files = sorted(msg_dir.glob("*.json"))
         ordinary_files: List[Path] = []
         control_files: List[Path] = []
         for path in files:
-            try:
-                with open(path) as fh:
-                    data = json.load(fh)
-                if (
-                    isinstance(data, dict)
-                    and data.get("_mailbox_delivery_uncertain") is True
-                ):
-                    continue
-            except Exception:
-                pass
-            if _is_control_cached(path):
+            data = _read_mailbox_record(path)
+            if (
+                data is None
+                or _is_durable_control(data)
+                or data.get("_mailbox_delivery_uncertain") is True
+            ):
                 control_files.append(path)
             else:
                 ordinary_files.append(path)
@@ -389,23 +430,6 @@ def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
                 len(control_files),
             )
 
-        # Evict oldest controls if they exceed the hard cap
-        excess_controls = len(control_files) - INBOX_MAX_CONTROLS
-        if excess_controls > 0:
-            for path in control_files[:excess_controls]:
-                try:
-                    path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            logger.warning(
-                "Inbox prune: EVICTED %d oldest durable control(s) from %r "
-                "(control_cap=%d, controls_remaining=%d) — "
-                "controls overflow indicates delivery or classification failure",
-                excess_controls,
-                msg_dir.name,
-                INBOX_MAX_CONTROLS,
-                len(control_files) - excess_controls,
-            )
     except Exception as e:
         logger.debug(f"Inbox prune failed for {msg_dir}: {e}")
 
@@ -3404,28 +3428,74 @@ class AgentMessenger:
             return {}
 
     @staticmethod
-    async def send_to_file(target_agent_id: str, message: HubMessage) -> None:
+    async def send_to_file(target_agent_id: str, message: HubMessage) -> bool:
         """Fallback: write message to agent's filesystem mailbox.
 
-        After writing, prunes ordinary traffic to INBOX_MAX_SIZE entries
-        (oldest first). Durable task controls are preserved until classified.
+        Ordinary traffic is written and pruned to INBOX_MAX_SIZE entries
+        (oldest first). Durable task controls are admitted under the shared
+        mailbox root lock up to INBOX_MAX_CONTROLS; a full mailbox raises
+        ``InboxCapacityError`` without evicting accepted controls. Retrying an
+        identical durable message ID is idempotent. Storage failures propagate
+        so callers cannot report an unpersisted message as queued.
+
+        Returns True when the message is durably admitted, including an
+        idempotent retry. Capacity exhaustion and storage errors are explicit.
         """
         if _validated_mailbox_timestamp(message.to_dict()) is None:
             raise ValueError("Cannot write mailbox message with invalid timestamp")
         messages_dir = get_messages_dir()
         messages_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         msg_dir = messages_dir / target_agent_id
-
         with locked_file(messages_dir / ".delivery.lock", private=True):
             msg_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            payload = message.to_dict()
+
+            if _is_durable_control(payload):
+                retained_count = 0
+                for path in msg_dir.glob("*.json"):
+                    existing = _read_mailbox_record(path)
+                    if (
+                        existing is None
+                        or _is_durable_control(existing)
+                        or existing.get("_mailbox_delivery_uncertain") is True
+                    ):
+                        retained_count += 1
+                    if existing is not None and existing.get("id") == message.id:
+                        if not _same_durable_payload(existing, payload):
+                            raise InboxMessageIdConflictError(
+                                "durable message ID already exists with different content"
+                            )
+                        return True
+
+                if retained_count >= INBOX_MAX_CONTROLS:
+                    logger.warning(
+                        "Durable mailbox full for %r (control_cap=%d); "
+                        "new control was not admitted",
+                        target_agent_id,
+                        INBOX_MAX_CONTROLS,
+                    )
+                    raise InboxCapacityError(
+                        "durable inbox capacity reached; retry after "
+                        "the receiver drains controls"
+                    )
+
+                filename = (
+                    f"{time.time():.6f}-{uuid.uuid4().hex[:8]}-"
+                    f"from-{message.from_identity}.json"
+                )
+                _atomic_write(msg_dir / filename, payload)
+                _prune_inbox(msg_dir, INBOX_MAX_SIZE)
+                logger.info("Wrote durable control to mailbox: %s", filename)
+                return True
+
             # Timestamp + UUID filename avoids seq race under concurrency
             filename = f"{time.time():.6f}-{uuid.uuid4().hex[:8]}-from-{message.from_identity}.json"
-
-            _atomic_write(msg_dir / filename, message.to_dict())
+            _atomic_write(msg_dir / filename, payload)
             logger.info(f"Wrote message to mailbox: {filename}")
 
-            # Enforce inbox size bound — evict oldest if over limit
+            # Enforce the independent ordinary-message bound.
             _prune_inbox(msg_dir, INBOX_MAX_SIZE)
+            return True
 
     @staticmethod
     def read_mailbox(
@@ -3440,7 +3510,7 @@ class AgentMessenger:
             agent_id: Agent identity or agent_id to read from.
             max_replay: If > 0, cap ordinary messages returned to this many
                 (newest first). Durable task controls bypass the cap so normal
-                receive can classify them exactly once. A synthetic
+                receive can classify them. A synthetic
                 ``inbox_summary`` reports dropped ordinary traffic. TTL also
                 applies only to ordinary traffic; controls must be classified.
             restart_boundary: Explicit restart boundary (epoch seconds).
@@ -3449,8 +3519,9 @@ class AgentMessenger:
                 clock-skew grace) are pre-reboot: they are dropped with a log
                 line and never delivered as current instructions, but durable
                 task controls are preserved for TaskLedger classification.
-            consume: Remove valid records after parsing. The live delivery loop
-                disables this and acknowledges each message only after delivery.
+            consume: Remove validated ordinary records after parsing. Controls
+                always require acknowledgment after receive classification.
+                The live delivery loop disables consumption for all records.
         """
         msg_dir = get_messages_dir() / agent_id
         if not msg_dir.exists():
@@ -3489,35 +3560,8 @@ class AgentMessenger:
             stale_preboot_count = 0
 
             for f in sorted(msg_dir.glob("*.json")):
-                data: Dict[str, Any] = {}
-                try:
-                    with open(f) as fh:
-                        data = json.load(fh)
-                except OSError as e:
-                    logger.warning(
-                        "Could not read mailbox record %s: %s", f.name, type(e).__name__
-                    )
-                    continue
-                except Exception as e:
-                    logger.warning(
-                        "Bad mailbox message %s: %s", f.name, type(e).__name__
-                    )
-                    try:
-                        f.unlink()
-                    except Exception:
-                        pass
-                    continue
-
-                if not isinstance(data, dict):
-                    logger.warning(
-                        "Bad mailbox message %s: expected JSON object, got %s",
-                        f,
-                        type(data).__name__,
-                    )
-                    try:
-                        f.unlink()
-                    except Exception:
-                        pass
+                data = _read_mailbox_record(f)
+                if data is None:
                     continue
 
                 if _is_acknowledged_mailbox_record(data):
@@ -3531,11 +3575,6 @@ class AgentMessenger:
 
                 timestamp = _validated_mailbox_timestamp(data)
                 if timestamp is None:
-                    logger.warning("Discarding mailbox record with invalid timestamp")
-                    try:
-                        f.unlink()
-                    except OSError:
-                        logger.warning("Could not discard malformed mailbox record")
                     continue
 
                 # TTL bounds ordinary chatter only. Durable task controls must
@@ -3557,17 +3596,16 @@ class AgentMessenger:
                 try:
                     msg = HubMessage.from_dict(data)
                 except Exception as e:
-                    logger.warning(f"Failed to parse mailbox message {f}: {e}")
-                    try:
-                        f.unlink()
-                    except OSError:
-                        logger.warning("Could not discard unparseable mailbox record")
+                    logger.warning(
+                        "Could not parse mailbox record %s; preserving it (%s)",
+                        f.name,
+                        type(e).__name__,
+                    )
                     continue
 
-                # The live delivery loop keeps parsed records until the receiver
-                # acknowledges them. Direct callers retain the historical
-                # consuming behavior by default.
-                if consume and not delivery_uncertain:
+                # Reading never frees a control's admission slot. Only receive
+                # classification followed by acknowledgment may retire it.
+                if consume and not is_control and not delivery_uncertain:
                     try:
                         f.unlink()
                     except OSError:
@@ -3737,7 +3775,9 @@ class AgentMessenger:
 
         Agents get a fresh agent_id on restart, but their hub identity
         stays stable. Reading both prevents offline messages from being
-        stranded in the old session's mailbox.
+        stranded in the old session's mailbox. Durable controls remain counted
+        until receive classification acknowledges them, including when ordinary
+        messages are consumed. The live delivery loop consumes no records.
 
         Args:
             agent_keys: List of agent_id and identity strings to drain.
