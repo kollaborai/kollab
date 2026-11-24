@@ -127,8 +127,9 @@ export async function discardReview(api: EngineApi, jobId: string): Promise<void
 }
 
 /** Preview stages untrusted source; only the explicit second action confirms its exact bytes. */
-export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied }: {
+export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied, onRestoreFocus }: {
   api: EngineApi; action: "install" | "update"; pluginId?: string; onClose: () => void; onApplied: () => Promise<void>;
+  onRestoreFocus: (event: Event) => void;
 }) {
   const [url, setUrl] = useState("");
   const [gitRef, setGitRef] = useState("");
@@ -136,6 +137,8 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pollVersion, setPollVersion] = useState(0);
+  const progressRef = useRef<HTMLParagraphElement>(null);
+  const previousStatus = useRef<Job["status"] | null>(null);
   const started = useRef(false);
   const start = async () => {
     setBusy(true); setError(null);
@@ -150,6 +153,12 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   useEffect(() => {
     if (action === "update" && !started.current) { started.current = true; void start(); }
   }, [action]);
+  useEffect(() => {
+    const status = job?.status ?? null;
+    if ((status === "staging" || status === "installing") && status !== previousStatus.current)
+      requestAnimationFrame(() => progressRef.current?.focus());
+    previousStatus.current = status;
+  }, [job?.status]);
   useEffect(() => {
     if (!job || (job.status !== "staging" && job.status !== "installing")) return;
     let cancelled = false;
@@ -220,7 +229,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   ];
   const form = reviewFormState(action, job, error !== null);
   return <Dialog open onOpenChange={open => { if (!open) close(); }}>
-    <DialogContent className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
+    <DialogContent onCloseAutoFocus={onRestoreFocus} className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
         <DialogDescription>Review the exact source and permissions before anything is installed or run.</DialogDescription></DialogHeader>
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
@@ -228,8 +237,8 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Git URL<Input className="pointer-coarse:min-h-11" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label>
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Branch or Tag<Input className="pointer-coarse:min-h-11" value={gitRef} onChange={event => setGitRef(event.target.value)} placeholder="Default branch" /></label>
         </div> : null}
-        {showFetching(job, error !== null) ? <p role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
-        {job?.status === "installing" && !error ? <p role="status" className="text-muted-foreground text-sm">Installing plugin…</p> : null}
+        {showFetching(job, error !== null) ? <p ref={progressRef} tabIndex={-1} role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
+        {job?.status === "installing" && !error ? <p ref={progressRef} tabIndex={-1} role="status" className="text-muted-foreground text-sm">Installing plugin…</p> : null}
         {job?.status === "complete" ? <p role="status" className="text-muted-foreground text-sm">Plugin {action === "install" ? "added" : "updated"}.</p> : null}
         {job?.warning ? <p role="alert" className="break-words text-sm">{job.warning}</p> : null}
         {job?.status === "error" ? <p role="alert" className="text-destructive text-sm">{job.error || "Plugin review failed."}</p> : null}
@@ -248,7 +257,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           <p className="bg-muted rounded-lg p-3 text-sm">{PLUGIN_TRUST_NOTICE}</p>
         </> : null}
         {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
-        {shouldRetryPolling(job, error !== null) ? <Button type="button" variant="outline" className="pointer-coarse:min-h-11 self-start" disabled={busy} onClick={() => { setError(null); setPollVersion((version) => version + 1); }}>Check Again</Button> : null}
+        {shouldRetryPolling(job, error !== null) ? <Button type="button" variant="outline" className="pointer-coarse:min-h-11 self-start" disabled={busy} onClick={() => { setError(null); setPollVersion((version) => version + 1); requestAnimationFrame(() => progressRef.current?.focus()); }}>Check Again</Button> : null}
       </div>
       <DialogFooter><Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={close}>{job?.status === "complete" ? "Close" : "Cancel"}</Button>
                 {form.review ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || (action === "install" && !url.trim())} onClick={() => { void start(); }}>{action === "update" ? "Review Again" : "Review"}</Button> : null}

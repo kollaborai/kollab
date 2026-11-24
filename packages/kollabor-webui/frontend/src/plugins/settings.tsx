@@ -87,6 +87,12 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
 }) {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string | null>(null);
+  const logOpener = useRef<HTMLElement | null>(null);
+  const restoreLogFocus = (event: Event) => {
+    if (!logOpener.current?.isConnected) return;
+    event.preventDefault();
+    logOpener.current.focus();
+  };
   const base = `${pathFor(id)}/services/${encodeURIComponent(service.name)}`;
   const control = async (action: "start" | "stop" | "restart") => {
     setBusy(true);
@@ -124,7 +130,7 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
       <span className="text-muted-foreground">{serviceStatus(service, now)}</span>
       {service.error ? <span className="text-destructive break-words">{service.error}</span> : null}
       <div className="ml-auto flex flex-wrap gap-1">
-        <Button type="button" variant="ghost" size="xs" className="pointer-coarse:min-h-11" aria-label={`View Log ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void showLog(); }}>View Log</Button>
+        <Button type="button" variant="ghost" size="xs" className="pointer-coarse:min-h-11" aria-label={`View Log ${service.name}`} disabled={busy || disabled || operationBusy} onClick={(event) => { logOpener.current = event.currentTarget; void showLog(); }}>View Log</Button>
         {canControl && service.state === "running" ? (
           <>
             {enabled ? <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" aria-label={`Restart ${service.name}`} disabled={busy || disabled || operationBusy} onClick={() => { void control("restart"); }}>Restart</Button> : null}
@@ -139,7 +145,7 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
         ) : null}
       </div>
       <Dialog open={log !== null} onOpenChange={(open) => { if (!open) setLog(null); }}>
-        <DialogContent>
+        <DialogContent onCloseAutoFocus={restoreLogFocus}>
           <DialogHeader>
             <DialogTitle>{service.name} Log</DialogTitle>
             <DialogDescription>Most recent redacted output.</DialogDescription>
@@ -173,6 +179,12 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<"disable" | "remove" | null>(null);
+  const confirmationOpener = useRef<HTMLElement | null>(null);
+  const restoreConfirmationFocus = (event: Event) => {
+    if (!confirmationOpener.current?.isConnected) return;
+    event.preventDefault();
+    confirmationOpener.current.focus();
+  };
   const [settingsDraft, setSettingsDraft] = useState<Draft>({});
   const { managed, switchEnabled, services, updateRemove } = pluginRowControls(entry, remote);
   const stopping = entry.state === "stopping";
@@ -229,7 +241,12 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
               disabled={!switchEnabled || busy || operationBusy}
               onCheckedChange={(checked) => {
                 if (checked) void perform("enable");
-                else { setError(null); setConfirmation("disable"); }
+                else {
+                  const active = document.activeElement;
+                  confirmationOpener.current = active instanceof HTMLElement ? active : null;
+                  setError(null);
+                  setConfirmation("disable");
+                }
               }}
             />
           </label>
@@ -237,7 +254,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
         {updateRemove ? (
           <div className="ml-auto flex flex-wrap gap-2">
             <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={() => onUpdate(entry.id)}>Update</Button>
-            <Button type="button" size="xs" variant="ghost" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={() => { setError(null); setConfirmation("remove"); }}>Remove</Button>
+            <Button type="button" size="xs" variant="ghost" className="pointer-coarse:min-h-11" disabled={busy || operationBusy} onClick={(event) => { confirmationOpener.current = event.currentTarget; setError(null); setConfirmation("remove"); }}>Remove</Button>
           </div>
         ) : null}
       </div>
@@ -312,7 +329,7 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
         ) : null}
       </div>
       <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open && !busy && !operationBusy) setConfirmation(null); }}>
-        <DialogContent>
+        <DialogContent onCloseAutoFocus={restoreConfirmationFocus}>
           <DialogHeader>
             <DialogTitle>{confirmation === "remove" ? "Remove" : "Turn off"} {entry.name}?</DialogTitle>
             <DialogDescription>{confirmation === "remove" ? "Background processes will stop. Plugin requests must finish before it can be removed." : "Background processes will stop. Cancel active plugin agent runs before turning it off."}</DialogDescription>
@@ -339,7 +356,13 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [busyPluginKey, setBusyPluginKey] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now() / 1000);
+  const operationOpener = useRef<HTMLElement | null>(null);
   const detailRef = useRef<HTMLElement>(null);
+  const restoreOperationFocus = (event: Event) => {
+    if (!operationOpener.current?.isConnected) return;
+    event.preventDefault();
+    operationOpener.current.focus();
+  };
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now() / 1000), 60_000);
     return () => window.clearInterval(timer);
@@ -369,7 +392,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h2 className="text-muted-foreground text-xs font-semibold">{group.title}</h2>
                 {group.title === "Installed" && !snapshot.off && !remote ? (
-                  <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busyPluginKey !== null} onClick={() => setOperation({ action: "install" })}>
+                  <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busyPluginKey !== null} onClick={(event) => { operationOpener.current = event.currentTarget; setOperation({ action: "install" }); }}>
                   Add Plugin
                   </Button>
                 ) : null}
@@ -434,7 +457,11 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
             operationBusy={busyPluginKey === entryKey(selected)}
             onBusyChange={(busy) => reportPluginBusy(entryKey(selected), busy)}
             detailRef={detailRef}
-            onUpdate={(pluginId) => setOperation({ action: "update", pluginId })}
+            onUpdate={(pluginId) => {
+              const active = document.activeElement;
+              operationOpener.current = active instanceof HTMLElement ? active : null;
+              setOperation({ action: "update", pluginId });
+            }}
           />
         ) : null}
       </div>
@@ -445,6 +472,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
           pluginId={operation.pluginId}
           onClose={() => setOperation(null)}
           onApplied={() => refreshPlugins()}
+          onRestoreFocus={restoreOperationFocus}
         />
       ) : null}
     </div>
