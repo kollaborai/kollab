@@ -202,3 +202,13 @@ def test_session_less_stop_never_signals_a_recycled_pid(monkeypatch):
     finally:
         bystander.kill()
         bystander.wait()
+
+
+def test_other_folder_list_skips_a_row_whose_pid_was_recycled(monkeypatch):
+    stale = _peer("phantom", project="/work/elsewhere")
+    stale.start_token = "darwin:1.0"  # this test process is not the row's writer
+    plugin, _ = _plugin(monkeypatch, [], [stale])
+
+    result = asyncio.run(plugin._handle_hub_command("stop all"))
+
+    assert "phantom" not in result
