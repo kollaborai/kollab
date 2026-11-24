@@ -722,8 +722,8 @@ def _stop_unrecorded(run_dir: Path, pid_path: Path) -> bool:
     wrapper, child = identity.get("wrapper"), identity.get("child")
     if _verified_wrapper(wrapper):
         # Record desired=stopped before the signal, as control_service does, so the supervisor cannot respawn it.
-        # 10 s is the default stop timeout control_service uses.
-        _record_stop_state(state_path, "stopping", time.time() + 10)
+        # The manifest may be unreadable here, so use the shared default grace (the wrapper's own default).
+        _record_stop_state(state_path, "stopping", time.time() + stop_timeout({}))
         try:
             os.kill(wrapper["pid"], signal.SIGTERM)
         except ProcessLookupError:
