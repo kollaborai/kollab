@@ -1,6 +1,6 @@
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
 import { PluginToolPart } from "./renderers";
 import type { PluginApi, PluginRendererProps, RendererSpec } from "./sdk";
@@ -14,7 +14,10 @@ function PluginToolRenderer({ toolCall }: PluginRendererProps) {
   return createElement("span", { "data-plugin-tool-ui": toolCall?.name }, "Plugin renderer");
 }
 
-afterEach(() => pluginRegistry.reset());
+afterEach(() => {
+  pluginRegistry.reset();
+  vi.restoreAllMocks();
+});
 
 function record(id: string, renderers: RendererSpec[], withK = true, enableOrder?: number): PluginRecord {
   return {
@@ -120,5 +123,15 @@ describe("PluginToolPart", () => {
       expect(html, toolName).toContain(`data-host-tool-ui="${toolName}"`);
       expect(html, toolName).not.toContain("data-plugin-tool-ui");
     }
+  });
+
+  it("keeps the plugin registry hook active when a host UI is present", () => {
+    const getSnapshot = vi.spyOn(pluginRegistry, "getSnapshot");
+    const toolUI = createElement("span", { "data-host-tool-ui": "hub_msg" }, "Host UI");
+    const part = { toolName: "hub_msg", args: {}, toolUI } as ComponentProps<typeof PluginToolPart>["part"];
+    const html = renderToStaticMarkup(createElement(PluginToolPart, { part, fallback: toolUI }));
+
+    expect(html).toContain("data-host-tool-ui=\"hub_msg\"");
+    expect(getSnapshot).toHaveBeenCalled();
   });
 });
