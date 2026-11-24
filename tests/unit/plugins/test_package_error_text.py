@@ -33,8 +33,10 @@ def _install(tmp_path, entry_source):
         f"    def __get__(self, obj, owner):\n        raise RuntimeError({SECRET!r})\n"
         "class Hello(BasePlugin):\n"
         "    get_default_config = Raising()\n",
+        "from kollabor_plugins import registry\n"
+        f"raise getattr(registry, '_LoadError', ValueError)({SECRET!r})\n",
     ],
-    ids=["import", "default-config", "module-getattr", "descriptor"],
+    ids=["import", "default-config", "module-getattr", "descriptor", "kollab-error-class"],
 )
 def test_plugin_raised_text_is_not_kept(tmp_path, monkeypatch, entry_source):
     monkeypatch.setenv("HOME", str(tmp_path))
