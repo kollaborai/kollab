@@ -21,6 +21,52 @@ def test_log_filter_redacts_across_chunks_and_suppresses_oversized_lines():
     assert b"oversized" in oversized
 
 
+def test_plugin_secret_redaction_boundaries_are_shared():
+    from kollabor_plugins.packages import _normalize_plugin_use
+    from kollabor_plugins.registry import _bounded_inventory_text
+    from kollabor_plugins.services import redact_log
+
+    credential = "ghp_fakecredentialvalue123"
+    cases = [
+        ("manifest use", "run:GITHUB_TOKEN=" + credential, None),
+        ("inventory token assignment", "GITHUB_TOKEN=" + credential, None),
+        ("inventory bearer", "Bearer abc123XYZ987", None),
+        ("inventory key shape", "sk-live-abcdefghijklmnop", None),
+        ("token label", "Token-Budget", "Token-Budget"),
+        ("password help", "Password: required", "Password: required"),
+        (
+            "provenance URL",
+            "https://github.com/acme/token-manager.git",
+            "https://github.com/acme/token-manager.git",
+        ),
+        (
+            "log assignment",
+            "PluginError: GITHUB_TOKEN=" + credential,
+            "PluginError: GITHUB_TOKEN: [redacted]",
+        ),
+        (
+            "log filesystem path",
+            "RuntimeError: /private/tmp/account/config.json",
+            "RuntimeError: [path]",
+        ),
+    ]
+    actual = []
+    for surface, value, _ in cases:
+        if surface == "manifest use":
+            actual.append(_normalize_plugin_use(value))
+        elif surface.startswith("inventory") or surface in {"token label", "password help", "provenance URL"}:
+            actual.append(_bounded_inventory_text(value))
+        else:
+            actual.append(redact_log(value))
+
+    failures = [
+        f"{surface}: expected {expected!r}, got {result!r}"
+        for (surface, _, expected), result in zip(cases, actual)
+        if result != expected
+    ]
+    assert failures == [], "; ".join(failures)
+
+
 def test_echoed_secret_and_token_are_redacted_in_cli(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
