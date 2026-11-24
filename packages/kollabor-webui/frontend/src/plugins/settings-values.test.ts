@@ -44,6 +44,17 @@ describe("plugin row controls", () => {
     expect(pluginRowControls(row("dev")).updateRemove).toBe(false);
   });
 
+  it("offers service controls to managed plugins in normal mode", () => {
+    expect(pluginRowControls(row("installed")).services).toBe(true);
+    expect(pluginRowControls(row("dev")).services).toBe(true);
+  });
+
+  it("disables the switch for changed-on-disk plugins while keeping update and remove available", () => {
+    const controls = pluginRowControls(row("installed", "changed-on-disk"));
+    expect(controls.switchEnabled).toBe(false);
+    expect(controls.updateRemove).toBe(true);
+  });
+
   it("holds the switch while a plugin is stopping or shadowed", () => {
     expect(pluginRowControls(row("installed", "stopping")).switchEnabled).toBe(false);
     expect(pluginRowControls(row("dev", "ok", true)).switchEnabled).toBe(false);
