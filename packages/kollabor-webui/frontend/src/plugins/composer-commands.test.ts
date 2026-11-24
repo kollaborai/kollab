@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
+import {
+  AssistantRuntimeProvider,
+  useLocalRuntime,
+  type ChatModelAdapter,
+} from "@assistant-ui/react";
+import { Thread } from "@/components/assistant-ui/thread";
 import { EMPTY_CONTRIBUTIONS, type PluginRecord } from "./registry";
-import type { CommandSpec, PluginApi } from "./sdk";
+import { pluginRegistry } from "./registry";
+import type { CommandSpec, PluginApi, PluginEntry } from "./sdk";
 import {
   matchPluginCommand,
   pluginCommandConflicts,
@@ -9,6 +18,24 @@ import {
   pluginCommandItems,
   reservedCommandKeys,
 } from "./composer-commands";
+
+vi.mock("@/components/assistant-ui/composer-palette", async () => {
+  const React = await import("react");
+  return {
+    ComposerPalette: ({ items }: { items: readonly { id: string; label: string }[] }) =>
+      React.createElement(
+        "div",
+        { "data-testid": "composer-palette" },
+        ...items.map((item) => React.createElement("span", { key: item.id }, item.label)),
+      ),
+  };
+});
+
+vi.mock("@/voice/voice-room", () => ({
+  useRoomVoiceMode: () => null,
+  useVoiceRoomLive: () => false,
+  VoiceRoomBar: () => null,
+}));
 
 const k = {} as PluginApi;
 const run = () => undefined;
@@ -215,5 +242,44 @@ describe("pluginCommandFailure", () => {
 
   it("names the command alone when the error has no text", () => {
     expect(pluginCommandFailure("hello", new Error("  "))).toBe("Could not run /hello.");
+  });
+});
+
+const threadAdapter: ChatModelAdapter = { run: async () => ({ content: [] }) };
+
+function putThreadCommand(name: string) {
+  pluginRegistry.put({
+    id: "punctuation",
+    name: "Punctuation",
+    entry: {} as PluginEntry,
+    status: "ready",
+    error: null,
+    retries: 0,
+    k: { id: "punctuation", toast: () => {} } as unknown as PluginApi,
+    contributions: {
+      ...EMPTY_CONTRIBUTIONS,
+      commands: [{ name, description: "A punctuation command", run: () => {} }],
+    },
+  });
+}
+
+function ThreadHarness() {
+  const runtime = useLocalRuntime(threadAdapter);
+  return createElement(
+    AssistantRuntimeProvider,
+    { runtime },
+    createElement(Thread, { agents: [], commands: [], attachmentsEnabled: false }),
+  );
+}
+
+afterEach(() => pluginRegistry.reset());
+
+describe("plugin command composer labels", () => {
+  it("keeps a label when a command name contains only separators", () => {
+    putThreadCommand("__");
+
+    const html = renderToStaticMarkup(createElement(ThreadHarness));
+
+    expect(html).toContain(">__</span>");
   });
 });
