@@ -437,7 +437,7 @@ def test_unusable_stop_timeout_on_an_approved_manifest_still_stops(tmp_path, mon
 
 
 def test_fallback_stop_publishes_the_shared_default_grace(tmp_path, monkeypatch):
-    """When control_service fails, the fallback stop records the same 30 s grace the wrapper uses."""
+    """The fallback stop uses the shared timeout helper instead of a fixed grace."""
     from kollabor_plugins import services
 
     run = tmp_path / "run"
