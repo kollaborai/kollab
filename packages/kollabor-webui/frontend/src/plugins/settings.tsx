@@ -414,7 +414,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
   const reportPluginBusy = (key: string, busy: boolean) => {
     setBusyPluginKey((current) => busy ? key : current === key ? null : current);
   };
-  const records = new Map<string, PluginRecord>(snapshot.plugins.map((record) => [record.id, record]));
+  const records = new Map<string, PluginRecord>(snapshot.plugins.map((record) => [entryKey(record.entry), record]));
   const entries = inventory.entries;
   const groups = [
     { title: "Installed", entries: entries.filter((entry) => entry.kind === "installed") },
@@ -449,8 +449,8 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
                   const key = entryKey(entry);
                   const isSelected = selected !== undefined && entryKey(selected) === key;
                   const descriptionId = `${listId}-${entry.kind}-${entry.id}`;
-                  const failure = failureOf(entry, records.get(entry.id));
-                  const status = pluginStatus(entry, records.get(entry.id));
+                  const failure = failureOf(entry, records.get(entryKey(entry)));
+                  const status = pluginStatus(entry, records.get(entryKey(entry)));
                   return (
                     <Button
                       key={key}
@@ -494,7 +494,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
           <PluginDetail
             key={entryKey(selected)}
             entry={selected}
-            record={records.get(selected.id)}
+            record={records.get(entryKey(selected))}
             api={api}
             remote={remote}
             now={now}
