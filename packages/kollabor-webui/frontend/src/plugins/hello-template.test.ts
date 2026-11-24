@@ -99,14 +99,13 @@ export default definePlugin(k => {
       child = spawn("npm", ["run", "dev"], {
         cwd: root,
         env: { ...process.env, PATH: toolPath },
-        detached: true,
         stdio: "ignore",
       });
       await waitFor(() => existsSync(bundle), 8000);
       appendFileSync(join(root, "src/index.js"), '\nglobalThis.__helloWatchMarker = "hello-watch-marker";\n');
       await waitFor(() => existsSync(bundle) && readFileSync(bundle, "utf8").includes("hello-watch-marker"), 8000);
     } finally {
-      if (child?.pid) process.kill(-child.pid, "SIGTERM");
+      if (child?.pid && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
       await new Promise((done) => setTimeout(done, 500));
       rmSync(root, { recursive: true, force: true });
     }
