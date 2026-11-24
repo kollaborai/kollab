@@ -184,6 +184,22 @@ def test_unchanged_dynamic_loader_reached_by_changed_test_is_rule_five_stale(
     assert docs_reasons == []
 
 
+def test_exec_hidden_import_makes_comparison_stale(tmp_path: Path) -> None:
+    test = "tests/unit/test_exec_dynamic_import.py"
+    write(tmp_path, "pkg/__init__.py", "")
+    write(tmp_path, "pkg/changed.py", "VALUE = 1\n")
+    write(tmp_path, test, 'exec("from pkg import changed")\n')
+    dynamic: set[str] = set()
+
+    graph = pr_blast_radius.build_import_graph(tmp_path, dynamic=dynamic)
+    stale, reasons = pr_blast_radius.decide(
+        {test}, {"pkg/changed.py"}, graph, dynamic=dynamic
+    )
+
+    assert stale is True
+    assert f"rule 5: cannot analyze dynamic loading in {test}" in reasons
+
+
 def test_reverse_closure_and_tests_of_follow_two_hops(tmp_path: Path) -> None:
     write(tmp_path, "packages/sample/src/sample/__init__.py", "")
     write(tmp_path, "packages/sample/src/sample/core.py", "")
