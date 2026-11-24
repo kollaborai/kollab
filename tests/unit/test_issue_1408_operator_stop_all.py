@@ -855,6 +855,46 @@ def test_cli_status_keeps_a_row_it_cannot_reread(tmp_path, monkeypatch):
     assert path.exists()
 
 
+def test_cli_status_serializes_dead_row_cleanup_with_replacement_publish(
+    tmp_path, monkeypatch
+):
+    """A replacement published after validation must survive the cleanup."""
+    from pathlib import Path
+
+    _cli(tmp_path, monkeypatch, local=False)
+    current = tmp_path / "current"
+    _write(current, "stale", "/work/here")
+    path = current / "stale.json"
+    row = json.loads(path.read_text())
+    row["start_token"] = "darwin:1.0"
+    path.write_text(json.dumps(row))
+    monkeypatch.setattr(
+        "kollabor_agent.runtime.process_start_token", lambda _pid: "darwin:9.9"
+    )
+    original_unlink = Path.unlink
+
+    def publish_replacement_then_unlink(candidate, *args, **kwargs):
+        if candidate == path:
+            path.write_text(
+                json.dumps(
+                    {
+                        **row,
+                        "identity": "replacement",
+                        "started_at": row["started_at"] + 50,
+                        "start_token": "darwin:9.9",
+                    }
+                )
+            )
+        return original_unlink(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", publish_replacement_then_unlink)
+
+    asyncio.run(_handle_cli_hub(["status"]))
+
+    assert path.exists()
+    assert json.loads(path.read_text())["identity"] == "replacement"
+
+
 def test_stop_cleanup_serializes_with_replacement_publish_and_keeps_its_socket(
     tmp_path, monkeypatch
 ):
