@@ -538,6 +538,8 @@ def supervisor_tick(*, engine_url: str | None = None) -> None:
                     continue
                 try:
                     state_path = run_dir / f"{service_name}.state"
+                    if state_path.is_symlink():
+                        continue
                     if state_path.exists():
                         state = json.loads(state_path.read_text(encoding="utf-8"))
                         if (
