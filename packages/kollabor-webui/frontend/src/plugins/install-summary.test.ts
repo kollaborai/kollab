@@ -90,6 +90,7 @@ describe("plugin review form state", () => {
   it("never shows the source form for an update", () => {
     expect(reviewFormState("update", null)).toEqual({ source: false, review: false });
     expect(reviewFormState("update", { status: "error" })).toEqual({ source: false, review: true });
+    expect(reviewFormState("update", null, true)).toEqual({ source: false, review: true });
   });
 });
 
