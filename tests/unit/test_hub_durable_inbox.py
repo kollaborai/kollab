@@ -90,7 +90,7 @@ class TestInboxSizeBound:
         # Write 10 files named by timestamp (sorted oldest-first)
         for i in range(10):
             f = inbox / f"{i:06d}.000000-x-from-sender.json"
-            f.write_text(json.dumps({"id": str(i)}))
+            f.write_text(json.dumps(_make_msg(content=str(i)).to_dict()))
 
         _prune_inbox(inbox, max_size=5)
 
@@ -185,11 +185,11 @@ class TestInboxTTLExpiry:
             "ordinary-after",
             "control-after",
         ]
-        assert not malformed.exists()
+        assert malformed.exists()
         assert "invalid timestamp" in caplog.text
         assert "SENSITIVE_CORRUPT_CONTENT" not in caplog.text
 
-    def test_bad_record_unlink_failure_does_not_abort_valid_neighbors(
+    def test_bad_record_preservation_does_not_abort_valid_neighbors(
         self, tmp_path: Path, caplog
     ) -> None:
         inbox = tmp_path / "lapis"
@@ -217,7 +217,7 @@ class TestInboxTTLExpiry:
 
         assert [message.id for message in result] == [before.id, after.id]
         assert malformed_path.exists()
-        assert "Could not discard malformed mailbox record" in caplog.text
+        assert "Preserving mailbox record" in caplog.text
         assert "DO_NOT_LOG_THIS" not in caplog.text
 
     def test_transient_read_failure_preserves_record_for_retry(
@@ -299,7 +299,7 @@ class TestInboxTTLExpiry:
         assert contents == {"recent1", "recent2"}
 
     @pytest.mark.parametrize("payload", ["[]", '"scalar"', "null"])
-    def test_non_object_json_is_discarded(self, tmp_path: Path, payload: str) -> None:
+    def test_non_object_json_is_preserved(self, tmp_path: Path, payload: str) -> None:
         """Valid JSON values that are not message objects cannot crash replay."""
         inbox = tmp_path / "lapis"
         inbox.mkdir()
@@ -312,7 +312,7 @@ class TestInboxTTLExpiry:
             result = AgentMessenger.read_mailbox("lapis")
 
         assert [message.content for message in result] == ["fresh"]
-        assert not malformed.exists()
+        assert malformed.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -443,12 +443,13 @@ class TestBoundedReplay:
     def test_prune_malformed_json_value_does_not_disable_bound(
         self, tmp_path: Path
     ) -> None:
-        """Malformed and non-object JSON remain evictable ordinary entries."""
+        """Unknown records survive while validated ordinary traffic stays bounded."""
         payloads = ["[]", '"scalar"', "null", "not-json"]
         for case, payload in enumerate(payloads):
             inbox = tmp_path / f"lapis-{case}"
             inbox.mkdir()
-            (inbox / "00000000-malformed.json").write_text(payload)
+            malformed = inbox / "00000000-malformed.json"
+            malformed.write_text(payload)
             for i in range(5):
                 (inbox / f"{i + 1:08d}.json").write_text(
                     json.dumps(_make_msg(content=f"ordinary {i}").to_dict())
@@ -456,7 +457,8 @@ class TestBoundedReplay:
 
             _prune_inbox(inbox, max_size=2)
 
-            assert len(list(inbox.glob("*.json"))) == 2
+            assert len(list(inbox.glob("*.json"))) == 3
+            assert malformed.exists()
 
     def test_ttl_expired_task_cron_is_preserved_for_stale_ack(
         self, tmp_path: Path
