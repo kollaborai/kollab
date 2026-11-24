@@ -5,7 +5,8 @@ from collections.abc import Iterable
 
 _SECRET_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9])(?P<key>api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
-    r"password|credential|authorization|bearer)(?![A-Za-z0-9])\s*[:=]\s*(?P<value>[^\s,;]+)",
+    r"password|credential|authorization|bearer)(?![A-Za-z0-9])\s*[:=]\s*"
+    r"(?P<value>(?!(?:bearer|basic)\s)[^\s,;]+)",
     re.IGNORECASE,
 )
 _AUTH_SCHEME = re.compile(r"(?i)\b(bearer|basic)\s+([^\s,;]+)")
@@ -21,7 +22,7 @@ _SAFE_TEXT_VALUES = {"budget", "length", "required"}
 
 
 def _is_auth_credential(value: str) -> bool:
-    return len(value) >= 24 or (len(value) >= 8 and any(char.isdigit() for char in value))
+    return len(value) >= 24 or (len(value) >= 6 and any(char.isdigit() for char in value))
 
 
 def contains_sensitive_text(text: str, *, allow_safe_values: bool = False) -> bool:
