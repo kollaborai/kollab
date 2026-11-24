@@ -199,10 +199,12 @@ def apply_config_changes(
             for plugin_id, values in builtin_values.items():
                 save(
                     plugin_id, values, allow_secrets=True,
-                    config_service=config_service, save_target=target,
+                    config_service=config_service, save_target=target, kind="built-in",
                 )
             for plugin_id, value in enabled.items():
-                set_enabled(plugin_id, value, config_service=config_service, save_target=target)
+                set_enabled(
+                    plugin_id, value, config_service=config_service, save_target=target, kind="built-in",
+                )
     except Exception as exc:
         logger.error("plugin settings save failed: %s", exc)
         return False
