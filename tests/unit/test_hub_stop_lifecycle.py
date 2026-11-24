@@ -52,7 +52,7 @@ def test_stop_peer_waits_after_shutdown_ack_then_sigterms(monkeypatch):
             agent_id="agent-lapis",
         )
 
-        async def signal_shutdown(socket_path, reason="", timeout=3.0):
+        async def signal_shutdown(socket_path, reason="", timeout=3.0, **_generation):
             return True
 
         wait_results = iter([False, True])
@@ -95,7 +95,7 @@ def test_stop_peer_escalates_to_sigkill_when_sigterm_fails(monkeypatch):
             agent_id="agent-sapphire",
         )
 
-        async def signal_shutdown(socket_path, reason="", timeout=3.0):
+        async def signal_shutdown(socket_path, reason="", timeout=3.0, **_generation):
             return True
 
         # grace wait -> False, SIGTERM wait -> False, SIGKILL wait -> True
@@ -140,7 +140,7 @@ def test_stop_peer_reports_failure_only_if_pid_survives_sigkill(monkeypatch):
             agent_id="agent-sapphire",
         )
 
-        async def signal_shutdown(socket_path, reason="", timeout=3.0):
+        async def signal_shutdown(socket_path, reason="", timeout=3.0, **_generation):
             return True
 
         async def wait_for_exit(agent, timeout=5.0):
@@ -410,7 +410,7 @@ def test_stop_peer_reports_stopped_when_the_forked_daemon_exits_unreaped(monkeyp
                 agent_id="agent-koordinator",
             )
 
-            async def signal_shutdown(socket_path, reason="", timeout=3.0):
+            async def signal_shutdown(socket_path, reason="", timeout=3.0, **_generation):
                 os.kill(child.pid, signal.SIGKILL)  # the daemon dies, nobody reaps it
                 return True
 

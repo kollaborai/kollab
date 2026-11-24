@@ -15465,15 +15465,20 @@ class HubPlugin(BasePlugin):
         here_ids = {agent.agent_id for agent in here}
         managed = self._locally_managed_sessions()
         sessions = []
-        for agent in here:
+        skipped = []
+        for agent in list(here):
             session = managed.get(getattr(agent, "pid", None))
-            # A tracked child keeps its lock-guarded escalation; anything else
-            # takes the named-stop path, as `/hub stop <name>` does.
+            # A tracked child keeps its lock-guarded escalation; a pid this
+            # session tracks under another process generation is not the row's
+            # process, so leave it alone. Everything else takes the named-stop
+            # path, as `/hub stop <name>` does.
             if session is not None and not (
                 getattr(session, "is_alive", True)
                 and self._presence_generation_matches(session, agent)
             ):
-                session = None
+                here.remove(agent)
+                skipped.append(agent.identity)
+                continue
             sessions.append(session)
         results = await asyncio.gather(
             *[
@@ -15488,6 +15493,10 @@ class HubPlugin(BasePlugin):
             lines += [f"  {a.identity}: {r}" for a, r in zip(here, results)]
         else:
             lines = ["no other agents in this folder"]
+        if skipped:
+            lines.append(
+                f"skipped (process changed since it registered): {', '.join(skipped)}"
+            )
 
         elsewhere: dict = {}
         now = time.time()
@@ -15788,15 +15797,13 @@ class HubPlugin(BasePlugin):
             return "no socket, cleaned up"
 
         try:
-            generation = (
-                {
-                    "expected_agent_id": getattr(agent, "agent_id", None),
-                    "expected_pid": getattr(agent, "pid", None),
-                    "expected_started_at": getattr(agent, "started_at", None),
-                }
-                if session is not None
-                else {}
-            )
+            # Always name the selected generation, so a new agent that took
+            # over this socket refuses a stop meant for the old one (#1408).
+            generation = {
+                "expected_agent_id": getattr(agent, "agent_id", None),
+                "expected_pid": getattr(agent, "pid", None),
+                "expected_started_at": getattr(agent, "started_at", None),
+            }
             success = await AgentMessenger.signal_shutdown(
                 agent.socket_path,
                 reason=reason,
