@@ -26,9 +26,9 @@ def test_webui_prefix_turns_on_only_webui():
     assert ci_changed_lanes.lanes_for(paths) == {"webui": True, "voice": False}
 
 
-def test_voice_prefix_turns_on_only_voice():
+def test_voice_prefix_turns_on_both_lanes():
     paths = ["packages/kollabor-voice/agent/run.py"]
-    assert ci_changed_lanes.lanes_for(paths) == {"webui": False, "voice": True}
+    assert ci_changed_lanes.lanes_for(paths) == BOTH
 
 
 @pytest.mark.parametrize(
@@ -43,14 +43,14 @@ def test_webui_dependencies_turn_on_webui(path):
     assert ci_changed_lanes.lanes_for([path]) == {"webui": True, "voice": False}
 
 
-def test_docs_only_changes_turn_on_neither_lane():
-    paths = ["docs/guide.md", "changes/1413.ci.md"]
-    assert ci_changed_lanes.lanes_for(paths) == NEITHER
+def test_learn_docs_change_turns_on_webui():
+    paths = ["docs/features/learn.md", "changes/1413.ci.md"]
+    assert ci_changed_lanes.lanes_for(paths) == {"webui": True, "voice": False}
 
 
 def test_voice_only_change_turns_on_only_voice():
     paths = ["packages/kollabor-voice/src/kollabor_voice/client.py"]
-    assert ci_changed_lanes.lanes_for(paths) == {"webui": False, "voice": True}
+    assert ci_changed_lanes.lanes_for(paths) == BOTH
 
 
 def test_webui_unit_test_turns_on_webui():
@@ -87,6 +87,7 @@ def test_changes_job_pick_step_uses_fail_closed_shell():
 
     assert pick_step.get("shell") == "bash"
     assert "set -euo pipefail" in pick_step["run"]
+    assert 'git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA"' in pick_step["run"]
     assert '| python scripts/ci_changed_lanes.py >> "$GITHUB_OUTPUT"' not in pick_step["run"]
 
 
