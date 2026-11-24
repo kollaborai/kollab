@@ -615,3 +615,43 @@ async def test_a_refused_message_in_a_summarised_replay_stays_queued(tmp_path):
         assert refusals == [message.id]
         assert acknowledged == set()
         assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 1
+
+
+@pytest.mark.asyncio
+async def test_accepted_delivery_is_not_replayed_when_unlink_fails(tmp_path):
+    from pathlib import Path
+
+    from plugins.hub.plugin import HubPlugin
+
+    message = HubMessage(
+        action="message", from_identity="peer", to="receiver", content="effect"
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="agent", identity="receiver")
+
+    async def receive(msg):
+        effects.append(msg.id)
+
+    plugin._on_message_received = receive
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        path = next((tmp_path / "receiver").glob("*.json"))
+        original_unlink = Path.unlink
+
+        def fail_ack(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError("simulated ack unlink failure")
+            return original_unlink(self, *args, **kwargs)
+
+        with patch.object(Path, "unlink", new=fail_ack):
+            first = messenger_module.AgentMessenger.read_mailboxes(
+                ["receiver"], consume=False
+            )
+            assert await plugin._deliver_inbox_batch(first) == {message.id}
+            replay = messenger_module.AgentMessenger.read_mailboxes(
+                ["receiver"], consume=False
+            )
+
+    assert effects == [message.id]
+    assert replay == []
