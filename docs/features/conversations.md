@@ -61,6 +61,10 @@ conversation at a specific message.
 
 While reading a long conversation, loading older pages and reconciling compacted history preserves the visible messages and their scroll position.
 
+In the Web UI, long assistant and user messages are restored in full when the
+chat reloads. Long tool results keep a preview and load the full result when
+expanded.
+
 ## Branching Conversations
 
 Use `/branch <session_id> <message_index>` to start a separate conversation from a saved session. The branch
