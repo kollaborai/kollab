@@ -111,7 +111,7 @@ def test_installed_asset_hash_streams_unrelated_package_files(tmp_path, monkeypa
         raise AssertionError("installed assets must be streamed")
 
     monkeypatch.setattr(Path, "read_bytes", reject_large_read)
-    monkeypatch.setattr(server, "Response", reject_buffered_response)
+    monkeypatch.setattr(server, "Response", reject_buffered_response, raising=False)
     with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
         response = client.get("/plugins/hello/web/main.js")
     assert response.status_code == 200
@@ -133,7 +133,7 @@ def test_asset_snapshot_preserves_hash_contract_and_handles_empty_or_missing(tmp
 
 
 def test_installed_asset_cannot_change_between_hash_and_response_open(tmp_path, monkeypatch):
-    from kollabor_webui import server
+    from kollabor_plugins import packages
 
     monkeypatch.setenv("HOME", str(tmp_path))
     home = tmp_path / ".kollab"
@@ -143,17 +143,19 @@ def test_installed_asset_cannot_change_between_hash_and_response_open(tmp_path, 
     asset = dist / "main.js"
     asset.write_text("approved")
     write_registry(home, root)
-    original = server.FileResponse
+    original = packages.files_sha256_with_asset_snapshot
 
-    def swap_before_open(path, *args, **kwargs):
-        if path == asset:
-            asset.write_text("unapproved after hash")
-        return original(path, *args, **kwargs)
+    def swap_after_snapshot(package_root, asset_path):
+        digest, snapshot = original(package_root, asset_path)
+        asset.write_text("unapproved after hash")
+        return digest, snapshot
 
-    monkeypatch.setattr(server, "FileResponse", swap_before_open)
+    monkeypatch.setattr(packages, "files_sha256_with_asset_snapshot", swap_after_snapshot)
     with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
         response = client.get("/plugins/hello/web/main.js")
-        assert response.status_code == 404 or response.text == "approved"
+        assert response.status_code == 200
+        assert response.text == "approved"
+    assert asset.read_text() == "unapproved after hash"
 
 
 def test_missing_approval_hash_fails_closed_and_dev_remains_unpinned(tmp_path, monkeypatch):
