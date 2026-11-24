@@ -224,7 +224,9 @@ describe("plugin settings page", () => {
   });
 
   it("locks service controls and plugin navigation during a plugin action", () => {
-    expect(source).toMatch(/<ServiceRow[\s\S]*?disabled=\{busy\}/);
+    const serviceRow = source.slice(source.indexOf("function ServiceRow"), source.indexOf("function PluginDetail"));
+    for (const action of ["Restart", "Stop", "Start"])
+      expect(serviceRow).toMatch(new RegExp(`aria-label=\\{\`${action} \\$\\{service\\.name\\}\`\\} disabled=\\{busy \\|\\| disabled \\|\\| operationBusy\\}`));
     expect(source).toMatch(/disabled=\{busyPluginKey !== null\}/);
   });
 
