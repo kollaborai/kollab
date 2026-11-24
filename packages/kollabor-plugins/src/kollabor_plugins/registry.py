@@ -116,14 +116,10 @@ class _RegistryDiscovery(PluginDiscovery):
         return False
 
 
-class _LoadError(ValueError):
-    """A load failure Kollab itself describes; its text is safe to show."""
-
-
 def _plugin_code_error(plugin_id: str, exc: Exception) -> ValueError:
     """Keep text raised by plugin code out of metadata; it can hold secrets (#1401)."""
     logger.error("Plugin %s raised while loading", plugin_id, exc_info=exc)
-    return _LoadError(f"Python entry raised {type(exc).__name__}; details in kollab.log")
+    return ValueError(f"Python entry raised {type(exc).__name__}; details in kollab.log")
 
 
 class PluginRegistry:
@@ -279,7 +275,9 @@ class PluginRegistry:
                 sys.modules[spec.name] = module
                 previous_bytecode = sys.dont_write_bytecode
                 # Everything in this block can run plugin code (import, module __getattr__,
-                # metaclass checks, descriptors); only Kollab's own _LoadError keeps its text.
+                # metaclass checks, descriptors), so any exception raised here is plugin text.
+                # Kollab's own refusals are recorded in `refusal` and raised after the block.
+                refusal = None
                 try:
                     sys.dont_write_bytecode = True
                     try:
@@ -288,15 +286,16 @@ class PluginRegistry:
                         sys.dont_write_bytecode = previous_bytecode
                     plugin_class = getattr(module, symbol)
                     if not inspect.isclass(plugin_class) or not issubclass(plugin_class, BasePlugin):
-                        raise _LoadError("Python entry must be a BasePlugin subclass")
-                    if symbol in self.discovery.loaded_classes:
-                        raise _LoadError("Python entry class conflicts with another plugin")
-                    get_config = getattr(plugin_class, "get_default_config", None)
-                    config = get_config() if callable(get_config) else {}
-                except _LoadError:
-                    raise
+                        refusal = "Python entry must be a BasePlugin subclass"
+                    elif symbol in self.discovery.loaded_classes:
+                        refusal = "Python entry class conflicts with another plugin"
+                    else:
+                        get_config = getattr(plugin_class, "get_default_config", None)
+                        config = get_config() if callable(get_config) else {}
                 except Exception as exc:
                     raise _plugin_code_error(plugin_id, exc) from exc
+                if refusal:
+                    raise ValueError(refusal)
                 self.discovery.loaded_classes[symbol] = plugin_class
                 self.discovery.plugin_configs[symbol] = config
                 loaded.append(plugin_class)
