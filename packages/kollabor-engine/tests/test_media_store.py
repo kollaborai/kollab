@@ -232,7 +232,11 @@ def test_mixed_row_counts_once(tmp_path: Path) -> None:
 
 
 def test_page_after_mixed_row_skips_once(tmp_path: Path) -> None:
-    """The older-page offset must count a mixed row once too."""
+    """The older-page offset must count a mixed row once too.
+
+    The F841 finding exposed that the older-row fixture was assigned but
+    never checked; keep its mixed-row count tied to this pagination case.
+    """
     refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG)]
     earlier = [
         {
@@ -243,6 +247,7 @@ def test_page_after_mixed_row_skips_once(tmp_path: Path) -> None:
             ],
         },
     ]
+    assert count_image_tokens(earlier[0]["content"]) == 1
     page = [{"role": "user", "content": "second [image1]"}]
     attach_media_to_rows(tmp_path, "s1", page, skip=1)
     assert [m["ref"] for m in page[0]["media"]] == [refs[1]]
