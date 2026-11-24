@@ -92,6 +92,24 @@ def test_install_job_requires_exact_commit_and_file_hash(client, managed_repo, t
     assert client.post(f"/plugins/jobs/{job_id}/confirm", json=accepted).status_code == 409
 
 
+def test_install_reports_manifest_review_limit_refusal(client, managed_repo):
+    source, bare = managed_repo
+    manifest = json.loads((source / "kollab-plugin.json").read_text())
+    manifest["uses"] = [f"net:host-{index}.example" for index in range(257)]
+    (source / "kollab-plugin.json").write_text(json.dumps(manifest))
+    _git("add", "kollab-plugin.json", cwd=source)
+    _git("commit", "-m", "exceed review limit", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo#main"})
+    job = _ready(client, response.json()["job_id"])
+
+    assert job["status"] == "error"
+    assert job["error"] == (
+        "Plugin manifest exceeds the review limits (128 services, 64 secrets per service, 256 uses)"
+    )
+
+
 def test_cancel_ready_job_removes_stage_and_rejects_confirmation(client, tmp_path):
     response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
     job_id = response.json()["job_id"]
