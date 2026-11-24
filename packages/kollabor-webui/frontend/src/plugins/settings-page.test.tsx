@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PluginsSettings } from "./settings";
+import { PluginsSettings, pluginRowControls } from "./settings";
 import { createPluginLoader } from "./loader";
 import { pluginRegistry } from "./registry";
 import type { PluginEntry } from "./sdk";
@@ -140,6 +140,15 @@ describe("plugin settings page", () => {
     }]);
 
     expect(markup).not.toContain('aria-label="Hello@dev enabled"');
+  });
+
+  it("does not offer service controls for a plugin changed on disk", () => {
+    expect(pluginRowControls({ kind: "installed", shadowed: false, state: "changed-on-disk" })).toEqual({
+      managed: true,
+      switchEnabled: false,
+      services: false,
+      updateRemove: false,
+    });
   });
 
   it("names each service action for the process it controls", async () => {
