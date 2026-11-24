@@ -129,8 +129,9 @@ def test_settings_routes_select_builtin_when_package_id_collides(tmp_path, monke
         }],
     )
 
-    def save_builtin(plugin_id, values):
+    def save_builtin(plugin_id, values, **kwargs):
         assert plugin_id == "voice"
+        assert kwargs["kind"] == "built-in"
         builtin_values.update(values)
 
     monkeypatch.setattr(plugin_settings, "save", save_builtin)
@@ -142,6 +143,50 @@ def test_settings_routes_select_builtin_when_package_id_collides(tmp_path, monke
             "/plugins/voice/settings?kind=built-in", json={"plugins.voice.mode": "updated"}
         ).json() == {"plugins.voice.mode": "updated"}
         assert package_values == {"mode": "installed"}
+
+
+def test_builtin_settings_save_uses_builtin_writer_when_package_id_collides(tmp_path, monkeypatch):
+    import json
+
+    from kollabor_engine.routes import plugins as plugin_routes
+    from kollabor_plugins import registry
+    from kollabor_plugins import settings as plugin_settings
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    (home / "plugins.json").write_text(json.dumps({
+        "plugins": {"voice": {"enabled": True}}, "dev": {},
+    }))
+    monkeypatch.setattr(plugin_routes, "_package_context", lambda plugin_id: None)
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [{
+        "id": "voice", "kind": "built-in", "settings": [{
+            "path": "plugins.voice.mode", "value": "before", "secret": False,
+            "type": "text_input",
+        }],
+    }])
+    builtin_writes = []
+    package_writes = []
+    monkeypatch.setattr(
+        plugin_settings, "_save_builtin",
+        lambda entry, values, **kwargs: builtin_writes.append((entry["id"], values)),
+    )
+    monkeypatch.setattr(
+        plugin_settings, "_save_locked",
+        lambda plugin_id, values: package_writes.append((plugin_id, values)),
+    )
+
+    with TestClient(create_app()) as client:
+        response = client.put(
+            "/plugins/voice/settings?kind=built-in", json={"plugins.voice.mode": "after"}
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"plugins.voice.mode": "before"}
+    assert builtin_writes == [("voice", {"plugins.voice.mode": "after"})]
+    assert package_writes == []
 
 
 @pytest.mark.asyncio
