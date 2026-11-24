@@ -592,7 +592,6 @@ def test_dispatcher_vendor_collisions_are_reported_and_released(tmp_path, monkey
     import sys
     from pathlib import Path
 
-    from kollabor_engine.routes.plugins import PluginDispatcher
     from kollabor_plugins import registry
     from kollabor_plugins.packages import files_sha256
 
@@ -696,6 +695,7 @@ def test_engine_router_failure_redacts_before_logging_and_storing(
     from pathlib import Path
 
     from kollabor_engine.routes.plugins import PluginDispatcher
+
     from kollabor_plugins import registry
     from kollabor_plugins.packages import files_sha256
 
