@@ -686,6 +686,7 @@ with `kollabor.binary.kollab_argv()` in its own session:
   file and opens a new one, keeping 3.
 
 Disable and remove are refused while plugin agent runs are active; the user cancels them before retrying.
+Remove also waits for active plugin requests to finish before deleting the package.
 Running agent daemons keep a plugin's `python` part until they restart. The engine does not currently report
 which daemons still run an old plugin version or provide a Restart Agents action, so Settings hides that
 notice until the backend supplies version counts and restart controls. Each daemon picks up the change
