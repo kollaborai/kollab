@@ -127,8 +127,8 @@ describe("right-hand menu rows", () => {
       state: "stop-failed",
       services: [{ name: "loop", state: "stop-failed", error: "signal failed" }],
     });
-    expect(rowCount(stopFailed, undefined)).toEqual({ text: "Stop Failed", hint: "signal failed" });
-    expect(rows()).toContain("Stop Failed");
+    expect(rowCount(stopFailed, undefined)).toEqual({ text: "Failed to Stop", hint: "signal failed" });
+    expect(rows()).toContain("Failed to Stop");
   });
 
   it("otherwise shows the plugin's own count and hover text", () => {

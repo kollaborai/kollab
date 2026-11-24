@@ -332,6 +332,17 @@ describe("plugin settings page", () => {
     expect(markup).not.toContain(">Failed</span>");
   });
 
+  it("shows failed-stop state in the plugin row and detail", async () => {
+    const markup = await markupFor([{
+      ...plugin([]),
+      state: "stop-failed",
+      services: [{ name: "worker", state: "stop-failed", error: "signal failed" }],
+    }]);
+
+    expect(markup.match(/>Failed to Stop</g)).toHaveLength(4);
+    expect(markup).toContain('class="text-xs font-medium text-destructive">Failed to Stop</span>');
+  });
+
   it("uses a Title Case Development Folder label", async () => {
     const markup = await markupFor([{
       ...plugin([]),
