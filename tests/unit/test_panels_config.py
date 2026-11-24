@@ -129,6 +129,59 @@ def test_describe_has_the_wire_shape(home):
     )
 
 
+def test_settings_configuration_excludes_plugin_fields(home, monkeypatch):
+    from kollabor_tui.config_widgets import ConfigWidgetDefinitions
+
+    monkeypatch.setattr(
+        ConfigWidgetDefinitions,
+        "get_config_modal_definition",
+        lambda: {
+            "sections": [
+                {
+                    "title": "General",
+                    "widgets": [
+                        {
+                            "type": "checkbox",
+                            "label": "Keep history",
+                            "config_path": "terminal.keep_history",
+                            "default": True,
+                        }
+                    ],
+                },
+                {
+                    "title": "Plugin Settings",
+                    "widgets": [
+                        {
+                            "type": "checkbox",
+                            "label": "Built In",
+                            "config_path": "plugins.builtin.enabled",
+                        },
+                        {
+                            "type": "checkbox",
+                            "label": "Installed",
+                            "config_path": "plugin-registry.installed.enabled",
+                        },
+                    ],
+                },
+                {
+                    "title": "Installed Plugin",
+                    "widgets": [
+                        {
+                            "type": "text_input",
+                            "label": "Greeting",
+                            "config_path": "plugin-values.installed.greeting",
+                        }
+                    ],
+                },
+            ]
+        },
+    )
+
+    fields = fields_of(describe(FakeConfig()))
+
+    assert set(fields) == {"terminal.keep_history"}
+
+
 def test_a_secret_never_leaves_describe(home):
     config = FakeConfig({"plugins": {"hub": {"bridge_token": SECRET}}})
     view = describe(config)
