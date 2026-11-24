@@ -355,6 +355,21 @@ def test_cli_status_with_an_empty_folder_names_other_folders(tmp_path, monkeypat
     assert "/work/elsewhere: far" in out
 
 
+def test_cli_other_folder_hints_scope_stop_to_the_reported_project(
+    tmp_path, monkeypatch, capsys
+):
+    _cli(tmp_path, monkeypatch, local=False)
+    command = "KOLLAB_PROJECT_ROOT=/work/elsewhere kollab --hub stop all"
+
+    asyncio.run(_handle_cli_hub(["status"]))
+    status = capsys.readouterr().out
+    assert command in status
+
+    asyncio.run(_handle_cli_hub(["stop", "all"]))
+    stop = capsys.readouterr().out
+    assert command in stop
+
+
 def test_cli_everywhere_is_refused_from_an_agent_context(tmp_path, monkeypatch):
     import pytest
 
