@@ -88,6 +88,35 @@ export default definePlugin(k => {
     }
   }, 30000);
 
+  it("typechecks the bundled Hello source against the generated declarations", () => {
+    const root = mkdtempSync(join(scratch, "hello-source-types-"));
+    try {
+      cpSync(join(example, "src/index.js"), join(root, "index.js"));
+      cpSync(join(example, "src/kollab-plugin.d.ts"), join(root, "kollab-plugin.d.ts"));
+      writeFileSync(join(root, "style.d.ts"), 'declare module "*.css";\n');
+      symlinkSync(join(frontend, "node_modules"), join(root, "node_modules"), "dir");
+      writeFileSync(
+        join(root, "tsconfig.json"),
+        JSON.stringify({
+          compilerOptions: {
+            strict: true,
+            noEmit: true,
+            allowJs: true,
+            checkJs: true,
+            module: "esnext",
+            moduleResolution: "bundler",
+            target: "es2022",
+            types: [],
+          },
+          files: ["index.js", "kollab-plugin.d.ts", "style.d.ts"],
+        }),
+      );
+      execFileSync(join(localBin, "tsc"), ["-p", root], { cwd: root, timeout: 30000, stdio: "inherit" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
   it("rebuilds after source edits in watch mode", async () => {
     expect(existsSync(join(example, "package.json")), "web/package.json exists").toBe(true);
     const root = mkdtempSync(join(scratch, "hello-watch-"));
