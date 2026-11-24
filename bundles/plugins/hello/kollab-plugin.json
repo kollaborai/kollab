@@ -4,7 +4,7 @@
   "name": "Hello",
   "version": "0.1.0",
   "description": "A small example plugin with a background process.",
-  "kollab": ">=0.21.1",
+  "kollab": ">=0.23.0",
   "python": "python/hello.py:HelloPlugin",
   "settings": "settings.json",
   "services": {
@@ -17,8 +17,10 @@
   },
   "web": {"entry": "web/dist/index.js", "style": "web/dist/index.css"},
   "contributes": {
-    "menu": [{"id": "hello", "label": "Hello", "icon": "hand", "open": {"page": "hello"}}],
-    "pages": [{"id": "hello", "title": "Hello"}]
+    "menu": [{"id": "hello-page", "label": "Hello Page", "icon": "hand", "open": {"page": "hello-page"}}],
+    "pages": [{"id": "hello-page", "title": "Hello Page"}],
+    "views": [{"id": "hello-view", "label": "Hello View"}],
+    "modals": [{"id": "hello-dialog", "title": "Hello Dialog"}]
   },
   "uses": ["run:python3"]
 }

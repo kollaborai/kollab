@@ -180,7 +180,7 @@ export function PluginPage({ pluginId, pageId, onExit }: { pluginId: string; pag
         <h1 ref={titleRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-lg font-semibold outline-none">
           {title}
         </h1>
-        <TooltipIconButton tooltip={`Close ${title}`} className="size-8" onClick={onExit}>
+        <TooltipIconButton tooltip={`Close ${title}`} className="size-8 pointer-coarse:size-11" onClick={onExit}>
           <X className="size-4" aria-hidden="true" />
         </TooltipIconButton>
       </header>
