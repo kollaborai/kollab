@@ -117,4 +117,15 @@ describe("plugin settings page", () => {
     for (const service of ["worker-a", "worker-b"])
       expect(markup).toContain(`aria-label="Stop ${service}"`);
   });
+
+  it("clears old service errors before the next service or confirmation action", () => {
+    expect(source).toContain("onError(null)");
+    expect(source).toMatch(/setError\(null\);\s*setConfirmation\("disable"\)/);
+    expect(source).toMatch(/setError\(null\);\s*setConfirmation\("remove"\)/);
+  });
+
+  it("locks service controls and plugin navigation during a plugin action", () => {
+    expect(source).toMatch(/<ServiceRow[\s\S]*?disabled=\{busy\}/);
+    expect(source).toMatch(/disabled=\{busyPluginKey !== null\}/);
+  });
 });
