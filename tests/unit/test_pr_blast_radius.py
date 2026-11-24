@@ -315,3 +315,114 @@ def test_status_write_failures_return_nonzero_and_continue(
         ("head-8", "failure"),
     ]
     assert capsys.readouterr().out.count("STALE") == 2
+
+
+@pytest.mark.parametrize(
+    ("behind_by", "expected_state", "expected_label", "expected_exit"),
+    [
+        (False, "failure", "STALE", 1),
+        (0.5, "failure", "STALE", 1),
+        (0, "success", "FRESH", 0),
+    ],
+)
+def test_behind_by_requires_a_nonnegative_integer(
+    tmp_path: Path,
+    capsys,
+    behind_by: object,
+    expected_state: str,
+    expected_label: str,
+    expected_exit: int,
+) -> None:
+    status_posts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project/pulls/7":
+            return {"head": {"sha": "head-sha"}, "base": {"ref": "main"}}
+        if endpoint == "repos/example/project/compare/main...head-sha":
+            return {"behind_by": behind_by}
+        if endpoint == "repos/example/project/statuses/head-sha" and method == "POST":
+            status_posts.append(("head-sha", fields["state"]))
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--pr",
+            "7",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == expected_exit
+    assert capsys.readouterr().out.startswith(f"#7 {expected_label} ")
+    assert status_posts == [("head-sha", expected_state)]
+
+
+def test_missing_base_ref_posts_failure_for_head_sha(
+    tmp_path: Path, capsys
+) -> None:
+    status_posts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project/pulls/7":
+            return {"head": {"sha": "head-sha"}}
+        if endpoint == "repos/example/project/statuses/head-sha" and method == "POST":
+            status_posts.append(("head-sha", fields["state"]))
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--pr",
+            "7",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == 1
+    assert "#7 STALE" in capsys.readouterr().out
+    assert status_posts == [("head-sha", "failure")]
+
+
+def test_all_open_missing_base_ref_posts_failure_and_returns_nonzero(
+    tmp_path: Path, capsys
+) -> None:
+    status_posts: list[tuple[str, str]] = []
+
+    def fake_fetcher(endpoint, *, method="GET", fields=None, paginate=False):
+        if endpoint == "repos/example/project":
+            return {"default_branch": "main"}
+        if endpoint == "repos/example/project/pulls?state=open&per_page=100":
+            return [{"number": 7, "head": {"sha": "head-sha"}}]
+        if endpoint == "repos/example/project/pulls/7":
+            return {"head": {"sha": "head-sha"}}
+        if endpoint == "repos/example/project/statuses/head-sha" and method == "POST":
+            status_posts.append(("head-sha", fields["state"]))
+            return {}
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    result = pr_blast_radius.main(
+        [
+            "--repo",
+            "example/project",
+            "--all-open",
+            "--root",
+            str(tmp_path),
+            "--post",
+        ],
+        fetcher=fake_fetcher,
+    )
+
+    assert result == 1
+    assert "#7 STALE" in capsys.readouterr().out
+    assert status_posts == [("head-sha", "failure")]
