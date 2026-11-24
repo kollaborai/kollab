@@ -1,17 +1,61 @@
 import { describe, expect, it } from "vitest";
-import { describePluginAdds, reviewFormState, showFetching, startReview } from "./install";
+import { readFileSync } from "node:fs";
+import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, reviewFormState, showFetching, startReview } from "./install";
+
+const installSource = readFileSync(new URL("./install.tsx", import.meta.url), "utf8");
 
 describe("plugin review additions", () => {
   it("lists only additions as lowercase fragments", () => {
     expect(describePluginAdds({ python: true, engine: true, web: true, agents: true,
       hooks: false, mcp: false, contributes: { views: ["hello"] }, services: {} })).toEqual([
       "1 view", "code that runs in every agent", "engine routes", "browser code", "agent definitions",
+      "no hooks", "no MCP servers",
     ]);
   });
   it("includes hooks, MCP and background processes when declared", () => {
     expect(describePluginAdds({ hooks: true, mcp: true, services: { server: {} } })).toEqual([
       "hooks", "MCP servers", "1 background process",
     ]);
+  });
+  it("says when hooks and MCP servers are absent", () => {
+    expect(describePluginAdds({})).toEqual(["no hooks", "no MCP servers"]);
+  });
+});
+
+describe("declared plugin uses", () => {
+  it("shows when a plugin's coding agents run with a shell without asking", () => {
+    expect(describeUses(["run:gh,git,codex,claude,python3,pgrep"]).onItsOwn).toEqual([
+      "Runs: gh,git,codex,claude,python3,pgrep",
+      "Its coding agents use a shell without asking.",
+    ]);
+  });
+
+  it("keeps the trust explanation explicit", () => {
+    expect(PLUGIN_TRUST_NOTICE).toContain("they have your files and keys and can do more");
+  });
+});
+
+describe("plugin review sheet data", () => {
+  it("labels an omitted ref as the default branch without guessing its name", () => {
+    expect(installSource).toContain('job.ref ? ` (${job.ref})` : " (default branch)"');
+  });
+
+  it("does not show limit values the review job does not return", () => {
+    expect(installSource).not.toContain('label="Limits"');
+    expect(installSource).not.toContain("When available, agent limits");
+  });
+
+  it("does not read file or grant changes the review job does not return", () => {
+    expect(installSource).not.toMatch(/job\.changes/);
+  });
+
+  it("uses Add Plugin on the install confirmation action", () => {
+    expect(installSource).toContain('action === "install" ? "Add Plugin" : "Update"');
+  });
+
+  it("shows the commit and file hash that the review job returned", () => {
+    expect(installSource).toContain("Commit: {job.commit}");
+    expect(installSource).toContain("Files SHA-256: {job.files_sha256}");
   });
 });
 
@@ -59,5 +103,19 @@ describe("plugin review after a failure", () => {
     expect(job.job_id).toBe("job2");
     expect(sent.map(item => item.path)).toEqual(["/plugins/install", "/plugins/install"]);
     expect(JSON.parse(sent[1].body)).toEqual({ source: "https://example.com/right#v2" });
+  });
+
+  it("rejects a ref supplied both in the URL and the Branch or Tag field", async () => {
+    const json = async () => ({ job_id: "unused", status: "staging" });
+    await expect(startReview({ json } as never, {
+      action: "install", url: "https://example.com/plugin#main", gitRef: "release",
+    })).rejects.toThrow("Put the branch or tag in one field, not both.");
+  });
+
+  it("rejects a staging response with no job id", async () => {
+    const json = async () => ({ status: "staging" });
+    await expect(startReview({ json } as never, {
+      action: "install", url: "https://example.com/plugin", gitRef: "",
+    })).rejects.toThrow("The plugin manager did not return a review job.");
   });
 });
