@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import sys
+from math import prod
 from pathlib import Path
 
 import pytest
@@ -89,6 +90,26 @@ def test_changes_job_pick_step_uses_fail_closed_shell():
     assert "set -euo pipefail" in pick_step["run"]
     assert 'git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA"' in pick_step["run"]
     assert '| python scripts/ci_changed_lanes.py >> "$GITHUB_OUTPUT"' not in pick_step["run"]
+
+
+def test_python_only_pull_request_runs_ten_ci_jobs():
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    jobs = workflow["jobs"]
+    lanes = ci_changed_lanes.lanes_for(["tests/unit/test_agent_manager.py"])
+    active_jobs = sum(
+        1
+        if not job.get("strategy")
+        else prod(
+            len(values)
+            for key, values in job["strategy"]["matrix"].items()
+            if key not in {"include", "exclude"} and isinstance(values, list)
+        )
+        for name, job in jobs.items()
+        if not (name == "support_voice_tests" and not lanes["voice"])
+        and not (name == "support_webui_tests" and not lanes["webui"])
+    )
+
+    assert active_jobs == 10
 
 
 def test_main_prints_exactly_two_lane_lines(monkeypatch, capsys):
