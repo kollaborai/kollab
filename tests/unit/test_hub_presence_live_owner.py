@@ -110,7 +110,7 @@ def test_discover_reclaims_a_dead_owner(hub_dirs, owner_socket):
     assert not pid_alive(child.pid)
     record = _owner_file(presence, owner_socket, pid=child.pid, age=660)
     assert _peer().discover_agents(include_solo=True) == []
-    assert not record.exists() and not owner_socket.exists()
+    assert not record.exists() and owner_socket.exists()
 
 
 @pytest.mark.skipif(not hasattr(os, "waitid"), reason="needs os.waitid")
@@ -122,7 +122,7 @@ def test_discover_reclaims_a_zombie_owner(hub_dirs, owner_socket):
         os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
         record = _owner_file(presence, owner_socket, pid=child.pid, age=660)
         assert _peer().discover_agents(include_solo=True) == []
-        assert not record.exists() and not owner_socket.exists()
+        assert not record.exists() and owner_socket.exists()
     finally:
         child.wait()
 
@@ -134,7 +134,7 @@ def test_discover_reclaims_a_reused_pid(hub_dirs, owner_socket):
         presence, owner_socket, pid=os.getpid(), age=660, start_token="another-process"
     )
     assert _peer().discover_agents(include_solo=True) == []
-    assert not record.exists() and not owner_socket.exists()
+    assert not record.exists() and owner_socket.exists()
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="simulates Linux boot time")
@@ -164,7 +164,7 @@ def test_startup_scan_reclaims_a_reused_pid(hub_dirs, owner_socket):
         presence, owner_socket, pid=os.getpid(), age=660, start_token="another-process"
     )
     assert _peer().startup_scan() == 1
-    assert not record.exists() and not owner_socket.exists()
+    assert not record.exists() and owner_socket.exists()
 
 
 @pytest.fixture
@@ -289,7 +289,7 @@ def test_discover_reclaims_a_reused_pid_on_macos(hub_dirs, owner_socket, macos):
             presence, owner_socket, pid=child.pid, age=660, start_token=earlier_owner
         )
         assert _peer().discover_agents(include_solo=True) == []
-        assert not record.exists() and not owner_socket.exists()
+        assert not record.exists() and owner_socket.exists()
     finally:
         child.kill()
         child.wait()

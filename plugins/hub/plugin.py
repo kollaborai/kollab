@@ -6066,14 +6066,11 @@ class HubPlugin(BasePlugin):
                             f"Force-claiming '{preferred}': holder "
                             f"pid={holder.pid} failed async ping"
                         )
-                        # Remove stale presence + socket so it doesn't
-                        # interfere with future discovery either
-                        from .presence import get_presence_dir
-
-                        stale_file = get_presence_dir() / f"{holder.agent_id}.json"
-                        stale_file.unlink(missing_ok=True)
-                        PresenceManager._cleanup_agent_socket(holder)
-                        taken = [t for t in taken if t != preferred]
+                        # A same-id replacement can publish while this stale
+                        # holder is being checked; cleanup revalidates its
+                        # complete generation under the presence-file lock.
+                        if self._presence.cleanup_agent(holder):
+                            taken = [t for t in taken if t != preferred]
                     elif explicit_as:
                         # Spawn guard (issue #38): caller explicitly requested
                         # this identity via --as, but a live process already
@@ -15712,10 +15709,10 @@ class HubPlugin(BasePlugin):
     def _cleanup_stopped_peer(self, agent, session) -> bool:
         """Clean up a stopped peer without crossing its selected generation.
 
-        Named operator stops have no tracked session and retain the existing
-        presence-plus-socket cleanup. Caller-owned stop-all defers cleanup to
-        normal presence discovery; it cannot atomically compare-and-unlink a
-        presence row or identity-named socket that may have been replaced.
+        Named operator stops have no tracked session and use the same
+        generation-checked presence-row cleanup. Shared socket paths are left
+        for stale-socket cleanup because a replacement may already have bound
+        the same path. Caller-owned stop-all defers cleanup to presence discovery.
         """
         if not self._presence:
             return False
