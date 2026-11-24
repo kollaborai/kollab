@@ -114,11 +114,17 @@ describe("plugin settings page", () => {
       services: [
         { name: "worker-a", state: "running" },
         { name: "worker-b", state: "running" },
+        { name: "retry-worker", state: "stop-failed" },
+        { name: "stopped-worker", state: "stopped" },
       ],
     }]);
 
-    for (const service of ["worker-a", "worker-b"])
-      expect(markup).toContain(`aria-label="Stop ${service}"`);
+    for (const label of [
+      "View Log worker-a", "Restart worker-a", "Stop worker-a",
+      "View Log worker-b", "Restart worker-b", "Stop worker-b",
+      "View Log retry-worker", "Retry Stop retry-worker",
+      "View Log stopped-worker", "Start stopped-worker",
+    ]) expect(markup).toContain(`aria-label="${label}"`);
   });
 
   it("clears old service errors before the next service or confirmation action", () => {
