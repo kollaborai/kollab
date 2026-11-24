@@ -20,6 +20,10 @@ This installs the single-file `kollab` binary for your machine into `~/.local/bi
 no Python needed: macOS 11+ and Linux (glibc 2.28+) on x86_64 or arm64. It checks the
 download's SHA-256 and that it starts before replacing anything. Anywhere else it installs
 the Python package with uv, pipx or pip. Add `~/.local/bin` to your PATH if needed.
+After installing, the script checks the executable and version produced by the selected
+method and confirms a new shell will resolve that same executable. If another command
+comes first on PATH, or the install directory is missing from PATH, it reports the path
+to fix and exits without claiming verification.
 
 `KOLLAB_INSTALL_METHOD=binary|uv|pipx|pip` uses only that method, `KOLLAB_VERSION=X.Y.Z`
 installs that release, and `KOLLAB_INSTALL_DIR` picks the binary's folder. In the binary,
