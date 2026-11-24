@@ -15489,7 +15489,10 @@ class HubPlugin(BasePlugin):
             ]
         )
         if here:
-            lines = [f"stopping {len(here)} agent(s) in this folder:"]
+            lines = [
+                f"stopping {len(here)} agent(s) in this folder "
+                f"({self._identity.identity} keeps running):"
+            ]
             lines += [f"  {a.identity}: {r}" for a, r in zip(here, results)]
         else:
             lines = ["no other agents in this folder"]

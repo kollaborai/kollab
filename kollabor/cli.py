@@ -582,6 +582,14 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
+        "--everywhere",
+        dest="hub_stop_everywhere",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
         "--raw",
         dest="hub_capture_raw",
         action="store_true",
@@ -815,6 +823,12 @@ Telegram bridge setup (run inside interactive mode):
 
     # Parse known args, capture unknown as potential CLI commands
     args, unknown = parser.parse_known_args(argv)
+
+    if args.hub_stop_everywhere:
+        # --hub is nargs='*', so the flag arrives here, not in args.hub (#1408).
+        if not args.hub or args.hub[0].lower() not in ("stop", "kill") or args.hub[1:2] != ["all"]:
+            parser.error("--everywhere is only valid with --hub stop all")
+        args.hub.append("--everywhere")
 
     if args.hub_capture_raw:
         if not args.hub or args.hub[0].lower() != "capture":
