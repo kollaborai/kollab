@@ -773,7 +773,7 @@ class PresenceManager:
         """
         if agent.pid and not _owner_gone(agent):
             return False
-        replaced = False
+        preserve = False
         for directory in _presence_directories(self._presence_dir):
             path = directory / f"{agent.agent_id}.json"
             try:
@@ -781,17 +781,18 @@ class PresenceManager:
             except FileNotFoundError:
                 continue
             except (OSError, ValueError):
-                row = None
+                preserve = True
+                continue
             if isinstance(row, dict) and (
                 row.get("pid") != agent.pid
                 or row.get("started_at", agent.started_at) != agent.started_at
             ):
-                replaced = True
+                preserve = True
                 continue
             path.unlink(missing_ok=True)
-        if not replaced:
+        if not preserve:
             self._cleanup_agent_socket(agent)
-        return not replaced
+        return not preserve
 
     def get_agent_by_identity(self, identity: str) -> Optional[AgentRuntime]:
         """Find an agent by its identity."""
