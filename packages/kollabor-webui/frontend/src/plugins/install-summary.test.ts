@@ -166,6 +166,11 @@ describe("plugin review after a failure", () => {
     expect(close).toContain("discardReview(api, job.job_id)");
     expect(start).toContain("discardReview(api, job.job_id)");
   });
+  it("closes a stale ready review when cancellation reports that its state changed", () => {
+    const close = installSource.slice(installSource.indexOf("const close ="), installSource.indexOf("const confirm ="));
+    expect(close).toMatch(/caught instanceof ApiError && caught\.status === 409/);
+    expect(close).toContain("onClose(); return;");
+  });
   it("explains when a review job was cancelled", () => {
     expect(installSource).toContain("Plugin review was cancelled.");
   });

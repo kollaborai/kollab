@@ -183,6 +183,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
     }
     setBusy(true); setError(null);
     void discardReview(api, job.job_id).then(onClose).catch((caught) => {
+      if (caught instanceof ApiError && caught.status === 409) { onClose(); return; }
       setError(errorText(caught));
     }).finally(() => setBusy(false));
   };
