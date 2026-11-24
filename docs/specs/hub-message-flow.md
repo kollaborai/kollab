@@ -346,7 +346,8 @@ there are TWO separate dedup systems:
     them; interruption or refusal leaves them available for replay
     if the receiver task itself is cancelled, the result is ambiguous: retain
     the record with an uncertainty marker and suppress automatic replay
-    until an operator inspects it and chooses to retry or acknowledge it
+    until an operator inspects it; clear the marker to retry or remove the
+    record after confirming its effect
     TTL-expired, restart-stale ordinary messages, and replay-cap drops are
     intentionally discarded; durable task controls retain their existing
     classification path
