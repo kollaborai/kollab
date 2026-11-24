@@ -93,7 +93,9 @@ export function PluginFailure({
 }
 
 /** Catches an error a plugin throws while drawing; Retry draws it again. */
-export class PluginBoundary extends Component<{ name: string; children: ReactNode }, { error: Error | null }> {
+type PluginBoundaryProps = { name: string; resetKey?: unknown; children: ReactNode };
+
+export class PluginBoundary extends Component<PluginBoundaryProps, { error: Error | null }> {
   state: { error: Error | null } = { error: null };
 
   static getDerivedStateFromError(error: unknown): { error: Error } {
@@ -102,6 +104,12 @@ export class PluginBoundary extends Component<{ name: string; children: ReactNod
 
   componentDidCatch(error: unknown, info: ErrorInfo) {
     console.error(`${this.props.name} failed to render`, error, info.componentStack);
+  }
+
+  componentDidUpdate(previousProps: Readonly<PluginBoundaryProps>) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
   }
 
   retry = () => this.setState({ error: null });
@@ -121,17 +129,23 @@ export function pluginRendererBoundaryKey(ownerPluginId: string, renderer: strin
 export function PluginMount({
   record,
   renderer = "default",
+  resetKey,
   children,
 }: {
   record: Pick<PluginRecord, "id" | "name">;
   renderer?: string;
+  resetKey?: unknown;
   children: ReactNode;
 }) {
   const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(null);
   return (
     <div data-plugin={record.id} className="flex min-h-0 min-w-0 flex-1 flex-col">
       <PluginPortalScopeContext.Provider value={{ scoped: true, container: portalContainer }}>
-        <PluginBoundary key={pluginRendererBoundaryKey(record.id, renderer)} name={record.name}>
+        <PluginBoundary
+          key={pluginRendererBoundaryKey(record.id, renderer)}
+          name={record.name}
+          resetKey={resetKey}
+        >
           {children}
         </PluginBoundary>
         <div ref={setPortalContainer} data-plugin-portal-root="" className="contents" />
@@ -163,7 +177,11 @@ export function PluginTabs({
       </TabsList>
       {tabs.map((tab) => (
         <TabsContent key={tab.id} value={tab.id} className="flex min-h-0 flex-col overflow-y-auto px-4 py-3 sm:px-6">
-          <PluginMount record={record} renderer={`page-tab:${tab.id}`}>
+          <PluginMount
+            record={record}
+            renderer={`page-tab:${tab.id}`}
+            resetKey={session?.session_id}
+          >
             {record.k ? <tab.render k={record.k} session={session} /> : null}
           </PluginMount>
         </TabsContent>

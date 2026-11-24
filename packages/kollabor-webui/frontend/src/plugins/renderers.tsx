@@ -48,6 +48,14 @@ type ToolPart = {
   status?: unknown;
 };
 
+function toolRendererResetKey(part: ToolPart): string {
+  const status = part.status;
+  const statusType = status && typeof status === "object" && "type" in status
+    ? String(status.type)
+    : String(status ?? "");
+  return `${statusType}:${part.result === undefined ? "pending" : "complete"}`;
+}
+
 /** A tool call. A loaded plugin's renderer for its tool wins; otherwise `fallback`. */
 export function PluginToolPart({
   part,
@@ -61,7 +69,11 @@ export function PluginToolPart({
   if (!found) return <>{fallback}</>;
   const Render = found.spec.render;
   return (
-    <PluginMount record={found.record} renderer={`tool:${part.toolName}`}>
+    <PluginMount
+      record={found.record}
+      renderer={`tool:${part.toolName}`}
+      resetKey={toolRendererResetKey(part)}
+    >
       <Render
         k={found.k}
         toolCall={{
@@ -101,7 +113,7 @@ export function PluginTaggedText({ text }: { text: string }) {
         if (!found) return <>{`<${tag.name}>${tag.content}</${tag.name}>`}</>;
         const Render = found.spec.render;
         return (
-          <PluginMount record={found.record} renderer={`tag:${tag.name}`}>
+          <PluginMount record={found.record} renderer={`tag:${tag.name}`} resetKey={tag.content}>
             <Render k={found.k} tag={tag} />
           </PluginMount>
         );

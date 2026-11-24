@@ -304,7 +304,7 @@ export function PluginViewHost({
   if (!record?.k || !view) return null;
   const View = view.render;
   return (
-    <PluginMount record={record} renderer={`view:${view.id}`}>
+    <PluginMount record={record} renderer={`view:${view.id}`} resetKey={session_id}>
       <View k={record.k} session={pluginSession} />
     </PluginMount>
   );
