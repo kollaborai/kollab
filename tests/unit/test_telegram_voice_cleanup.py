@@ -12,6 +12,7 @@ import psutil
 import pytest
 
 from kollabor_config import proc_ctl
+from plugins.hub import messaging_bridge
 from plugins.hub.messaging_bridge import TelegramBridge
 
 _REAL_PROCESS_CHILDREN = psutil.Process.children
@@ -525,13 +526,15 @@ async def test_cancellation_stops_indefinite_detached_descendant_and_cleans(
     monkeypatch.setattr(tempfile, "tempdir", str(private))
     whisper = tmp_path / "whisper"
     child_pid = tmp_path / "child.pid"
+    child_started = tmp_path / "child.started"
     whisper.write_text(
         "#!/usr/bin/env python3\n"
         + textwrap.dedent(
             f"""\
             import os, pathlib, subprocess, sys, time
             child = subprocess.Popen([
-                sys.executable, "-c", "import os,time; os.setsid(); time.sleep(120)"
+                sys.executable, "-c",
+                "import os,pathlib,time; os.setsid(); pathlib.Path({str(child_started)!r}).touch(); time.sleep(120)"
             ])
             pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
             time.sleep(120)
@@ -543,15 +546,28 @@ async def test_cancellation_stops_indefinite_detached_descendant_and_cleans(
 
     task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
     deadline = time.monotonic() + 5
-    while not child_pid.exists() and time.monotonic() < deadline:
+    while (not child_pid.exists() or not child_started.exists()) and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
     assert child_pid.exists(), "detached child did not start"
     child = psutil.Process(int(child_pid.read_text()))
+    wait_for_descendants = messaging_bridge._wait_for_voice_descendants
+
+    async def brief_descendant_wait(descendants, timeout=60):
+        return await wait_for_descendants(descendants, timeout=0.1)
+
+    monkeypatch.setattr(
+        messaging_bridge, "_wait_for_voice_descendants", brief_descendant_wait
+    )
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 3)
     try:
+        deadline = time.monotonic() + 3
+        while child.is_running() and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
         assert not child.is_running(), "cancellation left a detached writer alive"
+        while list(private.glob("kollab-telegram-voice-*")) and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
         assert not list(private.glob("kollab-telegram-voice-*"))
     finally:
         if child.is_running():
