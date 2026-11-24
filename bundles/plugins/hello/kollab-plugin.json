@@ -4,7 +4,7 @@
   "name": "Hello",
   "version": "0.1.0",
   "description": "A small example plugin with a background process.",
-  "kollab": ">=0.21.1",
+  "kollab": ">=0.23.0",
   "python": "python/hello.py:HelloPlugin",
   "settings": "settings.json",
   "services": {
