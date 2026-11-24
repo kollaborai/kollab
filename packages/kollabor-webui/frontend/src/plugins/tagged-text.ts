@@ -57,14 +57,22 @@ function maskedRanges(text: string): Mask[] {
   const masked: Mask[] = [];
   const codeSpanClosers = indexCodeSpanClosers(text);
   let index = 0;
+  let previousIndentedCode = false;
   while (index < text.length) {
     if (index === 0 || text[index - 1] === "\n") {
-      const blockEnd = codeBlockEnd(text, index);
+      if (isBlankLineAt(text, index)) {
+        index = lineEnd(text, index);
+        continue;
+      }
+      const indentedCode = startsIndentedCode(text, index, previousIndentedCode);
+      const blockEnd = codeBlockEnd(text, index, indentedCode);
       if (blockEnd >= 0) {
         masked.push({ start: index, end: blockEnd });
+        previousIndentedCode = indentedCode;
         index = blockEnd;
         continue;
       }
+      previousIndentedCode = false;
     }
     if (text[index] === "\\") {
       masked.push({ start: index, end: index + 2 });
@@ -82,10 +90,27 @@ function maskedRanges(text: string): Mask[] {
   return masked;
 }
 
-/** Pair each backtick run with the next run of the same length before a blank line. */
+/** Pair each backtick run with the next run of the same length in the same Markdown block. */
 function indexCodeSpanClosers(text: string): ReadonlyMap<number, number> {
   const runs: BacktickRun[] = [];
+  const blockBoundaries: number[] = [];
+  const listItems: number[] = [];
+  let previousIndentedCode = false;
   for (let index = 0; index < text.length; ) {
+    if (index === 0 || text[index - 1] === "\n") {
+      if (!isBlankLineAt(text, index)) {
+        const indentedCode = startsIndentedCode(text, index, previousIndentedCode);
+        const blockEnd = codeBlockEnd(text, index, indentedCode);
+        if (blockEnd >= 0) {
+          blockBoundaries.push(index);
+          previousIndentedCode = indentedCode;
+          index = blockEnd;
+          continue;
+        }
+        previousIndentedCode = false;
+        if (startsListItem(text, index)) listItems.push(index);
+      }
+    }
     if (text[index] !== "`") {
       index++;
       continue;
@@ -99,10 +124,20 @@ function indexCodeSpanClosers(text: string): ReadonlyMap<number, number> {
   const pending = new Map<number, BacktickRun>();
   const blankLines = text.matchAll(BLANK_LINE);
   let blank = blankLines.next();
+  let block = 0;
+  let list = 0;
   for (const run of runs) {
     while (!blank.done && blank.value.index < run.start) {
       pending.clear();
       blank = blankLines.next();
+    }
+    while (block < blockBoundaries.length && blockBoundaries[block] <= run.start) {
+      pending.clear();
+      block++;
+    }
+    while (list < listItems.length && listItems[list] <= run.start) {
+      pending.clear();
+      list++;
     }
     const opener = pending.get(run.length);
     if (opener) closers.set(opener.start, run.end);
@@ -119,9 +154,12 @@ function codeSpanEnd(text: string, index: number, closers: ReadonlyMap<number, n
 }
 
 /** Where the code block that starts at this line start ends, or -1 when none starts here. A fence may follow quote and list markers. */
-function codeBlockEnd(text: string, index: number): number {
-  INDENTED.lastIndex = index;
-  if (INDENTED.test(text)) return lineEnd(text, index);
+function codeBlockEnd(
+  text: string,
+  index: number,
+  indentedCode = startsIndentedCode(text, index, false),
+): number {
+  if (indentedCode) return lineEnd(text, index);
   CONTAINER.lastIndex = index;
   CONTAINER.exec(text);
   const prefix = text.slice(index, CONTAINER.lastIndex);
@@ -142,6 +180,52 @@ function quoteDepth(prefix: string): number {
 function lineEnd(text: string, index: number): number {
   const newline = text.indexOf("\n", index);
   return newline < 0 ? text.length : newline + 1;
+}
+
+/** Whether this physical line begins a new indented code block or continues one. */
+function startsIndentedCode(text: string, index: number, previousIndentedCode: boolean): boolean {
+  INDENTED.lastIndex = index;
+  if (!INDENTED.test(text) || isBlankLineAt(text, index) || startsNestedListItem(text, index)) return false;
+  if (previousIndentedCode || index === 0) return true;
+  const previousLineEnd = index - 1;
+  const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
+  return text.slice(previousLineStart, previousLineEnd).trim() === "";
+}
+
+/** A four-space list marker continues a surrounding list instead of opening indented code. */
+function startsNestedListItem(text: string, index: number): boolean {
+  const currentLine = text.slice(index, lineEnd(text, index));
+  const current = /^( {4,})(?:[-+*]|\d{1,9}[.)])[ \t]+/.exec(currentLine);
+  if (!current) return false;
+  const currentIndent = current[1].length;
+
+  let previousLineEnd = index - 1;
+  while (previousLineEnd >= 0) {
+    const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
+    const previousLine = text.slice(previousLineStart, previousLineEnd);
+    if (previousLine.trim()) {
+      const parent = /^( *)(?:[-+*]|\d{1,9}[.)])[ \t]+/.exec(previousLine);
+      if (!parent) return false;
+      const parentIndent = parent[1].length;
+      return currentIndent === parentIndent ||
+        (currentIndent >= parentIndent + 2 && currentIndent <= parentIndent + 4);
+    }
+    previousLineEnd = previousLineStart - 1;
+  }
+  return false;
+}
+
+/** A list item starts a new block, so inline code cannot continue into it. */
+function startsListItem(text: string, index: number): boolean {
+  CONTAINER.lastIndex = index;
+  CONTAINER.exec(text);
+  const prefix = text.slice(index, CONTAINER.lastIndex);
+  return /(?:[-*+]|\d{1,9}[.)])[ \t]+/.test(prefix) || startsNestedListItem(text, index);
+}
+
+/** Whether this line contains only whitespace. */
+function isBlankLineAt(text: string, index: number): boolean {
+  return text.slice(index, lineEnd(text, index)).trim() === "";
 }
 
 /** Index just past the closing fence, or the text end when the fence never closes. The closer must sit at the opener's quote depth. */
