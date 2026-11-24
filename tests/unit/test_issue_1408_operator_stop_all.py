@@ -9,6 +9,7 @@ claiming none are online, and `--everywhere` stops those too.
 import asyncio
 import json
 import os
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -828,6 +829,49 @@ def test_cli_stop_cleanup_needs_a_whole_selected_generation(tmp_path):
     _cleanup_presence_for_pid(tmp_path, 4242, {"agent_id": "agent-w", "pid": 4242})
 
     assert row.exists()
+
+
+def test_cli_stop_cleanup_serializes_replacement_publication(tmp_path, monkeypatch):
+    """A replacement publishing during cleanup keeps its row and shared socket."""
+    from pathlib import Path
+
+    from kollabor.cli import _cleanup_presence_for_pid
+    from plugins.hub.presence import _atomic_write
+
+    socket_path = tmp_path / "agent-race.sock"
+    socket_path.write_text("replacement socket")
+    row = tmp_path / "agent-race.json"
+    selected = {"agent_id": "agent-race", "pid": 4242, "started_at": 1.0}
+    replacement = {
+        **selected,
+        "started_at": 2.0,
+        "socket_path": str(socket_path),
+    }
+    row.write_text(json.dumps({**selected, "socket_path": str(socket_path)}))
+    published = threading.Event()
+    original_unlink = Path.unlink
+
+    def publish_replacement():
+        _atomic_write(row, replacement)
+        published.set()
+
+    def race_at_unlink(path, *args, **kwargs):
+        if path == row:
+            writer = threading.Thread(target=publish_replacement)
+            writer.start()
+            # On the unsafe path, publication can finish between validation
+            # and unlink. With the shared lock held, it completes afterward.
+            published.wait(0.2)
+            writer.join(0.01)
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", race_at_unlink)
+    _cleanup_presence_for_pid(tmp_path, 4242, selected)
+
+    assert published.wait(2)
+    assert row.exists()
+    assert json.loads(row.read_text())["started_at"] == 2.0
+    assert socket_path.exists()
 
 
 def test_cli_status_keeps_a_row_it_cannot_reread(tmp_path, monkeypatch):
