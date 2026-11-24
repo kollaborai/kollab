@@ -87,6 +87,22 @@ describe("PluginBoundary", () => {
     expect(setState).toHaveBeenCalledWith({ error: null });
   });
 
+  it("clears a render error when its renderer input changes", () => {
+    const boundary = new PluginBoundary({ name: "Hello", children: null });
+    const setState = vi.spyOn(boundary, "setState").mockImplementation(() => {});
+    boundary.state = { error: new Error("result is not ready") };
+    const previousProps = { ...boundary.props, resetKey: "running" };
+    const updated = boundary as unknown as {
+      props: { resetKey?: unknown };
+      componentDidUpdate?: (props: { resetKey?: unknown }) => void;
+    };
+    updated.props = { ...boundary.props, resetKey: "complete" };
+
+    updated.componentDidUpdate?.(previousProps);
+
+    expect(setState).toHaveBeenCalledWith({ error: null });
+  });
+
   it("logs what failed for the developer", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const boundary = new PluginBoundary({ name: "Hello", children: null });
