@@ -93,9 +93,13 @@ def test_agent_tool_stop_all_keeps_caller_owned_scope(monkeypatch):
 
 
 def _write(directory, name, project):
+    """A row as a current agent writes it, start_token included."""
+    from kollabor_agent.runtime import process_start_token
+
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{name}.json").write_text(json.dumps({
         "agent_id": name, "identity": name, "pid": os.getpid(),
+        "start_token": process_start_token(os.getpid()),
         "last_heartbeat": time.time(), "socket_path": str(directory / name),
         "project": project,
     }))
@@ -424,3 +428,48 @@ def test_cli_stop_binds_the_shutdown_to_the_selected_generation(monkeypatch):
     assert kwargs.get("expected_agent_id") == "a1"
     assert kwargs.get("expected_pid") == os.getpid()
     assert kwargs.get("expected_started_at") == 1795468911.5
+
+
+def test_session_less_stop_never_signals_a_pid_it_cannot_prove(monkeypatch):
+    """No start_token: the generation is unknown, so no raw SIGTERM/SIGKILL."""
+    import subprocess
+
+    import plugins.hub.plugin as hub_plugin
+
+    bystander = subprocess.Popen(["sleep", "30"])
+    try:
+        agent = _peer("tokenless")
+        agent.pid = bystander.pid
+        agent.socket_path = "/nonexistent/tokenless.sock"
+        plugin = HubPlugin()
+        plugin._presence = SimpleNamespace(cleanup_agent=lambda a: None)
+        plugin._identity = SimpleNamespace(agent_id="me", identity="legal-ops-lead")
+        signals = []
+        monkeypatch.setattr(
+            plugin, "_escalate_agent", lambda a, s, sig: signals.append(sig) or True
+        )
+        monkeypatch.setattr(
+            hub_plugin.AgentMessenger, "signal_shutdown", AsyncMock(return_value=False)
+        )
+
+        asyncio.run(plugin._stop_peer_agent(agent, reason="test"))
+
+        assert signals == []
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+def test_cli_everywhere_skips_another_folders_row_it_cannot_prove(tmp_path, monkeypatch, capsys):
+    stop = _cli(tmp_path, monkeypatch, local=False)
+    (tmp_path / "other" / "legacy.json").write_text(json.dumps({
+        "agent_id": "legacy", "identity": "legacy", "pid": os.getpid(),
+        "last_heartbeat": time.time(), "project": "/work/elsewhere",
+        "socket_path": str(tmp_path / "other" / "legacy"),
+    }))  # no start_token: its process cannot be proven
+
+    asyncio.run(_handle_cli_hub(["stop", "all", "--everywhere"]))
+
+    assert [call.args[0]["identity"] for call in stop.await_args_list] == ["far"]
+    assert "legacy" in capsys.readouterr().out
