@@ -84,3 +84,51 @@ def test_service_seconds_must_be_finite_and_bounded(key, value, tmp_path, monkey
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match=key):
         validate_manifest(root, "0.23.0")
+
+
+@pytest.mark.parametrize(
+    ("collection", "count", "error"),
+    [
+        ("uses", 256, None),
+        ("uses", 257, "exceeds 256 uses"),
+        ("services", 128, None),
+        ("services", 129, "exceeds 128 services"),
+        ("secrets", 64, None),
+        ("secrets", 65, "exceeds 64 secrets"),
+    ],
+    ids=["uses-at-limit", "uses-over-limit", "services-at-limit", "services-over-limit",
+         "secrets-at-limit", "secrets-over-limit"],
+)
+def test_manifest_collections_fit_the_plugin_review_limits(collection, count, error, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "Example",
+        "kollab": ">=0.23.0",
+        "uses": [],
+    }
+    if collection == "uses":
+        manifest["uses"] = [f"net:host-{index}.example" for index in range(count)]
+    elif collection == "services":
+        manifest["services"] = {
+            f"worker-{index}": {"command": ["python3"]} for index in range(count)
+        }
+    else:
+        secrets = [f"KEY_{index}" for index in range(count)]
+        manifest["uses"] = [f"secret:{secret}" for secret in secrets]
+        manifest["services"] = {"worker": {"command": ["python3"], "secrets": secrets}}
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+
+    if error:
+        with pytest.raises(ValueError, match=error):
+            validate_manifest(root, "0.23.0")
+    else:
+        assert validate_manifest(root, "0.23.0") == manifest

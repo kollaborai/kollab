@@ -122,6 +122,33 @@ describe("plugin inventory collection bounds", () => {
     expect(reads).toBe(128);
   });
 
+  it.each([
+    ["services", { services: Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`worker-${index}`, {}])) }, "1 additional service omitted from this review"],
+    ["uses", { uses: Array.from({ length: 257 }, (_, index) => `custom:cap-${index}`) }, "1 additional use declaration omitted from this review"],
+    ["service secrets", { services: { worker: { secrets: Array.from({ length: 65 }, (_, index) => `ENV_${index}`) } } }, "1 additional service secret omitted from this review"],
+  ] as const)("discloses omitted %s in the review summary", (_name, manifest, expected) => {
+    const job = normalizeReviewJob({ job_id: "review-1", status: "ready", manifest });
+
+    expect(job?.manifest).toBeDefined();
+    expect(describePluginAdds(job!.manifest!)).toContain(expected);
+  });
+
+  it("reports omissions in the installed inventory row", () => {
+    const entry = normalizePluginEntry({
+      id: "example-plugin",
+      services: [
+        { name: "worker", secrets: Array.from({ length: 65 }, (_, index) => `ENV_${index}`) },
+        ...Array.from({ length: 128 }, (_, index) => ({ name: `worker-${index}`, secrets: [] })),
+      ],
+      uses: Array.from({ length: 257 }, (_, index) => `custom:cap-${index}`),
+      granted: Array.from({ length: 257 }, (_, index) => `custom:cap-${index}`),
+    });
+
+    expect(entry?.services).toHaveLength(128);
+    expect(entry?.services[0].secrets_omitted).toBe(1);
+    expect(entry?.omitted).toEqual({ services: 1, uses: 1, granted: 1 });
+  });
+
   it("bounds setting option labels", () => {
     const labels = Object.fromEntries(Array.from({ length: 1000 }, (_, index) => [`choice-${index}`, `Label ${index}`]));
     const entry = normalizePluginEntry({

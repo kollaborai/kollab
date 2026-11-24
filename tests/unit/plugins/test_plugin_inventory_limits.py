@@ -119,6 +119,25 @@ def test_inventory_option_labels_stop_at_their_bound():
     assert labels.reads == limit
 
 
+def test_plugin_inventory_reports_service_use_and_grant_omissions():
+    entry = _normalize_plugin_entry(
+        {
+            "id": "example-plugin",
+            "services": [
+                {"name": f"worker-{index}", "secrets": [f"ENV_{index}_{secret}" for secret in range(65)]}
+                for index in range(129)
+            ],
+            "uses": [f"custom:cap-{index}" for index in range(257)],
+            "granted": [f"custom:cap-{index}" for index in range(257)],
+        }
+    )
+
+    assert entry is not None
+    assert len(entry["services"]) == 128
+    assert entry["services"][0]["secrets_omitted"] == 1
+    assert entry["omitted"] == {"services": 1, "uses": 1, "granted": 1}
+
+
 @pytest.mark.parametrize("value", ["run:codex\u200b", "net:github.com\u202eevil.test"])
 def test_inventory_text_rejects_invisible_format_controls(value):
     from kollabor_plugins.registry import _bounded_inventory_text
