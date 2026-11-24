@@ -1087,14 +1087,33 @@ def test_builtin_plugin_settings_preserve_unrelated_config(tmp_path, monkeypatch
 
     monkeypatch.setattr(registry, "plugin_entries", entries)
     with TestClient(create_app()) as client:
-        assert client.put("/plugins/example/settings", json={"plugins.example.mode": "new"}).json() == {
+        assert client.put(
+            "/plugins/example/settings?kind=built-in", json={"plugins.example.mode": "new"}
+        ).json() == {
             "plugins.example.mode": "new", "plugins.example.managed": "x",
         }
         saved = json.loads(path.read_text())
         assert saved["plugins"]["example"] == {"mode": "new", "enabled": True}
         assert saved["other"] == {"keep": 7}
-        for key in ("plugins.example.enabled", "plugins.example.secret", "plugins.example.managed", "other.keep"):
-            assert client.put("/plugins/example/settings", json={key: "leak"}).status_code == 422
+        secret = client.put(
+            "/plugins/example/settings?kind=built-in",
+            json={"plugins.example.secret": "new-secret"},
+        )
+        assert secret.status_code == 200
+        assert "new-secret" not in secret.text
+        saved = json.loads(path.read_text())
+        assert saved["plugins"]["example"]["secret"] == "new-secret"
+        remote = client.put(
+            "/plugins/example/settings?kind=built-in",
+            json={"plugins.example.secret": "remote-secret"},
+            headers={"x-kollab-plugin-remote": "1"},
+        )
+        assert remote.status_code == 403
+        assert json.loads(path.read_text())["plugins"]["example"]["secret"] == "new-secret"
+        for key in ("plugins.example.enabled", "plugins.example.managed", "other.keep"):
+            assert client.put(
+                "/plugins/example/settings?kind=built-in", json={key: "leak"}
+            ).status_code == 422
         assert json.loads(path.read_text()) == saved
         assert client.post("/plugins/example/disable").json() == {"enabled": False}
         assert json.loads(path.read_text())["plugins"]["example"]["enabled"] is False
