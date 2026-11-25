@@ -1,0 +1,347 @@
+{
+  "_base": {
+    "base_prompt.md": [
+      "59c643f330a6a341dfdcbb57b92f6a5a5c0ba22385be7cf965137c8498143743",
+      "d0a44890e377032d5e301c9072ad9e8e9dfa4151379d0b592ee4f37dd2a53729"
+    ],
+    "sections/00-header.md": [
+      "9c456e408299e747d551d7408c631a1915e29eb0b0ac42c06371a0069639433e"
+    ],
+    "sections/01-session-context.md": [
+      "457afcafb3ce9f1951ba57f24375b92b18ec97d2a8ac3810efe4833efabdeb63"
+    ],
+    "sections/meta/completion-checklist.md": [
+      "2f5bdb07bb2aad5db188eb13e1f8682dd4f7cbe872369869e2b4423ec0d99152"
+    ],
+    "sections/meta/final-reminders.md": [
+      "5357ef95e8c0c06358ce093368176753693900c4f0db36963cdf4e6e5d5a664c"
+    ],
+    "sections/meta/quality-assurance.md": [
+      "7dbc06037c75f5a8081b2a25a707f3cd7c103f35cd7b1da3c4a2f73501426be7"
+    ],
+    "sections/meta/resource-limits.md": [
+      "4c21905b3aaa09959713bd3308c053697f4ea636dde7960b28adc2663a425b59"
+    ],
+    "sections/meta/terminal-formatting.md": [
+      "4344284656e5e140d63dd02f23abef8e494f9c76a4aae8d4b11b14964120be4c"
+    ],
+    "sections/meta/thoroughness-mandate.md": [
+      "4c243a3462daf664f6d8c5a6253b1bc6c87757bc0d9938c5c45ba4d2823b2c62"
+    ],
+    "sections/practices/advanced-troubleshooting.md": [
+      "d534e362b2ad6286de8ac66a77ec036b3a4f4cd07029581336566cccf719d9cb"
+    ],
+    "sections/practices/communication-style.md": [
+      "e219a30866f364f5a6fd0f3075e58fed80b7c843cd91d2920b41569fc846e60e"
+    ],
+    "sections/practices/debugging.md": [
+      "ca8c71d916a78f35445152446c519373be89b22035b2cdf556845f28ed499b0c"
+    ],
+    "sections/practices/dependencies.md": [
+      "61487b6152638894833f93536b4a60e93eaf5fe4a0bb965b72ef9ca7d8582080"
+    ],
+    "sections/practices/dirty-worktree.md": [
+      "9ab3002547097058b746dcfd337896250cdd484068d851fe4a661b96ec4053c5"
+    ],
+    "sections/practices/engineering-discipline.md": [
+      "afc7ee402713aedb39ec418326195041432f4998dbacd97598d5cd5bc0022e9c"
+    ],
+    "sections/practices/error-handling.md": [
+      "fd55394e57f0c5e753aeca97a12d74292339fc1db7143726a6a131078b1f80ea"
+    ],
+    "sections/practices/performance.md": [
+      "85def994726145873c30abc974d14afe559af585a458446819b2777a88a3ebf3"
+    ],
+    "sections/practices/security.md": [
+      "4de06a215e72e0221d846d571dce4a8b3299b6238e8cd45ebe2a5634b7459333"
+    ],
+    "sections/practices/testing.md": [
+      "0f346154f6ba87887e42754912a261b7e1feae3e083b25ad4073c76f2131b025"
+    ],
+    "sections/protocols/code-review.md": [
+      "c41bfd4623909d83c12464b20b32b455fb025a0679c749eefdf53e38383891ef"
+    ],
+    "sections/protocols/communication.md": [
+      "ea0645db83a9c62cea3b6fe3d2b371a4a399c77b98b4daaa1c3d75412b219e3d"
+    ],
+    "sections/protocols/investigation-examples.md": [
+      "9354b30ae6acc7a4b330a1cb2f8e6694688cc333dd47cd2377824adb0878402c"
+    ],
+    "sections/protocols/notifications.md": [
+      "bccd48d21e25cf9b862b005225914be2f1d332b850c96cd224987dc73e82b043"
+    ],
+    "sections/protocols/response-patterns.md": [
+      "dcdd720caed8b611475a5d155f69c1705a4685a116c0d142f00b39d6077865c6"
+    ],
+    "sections/protocols/task-planning.md": [
+      "1219be71e217498db4a97eeea3841a1e9eb844b3f23951aa0821488c8a8a7a60"
+    ],
+    "sections/protocols/tool-execution.md": [
+      "b647b235a9060a229e5b064359d96146a49a126ae66f3f1b6506b85d61cf7822"
+    ],
+    "sections/protocols/tool-workflow.md": [
+      "3694190bfbff8abfdf7bace2a599525d42626449823592ea44ae5522392fff05"
+    ],
+    "sections/README.md": [
+      "4167915cf64db1bd5af02de4941b9643123f61e013e9918c9c78705154242d4d",
+      "46548a6c4545db2640bc7f84ded90c9d4c16e21676b5ad2d57055de7d60e6f71"
+    ],
+    "sections/tool-reference/context.md": [
+      "65f126603d42bd603123bac47f5e218bacb0d5a0f2592f31506a294367f1dd87"
+    ],
+    "sections/tool-reference/directory.md": [
+      "00b3a3730d5901bff915041877986fb00490958499e1b226452ab8f7eedbb9d3"
+    ],
+    "sections/tool-reference/file-append.md": [
+      "a72ebce36f21624837ae6b8a308e106a236f2061b50712f8ab5a1ebf38e64481"
+    ],
+    "sections/tool-reference/file-edit.md": [
+      "87f410e7883f5e652845c0e510f8785254a4ce54a89c9119d81a179159347253"
+    ],
+    "sections/tool-reference/file-read.md": [
+      "8adce0428528bbbea3283ce859c2917535f55ec98ef80cc37a55d3a5cc7ef06d"
+    ],
+    "sections/tool-reference/on-demand.md": [
+      "c335e72d1a0d05c3ff50467ca2d35d2c5c761d82f6dd0f65e3bf50ae843d80da"
+    ],
+    "sections/tool-reference/terminal.md": [
+      "68894bf11b2531d9b434fb7c057dfca4bbc25bdcc4e70809801712df92f76f9e",
+      "d323f338db8b3d49436ed7465cca3a37fa7c2038308778b47cda62653acb84db"
+    ],
+    "sections/tool-reference/web.md": [
+      "116d7b729e41ff62874a50a0856d385a6789a30ef9274a92cc9461462496d5fe",
+      "1c649cf68963b0de8be31316706d0a16e31111190d0ea6badf5ab3275359cb01"
+    ]
+  },
+  "coder": {
+    "__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "agent.json": [
+      "8a6b0bb280022c78145a0ffd7963eca523ee471a8823f9eb513fda3de8ca9ed4"
+    ],
+    "sections/00-header.md": [
+      "fdfcbac16df7a2a697b20dd77033b21989dc7d1c0ebc17a9d578cf76e2dd0009"
+    ],
+    "sections/README.md": [
+      "b8c5bec13dac2af928d5ab360856a442be3d1e27bf731b97c95ac774c62f7b24"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "community": {
+    "agent.json": [
+      "2758903f49d240b789e3ee4f99ff1249429fd4dc4b2ac86944469bd48309fd74"
+    ],
+    "sections/00-header.md": [
+      "e2fb0c8a7dfdf046ba9e816fee62014953aa026befbc37c45ced405ad4119d53"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "creative-writer": {
+    "__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "agent.json": [
+      "1c489410103244de4c408f0ebd4fac4277d381a6374f040b661b6999dc8ce2c1"
+    ],
+    "sections/00-header.md": [
+      "0c8d5010abd5cc7448315463d4941fe7e17e66e3a31816ec8528cbd17d7505f4",
+      "dc3005530e4b76d312149d9984b3f78b2b111d30973ea962b7d8a5a57ccc4467"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "data-analyst": {
+    "__init__.py": [
+      "8b04a989efbf17730e7e976d1b2dcae2bb1a17f87134d04479d59c8b11dab9d2"
+    ],
+    "agent.json": [
+      "61bdd0fe33e5d9d4ed70506168d3f16b36b3786245674b7bf211105d63419e51"
+    ],
+    "sections/00-header.md": [
+      "c288ab2246aee4205833a40b4a370076f22acbb0bf28c6aeba169775595796f0"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "default": {
+    "__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "agent.json": [
+      "cb3a79c69312ca1104aa23b1f26997975ce3743f25d31cc51d206cb12e4ef6d9"
+    ],
+    "sections/00-header.md": [
+      "4e7e1b809bd134b3b67521d3395b0602e93dc54500c8eb7df51f3e9bd9885664"
+    ],
+    "sections/README.md": [
+      "bcc3a583601c09ea250b1f007fa6843935e622c29ab5a052aa33bad0ee55eb29"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "kollabor": {
+    "__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "agent.json": [
+      "893eee5fe70ef2772f7fd57ca278dadf7ab6dcae3c61fda008a7f8fcf639a59d"
+    ],
+    "sections/00-header.md": [
+      "ad32b27cf7820ecd99ba93fdebe73e7acb8a9743b2c792408f3e9a4863251a20"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "koordinator": {
+    "__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "agent.json": [
+      "34569008d9c697744a28bb54d8668550056675ef54c9f4b960a5a8d6d0a6fd73"
+    ],
+    "sections/00-header.md": [
+      "2886b18ed4268fb5f2ae5179b07ae9fa465a36980406c1ea4eba24a82bc41e97",
+      "57427ad3e960640bf3360535087c7c57b39b38f503c4facf6144ce3e0cab5568"
+    ],
+    "sections/README.md": [
+      "bcc3a583601c09ea250b1f007fa6843935e622c29ab5a052aa33bad0ee55eb29"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "maintainer": {
+    "agent.json": [
+      "d4a045fb89394690d50bf07ba8a11bf6effdfc905f65c64166f30bc0ab354190"
+    ],
+    "sections/00-header.md": [
+      "7100624d5b3acc3e37faf8be5abb14c0c170d89b2b248c23857972d3d7cafae0"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "native": {
+    "__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "agent.json": [
+      "25c938a2043db9b143b9fd4cd4d3da6b13e74cab2523142807599b3f791c5017"
+    ],
+    "sections/00-header.md": [
+      "0c108c822c32b765e2f344f6e36400902465cd86bd3b81527cb3b35cb5e42ccd"
+    ],
+    "sections/README.md": [
+      "b8c5bec13dac2af928d5ab360856a442be3d1e27bf731b97c95ac774c62f7b24"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "pr-shepherd": {
+    "agent.json": [
+      "6a07e3061b45ba533adf15666dc4ccfd6d5d3600fc2ca7e4ca820bf7d2bb1687"
+    ],
+    "sections/00-header.md": [
+      "85ec03017a52e8e0e0b27b936b31e91485e4a5f5a449c8df355285649348e502"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "release-planner": {
+    "agent.json": [
+      "43de9918a646bd464e73e5b6574323bf2282281fe770c735bfc81bcca689c117"
+    ],
+    "sections/00-header.md": [
+      "69933e56bac674bcf225b7b8ad7c74a9a9ff4cf85672703d4f9a6774467defc4"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "research": {
+    "__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "agent.json": [
+      "0723be248fa49205d526ab4b1c3700439b421f67b4551296c09781886c58b322"
+    ],
+    "sections/00-header.md": [
+      "61c0fb9fd4584dee870d13dc862137e55619a0b7708e547d5ac063416ef1c0bc"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "system": {
+    "hub-collaboration.md": [
+      "5fc716252e06ea1d9ab4d057e9c0faf9bd09bc105212aac8f5989c8693c0dfd2"
+    ],
+    "hub-context.md": [
+      "d01f34016c3d38bae5f03aeababf513c7583c8ed22c5bc321ce6340d93e110fb"
+    ]
+  },
+  "tech-dude": {
+    "agent.json": [
+      "7eaa536177bba1c75d4d396518a5c4e81f18e1940a6de3d131b135b6f5798c8f"
+    ],
+    "sections/00-header.md": [
+      "9a9815ae41f301e964d8eddf7d15125dbec9bd908e1f49beed9df14756068bfc",
+      "b80f44f9ebf41dd8c7879b06a537642724ef11fe817445cc3faa40804c63d80f"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "technical-writer": {
+    "__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "agent.json": [
+      "20ba5af9682e4ed66e9692d0ee6d1f3497061e3b198919c91ef39fc30eb8a5a6"
+    ],
+    "sections/00-header.md": [
+      "0e3fa0748958407253c5dfd78b6b0135badd620b10cac44c3cebe6a70531c6cb",
+      "104630a74158e5727f8202eaacff612f11b68c0020f380813ff584060dfd7a3a"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  },
+  "triager": {
+    "agent.json": [
+      "a068b87d71e15917a9e17413a0a85f77f3bb9a1ec55d24f18b09c3b9c4516378"
+    ],
+    "sections/00-header.md": [
+      "bc8cb75be38a93cf677b0a7b86bab93770c28b7ab7524468a1443097d2621bf9"
+    ],
+    "system_prompt.md": [
+      "6faaeed78ec019847c43d2d05067d4f9eafc95e9b30a39fc978e44733c0e78af",
+      "e6896f7ada30ae59918be937432a7acb93610fa6708fbae1e5e82ddfa3c29094"
+    ]
+  }
+}

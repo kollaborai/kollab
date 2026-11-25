@@ -38,11 +38,18 @@ Agents are resolved from:
 When the same agent name exists at multiple tiers, the higher-priority definition
 wins. The bundled copy remains the install-safe fallback.
 
-On app startup Kollab copies missing bundled agent files into the global agents
-directory. Existing files are preserved, so a global copy does not automatically
-receive later bundle changes. Linked agent or section directories, junctions,
-reparse points and file links are preserved instead of being seeded through. If
-the global config directory or its agents directory is linked, startup skips seeding there;
+On app startup Kollab synchronizes bundled files with the global agents
+directory. A global file is updated or retired only when its contents match a
+version recorded in `bundles/data/agent-seed-hashes.json`. Replaced and retired
+files move to `~/.kollab/agents/.seed-backup/` without overwriting earlier
+backups. User-edited or unrecognized files are preserved; if one shadows a
+bundled file, startup logs its path. Missing files are copied without replacing
+a destination created at the same time. If the hash list is missing or unreadable,
+existing files are left alone and only missing files are copied.
+
+Linked agent or section directories, junctions, reparse points and file links
+are preserved instead of being seeded through or retired. If the global config
+directory or its agents directory is linked, startup skips seeding there;
 existing global agents in that directory still resolve normally. An agent with
 no local or global `system_prompt.md` resolves from the bundle.
 

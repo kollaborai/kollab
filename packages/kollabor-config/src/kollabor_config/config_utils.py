@@ -790,7 +790,7 @@ def initialize_system_prompt() -> None:
 
     Priority order:
     1. Migrate from old global system_prompt/default.md if it exists
-    2. Copy ALL agents from seed folder to global ~/.kollab/agents/
+    2. Sync bundled agent files to global ~/.kollab/agents/
     3. Retire unmodified seed copies of bundled skills (moves, never deletes)
     """
     try:
@@ -937,7 +937,7 @@ def _copy_missing_tree_contents(source_dir: Path, target_dir: Path) -> tuple[int
     """Copy missing seed entries, keeping each destination directory pinned."""
     copied = 0
     preserved = 0
-    if not source_dir.is_dir():
+    if _is_link_or_reparse(source_dir) or not source_dir.is_dir():
         return copied, preserved
     if _is_link_or_reparse(target_dir):
         return copied, preserved + 1
@@ -946,6 +946,9 @@ def _copy_missing_tree_contents(source_dir: Path, target_dir: Path) -> tuple[int
         with _seed_directory(target_dir, create=True) as directory_fd:
             for item in source_dir.iterdir():
                 target = target_dir / item.name
+                if _is_link_or_reparse(item):
+                    preserved += 1
+                    continue
                 if _is_link_or_reparse(target):
                     preserved += 1
                     continue
@@ -1142,7 +1145,7 @@ def _get_bundled_dir(name: str) -> Optional[Path]:
 def _copy_seed_agents_to_global(
     global_agents_dir: Path, old_global_prompt_dir: Path
 ) -> None:
-    """Copy all agents from bundled seed folder to global agents directory.
+    """Sync bundled agents into the global directory without losing user edits.
 
     Args:
         global_agents_dir: Target global agents directory (~/.kollab/agents/)
@@ -1151,7 +1154,9 @@ def _copy_seed_agents_to_global(
     if _is_link_or_reparse(global_agents_dir) or _is_link_or_reparse(
         global_agents_dir.parent
     ):
-        logger.info("Preserving linked global agents directory or parent: %s", global_agents_dir)
+        logger.info(
+            "Preserving linked global agents directory or parent: %s", global_agents_dir
+        )
         return
 
     seed_agents_dir = _get_bundled_dir("agents")
@@ -1169,12 +1174,42 @@ def _copy_seed_agents_to_global(
             )
         return
 
-    # Copy each agent from seed to global without overwriting existing user files
+    seed_hashes = _load_agent_seed_hashes()
+
+    bundled_agent_names: set[str] = set()
+    # Sync each agent file independently so edits do not freeze the whole agent.
     for agent_dir in seed_agents_dir.iterdir():
+        bundled_agent_names.add(agent_dir.name)
+        if _is_link_or_reparse(agent_dir):
+            logger.warning("Preserving linked bundled agent seed: %s", agent_dir)
+            continue
         if agent_dir.is_dir():
             target_agent_dir = global_agents_dir / agent_dir.name
             try:
-                copied, preserved = _copy_missing_tree_contents(agent_dir, target_agent_dir)
+                updated = 0
+                retired = 0
+                preserved = 0
+                if seed_hashes is None or agent_dir.name not in seed_hashes:
+                    if seed_hashes is not None:
+                        logger.warning(
+                            "Agent seed hashes missing for %s; preserving existing files",
+                            agent_dir.name,
+                        )
+                    copied, preserved = _copy_missing_tree_contents(
+                        agent_dir, target_agent_dir
+                    )
+                else:
+                    updated, retired, preserved = _sync_agent_seed_files(
+                        agent_dir,
+                        target_agent_dir,
+                        global_agents_dir,
+                        agent_dir.name,
+                        seed_hashes[agent_dir.name],
+                    )
+                    copied, missing_preserved = _copy_missing_tree_contents(
+                        agent_dir, target_agent_dir
+                    )
+                    preserved += missing_preserved
             except OSError:
                 if (target_agent_dir / "system_prompt.md").is_file():
                     logger.error(
@@ -1186,13 +1221,388 @@ def _copy_seed_agents_to_global(
                     )
                 raise
             logger.info(
-                f"Seeded agent to global: {agent_dir.name} "
-                f"(copied={copied}, preserved_existing={preserved})"
+                "Synced bundled agent to global: %s "
+                "(copied=%s, updated=%s, retired=%s, preserved_existing=%s)",
+                agent_dir.name,
+                copied,
+                updated,
+                retired,
+                preserved,
+            )
+
+    if seed_hashes is None:
+        return
+    for agent_name, known_files in seed_hashes.items():
+        if agent_name in bundled_agent_names:
+            continue
+        target_agent_dir = global_agents_dir / agent_name
+        if _is_link_or_reparse(target_agent_dir):
+            logger.warning(
+                "Preserving linked retired global agent: %s", target_agent_dir
+            )
+            continue
+        try:
+            retired, skipped = _retire_agent_seed_files(
+                target_agent_dir,
+                global_agents_dir,
+                agent_name,
+                known_files,
+            )
+        except OSError as exc:
+            logger.warning(
+                "Could not retire removed global agent %s: %s", target_agent_dir, exc
+            )
+            continue
+        if retired or skipped:
+            logger.info(
+                "Retired removed global agent seeds: %s (retired=%s, preserved=%s)",
+                target_agent_dir,
+                retired,
+                skipped,
             )
 
 
 SEED_BACKUP_DIR_NAME = ".seed-backup"
+AGENT_SEED_HASHES_NAME = "agent-seed-hashes.json"
 SKILL_SEED_HASHES_NAME = "skill-seed-hashes.json"
+
+
+def _load_agent_seed_hashes() -> dict[str, dict[str, set[str]]] | None:
+    """Return known SHA-256 versions for each bundled agent file."""
+    data_dir = _get_bundled_dir("data")
+    if data_dir is None:
+        return None
+    try:
+        raw = json.loads(
+            (data_dir / AGENT_SEED_HASHES_NAME).read_text(encoding="utf-8")
+        )
+        if not isinstance(raw, dict):
+            raise ValueError("top-level value must be an object")
+
+        result: dict[str, dict[str, set[str]]] = {}
+        for agent_name, files in raw.items():
+            if (
+                not isinstance(agent_name, str)
+                or not agent_name
+                or "/" in agent_name
+                or "\\" in agent_name
+                or ":" in agent_name
+                or "\x00" in agent_name
+                or agent_name in {".", ".."}
+                or not isinstance(files, dict)
+            ):
+                raise ValueError("invalid agent entry")
+            parsed_files: dict[str, set[str]] = {}
+            for relative_path, digests in files.items():
+                if (
+                    not isinstance(relative_path, str)
+                    or not relative_path
+                    or relative_path.startswith("/")
+                    or "\\" in relative_path
+                    or ":" in relative_path
+                    or "\x00" in relative_path
+                    or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+                    or not isinstance(digests, list)
+                    or not digests
+                    or any(
+                        not isinstance(digest, str)
+                        or len(digest) != 64
+                        or any(
+                            character not in "0123456789abcdef" for character in digest
+                        )
+                        for digest in digests
+                    )
+                ):
+                    raise ValueError("invalid agent file hash entry")
+                parsed_files[relative_path] = set(digests)
+            result[agent_name] = parsed_files
+        return result
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        logger.warning(
+            "Agent seed hashes unreadable; preserving existing global files: %s", exc
+        )
+        return None
+
+
+def _agent_seed_files(root: Path, *, reject_links: bool = False) -> dict[str, Path]:
+    """List regular files without traversing linked or reparse directories."""
+    if _is_link_or_reparse(root):
+        if reject_links:
+            raise OSError(
+                errno.ELOOP, "refusing linked bundled agent directory", str(root)
+            )
+        return {}
+    if not root.is_dir():
+        return {}
+
+    result: dict[str, Path] = {}
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        for entry in sorted(directory.iterdir(), key=lambda path: path.name):
+            if _is_link_or_reparse(entry):
+                if reject_links:
+                    raise OSError(
+                        errno.ELOOP, "refusing linked bundled agent entry", str(entry)
+                    )
+                continue
+            if entry.is_dir():
+                pending.append(entry)
+            elif entry.is_file():
+                result[entry.relative_to(root).as_posix()] = entry
+    return result
+
+
+def _seed_file_sha256(path: Path) -> Optional[str]:
+    """Hash one unchanged regular file, returning None for unsafe or unreadable paths."""
+    try:
+        before = path.lstat()
+        if _is_link_or_reparse(path) or not stat.S_ISREG(before.st_mode):
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            current = path.lstat()
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or _is_link_or_reparse(path)
+                or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+                or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+            ):
+                return None
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            after = os.fstat(stream.fileno())
+            if (opened.st_size, opened.st_mtime_ns) != (
+                after.st_size,
+                after.st_mtime_ns,
+            ):
+                return None
+            return digest
+    except OSError:
+        return None
+
+
+def _restore_agent_seed_file(target: Path, backup: Path) -> bool:
+    """Restore a moved file only when its original name is still free."""
+    try:
+        with _seed_directory(backup.parent, create=False) as backup_fd:
+            with _seed_directory(target.parent, create=False) as target_fd:
+                source = backup if backup_fd is None else backup.name
+                destination = target if target_fd is None else target.name
+                _rename_seed_noreplace(
+                    source,
+                    destination,
+                    src_dir_fd=backup_fd,
+                    dst_dir_fd=target_fd,
+                )
+    except OSError as exc:
+        logger.error(
+            "Global agent seed recovery conflict: %s could not be restored to %s; "
+            "the preserved file remains at %s (%s)",
+            backup.name,
+            target,
+            backup,
+            exc,
+        )
+        return False
+    logger.warning(
+        "Restored global agent file after an interrupted seed update: %s", target
+    )
+    return True
+
+
+def _backup_agent_seed_file(
+    global_agents_dir: Path,
+    agent_name: str,
+    relative_path: str,
+    target: Path,
+    known_hashes: set[str],
+) -> Optional[Path]:
+    """Move a known seed file into its backup path without replacing entries."""
+    if _seed_file_sha256(target) not in known_hashes:
+        return None
+
+    backup_parent = (
+        global_agents_dir
+        / SEED_BACKUP_DIR_NAME
+        / agent_name
+        / Path(*relative_path.split("/")).parent
+    )
+    try:
+        with _seed_directory(target.parent, create=False) as source_fd:
+            with _seed_directory(backup_parent, create=True) as backup_fd:
+                backup = _unused_backup_path(backup_parent, target.name)
+                while True:
+                    source = target if source_fd is None else target.name
+                    destination = backup if backup_fd is None else backup.name
+                    try:
+                        _rename_seed_noreplace(
+                            source,
+                            destination,
+                            src_dir_fd=source_fd,
+                            dst_dir_fd=backup_fd,
+                        )
+                        break
+                    except FileExistsError:
+                        suffix = (
+                            f"{datetime.now():%Y%m%d-%H%M%S-%f}-{os.urandom(4).hex()}"
+                        )
+                        backup = backup_parent / f"{target.name}-{suffix}"
+
+                moved_hash = _seed_file_sha256(backup)
+                if moved_hash in known_hashes:
+                    return backup
+    except OSError as exc:
+        logger.warning("Could not safely back up global agent file %s: %s", target, exc)
+        return None
+
+    _restore_agent_seed_file(target, backup)
+    logger.warning(
+        "Global agent file changed during seed backup; preserved it at %s",
+        target if target.exists() else backup,
+    )
+    return None
+
+
+def _sync_agent_seed_files(
+    bundled_agent_dir: Path,
+    global_agent_dir: Path,
+    global_agents_dir: Path,
+    agent_name: str,
+    known_files: dict[str, set[str]],
+) -> tuple[int, int, int]:
+    """Update and retire only files that still match a known bundled version."""
+    try:
+        bundled_files = _agent_seed_files(bundled_agent_dir, reject_links=True)
+        global_files = _agent_seed_files(global_agent_dir)
+    except OSError as exc:
+        logger.warning("Could not inspect bundled agent %s safely: %s", agent_name, exc)
+        return 0, 0, 0
+
+    updated = 0
+    retired = 0
+    preserved = 0
+    for relative_path, target in sorted(global_files.items()):
+        known_hashes = known_files.get(relative_path)
+        bundled_file = bundled_files.get(relative_path)
+        if known_hashes is None:
+            if bundled_file is not None:
+                logger.warning(
+                    "Preserving global agent file without seed history: %s (bundle: %s)",
+                    target,
+                    bundled_file,
+                )
+                preserved += 1
+            continue
+
+        global_hash = _seed_file_sha256(target)
+        if global_hash is None:
+            if bundled_file is not None:
+                logger.warning(
+                    "Preserving unreadable or linked global agent file: %s (bundle: %s)",
+                    target,
+                    bundled_file,
+                )
+                preserved += 1
+            continue
+        if global_hash not in known_hashes:
+            if bundled_file is not None:
+                logger.warning(
+                    "Preserving user-edited global agent file that shadows a bundle: %s "
+                    "(bundle: %s)",
+                    target,
+                    bundled_file,
+                )
+                preserved += 1
+            continue
+
+        bundled_hash = (
+            _seed_file_sha256(bundled_file) if bundled_file is not None else None
+        )
+        if bundled_file is not None and (
+            bundled_hash is None or bundled_hash not in known_hashes
+        ):
+            logger.warning(
+                "Preserving global agent file because its bundle hash is unavailable: %s "
+                "(bundle: %s)",
+                target,
+                bundled_file,
+            )
+            preserved += 1
+            continue
+        if bundled_file is not None and global_hash == bundled_hash:
+            continue
+
+        backup = _backup_agent_seed_file(
+            global_agents_dir,
+            agent_name,
+            relative_path,
+            target,
+            known_hashes,
+        )
+        if backup is None:
+            preserved += 1
+            continue
+        if bundled_file is None:
+            retired += 1
+            continue
+
+        try:
+            published = _copy_file_if_missing(bundled_file, target)
+        except OSError as exc:
+            logger.warning(
+                "Could not publish updated global agent file %s: %s", target, exc
+            )
+            published = False
+        if published or _seed_file_sha256(target) == bundled_hash:
+            updated += 1
+            continue
+
+        _restore_agent_seed_file(target, backup)
+        preserved += 1
+
+    return updated, retired, preserved
+
+
+def _retire_agent_seed_files(
+    global_agent_dir: Path,
+    global_agents_dir: Path,
+    agent_name: str,
+    known_files: dict[str, set[str]],
+) -> tuple[int, int]:
+    """Back up known files for an agent that is no longer bundled."""
+    try:
+        global_files = _agent_seed_files(global_agent_dir)
+    except OSError as exc:
+        logger.warning(
+            "Could not inspect removed global agent %s: %s", global_agent_dir, exc
+        )
+        return 0, 0
+
+    retired = 0
+    preserved = 0
+    for relative_path, target in sorted(global_files.items()):
+        known_hashes = known_files.get(relative_path)
+        if known_hashes is None:
+            continue
+        if _seed_file_sha256(target) not in known_hashes:
+            preserved += 1
+            continue
+        if (
+            _backup_agent_seed_file(
+                global_agents_dir,
+                agent_name,
+                relative_path,
+                target,
+                known_hashes,
+            )
+            is None
+        ):
+            preserved += 1
+        else:
+            retired += 1
+    return retired, preserved
 
 
 def _load_skill_seed_hashes() -> dict[str, dict[str, set[str]]] | None:
