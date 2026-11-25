@@ -41,7 +41,7 @@ function toPart(part: ChatPart): LikePart {
         args: isRecord(part.args) ? (part.args as ReadonlyJSONObject) : {},
         argsText: JSON.stringify(part.args ?? {}),
         result: part.result,
-        isError: part.is_error,
+        isError: part.is_error ?? undefined,
       };
     case "image":
       return { type: "image", image: part.url };
