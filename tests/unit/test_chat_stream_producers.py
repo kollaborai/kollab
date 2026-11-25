@@ -610,3 +610,41 @@ def test_goal_continuation_responses_replace_only_current_segment():
     snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
     reply = next(row for row in snapshot["data"]["rows"] if row["kind"] == "reply")
     assert reply["parts"][0]["text"] == "First Second Third"
+
+
+@pytest.mark.asyncio
+async def test_native_model_continuations_clean_only_their_own_reply_segment():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from kollabor_agent.queue_processor import QueueProcessor
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    _publish(state, "turn_start", turn_id="native", request_id="input")
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = state._event_bus
+    processor._turn_lock = asyncio.Lock()
+    processor._run_after_turn = AsyncMock()
+    processor._turn_token = None
+    processor.active_request_ids = ()
+    processor.turn_completed = False
+    processor.cancel_processing = False
+    segments = iter(
+        [("First <tool>", "First "), ("<tool>", ""), ("Last <tool>", "Last")]
+    )
+
+    async def model_call(*args, **kwargs):
+        raw, clean = next(segments)
+        _publish(state, "token", turn_id="native", text=raw)
+        _publish(state, "response", turn_id="native", text=clean)
+        return "parent"
+
+    processor._execute_llm_turn_inner = model_call
+    for first in (True, False, False):
+        await processor._execute_llm_turn(first, "parent")
+
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    reply = next(row for row in snapshot["data"]["rows"] if row["kind"] == "reply")
+    assert reply["parts"][0]["text"] == "First Last"
