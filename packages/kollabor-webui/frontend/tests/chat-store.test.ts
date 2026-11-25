@@ -866,13 +866,15 @@ describe("LiveChatStore", () => {
     expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
   });
 
-  it("once the POST has succeeded, a snapshot without the pending row's id drops the row", async () => {
+  it("once the POST has succeeded, a snapshot without the pending row's id retains it", async () => {
     const { store, streams } = make();
     const first = await startOpen(store, streams);
     first.emit(snapshot(5, [row("r1", "one")]));
     await store.send({ id: "web-a1", text: "hello" });
     first.emit(snapshot(7, [row("r1", "one")]));
-    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    first.emit(streamEvent(7, "row.upsert", row("web-a1", "hello", "input", "user")));
+    expect(store.rows).toEqual([row("r1", "one"), row("web-a1", "hello", "input", "user")]);
   });
 
   it("a replace that lacks the pending row's id keeps the row while its POST is in flight", async () => {
