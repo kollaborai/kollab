@@ -112,14 +112,32 @@ describe("chat recorder analysis", () => {
     })).toBe(true);
   });
 
-  it("accepts successful ACP compaction without a transcript replacement", () => {
+  it("requires a stream replacement for successful ACP compaction", () => {
     expect(isCompactionComplete({
       sawStart: true,
       status: "idle",
       latestEventStatus: "idle",
       replaced: false,
       runtime: "codex-cli",
+    })).toBe(false);
+    expect(isCompactionComplete({
+      sawStart: true, status: "idle", latestEventStatus: "idle",
+      replaced: true, runtime: "codex-cli",
     })).toBe(true);
+  });
+
+  it("fails an idle ACP compaction when no post-command replacement arrives", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("  const waitForCompaction ="), source.indexOf("  const runtimeForSession ="));
+    let now = 0;
+    let polls = 0;
+    const wait = runInNewContext(`${body}; waitForCompaction`, {
+      Date: { now: () => now }, isCompactionComplete, activeRuntime: "codex-cli",
+      contextCompactionStatus: async () => ++polls === 1 ? "compacting" : "idle",
+      page: { evaluate: async () => [{ kind: "events", ev: "context_compaction_status", status: "compacting" }] },
+      sleep: async () => { now += 100000; },
+    });
+    await expect(wait(0)).rejects.toThrow(/compaction did not finish/);
   });
 
   it("does not complete ACP compaction from an idle event older than the current start", () => {
@@ -139,7 +157,7 @@ describe("chat recorder analysis", () => {
     const wait = runInNewContext(`${body}; waitForCompaction`, {
       Date, isCompactionComplete, activeRuntime: "codex-cli",
       contextCompactionStatus: async () => { polls++; return polls === 1 ? "idle" : polls === 2 ? "compacting" : "idle"; },
-      page: { evaluate: async () => [{ kind: "events", ev: "context_compaction_status", status: "compacting" }] },
+      page: { evaluate: async () => [{ kind: "events", ev: "context_compaction_status", status: "compacting" }, ...(polls >= 3 ? [{ kind: "stream", ev: "replace" }] : [])] },
       sleep: async () => {},
     });
     await wait(0);
@@ -154,7 +172,7 @@ describe("chat recorder analysis", () => {
     const wait = runInNewContext(`${body}; waitForCompaction`, {
       Date, isCompactionComplete, activeRuntime: "codex-cli",
       contextCompactionStatus: async () => { polls++; return polls === 1 ? "compacting" : "idle"; },
-      page: { evaluate: async () => polls === 1 ? [] : [event("compacting"), event("idle")] },
+      page: { evaluate: async () => polls === 1 ? [] : [event("compacting"), event("idle"), ...(polls >= 3 ? [{ kind: "stream", ev: "replace" }] : [])] },
       sleep: async () => {},
     });
     await wait(0);
