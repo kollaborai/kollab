@@ -191,6 +191,7 @@ function errorStatus(error: unknown): number | undefined {
  */
 export class LiveChatStore implements LiveStore {
   private state: StreamState = initialStreamState;
+  private lastConversationUid: string | null = null;
   // Not named `connection`: that name is the public getter below.
   private connectionState: ConnectionState = "connecting";
   // Not named `olderStatus`: that name is the public getter below.
@@ -286,7 +287,7 @@ export class LiveChatStore implements LiveStore {
 
   /** Shows the input at once as a pending row, then posts it. A failed post leaves the row as failed, and rethrows. */
   async send(input: InputRequest): Promise<void> {
-    this.beginSend(input);
+    const localSend = this.beginSend(input);
     let response: Response;
     try {
       response = await this.transport.request(`/sessions/${this.enc}/inputs`, {
@@ -294,22 +295,22 @@ export class LiveChatStore implements LiveStore {
         body: JSON.stringify(input),
       });
     } catch (error) {
-      this.endSend(input.id, false);
+      this.endSend(input.id, localSend, false);
       throw error;
     }
-    this.endSend(input.id, response.ok);
+    this.endSend(input.id, localSend, response.ok);
     if (!response.ok) throw new Error(`send failed: ${response.status}`);
   }
 
   /** Adds the pending row at the end of the rows. A send whose id is already on screen adds nothing. */
-  private beginSend(input: InputRequest): void {
+  private beginSend(input: InputRequest): LocalSend | undefined {
     const send = this.sends.get(input.id);
     if (send) {
       send.posts += 1;
       if (send.row.status === "failed") this.replaceLocalRow(send, { ...send.row, status: "pending" });
-      return;
+      return send;
     }
-    if (this.state.rows.some((row) => row.id === input.id)) return;
+    if (this.state.rows.some((row) => row.id === input.id)) return undefined;
     const row: ChatRow = {
       id: input.id,
       seq: -1, // not on the stream yet
@@ -320,14 +321,15 @@ export class LiveChatStore implements LiveStore {
       parts: [{ type: "text", text: input.text }],
       created_at: new Date().toISOString(),
     };
-    this.sends.set(input.id, { row, posts: 1, succeeded: false });
+    const localSend = { row, posts: 1, succeeded: false };
+    this.sends.set(input.id, localSend);
     this.publish();
+    return localSend;
   }
 
   /** Records one POST's answer. A failure with no other POST for the id still running marks the row failed. */
-  private endSend(id: string, ok: boolean): void {
-    const send = this.sends.get(id);
-    if (!send) return; // the stream has delivered the row, so it is no longer local
+  private endSend(id: string, send: LocalSend | undefined, ok: boolean): void {
+    if (!send || this.sends.get(id) !== send) return; // retired or replaced while the POST was in flight
     send.posts -= 1;
     send.succeeded ||= ok;
     if (!send.succeeded && send.posts === 0) this.replaceLocalRow(send, { ...send.row, status: "failed" });
@@ -496,6 +498,10 @@ export class LiveChatStore implements LiveStore {
       return;
     }
     if (result.outcome.kind === "duplicate") return;
+    if (event.type === "snapshot") {
+      if (this.lastConversationUid !== null && this.lastConversationUid !== event.conversation_uid) this.sends.clear();
+      this.lastConversationUid = event.conversation_uid;
+    }
     this.state = result.state;
     // A snapshot or a replace brings a new window: an older page still in flight is dropped, and the paging state restarts from the cursor.
     if (event.type === "snapshot" || event.type === "replace") {
