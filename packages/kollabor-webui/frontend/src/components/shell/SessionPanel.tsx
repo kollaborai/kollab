@@ -656,7 +656,9 @@ export function SessionPanel({
               </Button>
             ) : null}
           </div>
-          <ScrollArea className="max-h-[50vh]">
+          {/* The scrollbar sits in the dialog padding, so the rows end where
+              the buttons under them end. */}
+          <ScrollArea className="-mr-3 max-h-[50vh]">
             <div className="flex flex-col gap-2 pr-3">
               {allServerNames.length ? (
                 allServerNames.map((name) => {

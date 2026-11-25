@@ -1,9 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Session MCP fixture</title>
+    <!-- Screenshots are taken right after a resize or theme change: with no
+         transitions or animations they always show the settled page. -->
+    <style>*, *::before, *::after { transition: none !important; animation: none !important; }</style>
   </head>
   <body>
     <div id="root"></div>
