@@ -584,7 +584,7 @@ async function record(flow, session, browser, target) {
       }
       if (isCompactionComplete({
         sawStart: activeRuntime === "native" ? sawStart : startedBeforeState,
-        status: newerEventStatuses.at(-1) === "compacting" ? "compacting" : status,
+        status: newerEventStatuses.includes("compacting") ? "compacting" : status,
         latestEventStatus,
         replaced,
         runtime: activeRuntime,
