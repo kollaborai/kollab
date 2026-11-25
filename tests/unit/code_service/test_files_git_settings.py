@@ -587,6 +587,88 @@ def test_two_saves_with_the_same_expected_mtime_cannot_both_win(ws, monkeypatch)
     assert path.read_text(encoding="utf-8") in {"A", "B"}
 
 
+def test_concurrent_saves_through_hard_links_share_write_serialization(ws, monkeypatch):
+    path = ws.root / "a.txt"
+    alias = ws.root / "alias.txt"
+    _write(path, "one")
+    try:
+        os.link(path, alias)
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable: {exc}")
+
+    snapshot = _fs("file", ws.root, {"path": path.name}).content["data"]
+    both_checking = threading.Barrier(2)
+    first_write_entered = threading.Event()
+    overlapping_write_entered = threading.Event()
+    release_writes = threading.Event()
+    active_guard = threading.Lock()
+    active_writes = 0
+    max_active_writes = 0
+    original_checked_write = code_files._checked_write
+    original_write_atomic = code_files._write_atomic
+
+    def wait_for_both_checks(*args):
+        both_checking.wait(timeout=5)
+        return original_checked_write(*args)
+
+    def track_atomic_write(file_path, data):
+        nonlocal active_writes, max_active_writes
+        with active_guard:
+            active_writes += 1
+            max_active_writes = max(max_active_writes, active_writes)
+            overlapping = active_writes > 1
+        if overlapping:
+            overlapping_write_entered.set()
+        else:
+            first_write_entered.set()
+        try:
+            if not release_writes.wait(timeout=5):
+                raise TimeoutError("test did not release the atomic write")
+            original_write_atomic(file_path, data)
+        finally:
+            with active_guard:
+                active_writes -= 1
+
+    monkeypatch.setattr(code_files, "_checked_write", wait_for_both_checks)
+    monkeypatch.setattr(code_files, "_write_atomic", track_atomic_write)
+
+    async def both():
+        common = {
+            "content": "saved",
+            "expectedMtime": snapshot["mtime"],
+            "expectedVersion": snapshot["version"],
+        }
+        return await asyncio.gather(
+            code_files.serve("write_file", str(ws.root), {**common, "path": path.name}, None),
+            code_files.serve("write_file", str(ws.root), {**common, "path": alias.name}, None),
+        )
+
+    results = []
+    errors = []
+
+    def run_both():
+        try:
+            results.extend(asyncio.run(both()))
+        except Exception as exc:
+            errors.append(exc)
+
+    runner = threading.Thread(target=run_both)
+    runner.start()
+    try:
+        first_entered = first_write_entered.wait(timeout=5)
+        overlapped_before_release = overlapping_write_entered.wait(timeout=0.5) if first_entered else False
+    finally:
+        release_writes.set()
+    runner.join(timeout=10)
+
+    assert not runner.is_alive()
+    assert not errors, f"save requests raised: {errors!r}"
+    assert first_entered
+    assert not overlapped_before_release
+    assert max_active_writes == 1
+    assert sorted(reply.status_code for reply in results) == [200, 200]
+
+
 def test_stale_version_is_rejected_when_content_changes_within_one_stat_tick(ws, monkeypatch):
     path = ws.root / "a.txt"
     _write(path, "old")
