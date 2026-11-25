@@ -277,8 +277,9 @@ describe("loading", () => {
     expect(plugin("hello")?.contributions.notices).toEqual([]);
   });
 
-  it("keeps arbitrary setup errors out of plugin UI and logs the original exception", async () => {
-    const original = new Error("secret returned by a plugin API");
+  it("keeps setup errors out of plugin UI and logs only redacted details", async () => {
+    const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz";
+    const original = new Error(secret);
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const { loader, plugin } = harness([[entry("hello"), entry("pr-chain")]], {
       "/plugins/hello/web/index.js?v=abc": module(() => {
@@ -292,7 +293,8 @@ describe("loading", () => {
       status: "failed",
       error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
-    expect(logged).toHaveBeenCalledWith("Plugin hello web code failed while loading", original);
+    expect(logged).toHaveBeenCalledWith("hello web code load failed", expect.stringContaining("[redacted]"));
+    expect(logged.mock.calls.flat().join(" ")).not.toContain(secret);
     expect(plugin("pr-chain")?.status).toBe("ready");
   });
 
