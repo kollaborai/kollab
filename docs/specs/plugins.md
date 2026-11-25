@@ -103,7 +103,9 @@ Cancelled.
 
 **Settings → Plugins.** A new Settings tab lists every plugin in Installed, Development and Built In
 (Hub, Voice, MCP and the rest of the bundled `plugins/`) groups. Its detail shows name, version, source,
-an on/off switch, Background Processes with their state, what the plugin uses, and its settings form.
+Background Processes with their state, what the plugin uses, and its settings form. Installed and Built In
+entries also have an on/off switch; Development entries have no switch because `kind=dev` cannot be
+enabled or disabled through the settings API.
 Buttons: Add Plugin, and Update and Remove for installed plugins. Add Plugin takes a git URL. Plugin settings move here from
 Settings → Configuration, which keeps only kollab's own settings, so each field shows in one place.
 Installing, updating, removing and turning plugins on or off work only from a page opened on this
