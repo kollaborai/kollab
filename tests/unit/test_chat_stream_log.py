@@ -42,8 +42,7 @@ def test_new_subscriber_gets_a_transcript_snapshot_with_next_cursor():
 def test_events_have_one_strict_sequence_and_replay_after_cursor():
     log = ChatStreamLog("conv-1", snapshot_provider=_snapshot, replay_window=3)
     events = [
-        log.publish("row.delete", {"id": f"row-{index}"})
-        for index in range(1, 4)
+        log.publish("row.delete", {"id": f"row-{index}"}) for index in range(1, 4)
     ]
 
     replay = log.read(after=1, conversation_uid="conv-1")

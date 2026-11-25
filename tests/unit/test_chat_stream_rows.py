@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from kollabor_rpc import RpcRequest, RpcServer
 
 from kollabor.state.chat_stream_rows import (
     ChatStreamRowPager,
@@ -11,6 +10,7 @@ from kollabor.state.chat_stream_rows import (
     StaleRowCursor,
     register_chat_stream_rows_handler,
 )
+from kollabor_rpc import RpcRequest, RpcServer
 
 
 def _row(row_id: str, seq: int) -> dict:
@@ -31,7 +31,9 @@ class _Sources:
         self.conversation_uid = "conv-1"
         self.compaction_seq = 0
         self.transcript = [_row(f"row-{index}", index) for index in range(1, 6)]
-        self.row_log = [_row("row-5", 5), _row("row-6", 6)]
+        live_row = _row("row-3", 3)
+        live_row["parts"] = [{"type": "text", "text": "row-3-live"}]
+        self.row_log = [live_row, _row("row-5", 5), _row("row-6", 6)]
         self.snapshot_rows = [_row("row-5", 5), _row("row-6", 6)]
 
     def pager(self):
@@ -44,8 +46,7 @@ class _Sources:
         )
 
 
-@pytest.mark.asyncio
-async def test_daemon_pages_row_log_and_transcript_back_to_the_start():
+def test_daemon_pages_row_log_and_transcript_back_to_the_start():
     source = _Sources()
     pager = source.pager()
 
@@ -53,6 +54,7 @@ async def test_daemon_pages_row_log_and_transcript_back_to_the_start():
     second = pager.read(before=first["older"], limit=2)
 
     assert [row["id"] for row in first["rows"]] == ["row-3", "row-4"]
+    assert first["rows"][0]["parts"][0]["text"] == "row-3-live"
     assert [row["id"] for row in second["rows"]] == ["row-1", "row-2"]
     assert second["older"] is None
 
@@ -98,9 +100,9 @@ async def test_rows_rpc_maps_compaction_and_conversation_cursors_to_conflict_cod
     source = _Sources()
     rpc = RpcServer()
     register_chat_stream_rows_handler(rpc, source.pager())
-    cursor = (await _rpc_call(rpc, "state.chat_stream.rows", {"before": None, "limit": 2}))[
-        "older"
-    ]
+    cursor = (
+        await _rpc_call(rpc, "state.chat_stream.rows", {"before": None, "limit": 2})
+    )["older"]
 
     source.compaction_seq = 9
     stale = await _rpc_call(
