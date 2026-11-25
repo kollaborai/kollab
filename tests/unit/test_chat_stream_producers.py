@@ -532,6 +532,10 @@ async def test_goal_origin_survives_joined_human_input():
     _publish(state, "turn_start", turn_id="goal-turn", origin=origin)
     await _add(stream, "human", "steer")
     _publish(state, "user_message", request_id="human", turn_id="goal-turn", text="steer")
+    turns = [e["data"] for e in _events(stream, initial) if e["type"] == "turn.state"]
+    expected = {"turn_id": "goal-turn", "state": "running", "input_ids": ["human"], "origin": origin}
+    assert turns[-1] == expected
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"] == [expected]
     _publish(state, "turn_complete", turn_id="goal-turn", goal_attempt_terminal=True)
     turns = [e["data"] for e in _events(stream, initial) if e["type"] == "turn.state"]
     assert any(t["input_ids"] == ["human"] for t in turns)
