@@ -448,6 +448,7 @@ async function record(flow, session, browser, target) {
       if (!state.run && state.has) { calm ??= Date.now(); if (Date.now() - calm >= quiet) return; } else calm = null;
     }
     await mark("SETTLE TIMEOUT");
+    throw new Error(`settle timeout waiting for reply ${reply}`);
   };
   const tools = (n, seconds) => `run \`sleep ${seconds}\` with your terminal tool ${n} times, one call at a time, waiting for each to finish`;
   const say = (n) => `Then reply with only this, as one word with nothing between the parts: zebra, the digit ${n}, then ${tag}.`;
