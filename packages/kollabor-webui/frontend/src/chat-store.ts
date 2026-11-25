@@ -509,7 +509,7 @@ export class LiveChatStore implements LiveStore {
       this.paging = this.state.olderCursor === null ? "complete" : "idle";
     }
     this.followSends(event);
-    this.attempts = 0;
+    if (event.type !== "snapshot") this.attempts = 0;
     this.publish();
   }
 
