@@ -923,6 +923,19 @@ describe("LiveChatStore", () => {
     expect(store.rows[1].status).toBe("failed");
   });
 
+  it("keeps an accepted send pending when a same-id resend fails", async () => {
+    const { store, request } = make();
+    const firstAnswer = holdRequest(request);
+    const first = store.send({ id: "web-a1", text: "hello" });
+    const secondAnswer = holdRequest(request);
+    const second = store.send({ id: "web-a1", text: "hello" });
+    firstAnswer(new Response(null, { status: 202 }));
+    await first;
+    secondAnswer(new Response(null, { status: 500 }));
+    await expect(second).rejects.toThrow("send failed: 500");
+    expect(store.rows).toEqual([expect.objectContaining({ id: "web-a1", status: "pending" })]);
+  });
+
   it("sending again with the same id adds no second row; a resend after a failure is pending again", async () => {
     const { store, request } = make();
     await store.send({ id: "web-a1", text: "hello" });
