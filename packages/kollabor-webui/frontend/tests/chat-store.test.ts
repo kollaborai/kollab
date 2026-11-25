@@ -355,6 +355,13 @@ describe("LiveChatStore", () => {
       respond(new Response(JSON.stringify({ rows, older }), { status: 200 }));
   }
 
+  /** The next request stays open until the test answers it with a response. */
+  function holdRequest(request: ReturnType<typeof fakeTransport>["request"]) {
+    let answer!: (response: Response) => void;
+    request.mockImplementationOnce(() => new Promise<Response>((resolve) => { answer = resolve; }));
+    return (response: Response) => answer(response);
+  }
+
   it("start() with no snapshot opens /sessions/s1/stream with no after parameter", async () => {
     const { store, streams } = make();
     store.start();
@@ -721,5 +728,116 @@ describe("LiveChatStore", () => {
     expect(store.olderStatus).toBe("complete");
     await store.loadOlder();
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it("send shows the input as a pending row at once, before the POST answers", async () => {
+    const { store, request } = make();
+    const answer = holdRequest(request);
+    const sent = store.send({ id: "web-a1", text: "hello" });
+    expect(store.rows).toEqual([
+      expect.objectContaining({
+        id: "web-a1",
+        kind: "input",
+        role: "user",
+        turn_id: null,
+        status: "pending",
+        parts: [{ type: "text", text: "hello" }],
+      }),
+    ]);
+    answer(new Response(null, { status: 202 }));
+    await sent;
+  });
+
+  it("the stream's row with the pending row's id replaces it in place: one row, no second bubble", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    await store.send({ id: "web-a1", text: "hello" });
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    first.emit(streamEvent(5, "row.upsert", row("web-a1", "hello", "input", "user")));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    expect(store.rows[1]).toEqual(row("web-a1", "hello", "input", "user"));
+  });
+
+  it("a snapshot that contains the pending row's id takes the window's row in its place", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    await store.send({ id: "web-a1", text: "hello" });
+    first.emit(snapshot(7, [row("r1", "one"), row("web-a1", "hello", "input", "user")]));
+    expect(store.rows).toEqual([row("r1", "one"), row("web-a1", "hello", "input", "user")]);
+  });
+
+  it("a snapshot without the pending row's id keeps the row while its POST is in flight", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    const answer = holdRequest(request);
+    const sent = store.send({ id: "web-a1", text: "hello" });
+    first.emit(snapshot(7, [row("r1", "one")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    answer(new Response(null, { status: 202 }));
+    await sent;
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+  });
+
+  it("once the POST has succeeded, a snapshot without the pending row's id drops the row", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    await store.send({ id: "web-a1", text: "hello" });
+    first.emit(snapshot(7, [row("r1", "one")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("a replace that lacks the pending row's id keeps the row while its POST is in flight", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    const answer = holdRequest(request);
+    const sent = store.send({ id: "web-a1", text: "hello" });
+    first.emit(streamEvent(5, "replace", { rows: [row("m1", "Compacted", "marker", "system")] }));
+    expect(store.rows.map((r) => r.id)).toEqual(["m1", "web-a1"]);
+    answer(new Response(null, { status: 202 }));
+    await sent;
+  });
+
+  it("a failed POST keeps the row as failed, so the text stays on screen, and send rejects", async () => {
+    const { store, request } = make();
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "web-a1", text: "hello" })).rejects.toThrow("send failed: 500");
+    request.mockRejectedValueOnce(new Error("network down"));
+    await expect(store.send({ id: "web-a2", text: "again" })).rejects.toThrow("network down");
+    expect(store.rows).toEqual([
+      expect.objectContaining({ id: "web-a1", status: "failed", parts: [{ type: "text", text: "hello" }] }),
+      expect.objectContaining({ id: "web-a2", status: "failed", parts: [{ type: "text", text: "again" }] }),
+    ]);
+  });
+
+  it("a failed row stays through a snapshot that lacks its id, so the text stays on screen", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "web-a1", text: "hello" })).rejects.toThrow("send failed: 500");
+    first.emit(snapshot(7, [row("r1", "one")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    expect(store.rows[1].status).toBe("failed");
+  });
+
+  it("sending again with the same id adds no second row; a resend after a failure is pending again", async () => {
+    const { store, request } = make();
+    await store.send({ id: "web-a1", text: "hello" });
+    await store.send({ id: "web-a1", text: "hello" });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(store.rows.map((r) => r.id)).toEqual(["web-a1"]);
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "web-b1", text: "more" })).rejects.toThrow("send failed: 500");
+    const answer = holdRequest(request);
+    const resend = store.send({ id: "web-b1", text: "more" });
+    expect(store.rows[1]).toMatchObject({ id: "web-b1", status: "pending" });
+    answer(new Response(null, { status: 202 }));
+    await resend;
+    expect(store.rows.map((r) => r.id)).toEqual(["web-a1", "web-b1"]);
   });
 });
