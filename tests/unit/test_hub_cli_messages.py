@@ -312,7 +312,7 @@ def test_cli_status_not_connected_when_no_local_agents_online(tmp_path, capsys):
         asyncio.run(_handle_cli_hub(["status"]))
 
     out = capsys.readouterr().out
-    assert "no agents online" in out
+    assert "no agents in this folder" in out
     assert "network: not connected" in out
 
 

@@ -13,6 +13,8 @@ import {
   SETUP_STEPS,
   STORAGE_KEY,
   emptyFacts,
+  getStartedOpensSetup,
+  hasChosenProvider,
   loadGuideState,
   nextStep,
   resolveStep,
@@ -54,6 +56,8 @@ export function SetupGuide({
     return loadGuideState(window.localStorage.getItem(STORAGE_KEY));
   });
   const [facts, setFacts] = useState<SetupFacts>(emptyFacts);
+  const [factsLoaded, setFactsLoaded] = useState(false);
+  const pendingProviderHandoffRef = useRef(false);
 
   // Persist every transition; a reload resumes where the user left off.
   // The persist decision itself is pure (guide-model shouldPersistGuide):
@@ -70,11 +74,33 @@ export function SetupGuide({
 
   // Re-read engine facts while shown so completed steps disappear live.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setFactsLoaded(false);
+      pendingProviderHandoffRef.current = false;
+      return;
+    }
     let mounted = true;
+    setFactsLoaded(false);
     (async () => {
-      const [profiles, sessions, agents] = await Promise.all([
-        api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
+      const profilesRequest = api.listProfiles().then(
+        (profiles) => ({ profiles, loaded: true }),
+        () => ({
+          profiles: { profiles: [], active: undefined },
+          loaded: false,
+        }),
+      );
+      void profilesRequest.then(({ profiles, loaded }) => {
+        if (!mounted) return;
+        if (!loaded) pendingProviderHandoffRef.current = false;
+        setFacts((prev) => ({
+          ...prev,
+          providerChosen: hasChosenProvider(profiles.profiles || [], profiles.active),
+          activeProfile: profiles.active ?? null,
+        }));
+        setFactsLoaded(loaded);
+      });
+      const [profileResult, sessions, agents] = await Promise.all([
+        profilesRequest,
         api
           .listSessions()
           .catch(() => null)
@@ -82,8 +108,9 @@ export function SetupGuide({
         api.listAgentPool().catch(() => ({ agents: [] })),
       ]);
       if (!mounted) return;
+      const { profiles } = profileResult;
       setFacts({
-        profileCount: (profiles.profiles || []).length,
+        providerChosen: hasChosenProvider(profiles.profiles || [], profiles.active),
         activeProfile: profiles.active ?? null,
         anyAgentActive: (agents.agents || []).some((agent) => agent.active),
         networkLive: Boolean(
@@ -100,6 +127,15 @@ export function SetupGuide({
     };
   }, [api, open]);
 
+  // A click made before /profiles settles stays actionable. Defer the provider
+  // handoff until the active profile is known so existing setups are not opened
+  // into Settings > Setup just because the response is slow.
+  useEffect(() => {
+    if (!open || !factsLoaded || !pendingProviderHandoffRef.current) return;
+    pendingProviderHandoffRef.current = false;
+    if (getStartedOpensSetup(facts)) onOpenSettings("setup");
+  }, [facts, factsLoaded, onOpenSettings, open]);
+
   const { step, skipped } = useMemo(
     () => resolveStep(state, facts),
     [state, facts],
@@ -111,6 +147,14 @@ export function SetupGuide({
     setState((prev) => ({ ...prev, step: nextStep(resolveStep(prev, facts).step) }));
   }, [facts]);
 
+  // Welcome's "Get Started": Settings > Setup is the one provider screen, so open it
+  // there until a provider is chosen, then carry on to what is left (#1217).
+  const getStarted = useCallback(() => {
+    if (!factsLoaded) pendingProviderHandoffRef.current = true;
+    else if (getStartedOpensSetup(facts)) onOpenSettings("setup");
+    advance();
+  }, [factsLoaded, facts, onOpenSettings, advance]);
+
   const dismiss = useCallback(() => {
     setState((prev) => ({ ...prev, dismissed: true }));
     onDismiss?.();
@@ -119,8 +163,7 @@ export function SetupGuide({
 
   const runTarget = useCallback(() => {
     if (!target) return;
-    if (target === "settings:setup") onOpenSettings("setup");
-    else if (target === "settings:network") onOpenSettings("network");
+    if (target === "settings:network") onOpenSettings("network");
     else onStartSession();
     // Opening the surface counts as engaging the step; move on so a reopen
     // resumes at what is left.
@@ -199,20 +242,30 @@ export function SetupGuide({
           })}
           </ol>
         </div>
-        <footer className="flex shrink-0 items-center justify-between gap-2 px-6 pt-3 pb-3">
+        <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-6 pt-3 pb-3">
           {target ? (
             <Button type="button" variant="ghost" onClick={dismiss}>
               Skip
             </Button>
           ) : null}
-          <Button
-            type="button"
-            data-testid="setup-guide-next"
-            className="ml-auto"
-            onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : advance}
-          >
-            {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
-          </Button>
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            {!factsLoaded ? (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => onOpenSettings("setup")}
+              >
+                Open provider setup
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              data-testid="setup-guide-next"
+              onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : getStarted}
+            >
+              {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
+            </Button>
+          </div>
         </footer>
       </DialogContent>
     </Dialog>

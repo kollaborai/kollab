@@ -307,9 +307,8 @@ def resolve_context_window(model: str, provider: Optional[str] = None) -> Option
     if model and model not in _WARNED_UNLISTED:
         _WARNED_UNLISTED.add(model)
         logger.warning(
-            "Model %r has no context_window in the model registry; using %s. Add it "
+            "An unlisted model has no context_window in the model registry; using %s. Add it "
             "to bundles/data/models.json so compaction thresholds match its real window.",
-            model,
             f"the {provider} default of {fallback}" if fallback else "the config default",
         )
     return fallback

@@ -1,0 +1,39 @@
+{
+  "name": "hub-stop-all-operator",
+  "description": "#1408: /hub stop all typed in a session stops agents it did not launch in its own folder, leaves an agent in another folder running, and names that folder with its folder-scoped stop command. Every process pins HOME and KOLLAB_PROJECT_ROOT to the fixture so no step can reach the developer's hubs.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-stop-all\"; PP=\"$R$(printf \":%s\" \"$R\"/packages/*/src)\"; cd \"$H/ws\"; HOME=\"$H\" KOLLAB_PROJECT_ROOT=\"$H/ws\" KOLLAB_NO_KEYRING=1 PYTHONPATH=\"$PP\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 12,
+    "show_captures": false,
+    "term_width": 140,
+    "term_height": 40
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "fixture HOME: alpha and beta detached in ws/, gamma detached in other/, each folder its own hub root",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-stop-all\"; PP=\"$R$(printf ':%s' \"$R\"/packages/*/src)\"; for d in ws other; do [ -d \"$H/$d\" ] && (cd \"$H/$d\" && HOME=\"$H\" KOLLAB_PROJECT_ROOT=\"$H/$d\" KOLLAB_NO_KEYRING=1 PYTHONPATH=\"$PP\" \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1); done; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\" \"$H/other\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; touch \"$H/.kollab/connect-guide-seen\"; for a in ws:alpha ws:beta other:gamma; do d=\"${a%%:*}\"; (cd \"$H/$d\" && HOME=\"$H\" KOLLAB_PROJECT_ROOT=\"$H/$d\" KOLLAB_NO_KEYRING=1 PYTHONPATH=\"$PP\" \"$R/.venv/bin/python\" \"$R/main.py\" --detached --as \"${a##*:}\" >/dev/null 2>&1); done"
+    }
+  ],
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "❯", "timeout": 30, "description": "the prompt is up" },
+    { "action": "section", "title": "typed /hub stop all stops this folder's agents" },
+    { "action": "slash_command", "command": "hub", "subcommand": "stop all" },
+    { "action": "wait_for", "pattern": "stopping 2 agent", "timeout": 60 },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "alpha: stopped", "description": "alpha (not launched by this session) stopped" },
+    { "action": "assert_contains", "pattern": "beta: stopped", "description": "beta stopped" },
+    { "action": "assert_contains", "pattern": "/other: gamma", "description": "gamma in another folder is named, not stopped" },
+    { "action": "assert_contains", "pattern": "KOLLAB_PROJECT_ROOT=.*other kollab --hub stop all", "description": "the command scopes stop to the listed folder" },
+    { "action": "assert_not_contains", "pattern": "immune", "description": "no immune refusal" }
+  ],
+  "teardown": [
+    {
+      "action": "shell",
+      "description": "stop every fixture agent, folder by folder (never --everywhere); runs even when a step failed",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-hub-stop-all\"; PP=\"$R$(printf ':%s' \"$R\"/packages/*/src)\"; rc=0; for d in ws other; do (cd \"$H/$d\" && HOME=\"$H\" KOLLAB_PROJECT_ROOT=\"$H/$d\" KOLLAB_NO_KEYRING=1 PYTHONPATH=\"$PP\" \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all) || rc=1; done; exit $rc"
+    }
+  ]
+}

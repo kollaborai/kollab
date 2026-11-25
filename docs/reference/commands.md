@@ -1074,7 +1074,9 @@ grant (see below).
     - sends shutdown signal to hub peer(s) via socket
     - "all" stops only the peers your session started; peers launched by
       other lanes or the operator are immune (issue #669)
-    - equivalent to /hub stop from slash commands
+    - same as /hub stop <name>; /hub stop all typed by a person stops every
+      agent in that session's folder (issue #1408); the tool keeps the
+      caller-owned scope
     - works for org-launched agents and any mesh peer
 
   example:

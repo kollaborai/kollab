@@ -6,8 +6,11 @@ and provides release information for user notifications.
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -36,6 +39,19 @@ class ReleaseInfo:
     name: str
     url: str
     is_prerelease: bool
+
+
+@dataclass
+class UpdateCheckResult:
+    """A truthful result from one release lookup."""
+
+    status: str
+    release: Optional[ReleaseInfo]
+    checked_at: Optional[float]
+    last_successful_check: Optional[float]
+    retry_after_seconds: Optional[int] = None
+    retry_at: Optional[float] = None
+    retry_reason: Optional[str] = None
 
 
 def _cache_shows_current_or_older(cached: str, current: str) -> bool:
@@ -110,6 +126,12 @@ class VersionCheckService:
 
         # HTTP session (initialized in initialize())
         self.session: Optional[aiohttp.ClientSession] = None
+        self._check_lock = asyncio.Lock()
+        self._retry_until = 0.0
+        self._rate_limit_retry_until = 0.0
+        self._last_result: Optional[UpdateCheckResult] = None
+        self._forced_result_until = 0.0
+        self._forced_result: Optional[UpdateCheckResult] = None
 
         logger.debug(
             f"VersionCheckService initialized: "
@@ -125,6 +147,8 @@ class VersionCheckService:
         """
         if not self.check_enabled:
             logger.debug("Update checking disabled in config")
+            return
+        if self.session is not None:
             return
 
         # Create HTTP session with timeout
@@ -208,12 +232,162 @@ class VersionCheckService:
             )
             return None
 
+    async def check_status(self, *, force: bool = False) -> UpdateCheckResult:
+        """Return current, available, disabled, or failed without hiding errors.
+
+        Successful current results are fresh for at most one hour; available
+        releases use the configured interval (24 hours by default). Concurrent
+        callers share this service's in-flight result, including forced refreshes.
+        Rate limits honor Retry-After, defaulting to a 60-second cooldown.
+        All failures have a five-second retry gate (forced refreshes included)
+        and never enter the success cache. Successful forced refreshes are reused
+        for one minute to prevent repeated manual requests from exhausting quota.
+        """
+        if not self.check_enabled:
+            result = UpdateCheckResult("disabled", None, None, None)
+            self._last_result = result
+            return result
+
+        waiting_for_check = self._check_lock.locked()
+        async with self._check_lock:
+            if waiting_for_check and self._last_result is not None:
+                result = self._last_result
+                if force and result.status in {"current", "available"}:
+                    self._forced_result = result
+                    self._forced_result_until = time.monotonic() + 60
+                return result
+
+            now = time.time()
+            last_successful_check = self.config.get(
+                "kollabor.updates.last_check_timestamp"
+            )
+            monotonic_now = time.monotonic()
+            if force and monotonic_now < self._forced_result_until:
+                if self._forced_result is not None:
+                    self._last_result = self._forced_result
+                    return self._forced_result
+
+            if not force and self._is_cache_valid():
+                release = self._get_cached_release()
+                if release:
+                    status = self._status_for_release(release)
+                    if status is None:
+                        result = UpdateCheckResult(
+                            "failed", None, None, last_successful_check
+                        )
+                        self._last_result = result
+                        return result
+                    result = UpdateCheckResult(
+                        status, release, last_successful_check, last_successful_check
+                    )
+                    self._last_result = result
+                    return result
+
+            if monotonic_now < self._rate_limit_retry_until:
+                retry_after = math.ceil(self._rate_limit_retry_until - monotonic_now)
+                result = UpdateCheckResult(
+                    "failed",
+                    None,
+                    None,
+                    last_successful_check,
+                    retry_after,
+                    time.time() + retry_after,
+                    "rate_limit",
+                )
+                self._last_result = result
+                return result
+            if monotonic_now < self._retry_until:
+                retry_after = math.ceil(self._retry_until - monotonic_now)
+                result = UpdateCheckResult(
+                    "failed",
+                    None,
+                    None,
+                    last_successful_check,
+                    retry_after,
+                    time.time() + retry_after,
+                    "retry",
+                )
+                self._last_result = result
+                return result
+
+            try:
+                self._retry_until = 0.0
+                release_data = await self._fetch_latest_release()
+                release = self._parse_release_data(release_data) if release_data else None
+            except Exception as exc:
+                logger.warning("Update check failed for %s: %s", self.github_repo, exc)
+                release = None
+
+            if release is None:
+                self._retry_until = time.monotonic() + 5
+                rate_limited = self._rate_limit_retry_until > time.monotonic()
+                retry_after = (
+                    math.ceil(self._rate_limit_retry_until - time.monotonic())
+                    if rate_limited
+                    else 5
+                )
+                result = UpdateCheckResult(
+                    "failed",
+                    None,
+                    None,
+                    last_successful_check,
+                    retry_after,
+                    time.time() + retry_after,
+                    "rate_limit" if rate_limited else "retry",
+                )
+                self._last_result = result
+                return result
+
+            status = self._status_for_release(release)
+            if status is None:
+                self._retry_until = time.monotonic() + 5
+                result = UpdateCheckResult(
+                    "failed",
+                    None,
+                    None,
+                    last_successful_check,
+                    5,
+                    time.time() + 5,
+                    "retry",
+                )
+                self._last_result = result
+                return result
+
+            try:
+                self._update_cache(release)
+                checked_at = self.config.get(
+                    "kollabor.updates.last_check_timestamp", now
+                )
+            except Exception as exc:
+                logger.warning("Could not cache update result: %s", exc)
+                self._retry_until = time.monotonic() + 5
+                result = UpdateCheckResult(
+                    "failed",
+                    None,
+                    None,
+                    last_successful_check,
+                    5,
+                    time.time() + 5,
+                    "retry",
+                )
+                self._last_result = result
+                return result
+
+            result = UpdateCheckResult(status, release, checked_at, checked_at)
+            self._last_result = result
+            if force:
+                self._forced_result = result
+                self._forced_result_until = time.monotonic() + 60
+            return result
+
     async def _fetch_latest_release(self) -> Optional[dict]:
         """Fetch latest release from GitHub API.
 
         Returns:
             Parsed JSON response or None on error
         """
+        if not self.session:
+            await self.initialize()
         if not self.session:
             logger.debug("HTTP session not initialized - update check disabled")
             return None
@@ -244,7 +418,39 @@ class VersionCheckService:
                         f"rate-limited, or unreachable)"
                     )
                     return None
-                elif response.status == 403:
+                elif response.status == 429 or (
+                    response.status == 403
+                    and (
+                        response.headers.get("Retry-After") is not None
+                        or response.headers.get("X-RateLimit-Remaining") == "0"
+                    )
+                ):
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        if retry_after:
+                            try:
+                                retry_seconds = max(0, int(retry_after))
+                            except ValueError:
+                                retry_time = parsedate_to_datetime(retry_after)
+                                retry_seconds = max(
+                                    0,
+                                    int(
+                                        (
+                                            retry_time
+                                            - datetime.now(timezone.utc)
+                                        ).total_seconds()
+                                    ),
+                                )
+                        else:
+                            reset_at = response.headers.get("X-RateLimit-Reset")
+                            if reset_at and response.headers.get("X-RateLimit-Remaining") == "0":
+                                retry_seconds = max(0, int(reset_at) - int(time.time()))
+                            else:
+                                retry_seconds = 60
+                    except (TypeError, ValueError, OverflowError):
+                        retry_seconds = 60
+                    retry_seconds = min(retry_seconds, 3600)
+                    self._rate_limit_retry_until = time.monotonic() + retry_seconds
                     logger.info(
                         f"GitHub API rate limit exceeded for {self.github_repo} "
                         f"- update check will retry on next interval"
@@ -291,14 +497,12 @@ class VersionCheckService:
             name = release_json.get("name", tag_name)
             url = release_json["html_url"]
             is_prerelease = release_json.get("prerelease", False)
+            if not isinstance(is_prerelease, bool):
+                logger.warning("Invalid release data: prerelease must be a boolean")
+                return None
 
             # v0.22.1 or nightly-0.22.2.dev202611200900
             version = release_version(tag_name)
-
-            # Filter pre-releases if configured
-            if is_prerelease and not self.include_prereleases:
-                logger.debug(f"Skipping pre-release version: {version}")
-                return None
 
             release_info = ReleaseInfo(
                 version=version,
@@ -328,11 +532,24 @@ class VersionCheckService:
         Returns:
             True if release is newer than current version
         """
+        if release_info.is_prerelease and not self.include_prereleases:
+            return False
         try:
             return is_newer_version(self.current_version, release_info.version)
         except ValueError as e:
             logger.warning(f"Version comparison failed: {e}")
             return False
+
+    def _status_for_release(self, release_info: ReleaseInfo) -> Optional[str]:
+        """Classify a successful release only when its version is comparable."""
+        try:
+            is_newer = is_newer_version(self.current_version, release_info.version)
+        except ValueError as exc:
+            logger.warning("Version comparison failed: %s", exc)
+            return None
+        if release_info.is_prerelease and not self.include_prereleases:
+            return "current"
+        return "available" if is_newer else "current"
 
     def _is_cache_valid(self) -> bool:
         """Check if cached data is still valid based on TTL.
@@ -360,7 +577,18 @@ class VersionCheckService:
         # release behind): re-check within ~1 hour so users learn about
         # new releases promptly instead of after the full interval.
         cached_version = self.config.get("kollabor.updates.cached_latest_version", "")
-        if _cache_shows_current_or_older(cached_version, self.current_version):
+        cached_is_prerelease = self.config.get(
+            "kollabor.updates.cached_release_is_prerelease", False
+        )
+        if not isinstance(cached_is_prerelease, bool):
+            logger.debug("Cached release prerelease flag is invalid; forcing refresh")
+            return False
+        cached_is_filtered_prerelease = (
+            cached_is_prerelease and not self.include_prereleases
+        )
+        if cached_is_filtered_prerelease or _cache_shows_current_or_older(
+            cached_version, self.current_version
+        ):
             ttl_seconds = min(ttl_seconds, 3600)  # cap at 1 hour
 
         is_valid: bool = age_seconds < ttl_seconds
@@ -395,13 +623,19 @@ class VersionCheckService:
         name = self.config.get(
             "kollabor.updates.cached_release_name", f"Version {version}"
         )
+        is_prerelease = self.config.get(
+            "kollabor.updates.cached_release_is_prerelease", False
+        )
+        if not isinstance(is_prerelease, bool):
+            logger.debug("Cached release prerelease flag is invalid")
+            return None
 
         release_info = ReleaseInfo(
             version=version,
             tag_name=f"v{version}",
             name=name,
             url=url,
-            is_prerelease=False,
+            is_prerelease=is_prerelease,
         )
 
         logger.debug(f"Retrieved cached release: {version}")
@@ -419,6 +653,10 @@ class VersionCheckService:
         self.config.save_key("kollabor.updates.cached_latest_version", release_info.version)
         self.config.save_key("kollabor.updates.cached_release_url", release_info.url)
         self.config.save_key("kollabor.updates.cached_release_name", release_info.name)
+        self.config.save_key(
+            "kollabor.updates.cached_release_is_prerelease",
+            release_info.is_prerelease,
+        )
         self.config.save_key("kollabor.updates.cached_include_prereleases", self.include_prereleases)
 
         logger.debug(

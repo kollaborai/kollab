@@ -73,3 +73,40 @@ def test_sweep_removes_only_dead_agents(tmp_path, monkeypatch):
     assert len(passes) == 2  # one full pass ran
     assert all(path.exists() for path in [*live, no_pid, *shared_live])
     assert not any(path.exists() for path in [*dead, *shared_dead])
+
+
+def test_orphan_sweep_preserves_durable_control_with_malformed_neighbor(
+    tmp_path, monkeypatch
+):
+    inbox = tmp_path / "projects" / "p" / "hub" / "messages" / "lapis"
+    inbox.mkdir(parents=True)
+    control = inbox / "1-control.json"
+    control.write_text(
+        json.dumps(
+            {
+                "id": "task-1",
+                "action": "task_assignment",
+                "timestamp": 1.0,
+                "metadata": {"task_assignment": True},
+            }
+        )
+    )
+    (inbox / "2-corrupt.json").write_text(json.dumps({"timestamp": "invalid"}))
+
+    passes = []
+
+    async def one_pass(seconds):
+        passes.append(seconds)
+        if len(passes) > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(config_utils, "get_config_directory", lambda: tmp_path)
+    monkeypatch.setattr(
+        hub_plugin,
+        "asyncio",
+        SimpleNamespace(sleep=one_pass, CancelledError=asyncio.CancelledError),
+    )
+    asyncio.run(hub_plugin.HubPlugin._presence_sweep_loop(SimpleNamespace(_task_ledger=None)))
+
+    assert len(passes) == 2
+    assert control.exists()

@@ -252,7 +252,16 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint === "/config" && options.engineVersion) return json(route, { engine_version: options.engineVersion });
     if (endpoint === "/update/check" && options.update) {
-      return json(route, { current_version: "0.0.1", available: true, release: options.update, notes: [] });
+      return json(route, {
+        current_version: "0.0.1",
+        status: "available",
+        available: true,
+        release: options.update,
+        checked_at: Date.now() / 1000,
+        last_successful_check: Date.now() / 1000,
+        retry_after_seconds: null,
+        notes: [],
+      });
     }
     if (endpoint.startsWith("/sessions/")) {
       const requestedId = endpoint.split("/")[2];
@@ -382,6 +391,64 @@ export async function until(check, message, timeoutMs = 60_000) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(message);
+}
+
+export async function waitForSessionReady(page, {
+  sidebarTitleIncludes,
+  sessionHeading,
+  sessionName,
+  historyPath,
+  composerPlaceholder,
+  clickTarget,
+  timeout = 15_000,
+}) {
+  const deadline = Date.now() + timeout;
+  const remainingTimeout = () => Math.max(1, deadline - Date.now());
+  const historyResponse = historyPath
+    ? page.waitForResponse((response) =>
+      response.request().method() === "GET" && new URL(response.url()).pathname === historyPath,
+    { timeout: remainingTimeout() }).then(
+      (response) => ({ response }),
+      (error) => ({ error }),
+    )
+    : null;
+  if (clickTarget) await clickTarget.click({ timeout: remainingTimeout() });
+  if (historyResponse) {
+    const result = await historyResponse;
+    if ("error" in result) throw result.error;
+    let timer;
+    try {
+      await Promise.race([
+        result.response.finished(),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`history response body timed out for ${historyPath}`)),
+            remainingTimeout(),
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  await page.waitForFunction(({ title, placeholder, headingText, nameText }) => {
+    const activeRow = [...document.querySelectorAll('[data-sidebar="sidebar"] button')].some((button) =>
+      button.getAttribute("title")?.includes(title)
+      && button.getAttribute("data-active") === "true");
+    const composer = document.querySelector(".aui-composer-input");
+    const panelHeading = document.querySelector('aside[aria-label="Session Controls"] h2');
+    const panelName = panelHeading?.nextElementSibling;
+    return activeRow
+      && (!placeholder || composer?.getAttribute("placeholder") === placeholder)
+      && panelHeading?.textContent?.trim() === headingText
+      && panelName?.textContent?.trim() === nameText
+      && panelHeading.getClientRects().length > 0;
+  }, {
+    title: sidebarTitleIncludes,
+    placeholder: composerPlaceholder,
+    headingText: sessionHeading,
+    nameText: sessionName,
+  }, { timeout: remainingTimeout() });
 }
 
 export async function waitForLesson(page, title) {
@@ -571,18 +638,25 @@ async function main() {
     // createRequest signals POST arrival before its response and the session history load finish.
     // Wait for the launched chat before starting remote selection, so the flows cannot overlap.
     const sessionControls = shell.page.getByRole("complementary", { name: "Session Controls", exact: true });
-    await sessionControls.getByText("Learn regression session", { exact: true }).waitFor({
-      state: "visible",
+    await waitForSessionReady(shell.page, {
+      sidebarTitleIncludes: "Learn regression session",
+      sessionHeading: "Local Coder",
+      sessionName: "Learn regression session",
       timeout: 60_000,
     });
 
     // A live mocked peer demonstrates the existing Hub-to-remote-session selection path.
     const remoteAgentButton = shell.page.getByRole("button", { name: "Remote Coder Idle", exact: true });
-    await remoteAgentButton.click();
-    // The session panel is populated only after the remote session and its history load.
-    const remoteSessionName = sessionControls.getByText("Remote coder session", { exact: true });
     try {
-      await remoteSessionName.waitFor({ state: "visible", timeout: 60_000 });
+      await waitForSessionReady(shell.page, {
+        sidebarTitleIncludes: "Open Remote Coder on remote-build",
+        sessionHeading: "Remote Coder",
+        sessionName: "Remote coder session",
+        historyPath: "/sessions/remote-session-1/history",
+        composerPlaceholder: "Message Remote Coder…",
+        clickTarget: remoteAgentButton,
+        timeout: 60_000,
+      });
     } catch (reason) {
       const diagnostic = {
         remoteButtonActive: await remoteAgentButton.getAttribute("data-active"),

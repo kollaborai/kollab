@@ -25,6 +25,7 @@ from .packages import (
     stop_timeout,
     validate_manifest,
 )
+from .redaction import redact_sensitive_text
 
 
 def _format_uses(uses: list[str]) -> str:
@@ -515,7 +516,10 @@ def main(argv: list[str]) -> int:
             processes = ", ".join(sorted(services)) if isinstance(services, dict) else "invalid"
             print(f"{plugin_id}  {version}  {status}  {processes or 'no processes'}  {record.get('source', 'unknown')}")
         except (OSError, ValueError, TypeError, AttributeError) as exc:
-            print(f"{plugin_id}  {status}  manifest unavailable: {exc}")
+            print(
+                f"{plugin_id}  {status}  manifest unavailable: "
+                f"{redact_sensitive_text(str(exc))}"
+            )
     for plugin_id, folder in sorted(registry["dev"].items()):
         print(f"{plugin_id}@dev  dev  {folder}")
     return 0

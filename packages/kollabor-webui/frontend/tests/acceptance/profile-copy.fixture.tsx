@@ -6,7 +6,9 @@ import "../../src/styles.css";
 declare global {
   interface Window {
     profileCopyCreateCalls: number;
+    profileCopyCreateStarted: boolean;
     profileCopyCreateResolved: boolean;
+    profileCopyCreateRelease: () => void;
     profileCopyFailNextCreate: boolean;
     profileCopyLastCreate?: unknown;
   }
@@ -15,8 +17,11 @@ declare global {
 // This fixture is intentionally synthetic: it never starts or contacts an engine.
 document.documentElement.classList.add("dark");
 window.profileCopyCreateCalls = 0;
+window.profileCopyCreateStarted = false;
 window.profileCopyCreateResolved = false;
 window.profileCopyFailNextCreate = false;
+let releaseFirstCreate: () => void;
+window.profileCopyCreateRelease = () => releaseFirstCreate();
 
 const sourceProfile: Profile = {
   name: "demo-work",
@@ -35,7 +40,12 @@ const fixtureApi = {
     window.profileCopyCreateCalls += 1;
     window.profileCopyLastCreate = body;
     window.profileCopyCreateResolved = false;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (window.profileCopyCreateCalls === 1) {
+      window.profileCopyCreateStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseFirstCreate = resolve;
+      });
+    }
     window.profileCopyCreateResolved = true;
     if (window.profileCopyFailNextCreate) {
       window.profileCopyFailNextCreate = false;

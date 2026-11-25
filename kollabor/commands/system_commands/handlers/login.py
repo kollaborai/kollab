@@ -154,47 +154,16 @@ class LoginCommandHandler(BaseCommandHandler):
             available_models = altview.result_models
             model = altview.result_best_model
 
-            # Build extra headers for ChatGPT backend
-            from kollabor_ai.oauth.openai_oauth import CODEX_API_BASE_URL
-
-            extra_headers = {"originator": "kollab"}
-            if tokens.account_id:
-                extra_headers["ChatGPT-Account-Id"] = tokens.account_id
-
             # Whether the user opted to make this the saved default (asked in
             # the login view's confirm stage). Read before the profile block
             # so it is always defined for the result message below.
             make_default = bool(getattr(altview, "result_make_default", False))
 
-            # Create/update oauth profile in profile manager
+            profile_name = "openai-oauth"
             if self.profile_manager:
-                from kollabor_ai.profile_manager import LLMProfile
+                from kollabor_ai.oauth.profile import save_openai_oauth_profile
 
-                profile_name = "openai-oauth"
-                existing = self.profile_manager.get_profile(profile_name)
-
-                if existing:
-                    self.profile_manager.update_profile(
-                        profile_name,
-                        api_key=tokens.access_token,
-                        base_url=CODEX_API_BASE_URL,
-                        model=model,
-                        provider="openai_responses",
-                    )
-                    existing.auth_type = "oauth"
-                    existing.extra_headers = extra_headers
-                else:
-                    profile = LLMProfile(
-                        name=profile_name,
-                        provider="openai_responses",
-                        model=model,
-                        api_key=tokens.access_token,
-                        base_url=CODEX_API_BASE_URL,
-                        extra_headers=extra_headers,
-                        description="OpenAI OAuth (ChatGPT account)",
-                        auth_type="oauth",
-                    )
-                    self.profile_manager._profiles[profile_name] = profile
+                save_openai_oauth_profile(self.profile_manager, tokens, model)
 
                 # Switch through StateService when available. In attach mode
                 # this is an RPC to the daemon, which owns the real provider,
