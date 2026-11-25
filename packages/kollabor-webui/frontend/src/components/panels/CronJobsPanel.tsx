@@ -191,12 +191,18 @@ export function CronJobsPanel({ api }: { api: EngineApi }) {
     void load();
   }, [load]);
 
+  // "Loading" only while a request is in flight; a settled failure with no
+  // data says so instead of repeating the loading label.
+  const summary = view
+    ? summaryLine(view)
+    : error && !busy
+      ? "Scheduled jobs unavailable"
+      : "Loading scheduled jobs…";
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center justify-between gap-2 px-4 pt-3 sm:px-6">
-        <p className="text-muted-foreground text-sm">
-          {view ? summaryLine(view) : "Loading scheduled jobs…"}
-        </p>
+        <p className="text-muted-foreground text-sm">{summary}</p>
         <Button
           type="button"
           variant="outline"
