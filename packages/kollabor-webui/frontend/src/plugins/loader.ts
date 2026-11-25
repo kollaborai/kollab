@@ -451,7 +451,7 @@ export function normalizePluginEntry(value: unknown, previous?: PluginEntry): Pl
   const reportedContributionOmissions = safeInteger(reportedOmissions?.contributions) ?? 0;
   const contributionOmissions = reportedContributionOmissions + normalizedContributions.omissions;
   const retainPreviousContributions = previous !== undefined &&
-    (raw.contributes === undefined || normalizedContributions.malformed || reportedContributionOmissions > 0);
+    (raw.contributes === undefined || normalizedContributions.malformed || contributionOmissions > 0);
   const omitted = {
     services: (safeInteger(reportedOmissions?.services) ?? 0)
       + Math.max(0, rawServices.length - PLUGIN_INVENTORY_LIMITS.services),
