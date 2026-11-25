@@ -120,7 +120,7 @@ def validate(data: dict) -> list[str]:
                     f"registry is {age} days stale (max {MAX_AGE_DAYS}). Review "
                     "current model releases, refresh entries, bump _meta.updated."
                 )
-        except ValueError:
+        except (TypeError, ValueError):
             errors.append(f"_meta.updated is not an ISO date: {updated!r}")
 
     return errors
