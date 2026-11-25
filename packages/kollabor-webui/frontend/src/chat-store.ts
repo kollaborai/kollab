@@ -360,7 +360,8 @@ export class LiveChatStore implements LiveStore {
 
   async loadOlder(): Promise<void> {
     const cursor = this.state.olderCursor;
-    if (cursor === null) return;
+    // Until a snapshot restores the window, its cursor is not trusted: a resync, or a 409 that called it stale, may have left it.
+    if (cursor === null || this.state.lastSeq === null) return;
     // The page belongs to the window it was asked for. A resync or a snapshot while it is in flight replaces that window.
     const { conversationUid } = this.state;
     const epoch = this.epoch;
@@ -371,8 +372,11 @@ export class LiveChatStore implements LiveStore {
     try {
       const response = await this.requestHistory(path);
       if (response === null) {
-        // A stale cursor: resync, and the next snapshot brings a fresh one.
-        if (current()) this.resync();
+        // A stale cursor: forget it and resync. The next snapshot brings a fresh one, so this cursor is never retried.
+        if (current()) {
+          this.state = { ...this.state, olderCursor: null };
+          this.resync();
+        }
         this.settlePaging();
         return;
       }
@@ -416,7 +420,7 @@ export class LiveChatStore implements LiveStore {
       inputs: this.state.inputs,
       running: turnsRunning(this.state.turns),
       connection: this.connectionState,
-      hasEarlier: this.state.olderCursor !== null,
+      hasEarlier: this.state.olderCursor !== null && this.state.lastSeq !== null,
       olderStatus: this.paging,
     };
   }
@@ -427,9 +431,9 @@ export class LiveChatStore implements LiveStore {
     for (const listener of [...this.listeners]) listener();
   }
 
-  /** Sets the paging state from the window: complete when no older rows remain, idle when some do. */
+  /** Sets the paging state from the window: complete when the window is known to have no older rows, idle otherwise. */
   private settlePaging(): void {
-    this.setPaging(this.state.olderCursor === null ? "complete" : "idle");
+    this.setPaging(this.state.lastSeq !== null && this.state.olderCursor === null ? "complete" : "idle");
   }
 
   /** Sets the paging state and tells the listeners, unless the state is unchanged. */
