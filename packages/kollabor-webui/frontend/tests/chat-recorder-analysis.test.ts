@@ -47,6 +47,19 @@ describe("chat recorder analysis", () => {
     expect(findPromptStatusUpdate(events, "prompt-1", "pending", 2)).toBeNull();
   });
 
+  it("waits for the injected hub note after the injection offset", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("  const waitForStreamRowKind ="), source.indexOf("  const waitForPromptStatusUpdate ="));
+    const note = (text: string) => ({ kind: "stream", ev: "row.upsert", rowKind: "note", parts: [{ type: "hub-note", from: "recorder", text }] });
+    const entries = [{ ...note("injected"), row: "old" }, note("unrelated"), { ...note("injected"), row: "new" }];
+    const window = { __rec: { net: entries } };
+    const wait = runInNewContext(`${body}; waitForStreamRowKind`, {
+      Date, window, document: { querySelector: () => ({}) },
+      page: { evaluate: async (fn: Function, arg: unknown) => fn(arg) }, sleep: async () => {},
+    });
+    expect(await wait("note", { afterIndex: 1, hubNote: { from: "recorder", text: "injected" } })).toEqual(entries[2]);
+  });
+
   it("requires the reloaded snapshot to retain the active turn and its running inputs", () => {
     const expectedTurn = { turn_id: "turn-1", input_ids: ["input-1"] };
     expect(hasRunningTurnWithInputs({
