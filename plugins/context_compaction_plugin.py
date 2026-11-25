@@ -89,6 +89,27 @@ MAX_PRESERVED_COORDINATION_CHARS = 16000
 MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS = 8000
 
 
+def _validated_context_window(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if isinstance(value, int):
+        if value <= 0:
+            return None
+        try:
+            return value if math.isfinite(float(value)) else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if isinstance(value, float) and math.isfinite(value) and value > 0:
+        window = int(value)
+        return window if window > 0 else None
+    return None
+
+
 def _load_model_registry() -> Dict[str, Any]:
     """Load the model registry from bundles/data/models.json.
 
@@ -1082,26 +1103,7 @@ class ContextCompactionPlugin(BasePlugin):
             api_service = getattr(self._llm_service, "api_service", None)
             cfg = getattr(getattr(api_service, "_provider", None), "config", None)
             raw_window = getattr(cfg, "context_window", None)
-            if isinstance(raw_window, bool):
-                window = None
-            elif isinstance(raw_window, (int, float)):
-                try:
-                    numeric_window = float(raw_window)
-                    window = (
-                        int(numeric_window)
-                        if math.isfinite(numeric_window) and numeric_window > 0
-                        else None
-                    )
-                except (TypeError, ValueError, OverflowError):
-                    window = None
-            elif isinstance(raw_window, str):
-                try:
-                    parsed_window = int(raw_window)
-                    window = parsed_window if parsed_window > 0 else None
-                except (TypeError, ValueError, OverflowError):
-                    window = None
-            else:
-                window = None
+            window = _validated_context_window(raw_window)
             if window is not None:
                 return window
         except Exception:
@@ -1131,14 +1133,16 @@ class ContextCompactionPlugin(BasePlugin):
                 if model.startswith(name) and len(name) > best_len:
                     ctx = info.get("context_window")
                     if ctx:
-                        best_window = ctx
+                        best_window = _validated_context_window(ctx)
                         best_len = len(name)
-            if best_window is not None:
+            if best_len:
                 return best_window
 
         # Fall back to provider default
         if provider and provider in provider_defaults:
-            return provider_defaults[provider].get("context_window")
+            return _validated_context_window(
+                provider_defaults[provider].get("context_window")
+            )
 
         return None
 
@@ -1342,23 +1346,7 @@ class ContextCompactionPlugin(BasePlugin):
 
     def _get_context_window_tokens(self) -> int:
         """Return a validated context-window size, or zero when unknown."""
-        raw_context_window = self._resolve_context_window()
-        try:
-            if isinstance(raw_context_window, bool):
-                return 0
-            if isinstance(raw_context_window, (int, float)):
-                if isinstance(raw_context_window, float) and not math.isfinite(
-                    raw_context_window
-                ):
-                    return 0
-                context_window = int(raw_context_window)
-            elif isinstance(raw_context_window, str):
-                context_window = int(raw_context_window)
-            else:
-                return 0
-        except (TypeError, ValueError, OverflowError):
-            return 0
-        return max(0, context_window)
+        return _validated_context_window(self._resolve_context_window()) or 0
 
     def _get_hard_cap_threshold(self) -> int:
         """Return the absolute boundary cap, distinct from auto-compaction."""

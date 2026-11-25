@@ -14,6 +14,8 @@ Merge semantics are curated-safe:
   * existing entries are UPDATED only on fields the sources provide;
     curated-only fields (notes, effort_levels, thinking_default, default_output,
     supports_streaming, retired, aliases) are never touched;
+  * invalid retained price fields are normalized to null, even when a source
+    omits those prices;
   * new models are ADDED, flagged with an "Auto-generated" note for review;
   * nothing is ever deleted — retire models by hand;
   * _meta.updated bumps only when something actually changed.
@@ -53,6 +55,8 @@ MODELS_DEV_PROVIDERS = {
 
 # Fields a source may refresh on an existing entry. Everything else on the
 # entry is curated-only and survives every run.
+PRICE_FIELDS = ("pricing_in", "pricing_out", "pricing_cached_in")
+
 SOURCED_FIELDS = (
     "context_window",
     "max_output",
@@ -129,6 +133,16 @@ def _catalog_price(
     if not math.isfinite(scaled):
         return None
     return round(scaled, precision)
+
+
+def _is_valid_existing_price(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        price = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(price) and price >= 0
 
 
 def map_models_dev_model(name: str, entry: dict, provider_slug: str) -> dict:
@@ -289,6 +303,14 @@ def apply_merge(data: dict, models_dev: dict, openrouter: dict, today: str):
     for key, field, old, new_value in planned["changed"]:
         models[key][field] = new_value
         report.append(f"{key}.{field}: {old!r} -> {new_value!r}")
+    for key, entry in models.items():
+        if not isinstance(entry, dict):
+            continue
+        for field in PRICE_FIELDS:
+            value = entry.get(field)
+            if value is not None and not _is_valid_existing_price(value):
+                entry[field] = None
+                report.append(f"{key}.{field}: invalid existing price -> null")
     if not report:
         return False, ["no changes; model directory already matches the sources"]
     data.setdefault("_meta", {})["updated"] = today
