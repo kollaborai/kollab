@@ -150,6 +150,7 @@ export type ChatTransport = Pick<EngineApi, "request" | "streamSse">;
 export type ChatSnapshot = {
   readonly rows: readonly ChatRow[];
   readonly inputs: Readonly<Record<string, InputInfo>>;
+  readonly turns?: Readonly<Record<string, TurnInfo>>;
   readonly running: boolean;
   readonly connection: ConnectionState;
   readonly hasEarlier: boolean;
@@ -425,6 +426,7 @@ export class LiveChatStore implements LiveStore {
     return {
       rows: this.sends.size === 0 ? this.state.rows : [...this.state.rows, ...Array.from(this.sends.values(), (send) => send.row)],
       inputs: this.state.inputs,
+      turns: this.state.turns,
       running: turnsRunning(this.state.turns),
       connection: this.connectionState,
       hasEarlier: this.state.olderCursor !== null && this.state.lastSeq !== null,
