@@ -6,7 +6,9 @@
 import {
   Component,
   Suspense,
+  createContext,
   useEffect,
+  useContext,
   useState,
   type ComponentType,
   type ErrorInfo,
@@ -33,7 +35,7 @@ import { PluginPortalScopeContext } from "@/components/ui/plugin-portal-scope";
 import { cn } from "@/lib/utils";
 import type { PluginRecord } from "./registry";
 import type { PluginSession, PluginTab } from "./sdk";
-import { logPluginFailure, SAFE_PLUGIN_RENDER_ERROR } from "./plugin-errors";
+import { describePluginError, logPluginFailure, pluginRenderFailureMessage } from "./plugin-errors";
 
 // ponytail: a short list of lucide names a manifest's `icon` can use; importing lucide's whole set by name
 // would ship every icon. Add names here as plugins need them.
@@ -138,17 +140,28 @@ function PluginSuspenseFallback({
 
 type PluginBoundaryProps = {
   name: string;
+  renderer?: string;
   resetKey?: unknown;
   inline?: boolean;
   errorFallback?: ReactNode;
   children: ReactNode;
 };
 
+const PluginRendererSurfaceContext = createContext<string | undefined>(undefined);
+
+export function PluginRendererSurface({ renderer, children }: { renderer: string; children: ReactNode }) {
+  return (
+    <PluginRendererSurfaceContext.Provider value={renderer}>
+      {children}
+    </PluginRendererSurfaceContext.Provider>
+  );
+}
+
 export class PluginBoundary extends Component<PluginBoundaryProps, { error: Error | null }> {
   state: { error: Error | null } = { error: null };
 
   static getDerivedStateFromError(error: unknown): { error: Error } {
-    return { error: error instanceof Error ? error : new Error(String(error)) };
+    return { error: new Error(describePluginError(error)) };
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo) {
@@ -189,7 +202,7 @@ export class PluginBoundary extends Component<PluginBoundaryProps, { error: Erro
     return (
       <PluginFailure
         title={`${this.props.name} Failed to Render`}
-        error={SAFE_PLUGIN_RENDER_ERROR}
+        error={pluginRenderFailureMessage(this.props.renderer ?? "default")}
         onRetry={this.retry}
         inline={this.props.inline}
       />
@@ -218,6 +231,8 @@ export function PluginMount({
   errorFallback?: ReactNode;
   children: ReactNode;
 }) {
+  const inheritedRenderer = useContext(PluginRendererSurfaceContext);
+  const activeRenderer = renderer === "default" ? inheritedRenderer ?? renderer : renderer;
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
   const Root = inline ? "span" : "div";
   const PortalRoot = inline ? "span" : "div";
@@ -228,8 +243,9 @@ export function PluginMount({
     >
       <PluginPortalScopeContext.Provider value={{ scoped: true, container: portalContainer }}>
         <PluginBoundary
-          key={pluginRendererBoundaryKey(record.id, renderer)}
+          key={pluginRendererBoundaryKey(record.id, activeRenderer)}
           name={record.name}
+          renderer={activeRenderer}
           resetKey={resetKey}
           inline={inline}
           errorFallback={errorFallback}
@@ -247,10 +263,12 @@ export function PluginTabs({
   record,
   tabs,
   session,
+  rendererPrefix = "page-tab",
 }: {
   record: PluginRecord;
   tabs: readonly PluginTab[];
   session?: PluginSession;
+  rendererPrefix?: "page-tab" | "modal-tab";
 }) {
   const [active, setActive] = useState(tabs[0]?.id ?? "");
   const shown = tabs.some((tab) => tab.id === active) ? active : (tabs[0]?.id ?? "");
@@ -267,7 +285,7 @@ export function PluginTabs({
         <TabsContent key={tab.id} value={tab.id} className="flex min-h-0 flex-col overflow-y-auto px-4 py-3 sm:px-6">
           <PluginMount
             record={record}
-            renderer={`page-tab:${tab.id}`}
+            renderer={`${rendererPrefix}:${tab.id}`}
             resetKey={session?.session_id}
           >
             {record.k ? <tab.render k={record.k} session={session} /> : null}

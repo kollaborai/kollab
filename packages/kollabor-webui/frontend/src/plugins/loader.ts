@@ -32,7 +32,7 @@ import {
   type PluginInventoryResponse,
   type PluginService,
 } from "./sdk";
-import { logPluginFailure } from "./plugin-errors";
+import { describePluginError, logPluginFailure } from "./plugin-errors";
 
 export const LOAD_TIMEOUT_MS = 5_000;
 
@@ -75,7 +75,7 @@ const FIXED_SERVICE_ERRORS = new Set([
 ]);
 const SAFE_PLUGIN_ENTRY_ERROR = "Plugin details could not be loaded.";
 
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const message = (error: unknown) => describePluginError(error);
 const SAFE_WEB_PLUGIN_LOAD_ERROR = "This plugin's web code failed while loading. Check the browser console for details.";
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -346,7 +346,7 @@ function settingOmissions(...collections: unknown[]): { settings: number; settin
 }
 
 /** Normalize the untrusted GET /plugins row before it can reach Settings, failure panels or plugin loading. */
-export function normalizePluginEntry(value: unknown): PluginEntry | null {
+export function normalizePluginEntry(value: unknown, previous?: PluginEntry): PluginEntry | null {
   const raw = record(value);
   const id = safeIdentifier(raw?.id, 44);
   if (!raw || !id || !ID.test(id)) return null;
@@ -396,7 +396,9 @@ export function normalizePluginEntry(value: unknown): PluginEntry | null {
     settings: (safeInteger(reportedOmissions?.settings) ?? 0) + settingOmissionsFromInput.settings,
     setting_options: (safeInteger(reportedOmissions?.setting_options) ?? 0) + settingOmissionsFromInput.setting_options,
     option_labels: (safeInteger(reportedOmissions?.option_labels) ?? 0) + settingOmissionsFromInput.option_labels,
-    contributions: (safeInteger(reportedOmissions?.contributions) ?? 0) + pluginContributionOmissionCount(raw.contributes),
+    contributions: raw.contributes === undefined && previous
+      ? previous.omitted.contributions
+      : (safeInteger(reportedOmissions?.contributions) ?? 0) + pluginContributionOmissionCount(raw.contributes),
   };
   return {
     id,
@@ -411,7 +413,9 @@ export function normalizePluginEntry(value: unknown): PluginEntry | null {
     state,
     error,
     web,
-    contributes: normalizePluginContributes(raw.contributes),
+    contributes: raw.contributes === undefined && previous
+      ? previous.contributes
+      : normalizePluginContributes(raw.contributes),
     services,
     settings: normalizeSettings(raw.settings),
     settings_section: settingsSection ? { title: sectionTitle ?? "Settings" } : null,
@@ -565,7 +569,11 @@ export function openTarget(pluginId: string, target: OpenTarget, registry: Plugi
   else if (/^https?:\/\//i.test(target.url)) window.open(target.url, "_blank", "noopener,noreferrer");
 }
 
-type Attempt = { token: symbol; hash: string | null; dispose(): void };
+type Attempt = { token: symbol; loadKey: string; dispose(): void };
+
+function pluginLoadKey(entry: PluginEntry): string {
+  return JSON.stringify([entry.web, entry.contributes]);
+}
 
 export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
   const timeoutMs = deps.timeoutMs ?? LOAD_TIMEOUT_MS;
@@ -603,7 +611,7 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
     });
     attempts.set(entry.id, {
       token,
-      hash: entry.web?.hash ?? null,
+      loadKey: pluginLoadKey(entry),
       dispose() {
         abandoned = true;
         dispose();
@@ -693,8 +701,12 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
         const offset = serverTime - receivedAt;
         if (Number.isFinite(offset)) serverTimeOffsetSeconds = offset;
       }
+      const previousEntries = new Map(inventory.entries.map((entry) => [entry.id, entry]));
+      for (const plugin of registry.getSnapshot().plugins) previousEntries.set(plugin.id, plugin.entry);
       entries = listed.map((item) => {
-        const normalized = normalizePluginEntry(item);
+        const raw = record(item);
+        const id = safeIdentifier(raw?.id, 44);
+        const normalized = normalizePluginEntry(item, id ? previousEntries.get(id) : undefined);
         if (!normalized) throw new Error("Invalid plugin inventory response.");
         return normalized;
       });
@@ -710,8 +722,8 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
     const keep = new Set(active.map((entry) => entry.id));
     for (const { id } of registry.getSnapshot().plugins) if (!keep.has(id)) drop(id);
     active.forEach((entry, listedOrder) => {
-      // The same build stays as it is; its row reads the new state (Stopping, Failed to Load ...).
-      if (find(entry.id) && attempts.get(entry.id)?.hash === (entry.web?.hash ?? null))
+      // Keep runtime state only while the build and its declared contributions are unchanged.
+      if (find(entry.id) && attempts.get(entry.id)?.loadKey === pluginLoadKey(entry))
         registry.update(entry.id, (record) => ({ ...record, name: entry.name, entry, listedOrder }));
       else void load(entry, 0, listedOrder);
     });

@@ -27,6 +27,16 @@ type PluginCommandResolution = {
   conflicts: PluginCommandConflict[];
 };
 
+/** A failed async command can restore its draft only into the same untouched composer session. */
+export function canRestorePluginCommandDraft(
+  currentRevision: number,
+  clearedRevision: number,
+  currentSession: string | null | undefined,
+  commandSession: string | null | undefined,
+): boolean {
+  return currentRevision === clearedRevision && Object.is(currentSession, commandSession);
+}
+
 /** Native command names and aliases, lower case, without the slash. */
 export function reservedCommandKeys(
   commands: readonly { name: string; aliases?: readonly string[] }[],

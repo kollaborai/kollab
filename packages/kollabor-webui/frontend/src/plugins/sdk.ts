@@ -30,7 +30,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { FieldRenderer } from "@/components/panels/FieldRenderer";
 import { GemAvatar } from "@/components/gems/GemAvatar";
-import { logPluginFailure } from "./plugin-errors";
+import { describePluginError, logPluginFailure } from "./plugin-errors";
 import { copyText } from "@/phonelink/copy-link";
 import { nextNoticeKey, type Contributions } from "./registry";
 
@@ -130,7 +130,9 @@ export type PluginRendererProps = {
   toolCall?: { name: string; args: unknown; result: unknown; status: unknown };
   tag?: { name: string; content: string };
 };
-export type RendererSpec = { tool?: string; tag?: string; render: ComponentType<PluginRendererProps> };
+export type RendererSpec =
+  | { tool: string; tag?: never; render: ComponentType<PluginRendererProps> }
+  | { tag: string; tool?: never; render: ComponentType<PluginRendererProps> };
 export type NoticeButton = { label: string; open?: OpenTarget; run?: () => unknown };
 export type NoticeSpec = { text: string; button?: NoticeButton };
 export type ApiOptions = { refreshOn?: string; everyMs?: number };
@@ -342,7 +344,7 @@ export function useRemote<T>(k: PluginApi | null, path: string | null | undefine
           setState((current) => ({
             key,
             data: current.key === key ? current.data : undefined,
-            error: error instanceof Error ? error.message : String(error),
+            error: describePluginError(error),
             loading: false,
           }));
       },
@@ -494,13 +496,18 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
       }));
     },
     renderer(spec) {
-      const name = spec?.tool ?? spec?.tag;
+      const hasTool = spec?.tool !== undefined;
+      const hasTag = spec?.tag !== undefined;
+      if (hasTool === hasTag) return invalid("renderer", "provide exactly one of tool or tag");
+      const name = hasTool ? spec.tool : spec.tag;
       if (!bound("renderer", declaredIds(declared.renderers), name)) return;
       if (spec?.tag !== undefined && !isRendererTagName(spec.tag)) {
         return invalid("renderer", "tag name must start with a letter and use only letters, digits, _ or -");
       }
       if (!isComponent(spec.render)) return invalid("renderer", "render must be a component");
-      const renderer: RendererSpec = spec.tool ? { tool: spec.tool, render: spec.render } : { tag: spec.tag, render: spec.render };
+      const renderer: RendererSpec = hasTool
+        ? { tool: spec.tool!, render: spec.render }
+        : { tag: spec.tag!, render: spec.render };
       contribute((current) => ({
         ...current,
         renderers: [

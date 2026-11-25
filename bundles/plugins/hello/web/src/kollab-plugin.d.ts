@@ -130,7 +130,9 @@ export type PluginRendererProps = {
   toolCall?: { name: string; args: unknown; result: unknown; status: unknown };
   tag?: { name: string; content: string };
 };
-export type RendererSpec = { tool?: string; tag?: string; render: ComponentType<PluginRendererProps> };
+export type RendererSpec =
+  | { tool: string; tag?: never; render: ComponentType<PluginRendererProps> }
+  | { tag: string; tool?: never; render: ComponentType<PluginRendererProps> };
 export type NoticeButton = { label: string; open?: OpenTarget; run?: () => unknown };
 export type NoticeSpec = { text: string; button?: NoticeButton };
 export type ApiOptions = { refreshOn?: string; everyMs?: number };

@@ -24,16 +24,31 @@ type Job = {
     omitted?: { services?: number; uses?: number; service_secrets?: number; contributions?: number };
     python?: unknown; engine?: unknown; web?: unknown; agents?: unknown; contributes?: unknown; hooks?: unknown; mcp?: unknown };
 };
-export const errorText = (error: unknown) => error instanceof ApiError
-  ? error.status === 404 ? "Plugin review no longer exists."
-    : error.status === 409 && error.message === "Cannot safely update this plugin" ? error.message
-    : error.status === 409 ? "Plugin changed during review. Stage it again."
-    : error.status === 503 ? "Plugin manager could not complete the request."
-    : error.status === 422 && error.message === "Invalid plugin Git source" ? error.message
-    : `Plugin request failed (HTTP ${error.status}).`
-  : error instanceof Error && error.message === "Put the branch or tag in one field, not both."
-    ? error.message
-    : "Plugin request failed. Try again.";
+export const errorText = (error: unknown): string => {
+  try {
+    if (error instanceof ApiError) {
+      if (error.status === 404) return "Plugin review no longer exists.";
+      if (error.status === 409 && error.message === "Cannot safely update this plugin") return error.message;
+      if (error.status === 409) return "Plugin changed during review. Stage it again.";
+      if (error.status === 503) return "Plugin manager could not complete the request.";
+      if (error.status === 422 && error.message === "Invalid plugin Git source") return error.message;
+      return `Plugin request failed (HTTP ${error.status}).`;
+    }
+    if (error instanceof Error && error.message === "Put the branch or tag in one field, not both.")
+      return error.message;
+  } catch {
+    // A rejected request can contain an arbitrary thrown value or accessor.
+  }
+  return "Plugin request failed. Try again.";
+};
+
+function apiErrorHasStatus(error: unknown, statuses: readonly number[]): boolean {
+  try {
+    return error instanceof ApiError && statuses.includes(error.status);
+  } catch {
+    return false;
+  }
+}
 
 const JOB_STATUSES = new Set<Job["status"]>(["staging", "ready", "cancelling", "installing", "complete", "error", "cancelled"]);
 const JOB_ERRORS = new Set([
@@ -343,7 +358,7 @@ export async function discardReview(api: EngineApi, jobId: string): Promise<void
   try {
     await api.json(`/plugins/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
   } catch (caught) {
-    if (!(caught instanceof ApiError) || (caught.status !== 404 && caught.status !== 409)) throw caught;
+    if (!apiErrorHasStatus(caught, [404, 409])) throw caught;
   }
 }
 
@@ -351,7 +366,7 @@ async function discardReviewForDismissal(api: EngineApi, jobId: string): Promise
   try {
     await api.json(`/plugins/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
   } catch (caught) {
-    if (!(caught instanceof ApiError) || caught.status !== 404) throw caught;
+    if (!apiErrorHasStatus(caught, [404])) throw caught;
   }
 }
 
@@ -430,7 +445,13 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied,
         ? discardReview(api, job.job_id)
         : discardReviewForDismissal(api, job.job_id);
       void cleanup.then(onClose).catch((caught) => {
-        if (caught instanceof ApiError && caught.status === 409) { onClose(); return; }
+        let staleConflict = false;
+        try {
+          staleConflict = caught instanceof ApiError && caught.status === 409;
+        } catch {
+          // A thrown proxy can make both instanceof and property reads throw.
+        }
+        if (staleConflict) { onClose(); return; }
         setError(errorText(caught));
       }).finally(() => setBusy(false));
       return;

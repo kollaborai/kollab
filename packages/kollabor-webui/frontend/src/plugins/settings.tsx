@@ -7,7 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import { inPhoneApp } from "@/utils/page-route";
 import { PLUGIN_TRUST_NOTICE, PluginInstallDialog, describeUses } from "./install";
 import { listedPluginEntries, refreshPlugins, retryPlugin, usePluginInventory } from "./loader";
-import { PluginMount, PluginFailure } from "./mount";
+import { PluginMount, PluginFailure, PluginRendererSurface } from "./mount";
 import { type PluginRecord, usePlugins } from "./registry";
 import type { PluginEntry, PluginService } from "./sdk";
 import { logPluginFailure, SAFE_PLUGIN_SETTINGS_ERROR } from "./plugin-errors";
@@ -367,9 +367,11 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
           </div>
         ) : null}
         {SettingsView && record?.k ? (
-          <PluginMount record={record}>
-            <SettingsView k={record.k} />
-          </PluginMount>
+          <PluginRendererSurface renderer="settings">
+            <PluginMount record={record}>
+              <SettingsView k={record.k} />
+            </PluginMount>
+          </PluginRendererSurface>
         ) : null}
       </div>
       <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open && !busy && !operationBusy) setConfirmation(null); }}>

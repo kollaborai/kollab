@@ -59,7 +59,6 @@ import {
   useSendWaitingNow,
 } from "@/runtime";
 import {
-  DEFAULT_SLASH_COMMANDS,
   type AgentPoolEntry,
   type MediaEntry,
   type NetworkAgent,
@@ -73,6 +72,7 @@ import {
   pluginCommandItems,
   reservedCommandKeys,
   warnPluginCommandConflicts,
+  canRestorePluginCommandDraft,
 } from "@/plugins/composer-commands";
 import { PluginTaggedText, PluginToolPart } from "@/plugins/renderers";
 import { slashCatalogNotice } from "./slash-catalog-notice";
@@ -170,6 +170,10 @@ export type ThreadProps = {
   /** Per-agent/conversation localStorage key for the unsent composer text. */
   draftKey?: string | null | undefined;
 };
+
+function composerRevisionSignature(text: string, attachments: readonly { id: string }[]): string {
+  return JSON.stringify([text, attachments.map(({ id }) => id)]);
+}
 
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -570,6 +574,9 @@ const Composer: FC<{
   );
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const composerText = useAuiState((s) => s.composer.text);
+  const composerRevisionKey = useAuiState((s) =>
+    composerRevisionSignature(s.composer.text, s.composer.attachments),
+  );
   const composerImages = useAuiState(
     useShallow((s) => s.composer.attachments),
   );
@@ -699,6 +706,34 @@ const Composer: FC<{
     saveComposerDraft(key, composerText);
   }, [composerText, draftKey]);
 
+  const composerRevisionRef = useRef(0);
+  const observedComposerRevisionKeyRef = useRef(composerRevisionKey);
+  if (observedComposerRevisionKeyRef.current !== composerRevisionKey) {
+    composerRevisionRef.current += 1;
+    observedComposerRevisionKeyRef.current = composerRevisionKey;
+  }
+  const currentDraftKeyRef = useRef(draftKey ?? null);
+  currentDraftKeyRef.current = draftKey ?? null;
+  const composerWithOptionalSubscribe = aui.composer as typeof aui.composer & {
+    subscribe?: (listener: () => void) => () => void;
+  };
+  useLayoutEffect(() => {
+    const observeComposerChange = () => {
+      const state = aui.composer.getState();
+      const key = composerRevisionSignature(state.text, state.attachments);
+      if (observedComposerRevisionKeyRef.current !== key) {
+        composerRevisionRef.current += 1;
+        observedComposerRevisionKeyRef.current = key;
+      }
+    };
+    const unsubscribeClient = aui.subscribe(observeComposerChange);
+    const unsubscribeComposer = composerWithOptionalSubscribe.subscribe?.(observeComposerChange);
+    return () => {
+      unsubscribeClient();
+      unsubscribeComposer?.();
+    };
+  }, [aui, aui.composer]);
+
   const lastBusySubmit = useRef<{
     fingerprint: string;
     at: number;
@@ -729,17 +764,18 @@ const Composer: FC<{
   };
 
   const { plugins } = usePlugins();
+  const pluginCommandsReady = commandCatalogStatus === "ready" || commandCatalogStatus === "empty";
   const reserved = useMemo(
-    () => reservedCommandKeys([...DEFAULT_SLASH_COMMANDS, ...commands]),
+    () => reservedCommandKeys(commands),
     [commands],
   );
   const pluginEntries = useMemo(
-    () => pluginCommandEntries(plugins, reserved),
-    [plugins, reserved],
+    () => pluginCommandsReady ? pluginCommandEntries(plugins, reserved) : [],
+    [pluginCommandsReady, plugins, reserved],
   );
   const pluginConflicts = useMemo(
-    () => pluginCommandConflicts(plugins, reserved),
-    [plugins, reserved],
+    () => pluginCommandsReady ? pluginCommandConflicts(plugins, reserved) : [],
+    [pluginCommandsReady, plugins, reserved],
   );
   const reportedPluginConflicts = useRef(new Set<string>());
   useEffect(() => {
@@ -764,10 +800,25 @@ const Composer: FC<{
     const draft = aui.composer.getState().text;
     const match = matchPluginCommand(draft, pluginEntries);
     if (!match) return false;
+    const commandSession = draftKey ?? null;
     event.preventDefault();
+    const stateBeforeClear = aui.composer.getState();
     aui.composer.setText("");
+    composerRevisionRef.current += 1;
+    observedComposerRevisionKeyRef.current = composerRevisionSignature("", stateBeforeClear.attachments);
+    const clearedRevision = composerRevisionRef.current;
     const fail = (error: unknown) => {
-      if (!aui.composer.getState().text) aui.composer.setText(draft);
+      if (
+        canRestorePluginCommandDraft(
+          composerRevisionRef.current,
+          clearedRevision,
+          currentDraftKeyRef.current,
+          commandSession,
+        ) &&
+        aui.composer.getState().text === ""
+      ) {
+        aui.composer.setText(draft);
+      }
       logPluginFailure(match.entry.pluginId, `command /${match.entry.name} failed`, error);
       match.entry.k.toast(pluginCommandFailure(match.entry.name, error));
     };

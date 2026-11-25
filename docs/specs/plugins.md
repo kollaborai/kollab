@@ -166,11 +166,12 @@ command names and aliases remain reserved for native commands while the session 
 or is unavailable.
 
 **Failures.** A plugin whose code fails while loading keeps its row as `PR Chain  Failed to Load`, and
-one that fails while drawing shows `Failed to Render`; both open a small kollab-drawn panel with Retry,
-View Error and Turn Off, and everything else keeps working. Every plugin view, tab, settings view, tool
-card and tag card has that render boundary and a Suspense fallback; a render still suspended after five
-seconds shows `Failed to Render` with Retry. Plugin callback failures show fixed safe text, with error
-details written only to the redacted browser log. A plugin whose last boot never finished (the tab froze
+one that fails while drawing shows `Failed to Render`; both open a small kollab-drawn panel with Retry
+and View Error, and everything else keeps working. Every plugin view, tab, settings view, tool card and
+tag card has that render boundary and a Suspense fallback. Its five-second timeout covers suspended
+renders only, after React commits the fallback. Plugin code runs on the page's main thread; a synchronous
+loop freezes the tab and cannot be interrupted by the timeout. Plugin callback failures show fixed safe
+text, with error details written only to the redacted browser log. A plugin whose last boot never finished (the tab froze
 or closed during it) is skipped on the next load with the notice `PR Chain was skipped: it froze the page
 last time.  [Turn On Again]`. `?plugins=off` in the page URL loads the web UI with no plugin code and
 Settings → Plugins says `Plugins are off for this page`. The configured agent-run caps are intended
@@ -559,8 +560,8 @@ streamed output sits in an `aria-live="polite"` region. Each plugin view mounts 
 `kollab plugin add` warns when `index.css` has rules outside it.
 
 Loading: at boot the app reads `GET /plugins`, `import()`s every enabled entry in parallel and awaits
-each plugin function. A 5 s limit covers the import and that await; it cannot stop a synchronous loop
-in plugin code, which freezes the tab, and `?plugins=off` is the way back in. Retry imports
+each plugin function. A 5 s limit covers the import and that await; it cannot interrupt a synchronous
+loop in plugin code, which freezes the tab, and `?plugins=off` is the way back in. Retry imports
 `index.js?v=<hash>&retry=<n>` so the browser does not hand back the failed module, and a timed-out
 import that resolves later is ignored. On `plugins-changed` the page reads `GET /plugins` again and
 adds or removes rows, tabs and pages without a reload.
@@ -882,8 +883,8 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 ## Failure modes
 
 1. **Web bundle throws or fails to render.** A per-plugin error boundary, a 5 s limit on import and the
-   awaited function, and a 5 s limit on suspended rendering; the app boots without it. A synchronous
-   hang freezes the tab; recovery is a reload with `?plugins=off`.
+   awaited function, and a 5 s timeout for suspended rendering after React commits the fallback; the
+   app boots without it. A synchronous hang freezes the tab; recovery is a reload with `?plugins=off`.
 2. **Engine router or `python` entry fails while loading.** That part is skipped, the process keeps
    running, and `/plugins` reports `state: "error"` with the message.
 3. **Background process crash loop.** The wrapper's backoff and five-crash stop, a notice, the menu count
@@ -988,7 +989,8 @@ Red first; each test lands failing before its code:
   the proxy and the PhoneLink bridge; a token in a log line comes back redacted; a second wrapper exits
   while the first holds the lock.
 - `packages/kollabor-webui/frontend/src/plugins/*.test.ts`: error boundary, Failed to Render, the 5 s
-  limit, Retry with a new URL, a late import ignored, `plugins-changed` adds and removes rows, a chat on
+  suspended-render timeout, Retry with a new URL, a late import ignored, `plugins-changed` adds and removes
+  rows, a chat on
   a removed tab goes to Chat, one React instance, text from GitHub rendered as text.
 - Browser acceptance `frontend/tests/acceptance/plugins.browser.mjs`: the hello plugin adds a row and
   opens a page, a modal and a tab at 1440 and 390 px; turning it off removes them live; a throwing plugin
