@@ -10,6 +10,7 @@ device that was off fires exactly once on return, then continues (requirement
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -97,6 +98,22 @@ def test_store_roundtrip_survives_restart(tmp_path):
     assert reloaded[1].when_busy == "new_instance"
     assert reloaded[1].created_by == "marco"
     assert reloaded[1].revision >= 1
+
+
+def test_store_keeps_last_valid_file_when_atomic_replace_fails(tmp_path, monkeypatch):
+    path = tmp_path / "schedules.json"
+    store = ScheduleStore(path)
+    store.save([_row()])
+
+    def fail_replace(source, target):
+        raise OSError("simulated interrupted replacement")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="interrupted"):
+        store.save([_row(id="replacement")])
+
+    reloaded = ScheduleStore(path).load()
+    assert [row.id for row in reloaded] == ["s1"]
 
 
 def test_store_defaults_fill_optional_fields(tmp_path):
