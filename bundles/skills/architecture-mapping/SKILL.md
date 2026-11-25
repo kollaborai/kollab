@@ -100,9 +100,9 @@ javascript/node projects:
   <terminal>cat package.json | grep -A10 '"scripts"'</terminal>
 
 java projects:
-  <terminal>find . -type f -name "*.class" | head -5</terminal>
+  <file-find><pattern>*.class</pattern></file-find>
 
-  <terminal>find . -type f -name "*.jar" | head -5</terminal>
+  <file-find><pattern>*.jar</pattern></file-find>
 
   <terminal>grep -r "public static void main" . --include="*.java" | head -10</terminal>
 
@@ -187,7 +187,7 @@ analyze module organization
 
 identify public vs private boundaries
 
-  <terminal>find . -type f -name "__init__.py" | head -20</terminal>
+  <file-find><pattern>__init__.py</pattern></file-find>
 
   <terminal>find . -type f -name "*.py" -exec grep -l "^def " {} \; | head -20</terminal>
 
@@ -439,7 +439,8 @@ event-driven systems:
 discover rpc/service interfaces
 
 grpc, thrift, custom rpc:
-  <terminal>find . -name "*.proto" -o -name "*.thrift"</terminal>
+  <file-find><pattern>*.proto</pattern></file-find>
+  <file-find><pattern>*.thrift</pattern></file-find>
 
   <terminal>grep -r "@grpc\|@service\|@rpc" . --include="*.py" --include="*.js" | head -20</terminal>
 
@@ -514,7 +515,9 @@ identify data storage
 databases:
   <terminal>grep -r "sqlite\|postgres\|mysql\|mongodb\|redis\|elasticsearch" . --include="*.py" --include="*.js" --include="*.json" --include="*.yaml" | head -20</terminal>
 
-  <terminal>find . -name "*.db" -o -name "*.sqlite" -o -name "schema.sql"</terminal>
+  <file-find><pattern>*.db</pattern></file-find>
+  <file-find><pattern>*.sqlite</pattern></file-find>
+  <file-find><pattern>schema.sql</pattern></file-find>
 
 file storage:
   <terminal>grep -r "open(\|file\|path\|Path(" . --include="*.py" | grep -v "test" | head -20</terminal>
@@ -525,7 +528,9 @@ map data models
 python orm models:
   <terminal>grep -r "class.*\(Base\|Model\|Entity\)" . --include="*.py" | grep -v test | head -30</terminal>
 
-  <terminal>find . -name "models.py" -o -name "entities.py" -o -name "schemas.py" | head -10</terminal>
+  <file-find><pattern>models.py</pattern></file-find>
+  <file-find><pattern>entities.py</pattern></file-find>
+  <file-find><pattern>schemas.py</pattern></file-find>
 
 document each model:
   [ ] model name
@@ -541,7 +546,8 @@ active record (database logic in model):
   <terminal>grep -r "save()\|delete()\|update()" . --include="*.py" | grep "class " | head -20</terminal>
 
 repository pattern (separate data access):
-  <terminal>find . -name "*repository*.py" -o -name "*dao*.py"</terminal>
+  <file-find><pattern>*repository*.py</pattern></file-find>
+  <file-find><pattern>*dao*.py</pattern></file-find>
 
   <terminal>grep -r "class.*Repository\|class.*DAO" . --include="*.py" | head -20</terminal>
 
@@ -560,7 +566,7 @@ http/rest:
   <terminal>grep -r "axios\|fetch\|XMLHttpRequest" . --include="*.js" | head -20</terminal>
 
 grpc:
-  <terminal>find . -name "*.proto"</terminal>
+  <file-find><pattern>*.proto</pattern></file-find>
 
   <terminal>grep -r "grpc\|@grpc" . --include="*.py" --include="*.js" | head -10</terminal>
 
@@ -962,9 +968,13 @@ look for evidence of decisions:
   [ ] integration approaches
   [ ] deployment strategy
 
-  <terminal>find . -name "requirements.txt" -o -name "package.json" -o -name "pom.xml"</terminal>
+  <file-find><pattern>requirements.txt</pattern></file-find>
+  <file-find><pattern>package.json</pattern></file-find>
+  <file-find><pattern>pom.xml</pattern></file-find>
 
-  <terminal>find . -name "docker-compose.yml" -o -name "Dockerfile" -o -name "kubernetes"</terminal>
+  <file-find><pattern>docker-compose.yml</pattern></file-find>
+  <file-find><pattern>Dockerfile</pattern></file-find>
+  <file-find><pattern>kubernetes</pattern></file-find>
 
 
 PHASE 16: RESEARCH RULES (STRICT MODE)

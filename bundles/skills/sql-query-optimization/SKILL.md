@@ -38,7 +38,7 @@ list database sizes:
 
 check existing query patterns
 
-  <terminal>find . -name "*.sql" -type f 2>/dev/null | head -10</terminal>
+  <file-find><pattern>*.sql</pattern></file-find>
 
 sample existing queries:
   <terminal>find . -name "*.sql" -type f 2>/dev/null -exec head -50 {} \; | head -100</terminal>

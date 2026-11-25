@@ -85,7 +85,8 @@ detect version control
 detect testing framework
 
   python:
-    <terminal>find . -name "test_*.py" -o -name "*_test.py" | head -10</terminal>
+    <file-find><pattern>test_*.py</pattern></file-find>
+    <file-find><pattern>*_test.py</pattern></file-find>
     <terminal>grep -r "pytest\|unittest\|nose" --include="*.py" . 2>/dev/null | head -5</terminal>
 
   javascript:
@@ -100,21 +101,26 @@ PHASE 1: ENTRY POINTS AND EXECUTION FLOW
 identify main entry points
 
   python projects:
-    <terminal>find . -name "main.py" -o -name "__main__.py" -o -name "app.py" -o -name "run.py" | head -10</terminal>
+    <file-find><pattern>main.py</pattern></file-find>
+    <file-find><pattern>__main__.py</pattern></file-find>
+    <file-find><pattern>app.py</pattern></file-find>
+    <file-find><pattern>run.py</pattern></file-find>
 
     <terminal>grep -r "if __name__" --include="*.py" . 2>/dev/null | head -10</terminal>
 
   javascript projects:
     <terminal>cat package.json 2>/dev/null | grep -A3 '"bin"'</terminal>
     <terminal>cat package.json 2>/dev/null | grep -A3 '"main"'</terminal>
-    <terminal>find . -name "index.js" -o -name "server.js" -o -name "app.js" | head -10</terminal>
+    <file-find><pattern>index.js</pattern></file-find>
+    <file-find><pattern>server.js</pattern></file-find>
+    <file-find><pattern>app.js</pattern></file-find>
 
   rust:
     <terminal>cat Cargo.toml 2>/dev/null | grep -A5 "\[bin\]"</terminal>
     <terminal>find src -name "main.rs"</terminal>
 
   go:
-    <terminal>find . -name "main.go"</terminal>
+    <file-find><pattern>main.go</pattern></file-find>
 
 
 identify cli entry points
@@ -319,7 +325,9 @@ locate configuration files
 
   <terminal>ls -la | grep -E "\.(env|yaml|yml|toml|ini|json)$"</terminal>
 
-  <terminal>find . -name ".env*" -o -name "config.*" -o -name "settings.*" | head -20</terminal>
+  <file-find><pattern>.env*</pattern></file-find>
+  <file-find><pattern>config.*</pattern></file-find>
+  <file-find><pattern>settings.*</pattern></file-find>
 
 
 analyze configuration patterns
@@ -359,7 +367,10 @@ PHASE 5: DATA MODEL ANALYSIS
 identify data models
 
   python:
-    <terminal>find . -name "models.py" -o -name "model.py" -o -name "schemas.py" -o -name "types.py" | head -10</terminal>
+    <file-find><pattern>models.py</pattern></file-find>
+    <file-find><pattern>model.py</pattern></file-find>
+    <file-find><pattern>schemas.py</pattern></file-find>
+    <file-find><pattern>types.py</pattern></file-find>
 
     <terminal>grep -r "class.*\(Model\|Base\)" --include="*.py" . 2>/dev/null | grep -v "__pycache__" | head -30</terminal>
 
@@ -388,11 +399,13 @@ analyze model relationships
 
 identify database schema
 
-  <terminal>find . -name "schema.sql" -o -name "migrations" -o -name "alembic"</terminal>
+  <file-find><pattern>schema.sql</pattern></file-find>
+  <file-find><pattern>migrations</pattern></file-find>
+  <file-find><pattern>alembic</pattern></file-find>
 
   <terminal>ls -la migrations/ 2>/dev/null || echo "no migrations directory"</terminal>
 
-  <terminal>find . -name "*.sql" | head -10</terminal>
+  <file-find><pattern>*.sql</pattern></file-find>
 
 
 document data model
@@ -420,7 +433,8 @@ identify api endpoints
     <terminal>grep -r "app\.(get|post|put|delete|patch)" --include="*.js" --include="*.ts" . 2>/dev/null | head -30</terminal>
 
   graphql:
-    <terminal>find . -name "*.graphql" -o -name "schema.graphql" | head -10</terminal>
+    <file-find><pattern>*.graphql</pattern></file-find>
+    <file-find><pattern>schema.graphql</pattern></file-find>
 
     <terminal>grep -r "type Query\|type Mutation" --include="*.graphql" --include="*.ts" --include="*.js" . 2>/dev/null | head -20</terminal>
 
@@ -488,7 +502,9 @@ analyze error handling patterns
 
 identify custom exceptions
 
-  <terminal>find . -name "exceptions.py" -o -name "errors.py" -o -name "error.py"</terminal>
+  <file-find><pattern>exceptions.py</pattern></file-find>
+  <file-find><pattern>errors.py</pattern></file-find>
+  <file-find><pattern>error.py</pattern></file-find>
 
   <read><file>PATH_TO_EXCEPTIONS_FILE</file></read>
 
@@ -513,7 +529,9 @@ analyze logging patterns
 
 identify log configuration
 
-  <terminal>find . -name "logging.conf" -o -name "*log*.json" -o -name "*log*.yaml"</terminal>
+  <file-find><pattern>logging.conf</pattern></file-find>
+  <file-find><pattern>*log*.json</pattern></file-find>
+  <file-find><pattern>*log*.yaml</pattern></file-find>
 
   <terminal>grep -r "basicConfig\|getLogger\|dictConfig" --include="*.py" . 2>/dev/null | head -20</terminal>
 
@@ -712,7 +730,10 @@ PHASE 11: DOCUMENTATION ASSESSMENT
 
 assess documentation quality
 
-  <terminal>find . -name "README*" -o -name "CONTRIBUTING*" -o -name "CHANGELOG*" -o -name "ARCHITECTURE*" | head -20</terminal>
+  <file-find><pattern>README*</pattern></file-find>
+  <file-find><pattern>CONTRIBUTING*</pattern></file-find>
+  <file-find><pattern>CHANGELOG*</pattern></file-find>
+  <file-find><pattern>ARCHITECTURE*</pattern></file-find>
 
   <terminal>find . -name "*.md" -type f | grep -v node_modules | head -20</terminal>
 
@@ -876,23 +897,31 @@ identify ci/cd configuration
 
   <terminal>find .github -name "*.yml" -o -name "*.yaml" 2>/dev/null</terminal>
 
-  <terminal>find .gitlab-ci.yml .gitlab-ci.yml docker-compose.yml Dockerfile 2>/dev/null</terminal>
+  <file-find><pattern>.gitlab-ci.yml</pattern></file-find>
+  <file-find><pattern>docker-compose.yml</pattern></file-find>
+  <file-find><pattern>Dockerfile</pattern></file-find>
 
   <terminal>cat .github/workflows/*.yml 2>/dev/null | head -50</terminal>
 
 
 identify deployment configuration
 
-  <terminal>find . -name "Dockerfile*" -o -name "docker-compose*" -o -name "kubernetes*" -o -name "helm*" | head -10</terminal>
+  <file-find><pattern>Dockerfile*</pattern></file-find>
+  <file-find><pattern>docker-compose*</pattern></file-find>
+  <file-find><pattern>kubernetes*</pattern></file-find>
+  <file-find><pattern>helm*</pattern></file-find>
 
-  <terminal>find . -name "*.tf" -o -name "terraform*" | head -10</terminal>
+  <file-find><pattern>*.tf</pattern></file-find>
+  <file-find><pattern>terraform*</pattern></file-find>
 
   <terminal>cat Dockerfile 2>/dev/null | head -30</terminal>
 
 
 identify environment configuration
 
-  <terminal>find . -name ".env*" -o -name "*production*" -o -name "*staging*" | head -20</terminal>
+  <file-find><pattern>.env*</pattern></file-find>
+  <file-find><pattern>*production*</pattern></file-find>
+  <file-find><pattern>*staging*</pattern></file-find>
 
   <terminal>grep -r "NODE_ENV\|FLASK_ENV\|DJANGO_SETTINGS\|ENVIRONMENT" --include="*.py" --include="*.js" . 2>/dev/null | head -20</terminal>
 

@@ -68,10 +68,14 @@ what to look for:
 workflow phase 4: code quality and tooling setup
 
 tool calls to execute:
-  - terminal(command="find . -name '.eslintrc*' -o -name '.prettierrc*' -o -name 'pyproject.toml' -o -name 'setup.cfg' | head -5")
+  - file_find(pattern=".eslintrc*")
+  - file_find(pattern=".prettierrc*")
+  - file_find(pattern="pyproject.toml")
+  - file_find(pattern="setup.cfg")
   - read_file(path="tsconfig.json") (if exists)
   - read_file(path=".pytest.ini") (if exists)
-  - terminal(command="find . -name 'requirements*.txt' -o -name 'requirements*.in' | head -5")
+  - file_find(pattern="requirements*.txt")
+  - file_find(pattern="requirements*.in")
 
 what to look for:
   - linting configuration (eslint, pylint, flake8, etc.)

@@ -51,8 +51,10 @@ if pip-audit not installed:
 check project structure
 
   <terminal>ls -la</terminal>
-  <terminal>find . -name "*.py" -type f | head -20</terminal>
-  <terminal>find . -name "requirements*.txt" -o -name "pyproject.toml" -o -name "setup.py" 2>/dev/null</terminal>
+  <file-find><pattern>*.py</pattern></file-find>
+  <file-find><pattern>requirements*.txt</pattern></file-find>
+  <file-find><pattern>pyproject.toml</pattern></file-find>
+  <file-find><pattern>setup.py</pattern></file-find>
 
 identify:
   - python source files
@@ -84,8 +86,12 @@ before diving into code, understand what youre reviewing.
 
 identify application entry points
 
-  <terminal>find . -name "main.py" -o -name "app.py" -o -name "__main__.py" 2>/dev/null</terminal>
-  <terminal>find . -name "manage.py" -o -name "wsgi.py" -o -name "asgi.py" 2>/dev/null</terminal>
+  <file-find><pattern>main.py</pattern></file-find>
+  <file-find><pattern>app.py</pattern></file-find>
+  <file-find><pattern>__main__.py</pattern></file-find>
+  <file-find><pattern>manage.py</pattern></file-find>
+  <file-find><pattern>wsgi.py</pattern></file-find>
+  <file-find><pattern>asgi.py</pattern></file-find>
   <terminal>grep -r "if __name__" --include="*.py" . 2>/dev/null | head -10</terminal>
 
 entry points to examine:

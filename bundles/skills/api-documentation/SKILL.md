@@ -16,8 +16,11 @@ before writing ANY API documentation, discover what exists.
 
 check for existing API specifications
 
-  <terminal>find . -name "openapi.yaml" -o -name "openapi.yml" -o -name "swagger.json" 2>/dev/null</terminal>
-  <terminal>find . -name "*.spec.yaml" -o -name "*.spec.yml" 2>/dev/null</terminal>
+  <file-find><pattern>openapi.yaml</pattern></file-find>
+  <file-find><pattern>openapi.yml</pattern></file-find>
+  <file-find><pattern>swagger.json</pattern></file-find>
+  <file-find><pattern>*.spec.yaml</pattern></file-find>
+  <file-find><pattern>*.spec.yml</pattern></file-find>
 
 if OpenAPI spec exists:
   <read><file>openapi.yaml</file></read>
@@ -44,9 +47,13 @@ read existing docs to understand:
 
 check for API source code
 
-  <terminal>find . -name "*routes*.py" -o -name "*api*.py" -o -name "*controller*.py" 2>/dev/null | head -20</terminal>
-  <terminal>find . -name "*routes*.js" -o -name "*api*.js" -o -name "*controller*.js" 2>/dev/null | head -20</terminal>
-  <terminal>find . -name "*handlers*.go" 2>/dev/null | head -10</terminal>
+  <file-find><pattern>*routes*.py</pattern></file-find>
+  <file-find><pattern>*api*.py</pattern></file-find>
+  <file-find><pattern>*controller*.py</pattern></file-find>
+  <file-find><pattern>*routes*.js</pattern></file-find>
+  <file-find><pattern>*api*.js</pattern></file-find>
+  <file-find><pattern>*controller*.js</pattern></file-find>
+  <file-find><pattern>*handlers*.go</pattern></file-find>
 
 for each route file found:
   <read><file>path/to/routes.py</file></read>
@@ -58,7 +65,8 @@ for each route file found:
 check for authentication setup
 
   <terminal>grep -r "jwt\|oauth\|api.*key\|bearer\|auth" --include="*.py" --include="*.js" . 2>/dev/null | head -20</terminal>
-  <terminal>find . -name "*auth*.py" -o -name "*auth*.js" 2>/dev/null | head -10</terminal>
+  <file-find><pattern>*auth*.py</pattern></file-find>
+  <file-find><pattern>*auth*.js</pattern></file-find>
 
 understand:
   - authentication method (JWT, OAuth, API Key)
@@ -68,8 +76,9 @@ understand:
 
 check for testing files
 
-  <terminal>find . -name "*test*api*.py" -o -name "*test*route*.py" 2>/dev/null | head -10</terminal>
-  <terminal>find . -name "*test*api*.js" 2>/dev/null | head -10</terminal>
+  <file-find><pattern>*test*api*.py</pattern></file-find>
+  <file-find><pattern>*test*route*.py</pattern></file-find>
+  <file-find><pattern>*test*api*.js</pattern></file-find>
 
 test files contain:
   - example requests
