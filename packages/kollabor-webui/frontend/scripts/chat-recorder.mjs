@@ -47,6 +47,7 @@ import {
   analyzeChatFrames,
   CHAT_RECORDER_FLOWS,
   classifyChatRuntime,
+  hasRunningTurnWithInputs,
   isCompactionComplete,
   parseRuntimeMatrix,
 } from "./chat-recorder-analysis.mjs";
@@ -115,6 +116,10 @@ function installRecorder(cfg) {
     toolsStarted: Number(restore?.toolsStarted) || 0,
     toolRows: Array.isArray(restore?.toolRows) ? restore.toolRows : [],
     flowSeq: Number.isInteger(restore?.flowSeq) ? restore.flowSeq : null,
+    streamTurns: Array.isArray(restore?.streamTurns) ? restore.streamTurns : [],
+    streamInputs: Array.isArray(restore?.streamInputs) ? restore.streamInputs : [],
+    expectedActiveTurn: restore?.expectedActiveTurn ?? null,
+    latestSnapshot: null,
     lastStreamSeq: null,
     streamReady: false,
   });
@@ -155,8 +160,24 @@ function installRecorder(cfg) {
       const data = event.data ?? {};
       if (type === "snapshot") {
         rec.streamReady = true;
+        rec.latestSnapshot = {
+          turns: Array.isArray(data.turns) ? data.turns : [],
+          inputs: Array.isArray(data.inputs) ? data.inputs : [],
+        };
+        rec.streamTurns = rec.latestSnapshot.turns;
+        rec.streamInputs = rec.latestSnapshot.inputs;
         rec.lastStreamSeq = Number.isInteger(data.next_seq) ? data.next_seq - 1 : event.seq;
         (data.rows ?? []).forEach(rec.noteToolRow);
+      } else if (type === "turn.state") {
+        rec.streamTurns = [
+          ...rec.streamTurns.filter((turn) => turn.turn_id !== data.turn_id),
+          data,
+        ];
+      } else if (type === "input.state") {
+        rec.streamInputs = [
+          ...rec.streamInputs.filter((input) => input.id !== data.id),
+          data,
+        ];
       } else if (type === "replace") {
         (data.rows ?? []).forEach(rec.noteToolRow);
       } else if (type === "row.upsert") {
@@ -436,7 +457,8 @@ async function record(flow, session, browser, target) {
   const waitForStreamSnapshot = async (timeout = 30000) => {
     const started = Date.now();
     while (Date.now() - started < timeout) {
-      if (await page.evaluate(() => window.__rec.streamReady)) return;
+      const snapshot = await page.evaluate(() => window.__rec.latestSnapshot);
+      if (snapshot) return snapshot;
       await sleep(250);
     }
     throw new Error("the chat stream did not send its initial snapshot");
@@ -457,18 +479,37 @@ async function record(flow, session, browser, target) {
     }
     throw new Error(`the chat stream did not deliver a ${kind} row within ${timeout / 1000} seconds`);
   };
-  const preserveRecorderState = async () => page.evaluate(() => sessionStorage.setItem(
+  const preserveRecorderState = async (expectedActiveTurn) => page.evaluate((activeTurn) => sessionStorage.setItem(
     "__kollabChatRecorderRestore",
-    JSON.stringify({ toolsStarted: window.__rec.toolsStarted, toolRows: window.__rec.toolRows, flowSeq: window.__rec.flowSeq }),
-  ));
+    JSON.stringify({
+      toolsStarted: window.__rec.toolsStarted,
+      toolRows: window.__rec.toolRows,
+      flowSeq: window.__rec.flowSeq,
+      streamTurns: window.__rec.streamTurns,
+      streamInputs: window.__rec.streamInputs,
+      expectedActiveTurn: activeTurn,
+    }),
+  ), expectedActiveTurn);
   const reloadDuringRun = async (reply) => {
     await waitForRunning();
     await sleep(1200);
+    const expectedActiveTurn = await page.evaluate(() => {
+      const turn = window.__rec.streamTurns.filter((item) => item.state === "running").at(-1);
+      if (!turn || !Array.isArray(turn.input_ids) || turn.input_ids.length === 0) return null;
+      return { turn_id: turn.turn_id, input_ids: [...turn.input_ids] };
+    });
+    if (!expectedActiveTurn) {
+      throw new Error("the stream did not identify the running turn and its inputs before reload");
+    }
     await collect();
-    await preserveRecorderState();
+    await preserveRecorderState(expectedActiveTurn);
     collected.marks.push({ t: Date.now() - wall0, name: "RELOAD" });
     await page.reload({ waitUntil: "domcontentloaded" });
-    await waitForStreamSnapshot();
+    const snapshot = await waitForStreamSnapshot();
+    const preservedTurn = await page.evaluate(() => window.__rec.expectedActiveTurn);
+    if (!hasRunningTurnWithInputs(snapshot, preservedTurn)) {
+      throw new Error("the reload snapshot did not retain the active running turn and its inputs");
+    }
     await sleep(2500);
     await mark("RELOADED");
     await settle(reply);
@@ -599,15 +640,7 @@ async function record(flow, session, browser, target) {
     async reload() {
       await send(`${U(1)}: ${tools(3, 6)}. ${say(1)}`, "U1");
       await sleep(7000);
-      await collect();
-      // The page's own log goes with the page: keep these marks and its count here.
-      await preserveRecorderState();
-      collected.marks.push({ t: Date.now() - wall0, name: "RELOAD" });
-      await page.reload({ waitUntil: "domcontentloaded" });
-      await waitForStreamSnapshot();
-      await sleep(2500);
-      await mark("RELOADED");
-      await settle(R(1));
+      await reloadDuringRun(R(1));
     },
     // A permission prompt appears in this page and an independent client approves it.
     async "prompt-other"() {

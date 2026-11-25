@@ -67,6 +67,19 @@ export function isCompactionComplete({ sawStart, status, latestEventStatus, repl
   return sawStart && replaced && (status !== "compacting" || latestEventStatus === "idle");
 }
 
+/** Check that a reload snapshot still contains the same live turn and inputs. */
+export function hasRunningTurnWithInputs(snapshot, expectedTurn) {
+  const expectedIds = expectedTurn?.input_ids;
+  if (!Array.isArray(snapshot?.turns) || !Array.isArray(snapshot?.inputs) ||
+      !expectedTurn?.turn_id || !Array.isArray(expectedIds) || expectedIds.length === 0) return false;
+  const turn = snapshot.turns.find((item) => item.turn_id === expectedTurn.turn_id && item.state === "running");
+  if (!turn || !Array.isArray(turn.input_ids)) return false;
+  return expectedIds.every((id) =>
+    turn.input_ids.includes(id) && snapshot.inputs.some((input) =>
+      input.id === id && input.turn_id === expectedTurn.turn_id &&
+      (input.state === "started" || input.state === "joined")));
+}
+
 /** Count the recorder's frame-level defects without accessing a browser. */
 export function analyzeChatFrames(frames, marks) {
   const at = (name) => marks.find((mark) => mark.name === name)?.t;
