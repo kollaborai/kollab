@@ -146,7 +146,6 @@ export function analyzeChatFrames(frames, marks) {
   const gone = seen.map(() => false);
   let previous = null;
   let anchor = null;
-  let remountEpisode = false;
 
   for (const frame of frames) {
     if (frame.t < readyAt || reloading(frame.t)) {
@@ -157,14 +156,9 @@ export function analyzeChatFrames(frames, marks) {
       if (frame.n === 0 && previous.n > 0) {
         flag(frame.t, "BLANK", `rows ${previous.n} -> 0`, "blank");
       }
-      if (previous.n >= 3 && frame.n >= 3) {
-        const remounted = ![...ids(frame)].some((id) => ids(previous).has(id));
-        if (remounted && !remountEpisode) {
-          flag(frame.t, "REMOUNT-ALL", `every row is a new element (${previous.n} -> ${frame.n} rows)`, "remount");
-        }
-        remountEpisode = remounted;
-      } else {
-        remountEpisode = false;
+      if (previous.n >= 3 && frame.n >= 3 &&
+          ![...ids(frame)].some((id) => ids(previous).has(id))) {
+        flag(frame.t, "REMOUNT-ALL", `every row is a new element (${previous.n} -> ${frame.n} rows)`, "remount");
       }
     }
 
