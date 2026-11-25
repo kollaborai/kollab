@@ -333,6 +333,19 @@ def test_plugin_inventory_redacts_credential_shaped_renderer_namespaced_ids():
     assert entry["omitted"]["contributions"] == 1
 
 
+def test_plugin_inventory_redacts_colon_delimited_sensitive_assignments():
+    entry = _normalize_plugin_entry(
+        {
+            "id": "example-plugin",
+            "contributes": {"slash": ["token:abc123SensitiveValue"]},
+        }
+    )
+
+    assert entry is not None
+    assert entry["contributes"]["slash"] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
 def test_plugin_inventory_preserves_the_documented_sk_fetch_renderer_tag():
     contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
     contributes["renderers"] = [{"tag": "sk-fetch"}]

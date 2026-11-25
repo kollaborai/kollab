@@ -10,6 +10,7 @@ import {
   LOAD_TIMEOUT_MS,
   normalizePluginEntry,
   pluginsOff,
+  safePluginText,
   type LoaderDeps,
 } from "./loader";
 import { createPluginRegistry } from "./registry";
@@ -242,6 +243,19 @@ describe("plugin inventory text redaction", () => {
       expect(error).not.toContain(secret);
     },
   );
+
+  it("redacts spaced API-key labels with Google-shaped values", () => {
+    const secret = "AIzaSyDUMMY012345678901234567890123456";
+    const text = `API key: ${secret}`;
+
+    expect(pluginErrors.containsSensitiveText(text)).toBe(true);
+    expect(safePluginText(text)).toBeNull();
+    expect(redactPluginError(text)).toBe("API key: [redacted]");
+
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    logPluginFailure("hello", "listener failed", new Error(text));
+    expect(logged.mock.calls.flat().join(" ")).not.toContain(secret);
+  });
 
   it("redacts plugin and action text in the log prefix", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});

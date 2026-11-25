@@ -111,7 +111,7 @@ describe("PluginMount", () => {
     }
   });
 
-  it("F3 keeps the first suspension deadline through resetKey updates and resets on Retry", async () => {
+  it("F3 preserves a pending deadline and resets a timed-out suspension on key change or Retry", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.useFakeTimers();
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -135,7 +135,13 @@ describe("PluginMount", () => {
       expect(host.textContent).toContain("Hello Failed to Render");
 
       await act(async () => root.render(view("chunk-3")));
+      expect(host.textContent).toContain("Rendering plugin view");
+      expect(host.textContent).not.toContain("Hello Failed to Render");
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(host.textContent).toContain("Hello Failed to Render");
+
       await act(async () => host.querySelector("button")?.click());
       expect(host.textContent).toContain("Rendering plugin view");
       await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });

@@ -1034,6 +1034,51 @@ describe("early plugin command submission", () => {
     expect(sendCapture.text).toBe("/probe");
   });
 
+  it("does not lose ordinary slash prose when the session changes during catalog loading", async () => {
+    vi.useFakeTimers();
+    prepareMountedThread();
+    pluginRegistry.setListed(null);
+    putLoadingThreadCommand("probe");
+    const draft = "/summarize this paragraph";
+    const targetDraftKey = "round14-target-session";
+    saveComposerDraft(targetDraftKey, "");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        queueSessionId: "round14-source-session",
+      })));
+      const runtime = sendCapture.runtime as {
+        thread: { composer: { setText(text: string): void } };
+      };
+      await act(async () => {
+        runtime.thread.composer.setText(draft);
+        publishComposerText(draft);
+      });
+      const form = host.querySelector("form");
+      expect(form).not.toBeNull();
+      await act(async () => form?.requestSubmit());
+
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        draftKey: targetDraftKey,
+        queueSessionId: "round14-target-session",
+        locked: "Switching session",
+      })));
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+
+      expect(sendCapture.modelRuns).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      saveComposerDraft(targetDraftKey, "");
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps a declared plugin slash while its web module is importing", () => {
     sendCapture.text = "/probe";
     pluginRegistry.setListed(null);
