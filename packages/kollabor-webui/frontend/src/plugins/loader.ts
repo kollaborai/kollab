@@ -32,6 +32,7 @@ import {
   type PluginInventoryResponse,
   type PluginService,
 } from "./sdk";
+import { logPluginFailure } from "./plugin-errors";
 
 export const LOAD_TIMEOUT_MS = 5_000;
 
@@ -662,7 +663,7 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
           abandoned = true;
           dispose();
           if (!current(entry.id, token)) return;
-          console.error(`Plugin ${entry.id} web code failed while loading`, error);
+          logPluginFailure(entry.id, "web code load failed", error);
           registry.update(entry.id, (record) => ({ ...record, status: "failed", error: SAFE_WEB_PLUGIN_LOAD_ERROR }));
         },
       )
