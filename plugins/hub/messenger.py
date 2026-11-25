@@ -1764,7 +1764,9 @@ class AgentSocketServer:
                     # it is absent from the remote allowlist.
                     jobs: List[Any] = []
                     error = ""
-                    if self._on_cron_jobs:
+                    if self._on_cron_jobs is None:
+                        error = "cron jobs handler unavailable"
+                    else:
                         try:
                             result = self._on_cron_jobs()
                             if asyncio.iscoroutine(result):

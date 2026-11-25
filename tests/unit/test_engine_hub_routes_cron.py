@@ -6,18 +6,25 @@ each row with the agent's identity. An agent that does not answer is
 reported separately and never blocks the others.
 """
 
+import asyncio
+import json
+import os
 import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+import httpx
+import pytest
+
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from fastapi import FastAPI  # type: ignore[import-not-found]
 from fastapi.testclient import TestClient  # type: ignore[import-not-found]
-
 from kollabor_engine.routes import hub as hub_routes
+
+from plugins.hub.messenger import AgentSocketServer
 
 
 def _job(job_id, target="lapis", agent_message="report the pulse"):
@@ -242,6 +249,64 @@ class TestAggregateCronJobs(_Fixture):
         self.client.get("/hub/cron-jobs?refresh=true").json()
 
         self.assertEqual(bridge.cache_flags, [False])
+
+
+@pytest.mark.asyncio
+async def test_engine_route_reads_cron_jobs_from_a_real_agent_socket(monkeypatch):
+    socket_name = f"cron-route-{os.getpid()}-{id(monkeypatch)}"
+    server = AgentSocketServer(
+        "cron-route-agent",
+        lambda _message: None,
+        on_cron_jobs=lambda: [_job("real-socket-row")],
+        socket_name=socket_name,
+    )
+    socket_path = await server.start()
+
+    class SocketBridge:
+        def get_agents(self, use_cache=True):
+            return [{"agent_id": "cron-route-agent", "identity": "socket-agent"}]
+
+        async def query_socket(self, agent_id, action, payload=None, timeout=5.0):
+            assert agent_id == "cron-route-agent"
+            assert action == "cron_jobs"
+            reader, writer = await asyncio.open_unix_connection(socket_path)
+            try:
+                writer.write((json.dumps({"action": action}) + "\n").encode())
+                await writer.drain()
+                line = await asyncio.wait_for(reader.readline(), timeout)
+                return json.loads(line.decode())
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+    old_bridge = hub_routes._bridge
+    hub_routes._bridge = SocketBridge()
+    app = FastAPI()
+    app.include_router(hub_routes.router)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/hub/cron-jobs")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["agents_responded"] == ["socket-agent"]
+        assert [(row["agent"], row["id"]) for row in data["jobs"]] == [
+            ("socket-agent", "real-socket-row")
+        ]
+    finally:
+        hub_routes._bridge = old_bridge
+        await server.stop()
+
+
+def test_cron_jobs_route_requires_engine_bearer_auth(monkeypatch):
+    monkeypatch.delenv("KOLLAB_ENGINE_BYPASS_AUTH", raising=False)
+    from kollabor_engine.server import create_app
+
+    response = TestClient(create_app()).get("/hub/cron-jobs")
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Missing bearer token"}
 
 
 if __name__ == "__main__":

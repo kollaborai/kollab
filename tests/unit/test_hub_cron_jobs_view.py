@@ -124,7 +124,7 @@ def test_cron_jobs_frame_round_trips_over_a_real_socket(monkeypatch):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="unix socket")
-def test_cron_jobs_without_a_handler_is_empty_not_an_error():
+def test_cron_jobs_without_a_handler_reports_unavailable():
     async def run():
         server = AgentSocketServer(
             "cron-none-id",
@@ -140,7 +140,7 @@ def test_cron_jobs_without_a_handler_is_empty_not_an_error():
     assert asyncio.run(run()) == {
         "type": "cron_jobs",
         "jobs": [],
-        "error": "",
+        "error": "cron jobs handler unavailable",
     }
 
 

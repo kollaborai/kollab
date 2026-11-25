@@ -102,6 +102,8 @@ test("a per-agent refusal still shows the refusal text when no jobs exist", () =
   };
   const html = renderToStaticMarkup(<CronJobsBody view={refused} />);
   expect(html).toContain("operator gate refused the cron_jobs question");
+  expect(html).toContain("No jobs reported by responding agents");
+  expect(html).toContain("their scheduled jobs are unknown");
 });
 
 test("the summary line counts jobs, live agents, and unavailable agents", () => {
@@ -126,7 +128,7 @@ test("the panel renders the refresh control and loading state before data arrive
   );
 });
 
-test("an empty roster view explains where jobs are scheduled instead of an empty table", () => {
+test("a partial empty roster says unavailable agents have unknown jobs", () => {
   const empty: HubCronJobsView = {
     count: 0,
     jobs: [],
@@ -136,9 +138,22 @@ test("an empty roster view explains where jobs are scheduled instead of an empty
   };
   const html = renderToStaticMarkup(<CronJobsBody view={empty} />);
   expect(html).not.toContain("<table");
-  expect(html).toContain("No scheduled jobs");
-  expect(html).toContain("/hub cron add");
+  expect(html).toContain("No jobs reported by responding agents");
+  expect(html).toContain("their scheduled jobs are unknown");
   expect(html).toContain("Not answering: zircon");
+});
+
+test("a fully queried empty roster confirms there are no scheduled jobs", () => {
+  const empty: HubCronJobsView = {
+    count: 0,
+    jobs: [],
+    agents_responded: ["moonstone"],
+    agents_unavailable: [],
+    agents_errors: {},
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={empty} />);
+  expect(html).toContain("No scheduled jobs");
+  expect(html).not.toContain("jobs are unknown");
 });
 
 test("the panel shell loads on mount, refreshes read-only, and keeps the hint visible", () => {

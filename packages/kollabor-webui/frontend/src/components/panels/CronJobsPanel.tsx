@@ -56,13 +56,17 @@ function ErrorAlerts({ errors }: { errors: [string, string][] }) {
 export function CronJobsBody({ view }: { view: HubCronJobsView }) {
   const errorAgents = Object.entries(view.agents_errors || {});
   if (!view.jobs.length) {
+    const partial = view.agents_unavailable.length > 0 || errorAgents.length > 0;
     return (
       <div className="text-muted-foreground rounded-lg border p-4 text-sm">
         <ErrorAlerts errors={errorAgents} />
-        <p className="text-foreground font-medium">No scheduled jobs</p>
+        <p className="text-foreground font-medium">
+          {partial ? "No jobs reported by responding agents" : "No scheduled jobs"}
+        </p>
         <p className="mt-1">
-          No live agent on this machine has a hub cron job. Schedule one from
-          an agent's terminal: /hub cron add
+          {partial
+            ? "Some agents could not be checked, so their scheduled jobs are unknown."
+            : "No live agent on this machine has a hub cron job. Schedule one from an agent's terminal: /hub cron add"}
         </p>
         {view.agents_unavailable.length > 0 ? (
           <p className="mt-2">
