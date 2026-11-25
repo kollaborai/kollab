@@ -103,10 +103,10 @@ export function isCompactionComplete({
 }
 
 /** Check that a reload snapshot still contains the same live turn and inputs. */
-export function hasRunningTurnWithInputs(snapshot, expectedTurn) {
+export function hasRunningTurnWithInputs(snapshot, expectedTurn, { allowEmptyInputs = false } = {}) {
   const expectedIds = expectedTurn?.input_ids;
   if (!Array.isArray(snapshot?.turns) || !Array.isArray(snapshot?.inputs) ||
-      !expectedTurn?.turn_id || !Array.isArray(expectedIds) || expectedIds.length === 0) return false;
+      !expectedTurn?.turn_id || !Array.isArray(expectedIds) || (!allowEmptyInputs && expectedIds.length === 0)) return false;
   const turn = snapshot.turns.find((item) => item.turn_id === expectedTurn.turn_id && item.state === "running");
   if (!turn || !Array.isArray(turn.input_ids)) return false;
   return expectedIds.every((id) =>

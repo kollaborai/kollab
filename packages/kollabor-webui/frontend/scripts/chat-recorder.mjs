@@ -607,11 +607,11 @@ async function record(flow, session, browser, target) {
   const reloadDuringRun = async (reply, goalCheck = null) => {
     await waitForRunning();
     await sleep(1200);
-    const expectedActiveTurn = await page.evaluate(() => {
+    const expectedActiveTurn = await page.evaluate((allowEmptyInputs) => {
       const turn = window.__rec.streamTurns.filter((item) => item.state === "running").at(-1);
-      if (!turn || !Array.isArray(turn.input_ids) || turn.input_ids.length === 0) return null;
+      if (!turn || !Array.isArray(turn.input_ids) || (!allowEmptyInputs && turn.input_ids.length === 0)) return null;
       return { turn_id: turn.turn_id, input_ids: [...turn.input_ids] };
-    });
+    }, goalCheck?.allowEmptyInputs === true);
     if (!expectedActiveTurn) {
       throw new Error("the stream did not identify the running turn and its inputs before reload");
     }
@@ -622,7 +622,7 @@ async function record(flow, session, browser, target) {
     await page.reload({ waitUntil: "domcontentloaded" });
     const snapshot = await waitForStreamSnapshot();
     const preservedTurn = await page.evaluate(() => window.__rec.expectedActiveTurn);
-    if (!hasRunningTurnWithInputs(snapshot, preservedTurn)) {
+    if (!hasRunningTurnWithInputs(snapshot, preservedTurn, { allowEmptyInputs: goalCheck?.allowEmptyInputs === true })) {
       throw new Error("the reload snapshot did not retain the active running turn and its inputs");
     }
     if (goalCheck) await goalCheck.after();
@@ -842,6 +842,7 @@ async function record(flow, session, browser, target) {
       await command(`/goal ${U(1)}: Use your terminal tool to run ` + "`sleep 10`" + `, then complete this goal with a concise report containing exactly ${R(1)}.`, "PAGE START GOAL");
       let expectedGoal;
       await reloadDuringRun(R(1), {
+        allowEmptyInputs: true,
         before: async () => {
           expectedGoal = await readPersistedGoal();
           if (!expectedGoal || expectedGoal.status !== "active" || !expectedGoal.objective.includes(U(1))) {
@@ -855,6 +856,7 @@ async function record(flow, session, browser, target) {
           }
         },
       });
+      throw new Error("goal reload proof incomplete: the stream exposes no goal-to-turn association");
     },
     // Inject a real hub message while the page's turn is still running.
     async "hub-note"() {
