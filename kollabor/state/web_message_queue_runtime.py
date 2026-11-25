@@ -866,6 +866,23 @@ class WebMessageQueueRuntime:
                     for batch in batches:
                         if not send_now and self._is_processing():
                             break
+                        bus = getattr(self.state_service, "_event_bus", None)
+                        get_service = getattr(bus, "get_service", None)
+                        stream = (
+                            get_service("chat_stream")
+                            if callable(get_service)
+                            else None
+                        )
+                        bind_scope = getattr(stream, "bind_queued_input_scope", None)
+                        if callable(bind_scope):
+                            scope = (
+                                binding.scope_id,
+                                binding.conversation_uid,
+                                binding.principal_id,
+                            )
+                            for item in batch.items:
+                                if request_id is None or item.request_id == request_id:
+                                    bind_scope(item.request_id, scope)
                         last_result = await worker.dispatch_batch(
                             batch.batch_id,
                             send_now=send_now,

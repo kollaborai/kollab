@@ -320,6 +320,12 @@ class ChatStreamService:
                 self._upsert(uid, updated)
         return {"found": True, "cancelled": cancelled}
 
+    def bind_queued_input_scope(
+        self, input_id: str, scope: tuple[str, str, str]
+    ) -> None:
+        """Retain the trusted queue owner before an input can emit lifecycle events."""
+        self._input_scopes.setdefault((scope[1], input_id), scope)
+
     async def send_now(self, params: dict[str, Any]) -> dict[str, Any]:
         input_id = params.get("id")
         if not isinstance(input_id, str) or not input_id:
