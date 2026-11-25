@@ -6,7 +6,7 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright-core";
-import { makeFixtures, openVite } from "./learn-browser-acceptance.mjs";
+import { makeFixtures, openVite, waitForSessionReady } from "./learn-browser-acceptance.mjs";
 
 const timeout = 15_000;
 const localSession = {
@@ -19,6 +19,7 @@ const localSession = {
   active: true,
 };
 const remoteId = "remote-session-1";
+const remoteButtonSelector = '[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]';
 const prompt = "LIFECYCLE_REMOTE_PROMPT";
 const reply = "LIFECYCLE_REMOTE_REPLY";
 const history = [];
@@ -133,6 +134,27 @@ async function openPageInContext(context, baseUrl, fixtures) {
   return { page, pageErrors, consoleErrors, externalRequests };
 }
 
+async function waitForLocalSession(page) {
+  await waitForSessionReady(page, {
+    sidebarTitleIncludes: localSession.name,
+    sessionHeading: "Local Coder",
+    sessionName: localSession.name,
+    timeout,
+  });
+}
+
+async function selectRemoteSession(page) {
+  await waitForSessionReady(page, {
+    sidebarTitleIncludes: "Open Remote Coder on remote-build",
+    sessionHeading: "Remote Coder",
+    sessionName: "Remote coder session",
+    historyPath: `/sessions/${remoteId}/history`,
+    composerPlaceholder: "Message Remote Coder…",
+    clickTarget: page.locator(remoteButtonSelector),
+    timeout,
+  });
+}
+
 async function main() {
   const { server, baseUrl } = await openVite();
   let context;
@@ -152,11 +174,9 @@ async function main() {
     fixtures = makeFixtures({ sessions: [localSession] });
     shell = await openPageInContext(context, baseUrl, fixtures);
     await shell.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    const controls = shell.page.getByRole("complementary", { name: "Session Controls" });
-    await controls.getByText(localSession.name, { exact: true }).waitFor({ timeout });
+    await waitForLocalSession(shell.page);
 
-    await shell.page.locator('[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]').click();
-    await controls.getByText("Remote coder session", { exact: true }).waitFor({ timeout });
+    await selectRemoteSession(shell.page);
     const composer = shell.page.getByRole("textbox", { name: "Message input" });
     await composer.fill(prompt);
     await composer.press("Enter");
@@ -166,9 +186,8 @@ async function main() {
 
     // Switching away and back exercises the history fetch on session open.
     await shell.page.locator(`[data-sidebar="sidebar"] button[title*="${localSession.name}"]`).click();
-    await shell.page.locator('[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]').click();
-    await controls.getByText("Remote coder session", { exact: true }).waitFor({ timeout });
-    await shell.page.waitForTimeout(500);
+    await waitForLocalSession(shell.page);
+    await selectRemoteSession(shell.page);
     console.log("remote reselection observation:", JSON.stringify({
       activeRows: await shell.page.locator('[data-sidebar="sidebar"] button[data-active="true"]').evaluateAll((rows) => rows.map((row) => row.getAttribute("title"))),
       remoteSessionRequests: fixtures.requests.filter((request) => request.endpoint.includes(remoteId)),
@@ -181,14 +200,8 @@ async function main() {
     // remote read must not erase the conversation that was already verified.
     failNextHistoryRead = true;
     await shell.page.reload({ waitUntil: "domcontentloaded" });
-    await controls.getByText(localSession.name, { exact: true }).waitFor({ timeout });
-    await shell.page.locator('[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]').click();
-    await shell.page.locator(".aui-composer-input").waitFor({ state: "visible", timeout });
-    await shell.page.waitForFunction(() =>
-      document.querySelector(".aui-composer-input")?.getAttribute("placeholder") === "Message Remote Coder…",
-      null,
-      { timeout },
-    );
+    await waitForLocalSession(shell.page);
+    await selectRemoteSession(shell.page);
     await shell.page.getByText(reply, { exact: true }).first().waitFor({ timeout });
     assert.ok(historyReads.length >= 3, `expected open/switch/reopen history reads, got ${historyReads.length}`);
     const cachedHistory = await cachedRemoteHistory(shell.page);
@@ -207,16 +220,10 @@ async function main() {
     context = await chromium.launchPersistentContext(profileDir, launchOptions);
     shell = await openPageInContext(context, baseUrl, fixtures);
     await shell.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await shell.page.getByRole("complementary", { name: "Session Controls" })
-      .getByText(localSession.name, { exact: true }).waitFor({ timeout });
+    await waitForLocalSession(shell.page);
     const acrossRestart = await cachedRemoteHistory(shell.page);
     assert.deepEqual(acrossRestart?.map((row) => row.content), [prompt, reply], "browser recreation must preserve the isolated IndexedDB history");
-    await shell.page.locator('[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]').click();
-    await shell.page.waitForFunction(() =>
-      document.querySelector(".aui-composer-input")?.getAttribute("placeholder") === "Message Remote Coder…",
-      null,
-      { timeout },
-    );
+    await selectRemoteSession(shell.page);
     await shell.page.getByText(reply, { exact: true }).first().waitFor({ timeout });
     assert.ok(historyReads.length >= 4, `expected a history read after browser recreation, got ${historyReads.length}`);
     assert.ok(shell.externalRequests.length === 0, `unexpected external calls after recreation: ${shell.externalRequests.join(", ")}`);
