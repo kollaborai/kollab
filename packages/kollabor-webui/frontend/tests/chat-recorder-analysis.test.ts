@@ -288,6 +288,31 @@ describe("chat recorder analysis", () => {
     expect(`/sessions/${encodeURIComponent("session one")}/inputs`.endsWith(suffix)).toBe(false);
   });
 
+  it("counts a tool call once across row IDs and reload", () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    const installPage = (saved: string | null) => {
+      const window = { fetch: async () => new Response() };
+      const install = runInNewContext(`(${body})`, {
+        window, Request, Response, ReadableStream, TextDecoder, URL, performance,
+        location: { href: "http://localhost/" },
+        sessionStorage: { getItem: () => saved, removeItem: () => {} },
+        requestAnimationFrame: () => {},
+      });
+      install({ wall0: Date.now(), sessionStreamSuffix: "/sessions/target/stream", user: [], reply: [] });
+      return (window as any).__rec;
+    };
+    const row = (id: string) => ({ id, seq: 10, kind: "tool", parts: [{ type: "tool-call", tool_call_id: "call-1" }] });
+    const rec = installPage(null);
+    rec.flowSeq = 1;
+    rec.noteToolRow(row("row-1"));
+    rec.noteToolRow(row("row-2"));
+    expect(rec.toolsStarted).toBe(1);
+    const restored = installPage(JSON.stringify(rec));
+    restored.noteToolRow(row("row-3"));
+    expect(restored.toolsStarted).toBe(1);
+  });
+
   it("records event streams only for the selected session", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
