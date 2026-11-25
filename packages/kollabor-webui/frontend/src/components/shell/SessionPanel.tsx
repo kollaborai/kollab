@@ -52,7 +52,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -669,6 +668,25 @@ export function SessionPanel({
                   const canEstablishOwnership = visibleDefinitionsLoad === "success";
                   const connected = visibleSessionMcpLoad === "success" && info?.status === "connected";
                   const tools = Array.isArray(info?.tools) ? info.tools : [];
+                  const toolCount = info?.tool_count || tools.length || 0;
+                  const toolNames = tools.map((tool) =>
+                    typeof tool === "string"
+                      ? tool
+                      : String((tool as Record<string, unknown>).name || "tool"),
+                  );
+                  const toolNameList = [
+                    toolNames.slice(0, 8).join(", "),
+                    toolNames.length > 8 ? `+${toolNames.length - 8} more` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(", ");
+                  const toolSummary = [
+                    `${toolCount} ${toolCount === 1 ? "tool" : "tools"}`,
+                    toolNameList,
+                    info?.error,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ");
                   return (
                     <div
                       key={name}
@@ -702,80 +720,63 @@ export function SessionPanel({
                             </span>
                           ) : null}
                         </div>
-                        <Badge
-                          className="shrink-0"
-                          variant={connected ? "default" : "outline"}
+                        <span
+                          className={cn(
+                            "shrink-0 text-xs",
+                            connected ? "text-foreground font-medium" : "text-muted-foreground",
+                          )}
                         >
                           {visibleSessionMcpLoad !== "success"
                             ? "Unknown"
                             : connected
                               ? "Connected"
                               : "Offline"}
-                        </Badge>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-muted-foreground text-xs">
-                          {visibleSessionMcpLoad !== "success"
-                            ? "Session tools unavailable"
-                            : `${info?.tool_count || tools.length || 0} tools${info?.error ? ` · ${info.error}` : ""}`}
                         </span>
-                        <div className="flex items-center gap-1">
-                          {editable || !canEstablishOwnership ? (
-                            <>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="ghost"
-                                aria-label={`Edit ${name}`}
-                                disabled={!canEstablishOwnership || !editable || mcpBusy === name}
-                                onClick={() => startEditServer(name, definition)}
-                              >
-                                <Pencil className="size-4" />
-                              </Button>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="ghost"
-                                aria-label={`Delete ${name}`}
-                                disabled={!canEstablishOwnership || !editable || mcpBusy === name}
-                                onClick={() => setPendingMcpDelete(name)}
-                              >
-                                <Trash2 className="size-4" />
-                              </Button>
-                            </>
-                          ) : null}
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant={connected ? "outline" : "default"}
-                            disabled={mcpBusy === name || visibleSessionMcpLoad !== "success"}
-                            onClick={() => void toggleMcp(name, connected)}
-                          >
-                            {mcpBusy === name
-                              ? "…"
-                              : connected
-                                ? "Disconnect"
-                                : "Connect"}
-                          </Button>
-                        </div>
                       </div>
-                      {tools.length ? (
-                        <div className="flex flex-wrap gap-1">
-                          {tools.slice(0, 8).map((tool, index) => (
-                            <Badge key={`${name}-${index}`} variant="secondary">
-                              {typeof tool === "string"
-                                ? tool
-                                : String(
-                                    (tool as Record<string, unknown>).name ||
-                                      "tool",
-                                  )}
-                            </Badge>
-                          ))}
-                          {tools.length > 8 ? (
-                            <Badge variant="secondary">+{tools.length - 8}</Badge>
-                          ) : null}
-                        </div>
-                      ) : null}
+                      <p className="text-muted-foreground text-xs">
+                        {visibleSessionMcpLoad !== "success"
+                          ? "Session tools unavailable"
+                          : toolSummary}
+                      </p>
+                      <div className="flex items-center justify-end gap-1">
+                        {editable || !canEstablishOwnership ? (
+                          <>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              aria-label={`Edit ${name}`}
+                              disabled={!canEstablishOwnership || !editable || mcpBusy === name}
+                              onClick={() => startEditServer(name, definition)}
+                            >
+                              <Pencil className="size-4" />
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              aria-label={`Delete ${name}`}
+                              disabled={!canEstablishOwnership || !editable || mcpBusy === name}
+                              onClick={() => setPendingMcpDelete(name)}
+                            >
+                              <Trash2 className="size-4" />
+                            </Button>
+                          </>
+                        ) : null}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={connected ? "outline" : "default"}
+                          disabled={mcpBusy === name || visibleSessionMcpLoad !== "success"}
+                          onClick={() => void toggleMcp(name, connected)}
+                        >
+                          {mcpBusy === name
+                            ? "…"
+                            : connected
+                              ? "Disconnect"
+                              : "Connect"}
+                        </Button>
+                      </div>
                     </div>
                   );
                 })
