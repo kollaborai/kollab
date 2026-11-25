@@ -163,7 +163,10 @@ function installRecorder(cfg) {
       if (row.turn_id && !rec.measuredTurns.includes(row.turn_id)) rec.measuredTurns.push(row.turn_id);
     }
     for (const part of row.parts) {
-      if (part.type !== "tool-call" || !part.tool_call_id || rec.toolCalls.includes(part.tool_call_id)) continue;
+      if (part.type !== "tool-call" || !part.tool_call_id) continue;
+      const pending = rec.pendingToolCalls.find((call) => call.id === part.tool_call_id);
+      if (pending && row.turn_id) pending.turn_id = row.turn_id;
+      if (rec.toolCalls.includes(part.tool_call_id)) continue;
       rec.toolCalls.push(part.tool_call_id);
       if (rec.measuring) rec.pendingToolCalls.push({ id: part.tool_call_id, turn_id: row.turn_id });
       else if (rec.flowSeq !== null) rec.toolsStarted += 1;
