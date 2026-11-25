@@ -25,18 +25,12 @@ const PNG = Buffer.from(
   "base64",
 );
 const screenshotDir = process.env.ISSUE_1176_SCREENSHOT_DIR
-  ?? path.join(os.tmpdir(), "kollab-issue-1176-screenshots");
-
-function frame(value) {
-  return `data: ${JSON.stringify(value)}\n\n`;
-}
+  ?? path.join(os.homedir(), "backups/claude-work/lanes-1451/artifacts/issue-1176-screenshots");
 
 function sentMessage(body) {
-  const commandMessage = body.commands?.find((command) => command.type === "add-message")?.message;
-  const message = commandMessage ?? body.message ?? body.messages?.at(-1);
-  const parts = message?.parts ?? message?.content;
-  assert.ok(Array.isArray(parts), "assistant transport must carry user message parts");
-  return { parts };
+  assert.equal(typeof body.text, "string", "input transport must carry the composer text");
+  assert.ok(Array.isArray(body.attachments), "input transport must carry attachment metadata");
+  return body;
 }
 
 async function main() {
@@ -81,34 +75,16 @@ async function main() {
     };
     shell = await openPage(browser, baseUrl, fixtures, { viewport: { width: 1280, height: 900 } });
     await shell.page.route(
-      (url) => url.pathname.endsWith(`/${SESSION_ID}/assistant`),
+      (url) => url.pathname.endsWith(`/${SESSION_ID}/inputs`),
       async (route) => {
         try {
-          const body = route.request().postDataJSON();
-          const { parts } = sentMessage(body);
-          resolveTransport({ parts });
-          const text = parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-          const userMessage = {
-            id: "issue-1176-user",
-            role: "user",
-            content: [{ type: "text", text }],
-            metadata: { custom: { media: [MEDIA] } },
-          };
-          const response = [
-            frame({ type: "part-start", part: { type: "text" } }),
-            frame({
-              type: "update-state",
-              operations: [
-                { type: "set", path: ["messages"], value: [userMessage] },
-                { type: "set", path: ["synced"], value: null },
-                { type: "set", path: ["usage"], value: { inputTokens: 1, outputTokens: 0, toolCalls: 0, stopReason: "stop" } },
-              ],
-            }),
-            frame({ type: "part-finish", path: [0] }),
-            frame({ type: "message-finish", finishReason: "stop" }),
-            "data: [DONE]\n\n",
-          ].join("");
-          await route.fulfill({ status: 200, contentType: "text/event-stream", body: response });
+          const body = sentMessage(route.request().postDataJSON());
+          resolveTransport(body);
+          await route.fulfill({
+            status: 202,
+            contentType: "application/json",
+            body: JSON.stringify({ id: body.id, state: "queued" }),
+          });
         } catch (error) {
           rejectTransport(error);
           await route.abort();
@@ -156,50 +132,36 @@ async function main() {
       failures.push(`restored composer text changed unexpectedly: ${JSON.stringify(restoredText)}`);
     }
 
-    await composer.press("Enter");
-
-    const sent = await Promise.race([
-      transportRequest,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("assistant transport was not called")), 15_000)),
-    ]);
-    const text = sent.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-    const tokenCount = (text.match(/\[image1\]/g) ?? []).length;
-    if (tokenCount !== 1) failures.push(`sent text contained ${tokenCount} [image1] tokens: ${JSON.stringify(text)}`);
-    const imageCount = sent.parts.filter((part) => part.type === "image").length;
-    if (imageCount !== 1) failures.push(`send carried ${imageCount} image parts`);
-
-    const thumbnail = shell.page.getByRole("button", { name: "Open image" });
-    const thumbnailVisible = await thumbnail.first().waitFor({ state: "visible", timeout: 5_000 })
-      .then(() => true, () => false);
-    if (!thumbnailVisible) {
-      failures.push("sent user message did not show an image thumbnail");
-    } else {
-      await thumbnail.first().locator("img").evaluate((image) => image.decode());
-    }
-    const messageCount = await shell.page.locator('[data-role="user"] .aui-user-message-content').count();
-    if (messageCount === 0) {
-      failures.push("sent user message bubble did not render");
-    } else {
-      const visibleMessage = await shell.page.locator('[data-role="user"] .aui-user-message-content').innerText();
-      if (visibleMessage.includes("[image1]")) failures.push("sent bubble showed the raw image token");
-    }
-
+    const restoredAttachment = shell.page.locator('.aui-composer-attachments [aria-label^="Image attachment"]');
+    await restoredAttachment.waitFor({ state: "visible" });
     await mkdir(screenshotDir, { recursive: true });
     await shell.page.screenshot({ path: path.join(screenshotDir, "issue-1176-image-message.png"), animations: "disabled" });
     for (const width of [390, 820]) {
       await shell.page.setViewportSize({ width, height: 900 });
-      if (thumbnailVisible && !(await thumbnail.first().isVisible())) {
-        failures.push(`sent image thumbnail was not visible at ${width}px`);
-      }
+      await restoredAttachment.waitFor({ state: "visible" });
       const horizontalOverflow = await shell.page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
       if (horizontalOverflow) failures.push(`chat has horizontal overflow at ${width}px`);
       await shell.page.screenshot({ path: path.join(screenshotDir, `issue-1176-image-message-${width}.png`), animations: "disabled" });
     }
+    await composer.press("Enter");
+    const sent = await Promise.race([
+      transportRequest,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("input transport was not called")), 15_000)),
+    ]);
+    const text = sent.text;
+    const tokenCount = (text.match(/\[image1\]/g) ?? []).length;
+    if (tokenCount !== 1) failures.push(`sent text contained ${tokenCount} [image1] tokens: ${JSON.stringify(text)}`);
+    const attachmentCount = sent.attachments.length;
+    if (attachmentCount !== 1) failures.push(`send carried ${attachmentCount} image attachments`);
+    if (sent.attachments[0]?.content_type !== "image/png" || !sent.attachments[0]?.data_url?.startsWith("data:image/png;base64,")) {
+      failures.push("the restored image was not sent as a PNG data URL");
+    }
+    if (!/^web-[0-9a-f]{24}$/.test(sent.id)) failures.push(`input id was not stable web id: ${sent.id}`);
 
     if (shell.pageErrors.length) failures.push(`browser page errors: ${JSON.stringify(shell.pageErrors)}`);
     if (shell.externalRequests.length) failures.push(`unexpected external requests: ${JSON.stringify(shell.externalRequests)}`);
     if (failures.length) throw new Error(failures.join("\n"));
-    console.log("PASS: one restored image token and image part sent; thumbnail visible at 1280px, 820px, and 390px.");
+    console.log("PASS: one restored image token and one image attachment are sent under a stable input id.");
     console.log("Screenshots: issue-1176-image-message.png, issue-1176-image-message-820.png, issue-1176-image-message-390.png");
   } finally {
     await shell?.context.close();
