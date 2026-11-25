@@ -50,6 +50,7 @@ const sendCapture = vi.hoisted(() => ({
   sendWaitingNow: null as (() => void) | null,
   runtime: null as unknown,
   transportCommands: [] as unknown[],
+  queueRequests: [] as Array<{ text: string; sendNow: boolean }>,
   newMessages: 0,
   modelRuns: 0,
 }));
@@ -523,7 +524,26 @@ function LocalThreadHarness({
   return createElement(
     AssistantRuntimeProvider,
     { runtime },
-    createElement(Thread, { agents: [], commands, commandCatalogStatus, draftKey, attachmentsEnabled: false }),
+    createElement(Thread, {
+      agents: [],
+      commands,
+      commandCatalogStatus,
+      draftKey,
+      attachmentsEnabled: false,
+      onQueueBusyMessage: async (request: { text: string; sendNow: boolean }) => {
+        sendCapture.queueRequests.push({ text: request.text, sendNow: request.sendNow });
+        return {
+          admitted: true as const,
+          batchId: "b",
+          requestId: "r",
+          operationId: "o",
+          scopeId: "s",
+          incarnation: "i",
+          planKey: "p",
+          sendNowStatus: request.sendNow ? ("accepted" as const) : ("not-requested" as const),
+        };
+      },
+    }),
   );
 }
 
@@ -563,6 +583,7 @@ afterEach(() => {
   sendCapture.sendWaitingNow = null;
   sendCapture.runtime = null;
   sendCapture.transportCommands.length = 0;
+  sendCapture.queueRequests.length = 0;
   sendCapture.newMessages = 0;
   sendCapture.modelRuns = 0;
 });
@@ -871,10 +892,7 @@ describe("native command reservations", () => {
 
       expect(execute).not.toHaveBeenCalled();
       expect(prevented).toBe(true);
-      expect(sendCapture.transportCommands).toContainEqual(expect.objectContaining({
-        type: "add-message",
-        message: { role: "user", parts: [{ type: "text", text: "/exit" }] },
-      }));
+      expect(sendCapture.queueRequests).toContainEqual(expect.objectContaining({ text: "/exit" }));
     } finally {
       resolveRun({ content: [] });
       await act(async () => root.unmount());
@@ -1078,22 +1096,14 @@ describe("early plugin command submission", () => {
         }));
         await Promise.resolve();
       });
-      expect(sendCapture.transportCommands).not.toContainEqual(expect.objectContaining({
-        type: "add-message",
-        message: { role: "user", parts: [{ type: "text", text }] },
-      }));
-      expect(sendWaitingNow).not.toHaveBeenCalled();
+      expect(sendCapture.queueRequests).not.toContainEqual(expect.objectContaining({ text }));
 
       await act(async () => {
         root.render(createElement(ThreadHarness, { commandCatalogStatus: "ready", draftKey }));
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
 
-      expect(sendCapture.transportCommands).toContainEqual(expect.objectContaining({
-        type: "add-message",
-        message: { role: "user", parts: [{ type: "text", text }] },
-      }));
-      expect(sendWaitingNow).toHaveBeenCalledOnce();
+      expect(sendCapture.queueRequests).toContainEqual(expect.objectContaining({ text, sendNow: true }));
     } finally {
       resolveRun({ content: [] });
       await act(async () => root.unmount());

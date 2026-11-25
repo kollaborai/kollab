@@ -69,6 +69,12 @@ def _wire_message(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     else:
         message["content"] = str(content)
     message["timestamp"] = str(raw.get("timestamp", inner.get("timestamp", "")) or "")
+    # Queue-owned media handoff is bound to the durable JSONL row UUID. Keep
+    # the logger's outer identity in the wire history shape so attachment
+    # verification can associate the exact indexed bytes with this row.
+    row_uuid = raw.get("uuid", inner.get("uuid"))
+    if isinstance(row_uuid, str) and row_uuid:
+        message["uuid"] = row_uuid
     metadata = inner.get("metadata")
     message["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
     # The logger stores the system prompt as a user record. The daemon marks

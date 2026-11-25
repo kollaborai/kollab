@@ -44,7 +44,14 @@ import {
   orphanImageNotice,
   stripImageTokens,
   stripLeadingImageTokens,
+  type ComposerAttachmentLike,
 } from "@/composer-restore";
+import {
+  acknowledgeBusyWebMessage,
+  hasUnresolvedBusyWebMessage,
+  type BusyWebMessageComposerRequest,
+  type BusyWebMessageResult,
+} from "@/components/web-queue/submit";
 import { useShallow } from "zustand/shallow";
 import type { ThreadUserMessagePart } from "@assistant-ui/core";
 import {
@@ -98,7 +105,6 @@ import {
   type PendingAttachment,
   type ToolCallMessagePartComponent,
   useAui,
-  useAssistantTransportSendCommand,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -126,6 +132,7 @@ import {
   type FC,
   type KeyboardEvent,
   type PropsWithChildren,
+  type ReactNode,
 } from "react";
 
 const PLUGIN_COMMAND_SUBMISSION_WAIT_MS = 2_000;
@@ -180,6 +187,14 @@ export type ThreadProps = {
   historyStartIndex?: number | undefined;
   /** Per-agent/conversation localStorage key for the unsent composer text. */
   draftKey?: string | null | undefined;
+  /** Engine session owning this daemon queue submission plan. */
+  queueSessionId?: string | null | undefined;
+  /** Current canonical conversation for local queue retry ownership. */
+  queueConversationUid?: string | null | undefined;
+  /** Daemon-backed queue shown in the sticky composer footer. */
+  queuePanel?: ReactNode | undefined;
+  /** Queue a busy-composer message through the authenticated daemon route. */
+  onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
 };
 
 function composerRevisionSignature(text: string, attachments: readonly { id: string }[]): string {
@@ -224,6 +239,10 @@ export const Thread: FC<ThreadProps> = ({
   onRetryHistory,
   historyStartIndex = 0,
   draftKey,
+  queueSessionId,
+  queueConversationUid,
+  queuePanel,
+  onQueueBusyMessage,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -243,6 +262,10 @@ export const Thread: FC<ThreadProps> = ({
         onRetryHistory={onRetryHistory}
         historyStartIndex={historyStartIndex}
         draftKey={draftKey}
+        queueSessionId={queueSessionId}
+        queueConversationUid={queueConversationUid}
+        queuePanel={queuePanel}
+        onQueueBusyMessage={onQueueBusyMessage}
       />
     </ThreadComponentsContext.Provider>
   );
@@ -262,6 +285,10 @@ const ThreadRoot: FC<{
   onRetryHistory: ThreadProps["onRetryHistory"];
   historyStartIndex: number;
   draftKey: ThreadProps["draftKey"];
+  queueSessionId: ThreadProps["queueSessionId"];
+  queueConversationUid: ThreadProps["queueConversationUid"];
+  queuePanel: ThreadProps["queuePanel"];
+  onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
 }> = ({
   isEmpty,
   agents,
@@ -276,6 +303,10 @@ const ThreadRoot: FC<{
   onRetryHistory,
   historyStartIndex,
   draftKey,
+  queueSessionId,
+  queueConversationUid,
+  queuePanel,
+  onQueueBusyMessage,
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -430,6 +461,7 @@ const ThreadRoot: FC<{
                 : "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
+            {queuePanel}
             {/* Keep transient status in the sticky footer so its mount/unmount
                 does not change the positions of transcript rows above it. */}
             {historyStatus ? (
@@ -465,6 +497,9 @@ const ThreadRoot: FC<{
                 onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={attachmentsEnabled}
                 draftKey={draftKey}
+                queueSessionId={queueSessionId}
+                queueConversationUid={queueConversationUid}
+                onQueueBusyMessage={onQueueBusyMessage}
               />
             </div>
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -560,9 +595,11 @@ const Composer: FC<{
   onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
-}> = ({ agents, commands, commandCatalogStatus, onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey }) => {
+  queueSessionId: ThreadProps["queueSessionId"];
+  queueConversationUid: ThreadProps["queueConversationUid"];
+  onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
+}> = ({ agents, commands, commandCatalogStatus, onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey, queueSessionId, queueConversationUid, onQueueBusyMessage }) => {
   const aui = useAui();
-  const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
   // running the agent listens) stays a typed command, and its status line shows.
   const terminalVoice = useVoiceMode();
@@ -577,7 +614,6 @@ const Composer: FC<{
     (command) => command.name === "voice" && command.enabled !== false,
   );
   const permissionStop = usePendingPermissionCancellation();
-  const sendWaitingNow = useSendWaitingNow();
   // The submit under way came from Cmd/Ctrl+Enter: the message goes at once.
   const submitSendsNow = useRef(false);
   const slotMode = useAuiState((s) =>
@@ -602,6 +638,12 @@ const Composer: FC<{
   const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
   const skipEmptyDraftPersist = useRef<{ key: string } | null>(null);
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
+  const [queueAdmissionLock, setQueueAdmissionLock] = useState<{
+    draftKey: string | null;
+    locked: boolean;
+  } | null>(null);
+  const queueAdmissionLocked = hasUnresolvedBusyWebMessage(queueSessionId, draftKey, undefined, queueConversationUid) ||
+    (queueAdmissionLock?.locked === true && queueAdmissionLock.draftKey === (draftKey ?? null));
 
   useLayoutEffect(() => {
     let cancelled = false;
@@ -708,7 +750,7 @@ const Composer: FC<{
     if (!key) return;
     if (composerText.length === 0 && skipEmptyDraftPersist.current?.key === key) {
       // assistant-ui clears the input as soon as submit starts. Keep the
-      // durable copy until the transport confirms that add-message succeeded.
+      // durable copy until transport or daemon queue admission is confirmed.
       skipEmptyDraftPersist.current = null;
       return;
     }
@@ -970,6 +1012,9 @@ const Composer: FC<{
     inFlight.add(fingerprint);
     event.preventDefault();
     setBusySubmitError(null);
+    setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: true });
+    let admissionConfirmed = false;
+    let exactDraftStillVisible = true;
     try {
       const attachments = await Promise.all(
         state.attachments.map(async (attachment) => {
@@ -983,43 +1028,51 @@ const Composer: FC<{
           throw new Error("Attachment is not ready to send");
         }),
       );
-      const parts: Array<
-        | { type: "text"; text: string }
-        | { type: "image"; image: string }
-      > = [];
-      if (state.text.trim()) parts.push({ type: "text", text: state.text });
-      for (const attachment of attachments) {
-        for (const part of attachment.content ?? []) {
-          if (part.type === "text") parts.push({ type: "text", text: part.text });
-          if (part.type === "image") parts.push({ type: "image", image: part.image });
-        }
-      }
-      if (parts.length === 0) throw new Error("Message has no sendable content");
-      queueComposerDraftSubmission(draftKey, state.text);
-      if (state.text.length > 0 && draftKey) skipEmptyDraftPersist.current = { key: draftKey };
-      // The message waits for the turn to end, as a queued message (#1102).
-      sendTransportCommand({
-        type: "add-message",
-        message: { role: "user", parts },
-        parentId: null,
-        sourceId: null,
+      if (!onQueueBusyMessage) throw new Error("The daemon message queue is unavailable.");
+      const result = await onQueueBusyMessage({
+        draftKey,
+        text: state.text,
+        attachments: attachments as ComposerAttachmentLike[],
+        sendNow: sendsNow,
       });
-      if (sendsNow) sendWaitingNow?.();
+      if (!result.admitted) throw new Error("The daemon did not confirm queue admission.");
+      admissionConfirmed = true;
       const currentState = aui.composer.getState();
       const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
         .map((attachment) => attachment.id)
         .join(",")}`;
+      exactDraftStillVisible = currentFingerprint === fingerprint;
       if (currentFingerprint === fingerprint) {
-        void aui.composer.reset();
+        if (state.text.length > 0 && draftKey) skipEmptyDraftPersist.current = { key: draftKey };
+        await aui.composer.reset();
+        if (state.text.length > 0) saveComposerDraft(draftKey, "");
+        if (!await acknowledgeBusyWebMessage(result)) {
+          setBusySubmitError("Message was queued, but the local retry guard could not be cleared. Check the queue before reusing this draft.");
+        } else if (sendsNow && result.sendNowStatus !== "accepted") {
+          setBusySubmitError(result.sendNowStatus === "unknown"
+            ? "Message is queued, but Send Now could not be confirmed. Check the queue before retrying."
+            : "Message is queued, but Send Now was not accepted. It remains in the queue.");
+        }
       }
-    } catch {
+      setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: false });
+    } catch (error) {
       if (lastBusySubmit.current?.fingerprint === fingerprint) {
         lastBusySubmit.current = {
           ...lastBusySubmit.current,
           at: Number.NEGATIVE_INFINITY,
         };
       }
-      setBusySubmitError("Could not send the message. Retry or remove the attachment.");
+      const unresolved = typeof error === "object" && error !== null &&
+        "requiresExactRetry" in error && error.requiresExactRetry === true;
+      const rejected = typeof error === "object" && error !== null &&
+        "definitelyNotAdmitted" in error && error.definitelyNotAdmitted === true;
+      const keepExactDraft = unresolved || (admissionConfirmed && exactDraftStillVisible);
+      setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: keepExactDraft });
+      setBusySubmitError(unresolved
+        ? "Queue admission may have succeeded. Keep this exact message unchanged and retry to reconcile it safely."
+        : rejected && error instanceof Error
+          ? error.message
+          : "Could not queue this message. Keep it in the composer and retry.");
     } finally {
       inFlight.delete(fingerprint);
     }
@@ -1040,8 +1093,8 @@ const Composer: FC<{
   }) => {
     if (runPluginCommand(event)) return;
     // Keep panel commands on their existing path, then bypass assistant-ui's
-    // disabled-send predicate while a turn is running. The transport already
-    // queues this append message behind the active run.
+    // disabled-send predicate while a turn is running. Busy text is admitted
+    // through the daemon-owned queue instead of creating a transient stream row.
     openPanelFromComposer(event);
     if (event.defaultPrevented) return;
     if (isRunning) {
@@ -1249,13 +1302,11 @@ const Composer: FC<{
     event.preventDefault();
   };
 
-  // While a turn runs the kit leaves Enter alone (it has no queue to put the
-  // message in), and the message box starts a new line. Send the message as
-  // the Send button does (#1365): it waits for the turn to end. Cmd+Enter
-  // (Ctrl+Enter off a Mac) sends it, and every message waiting before it, at
-  // once (#1102). This runs after the message box's own handler: an Enter the
-  // slash or @ menu took has its default prevented, and Shift+Enter still
-  // starts a new line.
+  // While a turn runs, Enter admits this message to the daemon queue for the
+  // next turn. Cmd+Enter (Ctrl+Enter off a Mac) admits it and requests Send
+  // Now for that batch. This runs after the message box's own handler: an
+  // Enter the slash or @ menu took has its default prevented, and Shift+Enter
+  // still starts a new line.
   const handleBusyEnter = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
       event.key !== "Enter" ||
@@ -1270,7 +1321,7 @@ const Composer: FC<{
     }
     event.preventDefault();
     // The submit handler runs inside requestSubmit and reads this at once.
-    submitSendsNow.current = sendWaitingNow !== null && (event.metaKey || event.ctrlKey);
+    submitSendsNow.current = event.metaKey || event.ctrlKey;
     event.target.form?.requestSubmit();
     submitSendsNow.current = false;
   };
@@ -1390,7 +1441,7 @@ const Composer: FC<{
         ) : null}
         <ComposerPrimitive.AttachmentDropzone
           asChild
-          disabled={!attachmentsEnabled}
+          disabled={!attachmentsEnabled || queueAdmissionLocked}
         >
           <div
             data-slot="aui_composer-shell"
@@ -1404,7 +1455,7 @@ const Composer: FC<{
                 {orphanTokenNotice}
               </p>
             ) : null}
-            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} />
+            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} disabled={queueAdmissionLocked} />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
@@ -1413,16 +1464,16 @@ const Composer: FC<{
               className="aui-composer-row flex items-end gap-1.5"
               onKeyDown={handleBusyEnter}
             >
-              {attachmentsEnabled ? <ComposerAddAttachment /> : null}
+              {attachmentsEnabled ? <ComposerAddAttachment disabled={queueAdmissionLocked} /> : null}
               <ComposerPrimitive.Input
                 placeholder={lock || placeholder}
-                disabled={Boolean(lock)}
+                disabled={Boolean(lock) || queueAdmissionLocked}
                 className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-base leading-6 outline-none pointer-fine:text-sm"
                 rows={1}
                 autoFocus
                 enterKeyHint="send"
                 aria-label="Message input"
-                addAttachmentOnPaste={attachmentsEnabled}
+                addAttachmentOnPaste={attachmentsEnabled && !queueAdmissionLocked}
                 onKeyDown={handleComposerKeyDown}
               />
               <ComposerSlot

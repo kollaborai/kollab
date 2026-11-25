@@ -316,7 +316,8 @@ async def test_remote_cancel_cleanup_is_correlated_to_task_and_generation():
     queue_processor.cancel_origin = None
     queue_processor.cancel_generation = 0
 
-    def request_cancellation(*, origin):
+    def request_cancellation(*, origin, preserve_queued=False):
+        assert preserve_queued is False
         queue_processor.cancel_generation += 1
         queue_processor.cancel_processing = True
         queue_processor.cancel_origin = origin
