@@ -176,6 +176,35 @@ describe("chat recorder analysis", () => {
     }, expectedTurn)).toBe(false);
   });
 
+  it("permits an inputless goal turn only when explicitly requested and retains its identity", () => {
+    const turn = { turn_id: "goal-turn", input_ids: [] };
+    const snapshot = { turns: [{ ...turn, state: "running" }], inputs: [] };
+    expect(hasRunningTurnWithInputs(snapshot, turn)).toBe(false);
+    expect(hasRunningTurnWithInputs(snapshot, turn, { allowEmptyInputs: true })).toBe(true);
+    expect(hasRunningTurnWithInputs({ ...snapshot, turns: [{ ...turn, turn_id: "other", state: "running" }] }, turn, { allowEmptyInputs: true })).toBe(false);
+    expect(hasRunningTurnWithInputs({ ...snapshot, turns: [{ ...turn, state: "ended" }] }, turn, { allowEmptyInputs: true })).toBe(false);
+  });
+
+  it("reports the missing goal-to-turn association after checking reload state", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    let checked = false;
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native", command: async () => {},
+      readPersistedGoal: async () => ({ id: "abc12345", status: "active", objective: "u: work" }),
+      reloadDuringRun: async (_reply: string, check: any) => {
+        expect(check.allowEmptyInputs).toBe(true);
+        await check.before({ turn_id: "t", input_ids: [] });
+        await check.after();
+        checked = true;
+      },
+      U: () => "u", R: () => "r",
+    });
+    await expect(flow()).rejects.toThrow(/association/i);
+    expect(checked).toBe(true);
+  });
+
   it("does not accept an idle compaction before the stream replacement arrives", () => {
     expect(isCompactionComplete({
       sawStart: true,
