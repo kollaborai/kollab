@@ -90,6 +90,16 @@ describe("chat recorder analysis", () => {
     })).toBe(true);
   });
 
+  it("does not complete ACP compaction from an idle event older than the current start", () => {
+    expect(isCompactionComplete({
+      sawStart: true,
+      status: "compacting",
+      latestEventStatus: "idle",
+      replaced: false,
+      runtime: "codex-cli",
+    })).toBe(false);
+  });
+
   it("lets a staged native compaction reach the request that applies it", () => {
     expect(isCompactionComplete({
       sawStart: true,
