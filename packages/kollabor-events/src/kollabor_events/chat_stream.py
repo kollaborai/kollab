@@ -286,7 +286,11 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 )
         seen.append(info["state"])
         if info.get("turn_id"):
-            turn_of[info["id"]] = info["turn_id"]
+            previous = turn_of.setdefault(info["id"], info["turn_id"])
+            if previous != info["turn_id"]:
+                problems.append(
+                    f"seq {seq}: input {info['id']} changed turn from {previous} to {info['turn_id']}"
+                )
 
     def note_rows(new_rows: list[dict[str, Any]]) -> None:
         rows.clear()
