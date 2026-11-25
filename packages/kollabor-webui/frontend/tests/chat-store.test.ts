@@ -875,6 +875,30 @@ describe("LiveChatStore", () => {
     expect(store.rows).toEqual([row("r1", "one"), row("web-a1", "hello", "input", "user")]);
   });
 
+  it("clears old local sends after resync to a different conversation and ignores their late POSTs", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("old")]));
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "failed", text: "old failed" })).rejects.toThrow();
+    const oldAnswer = holdRequest(request);
+    const oldSend = store.send({ id: "shared", text: "old pending" });
+    first.emit(streamEvent(7, "row.upsert", row("gap")));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(streamEvent(1, "snapshot", {
+      rows: [row("new")], next_seq: 2, older: null, turns: [], inputs: [],
+    }, "conv-2"));
+    expect(store.rows).toEqual([row("new")]);
+    const newAnswer = holdRequest(request);
+    const newSend = store.send({ id: "shared", text: "new pending" });
+    oldAnswer(new Response(null, { status: 500 }));
+    await expect(oldSend).rejects.toThrow();
+    expect(store.rows[1]).toMatchObject({ id: "shared", status: "pending" });
+    newAnswer(new Response(null, { status: 202 }));
+    await newSend;
+  });
+
   it("a snapshot without the pending row's id keeps the row while its POST is in flight", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
