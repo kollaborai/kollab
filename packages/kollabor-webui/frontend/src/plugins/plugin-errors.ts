@@ -3,7 +3,7 @@ import type { RootOptions } from "react-dom/client";
 export const SAFE_PLUGIN_ACTION_ERROR = "The plugin action failed. Check the browser console for redacted details.";
 export const SAFE_PLUGIN_SETTINGS_ERROR = "Could not complete this plugin settings action. Check the browser console for redacted details.";
 
-const URL_CREDENTIALS = /\b(https?:\/\/)[^/@\s]+@/gi;
+const URL_CREDENTIALS = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/@\s]+@/gi;
 const FILE_URL = /\bfile:\/\/[^\s"'<>]*/gi;
 const URL_QUERY_OR_FRAGMENT = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>?#]+)(?:[?#][^\s"'<>]*)?/gi;
 const ABSOLUTE_FILESYSTEM_PATH = /(?:(['"])(?:~|\/(?!\/)|[A-Za-z]:[\\/])[^'"]*\1|(?<![A-Za-z0-9._~:/-])(?:~|\/(?!\/)|[A-Za-z]:[\\/])[^\s'"]*)/g;

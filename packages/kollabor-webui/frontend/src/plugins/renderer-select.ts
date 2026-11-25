@@ -4,7 +4,13 @@ import { pluginsByEnableOrder } from "./plugin-order";
 import { declaredRendererIds } from "./plugin-declarations";
 
 /** A renderer a loaded plugin declared, with that plugin's `k` and record. */
-export type RendererMatch = { spec: RendererSpec; record: PluginRecord; k: PluginApi };
+export type RendererMatch<Spec extends RendererSpec = RendererSpec> = {
+  spec: Spec;
+  record: PluginRecord;
+  k: PluginApi;
+};
+type ToolRendererSpec = Extract<RendererSpec, { tool: string }>;
+type TagRendererSpec = Extract<RendererSpec, { tag: string }>;
 
 type RendererKind = "tool" | "tag";
 
@@ -19,12 +25,12 @@ function declaredRendererKeys(list: readonly unknown[] | undefined): Set<string>
   return keys;
 }
 
-function findRenderer(
+function findRenderer<Spec extends RendererSpec>(
   plugins: readonly PluginRecord[],
   kind: RendererKind,
   name: string,
-  claims: (spec: RendererSpec) => boolean,
-): RendererMatch | null {
+  claims: (spec: RendererSpec) => spec is Spec,
+): RendererMatch<Spec> | null {
   const ordered = pluginsByEnableOrder(plugins);
   const ownerKey = rendererOwnerKey(kind, name);
   const owner = ordered.find(
@@ -39,17 +45,27 @@ function findRenderer(
 export function findToolRenderer(
   plugins: readonly PluginRecord[],
   tool: string,
-): RendererMatch | null {
+): RendererMatch<ToolRendererSpec> | null {
   if (tool === "request_permission") return null;
-  return findRenderer(plugins, "tool", tool, (spec) => spec.tool === tool);
+  return findRenderer(
+    plugins,
+    "tool",
+    tool,
+    (spec): spec is ToolRendererSpec => spec.tool === tool,
+  );
 }
 
 /** The first enabled plugin's tag renderer for `tag`, or null. */
 export function findTagRenderer(
   plugins: readonly PluginRecord[],
   tag: string,
-): RendererMatch | null {
-  return findRenderer(plugins, "tag", tag, (spec) => spec.tag === tag);
+): RendererMatch<TagRendererSpec> | null {
+  return findRenderer(
+    plugins,
+    "tag",
+    tag,
+    (spec): spec is TagRendererSpec => spec.tag === tag,
+  );
 }
 
 /** Every tag name a loaded plugin renders, once each, in plugin order. */

@@ -129,7 +129,12 @@ import {
 } from "react";
 
 const PLUGIN_COMMAND_SUBMISSION_WAIT_MS = 2_000;
-type PendingPluginSubmission = { text: string; session: string | null; timer: number };
+type PendingPluginSubmission = {
+  text: string;
+  session: string | null;
+  timer: number;
+  sendsNow: boolean;
+};
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 
@@ -740,10 +745,12 @@ const Composer: FC<{
       aui.composer.getState().text !== pending.text
     ) return;
     if (normalFallback) normalPluginFallbackRef.current = pending;
+    submitSendsNow.current = pending.sendsNow;
     try {
       const form = composerFormRef.current ?? document.getElementById(composerFormId);
       if (form instanceof HTMLFormElement) form.requestSubmit();
     } finally {
+      submitSendsNow.current = false;
       if (normalFallback) normalPluginFallbackRef.current = null;
     }
   };
@@ -843,12 +850,20 @@ const Composer: FC<{
     }
     if (pluginCommandSubmissionPending(draft, commandCatalogStatus, pluginSnapshot, reserved)) {
       event.preventDefault();
-      if (!pendingPluginSubmitRef.current) {
+      const pendingSubmission = pendingPluginSubmitRef.current;
+      if (!pendingSubmission) {
         const timer = window.setTimeout(
           () => replayPendingPluginSubmit(true),
           PLUGIN_COMMAND_SUBMISSION_WAIT_MS,
         );
-        pendingPluginSubmitRef.current = { text: draft, session: commandSession, timer };
+        pendingPluginSubmitRef.current = {
+          text: draft,
+          session: commandSession,
+          timer,
+          sendsNow: submitSendsNow.current,
+        };
+      } else if (submitSendsNow.current) {
+        pendingSubmission.sendsNow = true;
       }
       return true;
     }

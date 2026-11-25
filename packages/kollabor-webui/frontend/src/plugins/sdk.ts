@@ -131,9 +131,15 @@ export type PluginRendererProps = {
   toolCall?: { name: string; args: unknown; result?: unknown; status?: unknown };
   tag?: { name: string; content: string };
 };
+export type PluginToolRendererProps = Pick<PluginRendererProps, "k"> & {
+  toolCall: NonNullable<PluginRendererProps["toolCall"]>;
+};
+export type PluginTagRendererProps = Pick<PluginRendererProps, "k"> & {
+  tag: NonNullable<PluginRendererProps["tag"]>;
+};
 export type RendererSpec =
-  | { tool: string; tag?: never; render: ComponentType<PluginRendererProps> }
-  | { tag: string; tool?: never; render: ComponentType<PluginRendererProps> };
+  | { tool: string; tag?: never; render: ComponentType<PluginToolRendererProps> }
+  | { tag: string; tool?: never; render: ComponentType<PluginTagRendererProps> };
 export type NoticeButton = { label: string; open?: OpenTarget; run?: () => unknown };
 export type NoticeSpec = { text: string; button?: NoticeButton };
 export type ApiOptions = { refreshOn?: string; everyMs?: number };
@@ -492,8 +498,8 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
       }
       if (!bound("renderer", declaredRendererIds(declared.renderers, hasTool ? "tool" : "tag"), name)) return;
       if (!isComponent(spec.render)) return invalid("renderer", "render must be a component");
-      const renderer: RendererSpec = hasTool
-        ? { tool: spec.tool!, render: spec.render }
+      const renderer: RendererSpec = spec.tool !== undefined
+        ? { tool: spec.tool, render: spec.render }
         : { tag: spec.tag!, render: spec.render };
       contribute((current) => ({
         ...current,

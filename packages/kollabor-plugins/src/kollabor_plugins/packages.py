@@ -201,14 +201,18 @@ _RENDERER_TAG_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*\Z", re.ASCII)
 
 def _has_single_contribution_identity(value: object, *, required: str | None = None) -> bool:
     if isinstance(value, str):
-        return bool(value) and required is None
+        return bool(_CONTRIBUTION_ID.fullmatch(value)) and required is None
     if not isinstance(value, dict):
         return False
     identities = [field for field in _CONTRIBUTION_IDENTITY_FIELDS if field in value]
+    if len(identities) != 1:
+        return False
+    identity = identities[0]
+    identity_value = value[identity]
     return (
-        len(identities) == 1
-        and isinstance(value[identities[0]], str)
-        and (required is None or identities[0] == required)
+        isinstance(identity_value, str)
+        and bool(_CONTRIBUTION_ID.fullmatch(identity_value))
+        and (required is None or identity == required)
     )
 
 

@@ -17,7 +17,9 @@ const INDENTED = /(?: {4}| {0,3}\t)/y;
 /** Split only registered, complete tags. Tag content is returned raw; code spans, fences, indented blocks and escaped `<` stay text. */
 export function splitPluginTags(text: string, names: readonly string[]): TaggedTextPart[] {
   const allowed = new Set(names.filter((name) => /^[a-z][\w-]*$/i.test(name)));
-  if (![...allowed].some((name) => text.includes(`<${name}>`))) {
+  if (allowed.size === 0) return [{ type: "text", text }];
+  const openers = new RegExp(`<(${[...allowed].join("|")})>`);
+  if (!openers.test(text)) {
     return [{ type: "text", text }];
   }
   const opens = pairTags(text, allowed, maskedRanges(text));
@@ -186,7 +188,8 @@ function codeBlockEnd(
   indentedCode = startsIndentedCode(text, index, false),
 ): number {
   if (indentedCode) return lineEnd(text, index);
-  CONTAINER.lastIndex = index;
+  const listIndent = listContinuationIndent(text, index);
+  CONTAINER.lastIndex = index + listIndent;
   CONTAINER.exec(text);
   const prefix = text.slice(index, CONTAINER.lastIndex);
   FENCE_OPEN.lastIndex = CONTAINER.lastIndex;
@@ -194,7 +197,7 @@ function codeBlockEnd(
   if (!marker) return -1;
   // A backtick fence's info string cannot hold a backtick: such a line is an inline code span, not a fence.
   if (marker[0] === "`" && text.slice(FENCE_OPEN.lastIndex, lineEnd(text, index)).includes("`")) return -1;
-  return fenceEnd(text, index, marker, quoteDepth(prefix));
+  return fenceEnd(text, index, marker, quoteDepth(prefix), listIndent);
 }
 
 /** Number of block quote markers in a line prefix. */
@@ -212,10 +215,36 @@ function lineEnd(text: string, index: number): number {
 function startsIndentedCode(text: string, index: number, previousIndentedCode: boolean): boolean {
   INDENTED.lastIndex = index;
   if (!INDENTED.test(text) || isBlankLineAt(text, index) || startsNestedListItem(text, index)) return false;
+  if (listContinuationIndent(text, index) > 0) return false;
   if (previousIndentedCode || index === 0) return true;
   const previousLineEnd = index - 1;
   const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
   return text.slice(previousLineStart, previousLineEnd).trim() === "";
+}
+
+/** Indentation occupied by the content of a surrounding list item, or zero. */
+function listContinuationIndent(text: string, index: number): number {
+  const currentLine = text.slice(index, lineEnd(text, index));
+  const currentIndent = /^( *)/.exec(currentLine)?.[0].length ?? 0;
+  if (currentIndent < 4) return 0;
+
+  let previousLineEnd = index - 1;
+  while (previousLineEnd >= 0) {
+    const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
+    const previousLine = text.slice(previousLineStart, previousLineEnd);
+    if (previousLine.trim()) {
+      const listItem = /^( *)(?:[-+*]|\d{1,9}[.)])[ \t]+/.exec(previousLine);
+      if (listItem) {
+        const contentIndent = listItem[0].length;
+        return currentIndent >= contentIndent && currentIndent < contentIndent + 4
+          ? contentIndent
+          : 0;
+      }
+      if (!/^[ \t]/.test(previousLine)) return 0;
+    }
+    previousLineEnd = previousLineStart - 1;
+  }
+  return 0;
 }
 
 /** A four-space list marker continues a surrounding list instead of opening indented code. */
@@ -255,13 +284,19 @@ function isBlankLineAt(text: string, index: number): boolean {
 }
 
 /** Index just past the closing fence, or the text end when the fence never closes. The closer must sit at the opener's quote depth. */
-function fenceEnd(text: string, index: number, marker: string, depth: number): number {
+function fenceEnd(
+  text: string,
+  index: number,
+  marker: string,
+  depth: number,
+  listIndent = 0,
+): number {
   let newline = text.indexOf("\n", index);
   while (newline >= 0) {
     const start = newline + 1;
     const next = text.indexOf("\n", start);
     const end = next < 0 ? text.length : next;
-    const closing = FENCE_CLOSE.exec(text.slice(start, end));
+    const closing = FENCE_CLOSE.exec(text.slice(start + listIndent, end));
     if (closing && quoteDepth(closing[1]) === depth && closing[2].length >= marker.length && closing[2][0] === marker[0]) {
       return Math.min(end + 1, text.length);
     }
