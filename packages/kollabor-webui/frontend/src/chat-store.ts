@@ -177,7 +177,7 @@ const HISTORY_PAGE_LIMIT = 50;
 type HistoryPage = { rows: ChatRow[]; older: string | null };
 
 /** A send whose row the stream has not delivered yet: the row, and how many POSTs for its id are still running. */
-type LocalSend = { row: ChatRow; posts: number };
+type LocalSend = { row: ChatRow; posts: number; succeeded: boolean };
 
 /** The HTTP status carried by an error the transport threw, if it has one. */
 function errorStatus(error: unknown): number | undefined {
@@ -320,7 +320,7 @@ export class LiveChatStore implements LiveStore {
       parts: [{ type: "text", text: input.text }],
       created_at: new Date().toISOString(),
     };
-    this.sends.set(input.id, { row, posts: 1 });
+    this.sends.set(input.id, { row, posts: 1, succeeded: false });
     this.publish();
   }
 
@@ -329,7 +329,8 @@ export class LiveChatStore implements LiveStore {
     const send = this.sends.get(id);
     if (!send) return; // the stream has delivered the row, so it is no longer local
     send.posts -= 1;
-    if (!ok && send.posts === 0) this.replaceLocalRow(send, { ...send.row, status: "failed" });
+    send.succeeded ||= ok;
+    if (!send.succeeded && send.posts === 0) this.replaceLocalRow(send, { ...send.row, status: "failed" });
   }
 
   private replaceLocalRow(send: LocalSend, row: ChatRow): void {
