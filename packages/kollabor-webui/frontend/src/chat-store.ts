@@ -381,6 +381,7 @@ export class LiveChatStore implements LiveStore {
         if (current()) {
           this.state = { ...this.state, olderCursor: null };
           this.resync();
+          this.settlePaging();
         } else if (isLatestRequest()) {
           this.settlePaging();
         }
