@@ -54,7 +54,7 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 
 **Ids.** A client picks the id of each input it sends; the web UI already does, as the `add-message` id. The daemon makes one when a sender has none (the TUI, hub messages, goals). That id is the row's id for the life of the row: queued, joined, saved, shown. No path creates a second id for an input. A resend with a known id is answered with the input's current state instead of making a second input.
 
-**Rows.** `{id, seq, kind, role, turn_id, status, parts, created_at}`. `kind` is one of `input`, `reply`, `tool`, `note` (hub notes, today glued into user text as `<agent_hud>`), `prompt`, or `marker` (compaction, errors shown in the thread).
+**Rows.** `{id, seq, kind, role, turn_id, status, parts, created_at}`. `kind` is one of `input`, `reply`, `tool`, `note` (hub notes, today glued into user text as `<agent_hud>`), `prompt`, or `marker` (compaction, errors shown in the thread). A hub message carries a `hub-note` part built from the daemon's structured hub fields (`from`, `to`, `text`, `observed`, optional `kind`, `thread_id`, `reply_to`, `is_direct`, `presence`), never parsed from text: a hub message that starts no turn is a `note` row with that part and no input lifecycle; one that starts a turn is an `input` row whose id is the hub message id, with the full input lifecycle and the part inside its parts.
 
 **Lifecycle.** Each input moves `queued`, then `started` or `joined`, then `ended`, with `ended.outcome` one of `completed`, `failed` or `cancelled`. `joined` names the turn it joined, and the input ends when that turn ends. Every input reaches `ended` exactly once.
 
