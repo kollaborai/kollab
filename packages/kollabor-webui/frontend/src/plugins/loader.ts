@@ -172,6 +172,18 @@ function normalizeDeclared(value: unknown): string | Record<string, string> | nu
   return Object.keys(next).some((key) => ["id", "name", "tool", "tag"].includes(key)) ? next : null;
 }
 
+function contributionIdentity(kind: string, value: string | Record<string, string>): string | null {
+  if (kind === "renderers") {
+    const renderer = pluginRendererDeclaration(value);
+    return renderer ? `${renderer.kind}:${renderer.name}` : null;
+  }
+  const identity = typeof value === "string"
+    ? value
+    : ["id", "name", "tool", "tag"].map((key) => value[key]).find(Boolean) ?? null;
+  if (!identity) return null;
+  return kind === "slash" ? identity.toLowerCase() : identity;
+}
+
 type NormalizedPluginContributions = {
   contributes: PluginEntry["contributes"];
   malformed: boolean;
@@ -208,6 +220,7 @@ function normalizePluginContributions(value: unknown, requireAllKinds = false): 
       omissions += 1;
       continue;
     }
+    const seen = new Set<string>();
     omissions += excessItems(items, PLUGIN_INVENTORY_LIMITS.contributions);
     for (const item of items.slice(0, PLUGIN_INVENTORY_LIMITS.contributions)) {
       if (kind !== "menu") {
@@ -217,11 +230,14 @@ function normalizePluginContributions(value: unknown, requireAllKinds = false): 
           continue;
         }
         const declared = normalizeDeclared(item);
-        if (declared) result[kind].push(declared);
-        else {
+        const identity = declared ? contributionIdentity(kind, declared) : null;
+        if (!identity || seen.has(identity)) {
           malformed = true;
           omissions += 1;
+          continue;
         }
+        seen.add(identity);
+        result[kind].push(declared);
         continue;
       }
       const row = record(item);
@@ -235,6 +251,12 @@ function normalizePluginContributions(value: unknown, requireAllKinds = false): 
       const open = normalizeOpenTarget(row?.open);
       const icon = row?.icon === undefined ? undefined : safeText(row.icon, 64);
       if (id && isPluginDeclarationId(id) && label && open && (row?.icon === undefined || icon)) {
+        if (seen.has(id)) {
+          malformed = true;
+          omissions += 1;
+          continue;
+        }
+        seen.add(id);
         result.menu.push({ id, label, open, ...(icon ? { icon } : {}) });
       } else {
         malformed = true;

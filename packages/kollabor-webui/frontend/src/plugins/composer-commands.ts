@@ -1,7 +1,7 @@
 import type { ComposerPaletteItem } from "@/components/assistant-ui/composer-palette";
 import { DEFAULT_SLASH_COMMANDS } from "@/api";
 import { PANEL_COMMAND_NAMES } from "@/components/panels/panel-model";
-import type { PluginRecord } from "./registry";
+import type { PluginRecord, PluginsSnapshot } from "./registry";
 import type { CommandSpec, PluginApi } from "./sdk";
 import { pluginsByEnableOrder } from "./plugin-order";
 import { declaredIds } from "./plugin-declarations";
@@ -29,6 +29,28 @@ type PluginCommandResolution = {
   conflicts: PluginCommandConflict[];
 };
 
+export type PluginCommandCatalogStatus = "loading" | "ready" | "empty" | "unavailable" | "fallback";
+
+export function pluginCommandCatalogReady(status: PluginCommandCatalogStatus): boolean {
+  return status === "ready" || status === "empty";
+}
+
+/** Hold an unresolved slash draft only while its catalog, inventory or declared plugin is loading. */
+export function pluginCommandSubmissionPending(
+  text: string,
+  status: PluginCommandCatalogStatus,
+  snapshot: Pick<PluginsSnapshot, "off" | "listed" | "plugins">,
+  reserved: ReadonlySet<string>,
+): boolean {
+  const name = /^\/(\S+)(?:\s+[\s\S]*)?$/.exec(text.trim())?.[1]?.toLowerCase();
+  if (!name || snapshot.off || reserved.has(name)) return false;
+  if (status === "loading" || (!snapshot.listed && snapshot.plugins.length === 0)) return true;
+  return snapshot.plugins.some(
+    (plugin) => plugin.status === "loading" &&
+      [...declaredIds(plugin.entry.contributes?.slash)].some((declared) => declared.toLowerCase() === name),
+  );
+}
+
 /** A failed async command can restore its draft only into the same untouched composer session. */
 export function canRestorePluginCommandDraft(
   currentRevision: number,
@@ -50,6 +72,8 @@ export function reservedCommandKeys(
     }
   }
   for (const name of PANEL_COMMAND_NAMES) keys.add(name.replace(/^\//, "").toLowerCase());
+  // The engine handles /exit even when a session's live command catalog has not arrived yet.
+  keys.add("exit");
   return keys;
 }
 

@@ -5,6 +5,7 @@ export const SAFE_PLUGIN_SETTINGS_ERROR = "Could not complete this plugin settin
 
 const URL_CREDENTIALS = /\b(https?:\/\/)[^/@\s]+@/gi;
 const URL_QUERY_OR_FRAGMENT = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>?#]+)(?:[?#][^\s"'<>]*)?/gi;
+const ABSOLUTE_FILESYSTEM_PATH = /(?:(['"])(?:~|\/(?!\/)|[A-Za-z]:[\\/])[^'"]*\1|(?<![A-Za-z0-9._~:/-])(?:~|\/(?!\/)|[A-Za-z]:[\\/])[^\s'"]*)/g;
 const AUTH_SCHEME = /\b(?:bearer|basic)\s+([^\s,;]+)/gi;
 const AUTH_SCHEME_ASSIGNMENT = /\b(?:proxy-authorization|authorization|token)\b\s*[:=]\s*(?:bearer|basic)\s+[^\s,;]+/i;
 const SENSITIVE_ASSIGNMENT = /((?:^|[^A-Za-z0-9])(?:api[_-]?key|(?:private|signing|encryption|ssh|secret|access|master|client)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)(?![A-Za-z0-9_])\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("[^"]*"|'[^']*'|[^\s,;]+)/gi;
@@ -78,7 +79,8 @@ export function redactPluginError(error: unknown): string {
     .replace(URL_QUERY_OR_FRAGMENT, "$1")
     .replace(SENSITIVE_ASSIGNMENT, "$1[redacted]")
     .replace(AUTH_SCHEME, "[redacted]")
-    .replace(SECRET_VALUE, "[redacted]");
+    .replace(SECRET_VALUE, "[redacted]")
+    .replace(ABSOLUTE_FILESYSTEM_PATH, "[path]");
 }
 
 /** Log plugin failure details only after redacting them; plugin output never goes straight to the console. */
@@ -88,7 +90,7 @@ export function logPluginFailure(
   error: unknown,
   componentStack?: string | null,
 ): void {
-  const message = `${plugin} ${action}`;
+  const message = `${redactPluginError(plugin)} ${redactPluginError(action)}`;
   if (componentStack) console.error(message, redactPluginError(error), redactPluginError(componentStack));
   else console.error(message, redactPluginError(error));
 }

@@ -801,6 +801,22 @@ def _normalize_renderer_declaration(value: object) -> dict | None:
     return normalized if isinstance(normalized, dict) else None
 
 
+def _contribution_identity(kind: str, value: str | dict) -> str | None:
+    if kind == "renderers":
+        if "tool" in value:
+            return f"tool:{value['tool']}"
+        if "tag" in value:
+            return f"tag:{value['tag']}"
+        return None
+    identity = value if isinstance(value, str) else next(
+        (value[field] for field in ("id", "name", "tool", "tag") if field in value),
+        None,
+    )
+    if not isinstance(identity, str) or not identity:
+        return None
+    return identity.casefold() if kind == "slash" else identity
+
+
 def _normalize_contributes(value: object) -> tuple[dict, int]:
     kinds = ("menu", "views", "pages", "modals", "slash", "renderers")
     result = {kind: [] for kind in kinds}
@@ -815,13 +831,16 @@ def _normalize_contributes(value: object) -> tuple[dict, int]:
             omissions += 1
             continue
         omissions += max(0, len(items) - _MAX_PLUGIN_CONTRIBUTIONS)
+        seen: set[str] = set()
         for item in items[:_MAX_PLUGIN_CONTRIBUTIONS]:
             if kind != "menu":
                 declared = _normalize_renderer_declaration(item) if kind == "renderers" else _normalize_declared(item)
-                if declared is not None:
-                    result[kind].append(declared)
-                else:
+                identity = _contribution_identity(kind, declared) if declared is not None else None
+                if identity is None or identity in seen:
                     omissions += 1
+                    continue
+                seen.add(identity)
+                result[kind].append(declared)
                 continue
             if not isinstance(item, dict) or not _has_single_contribution_identity(item, required="id"):
                 omissions += 1
@@ -849,6 +868,10 @@ def _normalize_contributes(value: object) -> tuple[dict, int]:
             if not target_value or (item.get("icon") is not None and not icon):
                 omissions += 1
                 continue
+            if row_id in seen:
+                omissions += 1
+                continue
+            seen.add(row_id)
             result["menu"].append({
                 "id": row_id,
                 "label": label,

@@ -66,10 +66,12 @@ import {
 } from "@/api";
 import {
   matchPluginCommand,
+  pluginCommandCatalogReady,
   pluginCommandConflicts,
   pluginCommandEntries,
   pluginCommandFailure,
   pluginCommandItems,
+  pluginCommandSubmissionPending,
   reservedCommandKeys,
   warnPluginCommandConflicts,
   canRestorePluginCommandDraft,
@@ -763,8 +765,9 @@ const Composer: FC<{
     onOpenPanel(request);
   };
 
-  const { plugins } = usePlugins();
-  const pluginCommandsReady = commandCatalogStatus === "ready" || commandCatalogStatus === "empty";
+  const pluginSnapshot = usePlugins();
+  const { plugins } = pluginSnapshot;
+  const pluginCommandsReady = pluginCommandCatalogReady(commandCatalogStatus);
   const reserved = useMemo(
     () => reservedCommandKeys(commands),
     [commands],
@@ -798,6 +801,10 @@ const Composer: FC<{
   const runPluginCommand = (event: { preventDefault: () => void }) => {
     if (aui.composer.getState().attachments.length > 0) return false;
     const draft = aui.composer.getState().text;
+    if (pluginCommandSubmissionPending(draft, commandCatalogStatus, pluginSnapshot, reserved)) {
+      event.preventDefault();
+      return true;
+    }
     const match = matchPluginCommand(draft, pluginEntries);
     if (!match) return false;
     const commandSession = draftKey ?? null;
@@ -1091,7 +1098,14 @@ const Composer: FC<{
     () => [...commandItems, ...pluginItems],
     [commandItems, pluginItems],
   );
-  const slashNotice = slashCatalogNotice(commandCatalogStatus, pluginItems.length > 0);
+  const slashNotice = pluginCommandSubmissionPending(
+    composerText,
+    commandCatalogStatus,
+    pluginSnapshot,
+    reserved,
+  ) && commandCatalogStatus !== "loading"
+    ? "Loading plugin commands."
+    : slashCatalogNotice(commandCatalogStatus, pluginItems.length > 0);
 
   const nestedCommandNames = useMemo(() => {
     const names = new Set<string>();
@@ -1257,7 +1271,7 @@ const Composer: FC<{
           <div role="status" className="bg-muted/50 text-muted-foreground flex items-center justify-between gap-3 px-3 py-2 text-xs">
             <span className="min-w-0">{slashNotice}</span>
             {(commandCatalogStatus === "fallback" || commandCatalogStatus === "unavailable") && onRetryCommands ? (
-              <Button type="button" size="sm" variant="outline" onClick={onRetryCommands}>
+              <Button type="button" size="sm" variant="outline" onClick={onRetryCommands} className="pointer-coarse:min-h-11">
                 Try Again
               </Button>
             ) : null}
