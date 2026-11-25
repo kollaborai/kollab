@@ -748,6 +748,33 @@ describe("LiveChatStore", () => {
     expect(store.olderStatus).toBe("idle");
   });
 
+  it("a replace while an older page is in flight drops that page: its rows do not join the replacement window", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(5, "replace", { rows: [row("m1", "Compacted", "marker", "system")] }));
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["m1"]);
+  });
+
+  it("a replace resets the paging state as a snapshot does: olderStatus leaves loading when the window is replaced", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    expect(store.olderStatus).toBe("loading");
+    first.emit(streamEvent(5, "replace", { rows: [row("m1", "Compacted", "marker", "system")] }));
+    expect(store.olderStatus).toBe("idle");
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["m1"]);
+    expect(store.olderStatus).toBe("idle");
+  });
+
   it("a snapshot without an older field has no earlier page: hasEarlier is false, paging is complete, and loadOlder sends nothing", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
