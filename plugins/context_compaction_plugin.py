@@ -1135,7 +1135,7 @@ class ContextCompactionPlugin(BasePlugin):
                     if ctx:
                         best_window = _validated_context_window(ctx)
                         best_len = len(name)
-            if best_len:
+            if best_len and best_window is not None:
                 return best_window
 
         # Fall back to provider default
