@@ -24,6 +24,17 @@ describe("plugin tagged text", () => {
     const text = ">     <card>example</card>";
     expect(splitPluginTags(text, ["card"])).toEqual([{ type: "text", text }]);
   });
+  it("keeps inline-code protection across a lazy blockquote continuation", () => {
+    const text = "> `<card>literal</card>\nlazy continuation\n> still inside code span`";
+    expect(splitPluginTags(text, ["card"])).toEqual([{ type: "text", text }]);
+  });
+  it("starts a new code-span scope when a blockquote interrupts top-level prose", () => {
+    const text = "`unclosed\n> <card>real</card>";
+    expect(splitPluginTags(text, ["card"])).toEqual([
+      { type: "text", text: "`unclosed\n> " },
+      { type: "tag", name: "card", content: "real" },
+    ]);
+  });
   it("does not treat an indented paragraph continuation as a code block", () => {
     const parts = splitPluginTags("Intro line\n    <todo_write>x</todo_write>\nAfter", ["todo_write"]);
     expect(parts).toContainEqual({ type: "tag", name: "todo_write", content: "x" });

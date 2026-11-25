@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_CONTRIBUTIONS, type Contributions } from "./registry";
-import { createPluginApi, definePlugin, remoteView, type PluginApiDeps, type PluginEntry, type RendererSpec } from "./sdk";
+import { redactPluginError } from "./plugin-errors";
+import { createPluginApi, definePlugin, remoteView, type PluginApiDeps, type PluginEntry, type PluginInventoryResponse, type RendererSpec } from "./sdk";
 
 const Tab = () => null;
 
@@ -61,6 +62,35 @@ describe("definePlugin", () => {
   it("returns the plugin function unchanged", () => {
     const setup = () => {};
     expect(definePlugin(setup)).toBe(setup);
+  });
+});
+
+describe("plugin inventory types", () => {
+  it("exposes all normalized contribution arrays as required typed fields", () => {
+    const response: PluginInventoryResponse = { plugins: [entry()] };
+    const contributionCounts = response.plugins.flatMap((plugin) => [
+      plugin.contributes.menu.length,
+      plugin.contributes.views.length,
+      plugin.contributes.pages.length,
+      plugin.contributes.modals.length,
+      plugin.contributes.slash.length,
+      plugin.contributes.renderers.length,
+    ]);
+
+    expect(contributionCounts).toEqual([1, 1, 1, 1, 1, 1]);
+  });
+});
+
+describe("plugin error redaction", () => {
+  it("redacts suffixed private-key names and PEM private-key blocks", () => {
+    const suffixed = redactPluginError("PRIVATE_KEY_PEM=private-key-sentinel");
+    const pem = redactPluginError(
+      "-----BEGIN PRIVATE KEY-----\nprivate-key-body-sentinel\n-----END PRIVATE KEY-----",
+    );
+
+    expect(suffixed).not.toContain("private-key-sentinel");
+    expect(pem).not.toContain("private-key-body-sentinel");
+    expect(pem).not.toContain("BEGIN PRIVATE KEY");
   });
 });
 
