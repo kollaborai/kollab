@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kollabor_events.chat_stream import sequence_problems
+from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import DisplayTap
 from kollabor.state.chat_stream import ChatStreamService
 
@@ -311,3 +312,44 @@ async def test_turn_error_is_a_marker_row_and_fails_its_input():
     assert markers[0]["role"] == "system"
     assert markers[0]["status"] == "failed"
     assert markers[0]["parts"] == [{"type": "text", "text": "provider failed"}]
+
+
+def test_snapshot_and_compaction_read_active_transcript_rows():
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content="look",
+            metadata={"request_id": "web-transcript-1"},
+        ),
+        ConversationMessage(
+            role="tool",
+            content="file saved",
+            metadata={"tool_id": "tool-1"},
+        ),
+        ConversationMessage(
+            role="user",
+            content="agent note",
+            metadata={"hub_message": True, "hub_message_id": "hub-message-1"},
+        ),
+    ]
+    stream = ChatStreamService(state)
+
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})[
+        "events"
+    ][0]
+    rows = snapshot["data"]["rows"]
+    input_row = next(row for row in rows if row["id"] == "web-transcript-1")
+    tool_row = next(row for row in rows if row["kind"] == "tool")
+    note_row = next(row for row in rows if row["id"] == "hub-message-1")
+
+    assert input_row["kind"] == "input"
+    assert tool_row["role"] == "assistant"
+    assert note_row["kind"] == "note"
+    assert note_row["role"] == "system"
+    assert note_row["parts"] == [{"type": "text", "text": "agent note"}]
+
+    replacement = stream.replace_transcript()
+
+    assert replacement["type"] == "replace"
+    assert any(row["id"] == "hub-message-1" for row in replacement["data"]["rows"])
