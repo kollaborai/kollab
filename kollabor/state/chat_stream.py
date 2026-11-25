@@ -210,6 +210,7 @@ class ChatStreamService:
         self._active_turns: dict[str, str] = {}
         self._reply_rows: dict[tuple[str, str], str] = {}
         self._reply_text: dict[tuple[str, str], str] = {}
+        self._turn_history_keys: dict[tuple[str, str], str] = {}
         self._turn_errors: dict[tuple[str, str], str] = {}
         self._display_tap: Any = None
         self._display_tap_listener: Any = None
@@ -433,6 +434,7 @@ class ChatStreamService:
         if turn_id is None:
             return
         key = (uid, turn_id)
+        self._turn_history_key(uid, turn_id, event=event)
         existing_turn = self._turns.setdefault(uid, {}).get(turn_id)
         already_running = (
             isinstance(existing_turn, dict) and existing_turn.get("state") == "running"
@@ -521,11 +523,25 @@ class ChatStreamService:
         if turn_id is None:
             return
         if event.get("type") == "response":
-            self._upsert_reply(uid, turn_id, text, status="streaming")
+            self._upsert_reply(
+                uid,
+                turn_id,
+                text,
+                status="streaming",
+                history_key=self._turn_history_key(
+                    uid, turn_id, event=event, input_ids=input_ids
+                ),
+            )
             return
         row_id = self._reply_rows.get((uid, turn_id))
         if row_id is None:
-            row_id = self._new_reply_row(uid, turn_id)
+            row_id = self._new_reply_row(
+                uid,
+                turn_id,
+                history_key=self._turn_history_key(
+                    uid, turn_id, event=event, input_ids=input_ids
+                ),
+            )
         self._reply_text[(uid, turn_id)] = (
             self._reply_text.get((uid, turn_id), "") + text
         )
@@ -557,7 +573,15 @@ class ChatStreamService:
             outcome = "failed"
         else:
             outcome = "completed"
-        self._upsert_reply(uid, turn_id, self._reply_text.get(key, ""), status=outcome)
+        self._upsert_reply(
+            uid,
+            turn_id,
+            self._reply_text.get(key, ""),
+            status=outcome,
+            history_key=self._turn_history_key(
+                uid, turn_id, event=event, input_ids=input_ids
+            ),
+        )
         self._set_turn_state(uid, turn_id, "ended")
         for input_id in input_ids:
             prior = self._inputs.setdefault(uid, {}).get(input_id, {})
@@ -628,8 +652,48 @@ class ChatStreamService:
             turn_id = self._active_turns.get(uid)
             if isinstance(input_id, str) and input_id and turn_id:
                 self._join_input(uid, input_id, turn_id)
-        elif isinstance(event.get("text"), str):
+        note = self._hub_note_part(event.get("hub_note"))
+        if note is not None:
+            self._on_structured_hub_message(uid, event, note)
+        elif event.get("input_source") != "steering" and isinstance(
+            event.get("text"), str
+        ):
             self._on_hub_note(uid, event)
+
+    def _on_structured_hub_message(
+        self, uid: str, event: dict[str, Any], note: dict[str, Any]
+    ) -> None:
+        row_id = event.get("message_id")
+        if not isinstance(row_id, str) or not row_id:
+            return
+        is_input = event.get("hub_admission") == "input"
+        prior = self._inputs.setdefault(uid, {}).get(row_id)
+        turn_id = (prior or {}).get("turn_id") or self._event_turn_id(event)
+        if is_input:
+            state = (prior or {}).get("state") or "queued"
+            status = (
+                (prior or {}).get("outcome")
+                if state == "ended"
+                else state
+            )
+        else:
+            state = None
+            status = "done"
+        self._upsert(
+            uid,
+            {
+                "id": row_id,
+                "seq": 0,
+                "kind": "input" if is_input else "note",
+                "role": "user" if is_input else "system",
+                "turn_id": turn_id,
+                "status": status or "ended",
+                "parts": [note],
+                "created_at": self._timestamp(),
+            },
+        )
+        if is_input and prior is None:
+            self._set_input_state(uid, row_id, "queued", turn_id=turn_id)
 
     def _on_hub_note(self, uid: str, event: dict[str, Any]) -> None:
         text = event.get("text")
@@ -655,22 +719,39 @@ class ChatStreamService:
         if not isinstance(tool_id, str) or not tool_id:
             tool_id = uuid.uuid4().hex
         turn_id = self._event_turn_id(event) or self._active_turns.get(uid)
-        row_id = (
-            f"tool-{uuid.uuid5(uuid.NAMESPACE_URL, f'{turn_id or ""}:{tool_id}').hex}"
+        history_key = self._turn_history_key(
+            uid, turn_id, event=event, input_ids=self._event_input_ids(event)
         )
+        row_id = self._tool_row_id(uid, turn_id, tool_id, history_key)
         name = event.get("tool_name")
         name = name if isinstance(name, str) and name else "Tool"
+        metadata = event.get("metadata")
+        acp_data = metadata.get("acp") if isinstance(metadata, dict) else None
+        acp_data = acp_data if isinstance(acp_data, dict) else {}
+        raw_input = acp_data.get("rawInput")
+        args = (
+            raw_input
+            if raw_input is not None
+            else event.get("input", {})
+        )
+        part: dict[str, Any] = {
+            "type": "tool-call",
+            "tool_call_id": tool_id,
+            "tool_name": name,
+            "args": args,
+        }
         if event.get("type") == "tool_start":
             status = "running"
-            detail = name
         else:
             status = "completed" if event.get("success") is True else "failed"
-            output = event.get("output")
-            detail = (
-                name
-                if not isinstance(output, str) or not output
-                else f"{name}: {output}"
-            )
+            result = acp_data.get("rawOutput")
+            if result is None:
+                result = acp_data.get("content")
+            if result is None:
+                result = event.get("output")
+            if result is not None:
+                part["result"] = copy.deepcopy(result)
+            part["is_error"] = status == "failed"
         self._upsert(
             uid,
             {
@@ -680,7 +761,7 @@ class ChatStreamService:
                 "role": "assistant",
                 "turn_id": turn_id,
                 "status": status,
-                "parts": [{"type": "text", "text": detail}],
+                "parts": [part],
                 "created_at": self._timestamp(),
             },
         )
@@ -688,11 +769,16 @@ class ChatStreamService:
     def _on_permission_prompt(self, uid: str, event: dict[str, Any]) -> None:
         details = event.get("details")
         details = details if isinstance(details, dict) else {}
-        prompt_id = details.get("permission_id") or event.get("tool_id")
+        prompt_id = (
+            details.get("permission_id")
+            or event.get("permission_id")
+            or event.get("tool_id")
+        )
         if not isinstance(prompt_id, str) or not prompt_id:
             prompt_id = uuid.uuid4().hex
-        title = (
-            details.get("title") or details.get("tool_name") or "Permission requested"
+        prompt_data = copy.deepcopy(details)
+        prompt_data.setdefault(
+            "title", details.get("tool_name") or "Permission requested"
         )
         self._upsert(
             uid,
@@ -701,9 +787,12 @@ class ChatStreamService:
                 "seq": 0,
                 "kind": "prompt",
                 "role": "system",
-                "turn_id": self._event_turn_id(event),
+                "turn_id": self._event_turn_id(event)
+                or self._event_turn_id(details),
                 "status": "open",
-                "parts": [{"type": "text", "text": str(title)}],
+                "parts": [
+                    {"type": "prompt", "prompt_id": prompt_id, "data": prompt_data}
+                ],
                 "created_at": self._timestamp(),
             },
         )
@@ -716,7 +805,25 @@ class ChatStreamService:
         row = self._rows.setdefault(uid, {}).get(row_id)
         if row is not None:
             status = str(event.get("type")).removeprefix("permission_")
-            self._upsert(uid, {**row, "status": status})
+            parts = copy.deepcopy(row.get("parts", []))
+            if parts and isinstance(parts[0], dict) and parts[0].get("type") == "prompt":
+                data = parts[0].get("data")
+                data = copy.deepcopy(data) if isinstance(data, dict) else {}
+                data["resolution"] = {
+                    key: copy.deepcopy(value)
+                    for key, value in event.items()
+                    if key not in {"ts", "seq", "conversation_uid"}
+                }
+                parts[0]["data"] = data
+            self._upsert(
+                uid,
+                {
+                    **row,
+                    "turn_id": self._event_turn_id(event) or row.get("turn_id"),
+                    "status": status,
+                    "parts": parts,
+                },
+            )
 
     def _join_input(self, uid: str, input_id: str, turn_id: str) -> None:
         self._ensure_input_row(uid, input_id)
@@ -803,8 +910,11 @@ class ChatStreamService:
         if input_id not in values:
             values.append(input_id)
 
-    def _new_reply_row(self, uid: str, turn_id: str) -> str:
-        row_id = f"reply-{uuid.uuid5(uuid.NAMESPACE_URL, turn_id).hex}"
+    def _new_reply_row(
+        self, uid: str, turn_id: str, *, history_key: str | None = None
+    ) -> str:
+        history_key = history_key or self._turn_history_keys.get((uid, turn_id))
+        row_id = self._reply_row_id(uid, turn_id, history_key)
         self._reply_rows[(uid, turn_id)] = row_id
         self._reply_text[(uid, turn_id)] = ""
         self._upsert(
@@ -822,10 +932,18 @@ class ChatStreamService:
         )
         return row_id
 
-    def _upsert_reply(self, uid: str, turn_id: str, text: str, *, status: str) -> None:
+    def _upsert_reply(
+        self,
+        uid: str,
+        turn_id: str,
+        text: str,
+        *,
+        status: str,
+        history_key: str | None = None,
+    ) -> None:
         row_id = self._reply_rows.get((uid, turn_id))
         if row_id is None:
-            row_id = self._new_reply_row(uid, turn_id)
+            row_id = self._new_reply_row(uid, turn_id, history_key=history_key)
         row = self._rows.setdefault(uid, {}).get(row_id)
         if row is None:
             return
@@ -863,6 +981,103 @@ class ChatStreamService:
         if isinstance(value, (str, int)) and str(value):
             return str(value)
         return None
+
+    def _turn_history_key(
+        self,
+        uid: str,
+        turn_id: str | None,
+        *,
+        event: dict[str, Any] | None = None,
+        input_ids: list[str] | None = None,
+    ) -> str | None:
+        if turn_id is None:
+            return None
+        key = (uid, turn_id)
+        candidate = event.get("acp_turn_key") if isinstance(event, dict) else None
+        if isinstance(candidate, str) and candidate:
+            self._turn_history_keys[key] = candidate
+            return candidate
+        known = self._turn_history_keys.get(key)
+        if known:
+            return known
+
+        llm_service = getattr(self._state_service, "_llm_service", None)
+        manager = getattr(llm_service, "conversation_manager", None)
+        messages = getattr(llm_service, "conversation_history", None)
+        if not isinstance(messages, list):
+            messages = getattr(manager, "messages", None)
+        if not isinstance(messages, list):
+            return None
+
+        candidates = set(input_ids or ())
+        for message in reversed(messages):
+            metadata = (
+                message.get("metadata")
+                if isinstance(message, dict)
+                else getattr(message, "metadata", None)
+            )
+            if not isinstance(metadata, dict):
+                continue
+            if self._event_turn_id(metadata) != turn_id:
+                continue
+            request_id = metadata.get("request_id")
+            if candidates and request_id not in candidates:
+                continue
+            history_key = metadata.get("acp_turn_key")
+            if isinstance(history_key, str) and history_key:
+                self._turn_history_keys[key] = history_key
+                return history_key
+        return None
+
+    @staticmethod
+    def _reply_row_id(
+        uid: str, turn_id: str, history_key: str | None = None
+    ) -> str:
+        identity = (
+            f"{uid}:acp:{history_key}"
+            if isinstance(history_key, str) and history_key
+            else f"{uid}:turn:{turn_id}"
+        )
+        return f"reply-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex}"
+
+    @staticmethod
+    def _tool_row_id(
+        uid: str,
+        turn_id: str | None,
+        tool_id: str,
+        history_key: str | None = None,
+    ) -> str:
+        identity = history_key if isinstance(history_key, str) and history_key else turn_id or ""
+        return f"tool-{uuid.uuid5(uuid.NAMESPACE_URL, f'{uid}:{identity}:{tool_id}').hex}"
+
+    @staticmethod
+    def _hub_note_part(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict) or value.get("type") != "hub-note":
+            return None
+        if (
+            not isinstance(value.get("from"), str)
+            or not value["from"]
+            or not isinstance(value.get("to"), str)
+            or not isinstance(value.get("text"), str)
+            or not isinstance(value.get("observed"), bool)
+        ):
+            return None
+        part = copy.deepcopy(value)
+        for field, check in (
+            ("kind", lambda item: isinstance(item, str)),
+            ("thread_id", lambda item: isinstance(item, str)),
+            ("reply_to", lambda item: isinstance(item, str)),
+            ("is_direct", lambda item: isinstance(item, bool)),
+            (
+                "presence",
+                lambda item: isinstance(item, str)
+                and item in {"online", "offline"},
+            ),
+        ):
+            optional = part.get(field)
+            if optional is not None and not check(optional):
+                part.pop(field, None)
+        return part
 
     def replace_transcript(self) -> Event:
         """Replace the row window after a daemon transcript compaction."""
@@ -970,8 +1185,95 @@ class ChatStreamService:
             if isinstance(item, dict) and item.get("id")
         }
         inputs.update(copy.deepcopy(self._inputs.get(uid, {})))
+        snapshot_rows = list(rows_by_id.values())[-REPLAY_WINDOW:]
+        visible_input_ids = {
+            row["id"] for row in snapshot_rows if row.get("kind") == "input"
+        }
+        history_replies = {
+            row["turn_id"]: row
+            for row in rows_by_id.values()
+            if row.get("kind") == "reply" and row.get("turn_id")
+        }
+        for row in snapshot_rows:
+            if row.get("kind") != "input":
+                continue
+            input_id = row.get("id")
+            if not isinstance(input_id, str) or input_id in inputs:
+                continue
+            turn_id = row.get("turn_id")
+            reply = history_replies.get(turn_id)
+            if reply is not None:
+                status = reply.get("status")
+                outcome = (
+                    "cancelled"
+                    if status in {"cancelled", "canceled"}
+                    else "failed"
+                    if status in {"failed", "error"}
+                    else "completed"
+                )
+                info = {
+                    "id": input_id,
+                    "state": "ended",
+                    "turn_id": turn_id,
+                    "outcome": outcome,
+                }
+            else:
+                state_name = row.get("status")
+                if state_name not in {"queued", "started", "joined"}:
+                    state_name = "started" if turn_id else "queued"
+                info = {
+                    "id": input_id,
+                    "state": state_name,
+                    "turn_id": turn_id,
+                }
+            inputs[input_id] = info
+        inputs = {
+            input_id: info
+            for input_id, info in inputs.items()
+            if input_id in visible_input_ids
+        }
+
+        turn_ids = list(
+            dict.fromkeys(
+                row["turn_id"]
+                for row in snapshot_rows
+                if row.get("kind") in {"input", "reply", "tool"}
+                and isinstance(row.get("turn_id"), str)
+                and row["turn_id"]
+            )
+        )
+        for turn_id, current in turns.items():
+            current_inputs = current.get("input_ids", [])
+            turns[turn_id] = {
+                **current,
+                "input_ids": [
+                    input_id
+                    for input_id in current_inputs
+                    if input_id in visible_input_ids
+                ],
+            }
+        for turn_id in turn_ids:
+            current = turns.get(turn_id, {})
+            input_ids = list(current.get("input_ids", []))
+            input_ids.extend(
+                item["id"]
+                for item in inputs.values()
+                if item.get("turn_id") == turn_id and item["id"] not in input_ids
+            )
+            reply = history_replies.get(turn_id)
+            turn_state = current.get("state") or (
+                "ended"
+                if reply is not None
+                and reply.get("status") not in {"streaming", "running"}
+                else "running"
+            )
+            turns[turn_id] = {
+                "turn_id": turn_id,
+                "state": turn_state,
+                "input_ids": input_ids,
+            }
         return (
-            list(rows_by_id.values())[-REPLAY_WINDOW:],
+            snapshot_rows,
             list(turns.values()),
             list(inputs.values()),
             state,
@@ -1024,14 +1326,18 @@ class ChatStreamService:
             handoff = metadata.get("queue_handoff")
             if isinstance(handoff, dict) and not metadata.get("request_id"):
                 metadata = {**metadata, "request_id": handoff.get("request_id")}
-            if metadata.get("context_compaction") or metadata.get("compaction_summary"):
-                kind, role = "marker", "system"
-            elif (
+            has_hub_identity = bool(
                 metadata.get("agent_hud")
                 or metadata.get("hub_message")
                 or metadata.get("hub_message_id")
-            ):
-                kind, role = "note", "system"
+            )
+            if metadata.get("context_compaction") or metadata.get("compaction_summary"):
+                kind, role = "marker", "system"
+            elif has_hub_identity:
+                if metadata.get("hub_admission") == "input":
+                    kind, role = "input", "user"
+                else:
+                    kind, role = "note", "system"
             elif source_role == "tool":
                 kind, role = "tool", "assistant"
             if kind not in {"input", "reply", "tool", "note", "prompt", "marker"}:
@@ -1047,7 +1353,13 @@ class ChatStreamService:
             content = field(message, "content", "")
             image_store = getattr(llm_service, "_image_store", None)
             resolve_image = getattr(image_store, "resolve", None)
-            parts = self._transcript_parts(content, resolve_image)
+            hub_note = self._hub_note_part(metadata.get("hub_note"))
+            parts = (
+                [hub_note]
+                if hub_note is not None
+                else self._transcript_parts(content, resolve_image)
+            )
+            turn_id = self._event_turn_id(metadata)
             timestamp = field(message, "timestamp")
             if hasattr(timestamp, "isoformat"):
                 timestamp = timestamp.isoformat()
@@ -1067,26 +1379,121 @@ class ChatStreamService:
                 ):
                     manager_uuid = field(candidate, "uuid")
             fallback_identity = f"{uid}:{source_role}:{timestamp}:{content!r}"
+            history_key = metadata.get("acp_turn_key")
+            if not isinstance(history_key, str) or not history_key:
+                history_key = None
+            request_id = metadata.get("request_id")
+            if history_key is None and kind in {"reply", "tool"}:
+                search_ids = [request_id] if isinstance(request_id, str) else None
+                history_key = self._turn_history_key(
+                    uid, turn_id, input_ids=search_ids
+                )
+            input_id = metadata.get("input_id")
+            hub_message_id = metadata.get("hub_message_id")
+            tool_id = metadata.get("tool_id")
+            if kind == "input":
+                row_id = next(
+                    (
+                        candidate
+                        for candidate in (hub_message_id, request_id, input_id)
+                        if isinstance(candidate, str) and candidate
+                    ),
+                    None,
+                )
+            elif kind == "reply":
+                explicit_reply_id = metadata.get("reply_id")
+                row_id = (
+                    explicit_reply_id
+                    if isinstance(explicit_reply_id, str) and explicit_reply_id
+                    else (
+                        self._reply_row_id(uid, turn_id, history_key)
+                        if turn_id is not None
+                        else None
+                    )
+                )
+            elif kind == "tool" and isinstance(tool_id, str) and tool_id:
+                row_id = tool_id
+            else:
+                row_id = next(
+                    (
+                        candidate
+                        for candidate in (hub_message_id, field(message, "uuid"), manager_uuid)
+                        if isinstance(candidate, str) and candidate
+                    ),
+                    None,
+                )
+            row_id = row_id or f"transcript-{uuid.uuid5(uuid.NAMESPACE_URL, fallback_identity).hex}"
+            row_status = metadata.get("status")
+            stop_reason = metadata.get("stop_reason")
+            if kind == "reply" and stop_reason is not None and not row_status:
+                row_status = (
+                    "done"
+                    if stop_reason == "end_turn"
+                    else "cancelled"
+                    if str(stop_reason).lower() in {"cancelled", "canceled"}
+                    else "failed"
+                )
             rows.append(
                 {
-                    "id": str(
-                        metadata.get("request_id")
-                        or metadata.get("input_id")
-                        or metadata.get("hub_message_id")
-                        or metadata.get("tool_id")
-                        or field(message, "uuid")
-                        or manager_uuid
-                        or f"transcript-{uuid.uuid5(uuid.NAMESPACE_URL, fallback_identity).hex}"
-                    ),
-                    "seq": index,
+                    "id": row_id,
+                    "seq": len(rows),
                     "kind": kind,
                     "role": role,
-                    "turn_id": metadata.get("turn_id"),
-                    "status": str(metadata.get("status") or "done"),
+                    "turn_id": turn_id,
+                    "status": str(row_status or "done"),
                     "parts": parts,
                     "created_at": timestamp,
                 }
             )
+            calls = metadata.get("tool_calls")
+            if source_role != "assistant" or not isinstance(calls, list):
+                continue
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                call_id = call.get("id") or call.get("tool_call_id")
+                if isinstance(call_id, int) and not isinstance(call_id, bool):
+                    call_id = str(call_id)
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                name = call.get("name") or call.get("tool_name")
+                if not isinstance(name, str) or not name:
+                    name = "Tool"
+                args = call.get("input")
+                if args is None:
+                    args = call.get("args", {})
+                part: dict[str, Any] = {
+                    "type": "tool-call",
+                    "tool_call_id": call_id,
+                    "tool_name": name,
+                    "args": copy.deepcopy(args),
+                }
+                result = call.get("result")
+                if result is not None:
+                    part["result"] = copy.deepcopy(result)
+                is_error = call.get("is_error")
+                if not isinstance(is_error, bool):
+                    is_error = call.get("status") == "failed"
+                part["is_error"] = is_error
+                call_status = call.get("status")
+                if call_status in {"running", "in_progress"}:
+                    tool_status = "running"
+                elif call_status in {"failed", "completed", "cancelled"}:
+                    tool_status = call_status
+                else:
+                    tool_status = "completed"
+                rows.append(
+                    {
+                        "id": self._tool_row_id(uid, turn_id, call_id, history_key),
+                        "seq": len(rows),
+                        "kind": "tool",
+                        "role": "assistant",
+                        "turn_id": turn_id,
+                        "status": tool_status,
+                        "parts": [part],
+                        "created_at": timestamp,
+                    }
+                )
         return rows
 
     @staticmethod
