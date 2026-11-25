@@ -134,7 +134,8 @@ function installRecorder(cfg) {
     for (const part of row.parts) {
       if (part.type !== "tool-call" || !part.tool_call_id || rec.toolCalls.includes(part.tool_call_id)) continue;
       rec.toolCalls.push(part.tool_call_id);
-      if (rec.flowSeq !== null && Number.isInteger(row.seq) && row.seq >= rec.flowSeq) rec.toolsStarted += 1;
+      // The observed IDs form the baseline; row and event sequences are independent.
+      if (rec.flowSeq !== null) rec.toolsStarted += 1;
     }
   };
 
