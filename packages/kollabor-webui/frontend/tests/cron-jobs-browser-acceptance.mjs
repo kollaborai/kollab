@@ -234,7 +234,7 @@ async function openCronTab(page, pageErrors = []) {
   if (!(await settingsBtn.isVisible().catch(() => false))) {
     // Narrow viewports keep the sidebar behind a sheet trigger; open it first.
     const trigger = page.getByRole("button", { name: /Toggle Sidebar/ }).first();
-    await trigger.click({ timeout: 5000 });
+    await trigger.click({ timeout: 5000, noWaitAfter: true, force: true });
     await settingsBtn.waitFor({ state: "visible", timeout: 5000 });
   }
   await settingsBtn.click();
