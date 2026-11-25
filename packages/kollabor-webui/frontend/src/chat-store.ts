@@ -166,6 +166,8 @@ export interface LiveStore extends ChatStore {
 export const WEB_INPUT_PREFIX = "web";
 
 const MAX_BACKOFF_MS = 10_000;
+// Rows per older page: the same size the daemon's history route defaults to.
+const HISTORY_PAGE_LIMIT = 50;
 
 type HistoryPage = { rows: ChatRow[]; older: string | null };
 
@@ -298,7 +300,7 @@ export class LiveChatStore implements LiveStore {
     const cursor = this.state.olderCursor;
     if (cursor === null) return;
     this.setPaging("loading");
-    const path = `/sessions/${this.enc}/history?before=${encodeURIComponent(cursor)}`;
+    const path = `/sessions/${this.enc}/rows?before=${encodeURIComponent(cursor)}&limit=${HISTORY_PAGE_LIMIT}`;
     let page: HistoryPage;
     try {
       const response = await this.requestHistory(path);
