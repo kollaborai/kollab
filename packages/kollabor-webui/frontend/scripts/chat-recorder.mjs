@@ -128,7 +128,12 @@ function installRecorder(cfg) {
     streamReady: false,
   });
   const now = () => Math.round(performance.timeOrigin + performance.now() - cfg.wall0);
-  rec.mark = (name) => rec.marks.push({ t: now(), name });
+  rec.mark = (name) => {
+    // These marks are emitted immediately before the first marked input is sent.
+    // Retain observed IDs as the baseline for later snapshots and replacements.
+    if (/^(PAGE SEND U1(?: \(|$)|OTHER CLIENT SEND U1$|PAGE START GOAL$)/.test(name)) rec.toolsStarted = 0;
+    rec.marks.push({ t: now(), name });
+  };
   rec.noteToolRow = (row) => {
     if (!row || row.kind !== "tool" || !Array.isArray(row.parts)) return;
     for (const part of row.parts) {
