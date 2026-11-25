@@ -1,3 +1,4 @@
+import { EngineApi } from "../src/api";
 import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatRow, InputInfo, InputRequest, TurnInfo } from "../src/chat-stream";
@@ -411,6 +412,21 @@ describe("LiveChatStore", () => {
       streams[i].drop();
     }
     await vi.waitFor(() => expect(store.connection).toBe("failed"));
+  });
+
+  it("resyncs without after when the final data frame is malformed", async () => {
+    const api = new EngineApi();
+    const first = `data: ${JSON.stringify(snapshot(5, [row("r1")]))}\n\n: keepalive\n\ndata: {broken}\n\n`;
+    const request = vi.spyOn(api, "request").mockResolvedValueOnce(new Response(first))
+      .mockImplementation((_path, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      }));
+    const store = new LiveChatStore(api, "s1", { retryBaseMs: 0 });
+    stores.push(store);
+    store.start();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(request.mock.calls[1][0]).toBe("/sessions/s1/stream");
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
   });
 
   it("eight failed connects in a row set connection to failed; retry() connects again", async () => {
