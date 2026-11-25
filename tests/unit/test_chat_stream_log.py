@@ -1,5 +1,7 @@
 """Daemon conversation stream log behavior for issue #1451."""
 
+import threading
+
 from kollabor.state.chat_stream import ChatStreamLog
 
 
@@ -94,3 +96,36 @@ def test_the_current_turn_stays_replayable_past_the_regular_window():
         {"turn_id": "turn-1", "state": "ended", "input_ids": ["input-1"]},
     )
     assert log.read(after=0, conversation_uid="conv-1")[0]["type"] == "snapshot"
+
+
+def test_live_publish_callbacks_preserve_the_log_sequence_across_threads():
+    callback_started = threading.Event()
+    release_first = threading.Event()
+    second_finished = threading.Event()
+    published = []
+
+    def on_event(event):
+        if event["seq"] == 1:
+            callback_started.set()
+            assert release_first.wait(timeout=2)
+        published.append(event["seq"])
+
+    log = ChatStreamLog("conv-1", snapshot_provider=_snapshot, on_event=on_event)
+    first = threading.Thread(target=log.publish, args=("row.delete", {"id": "1"}))
+
+    def publish_second():
+        log.publish("row.delete", {"id": "2"})
+        second_finished.set()
+
+    first.start()
+    assert callback_started.wait(timeout=2)
+    second = threading.Thread(target=publish_second)
+    second.start()
+    second_finished.wait(timeout=0.05)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert published == [1, 2]
