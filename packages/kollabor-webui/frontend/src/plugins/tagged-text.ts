@@ -14,6 +14,7 @@ const SETEXT_HEADING = / {0,3}(?:=+|-+)[ \t]*\r?(?:\n|$)/y;
 const BLOCKQUOTE_PREFIX = /^(?: {0,3}>[ \t]?)+/;
 const BLANK_LINE = /\n(?:[ \t]*>)*[ \t\r]*\n/g;
 const INDENTED = /(?: {4}| {0,3}\t)/y;
+const LIST_CONTINUATION_SCAN_LIMIT = 128;
 
 /** Split only registered, complete tags. Tag content is returned raw; code spans, fences, indented blocks and escaped `<` stay text. */
 export function splitPluginTags(text: string, names: readonly string[]): TaggedTextPart[] {
@@ -170,6 +171,13 @@ function startsMarkdownBlock(text: string, index: number): boolean {
   const contentIndex = index + quotePrefix.length;
   ATX_HEADING.lastIndex = contentIndex;
   if (ATX_HEADING.test(text)) return true;
+  if (index > 0) {
+    const previousLineEnd = index - 1;
+    const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
+    const previousPrefix = BLOCKQUOTE_PREFIX.exec(text.slice(previousLineStart, previousLineEnd))?.[0] ?? "";
+    ATX_HEADING.lastIndex = previousLineStart + previousPrefix.length;
+    if (ATX_HEADING.test(text)) return true;
+  }
   THEMATIC_BREAK.lastIndex = contentIndex;
   if (THEMATIC_BREAK.test(text)) return true;
   SETEXT_HEADING.lastIndex = contentIndex;
@@ -241,7 +249,9 @@ function listContinuationIndent(text: string, index: number): number {
   if (currentIndent < 4) return 0;
 
   let previousLineEnd = index - 1;
-  while (previousLineEnd >= 0) {
+  let scannedLines = 0;
+  while (previousLineEnd >= 0 && scannedLines < LIST_CONTINUATION_SCAN_LIMIT) {
+    scannedLines += 1;
     const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
     const previousLine = text.slice(previousLineStart, previousLineEnd);
     if (previousLine.trim()) {

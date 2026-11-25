@@ -448,7 +448,10 @@ export function normalizePluginEntry(value: unknown, previous?: PluginEntry): Pl
   const settingsSection = record(raw.settings_section);
   const settingOmissionsFromInput = settingOmissions(raw.settings, settingsSection?.widgets);
   const reportedOmissions = record(raw.omitted);
-  const normalizedContributions = normalizePluginContributions(raw.contributes, true);
+  const normalizedContributions = normalizePluginContributions(
+    raw.contributes,
+    raw.contributes === undefined,
+  );
   const reportedContributionOmissions = safeInteger(reportedOmissions?.contributions) ?? 0;
   const contributionOmissions = reportedContributionOmissions + normalizedContributions.omissions;
   const retainPreviousContributions = previous !== undefined &&

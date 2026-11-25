@@ -35,16 +35,16 @@ export function pluginCommandCatalogReady(status: PluginCommandCatalogStatus): b
   return status === "ready" || status === "empty";
 }
 
-/** Hold an unresolved slash draft only while its catalog, inventory or declared plugin is loading. */
+/** Hold an unresolved slash draft only while installed plugins may claim it. */
 export function pluginCommandSubmissionPending(
   text: string,
   status: PluginCommandCatalogStatus,
-  snapshot: Pick<PluginsSnapshot, "off" | "listed" | "plugins">,
+  snapshot: Pick<PluginsSnapshot, "off" | "plugins">,
   reserved: ReadonlySet<string>,
 ): boolean {
   const name = /^\/(\S+)(?:\s+[\s\S]*)?$/.exec(text.trim())?.[1]?.toLowerCase();
-  if (!name || snapshot.off || reserved.has(name)) return false;
-  if (status === "loading" || (!snapshot.listed && snapshot.plugins.length === 0)) return true;
+  if (!name || snapshot.off || reserved.has(name) || snapshot.plugins.length === 0) return false;
+  if (status === "loading") return true;
   return snapshot.plugins.some(
     (plugin) => plugin.status === "loading" &&
       [...declaredIds(plugin.entry.contributes?.slash)].some((declared) => declared.toLowerCase() === name),

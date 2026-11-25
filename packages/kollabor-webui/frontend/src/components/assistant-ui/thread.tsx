@@ -139,6 +139,7 @@ const PLUGIN_COMMAND_SUBMISSION_WAIT_MS = 2_000;
 type PendingPluginSubmission = {
   text: string;
   session: string | null;
+  queueSessionId: string | null;
   timer: number;
   sendsNow: boolean;
 };
@@ -768,6 +769,8 @@ const Composer: FC<{
   }
   const currentDraftKeyRef = useRef(draftKey ?? null);
   currentDraftKeyRef.current = draftKey ?? null;
+  const currentQueueSessionIdRef = useRef(queueSessionId ?? null);
+  currentQueueSessionIdRef.current = queueSessionId ?? null;
   const composerFormId = useId();
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const pendingPluginSubmitRef = useRef<PendingPluginSubmission | null>(null);
@@ -784,6 +787,7 @@ const Composer: FC<{
     cancelPendingPluginSubmit();
     if (
       currentDraftKeyRef.current !== pending.session ||
+      currentQueueSessionIdRef.current !== pending.queueSessionId ||
       aui.composer.getState().text !== pending.text
     ) return;
     if (normalFallback) normalPluginFallbackRef.current = pending;
@@ -883,11 +887,16 @@ const Composer: FC<{
     if (state.attachments.length > 0) return false;
     const draft = state.text;
     const commandSession = draftKey ?? null;
+    const commandQueueSessionId = queueSessionId ?? null;
     const normalFallback = normalPluginFallbackRef.current;
     if (normalFallback?.session === commandSession && normalFallback.text === draft) return false;
     if (normalFallback) normalPluginFallbackRef.current = null;
     const pending = pendingPluginSubmitRef.current;
-    if (pending && (pending.session !== commandSession || pending.text !== draft)) {
+    if (pending && (
+      pending.session !== commandSession ||
+      pending.queueSessionId !== commandQueueSessionId ||
+      pending.text !== draft
+    )) {
       cancelPendingPluginSubmit();
     }
     if (pluginCommandSubmissionPending(draft, commandCatalogStatus, pluginSnapshot, reserved)) {
@@ -901,6 +910,7 @@ const Composer: FC<{
         pendingPluginSubmitRef.current = {
           text: draft,
           session: commandSession,
+          queueSessionId: commandQueueSessionId,
           timer,
           sendsNow: submitSendsNow.current,
         };
@@ -965,14 +975,18 @@ const Composer: FC<{
     const pending = pendingPluginSubmitRef.current;
     if (!pending) return;
     const state = aui.composer.getState();
-    if (pending.session !== (draftKey ?? null) || pending.text !== state.text) {
+    if (
+      pending.session !== (draftKey ?? null) ||
+      pending.queueSessionId !== (queueSessionId ?? null) ||
+      pending.text !== state.text
+    ) {
       cancelPendingPluginSubmit();
       return;
     }
     if (!pluginCommandSubmissionPending(pending.text, commandCatalogStatus, pluginSnapshot, reserved)) {
       replayPendingPluginSubmit(false);
     }
-  }, [aui, commandCatalogStatus, composerText, draftKey, pluginSnapshot, reserved]);
+  }, [aui, commandCatalogStatus, composerText, draftKey, pluginSnapshot, queueSessionId, reserved]);
 
   useEffect(() => () => {
     const pending = pendingPluginSubmitRef.current;

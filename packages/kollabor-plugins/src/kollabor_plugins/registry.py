@@ -679,11 +679,9 @@ def _bounded_inventory_identifier(value: object, limit: int = _INVENTORY_TEXT_LI
     if clean is None:
         return None
     if contains_sensitive_text(clean):
-        namespace_value = clean.rsplit(":", 1)[-1]
         if (
-            ":" not in clean
-            or not _DECLARATION_ID.fullmatch(clean)
-            or contains_sensitive_text(namespace_value)
+            not _DECLARATION_ID.fullmatch(clean)
+            or any(contains_sensitive_text(part) for part in clean.split(":"))
         ):
             return None
     return clean
@@ -1091,13 +1089,8 @@ def _normalize_plugin_entry(value: object) -> dict | None:
             omitted_option_labels += max(0, len(labels) - _MAX_PLUGIN_OPTION_LABELS)
     raw_contributes = value.get("contributes", {})
     contributes, dropped_contributions = _normalize_contributes(raw_contributes)
-    missing_contributions = (
-        sum(kind not in raw_contributes for kind in _PLUGIN_CONTRIBUTION_KINDS)
-        if "contributes" in value and isinstance(raw_contributes, dict)
-        else 0
-    )
     omitted_contributions = (
-        _reported_omissions(value, "contributions") + dropped_contributions + missing_contributions
+        _reported_omissions(value, "contributions") + dropped_contributions
     )
     version = _bounded_inventory_text(value.get("version"), 256)
     source = _bounded_inventory_text(value.get("source"))
