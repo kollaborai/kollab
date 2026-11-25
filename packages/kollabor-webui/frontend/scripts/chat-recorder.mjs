@@ -118,7 +118,7 @@ function installRecorder(cfg) {
   const rec = (window.__rec = {
     frames: [], net: [], marks: [], cut: null, anchorEl: null,
     toolsStarted: Number(restore?.toolsStarted) || 0,
-    toolRows: Array.isArray(restore?.toolRows) ? restore.toolRows : [],
+    toolCalls: Array.isArray(restore?.toolCalls) ? restore.toolCalls : [],
     flowSeq: Number.isInteger(restore?.flowSeq) ? restore.flowSeq : null,
     streamTurns: Array.isArray(restore?.streamTurns) ? restore.streamTurns : [],
     streamInputs: Array.isArray(restore?.streamInputs) ? restore.streamInputs : [],
@@ -130,9 +130,12 @@ function installRecorder(cfg) {
   const now = () => Math.round(performance.timeOrigin + performance.now() - cfg.wall0);
   rec.mark = (name) => rec.marks.push({ t: now(), name });
   rec.noteToolRow = (row) => {
-    if (!row || row.kind !== "tool" || !row.id || rec.toolRows.includes(row.id)) return;
-    rec.toolRows.push(row.id);
-    if (rec.flowSeq !== null && Number.isInteger(row.seq) && row.seq >= rec.flowSeq) rec.toolsStarted += 1;
+    if (!row || row.kind !== "tool" || !Array.isArray(row.parts)) return;
+    for (const part of row.parts) {
+      if (part.type !== "tool-call" || !part.tool_call_id || rec.toolCalls.includes(part.tool_call_id)) continue;
+      rec.toolCalls.push(part.tool_call_id);
+      if (rec.flowSeq !== null && Number.isInteger(row.seq) && row.seq >= rec.flowSeq) rec.toolsStarted += 1;
+    }
   };
 
   // The chat's streams, logged as they pass.
@@ -512,7 +515,7 @@ async function record(flow, session, browser, target) {
     "__kollabChatRecorderRestore",
     JSON.stringify({
       toolsStarted: window.__rec.toolsStarted,
-      toolRows: window.__rec.toolRows,
+      toolCalls: window.__rec.toolCalls,
       flowSeq: window.__rec.flowSeq,
       streamTurns: window.__rec.streamTurns,
       streamInputs: window.__rec.streamInputs,
