@@ -60,6 +60,25 @@ describe("chat recorder analysis", () => {
     expect(await wait("note", { afterIndex: 1, hubNote: { from: "recorder", text: "injected" } })).toEqual(entries[2]);
   });
 
+  it("sends the hub note to the selected session presence", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf('    async "hub-note"() {'), source.indexOf("\n  };", source.indexOf('    async "hub-note"() {')));
+    let sent: any;
+    const flow = runInNewContext(`({${body}})["hub-note"]`, {
+      send: async () => {}, waitForRunning: async () => {}, sleep: async () => {},
+      page: { evaluate: async (fn: Function) => fn() },
+      document: { querySelector: () => ({}) }, window: { __rec: { net: [] } },
+      apiJson: async (route: string) => route.startsWith("/sessions/")
+        ? { identity: "same", daemon_pid: 42, workspace: "/chosen" }
+        : { agents: [{ identity: "same", pid: 41, project: "/other", agent_id: "wrong" }, { identity: "same", pid: 42, project: "/chosen", agent_id: "right" }] },
+      postFromClient: async (_route: string, payload: unknown) => { sent = payload; },
+      waitForStreamRowKind: async () => {}, settle: async () => {},
+      agent: "same", session: "chosen-session", LABEL: "test", tag: "tag", U: () => "u", R: () => "r", tools: () => "tools", say: () => "say",
+    });
+    await flow();
+    expect(sent.agent_id).toBe("right");
+  });
+
   it("requires the reloaded snapshot to retain the active turn and its running inputs", () => {
     const expectedTurn = { turn_id: "turn-1", input_ids: ["input-1"] };
     expect(hasRunningTurnWithInputs({
