@@ -255,6 +255,9 @@ function build(
   let frame = 0;
   let stopped = false;
   let framed = false;
+  // three.js reports a failed shader compile or link here without throwing.
+  let shaderFailed = false;
+  if (renderer.debug) renderer.debug.onShaderError = () => (shaderFailed = true);
 
   const draw = (now: number) => {
     if (stopped) return;
@@ -285,6 +288,12 @@ function build(
       renderer.render(mistScene, mistCam);
       renderer.setRenderTarget(null);
       renderer.render(scene, camera);
+      if (shaderFailed) {
+        // Nothing usable is on screen: release the scene and let the flat mark stay.
+        stop();
+        hooks.onLost?.();
+        return;
+      }
       if (!framed) {
         framed = true;
         hooks.onFrame?.();
