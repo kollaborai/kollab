@@ -1,1 +1,1 @@
-- Keep native goal attempts associated with their running chat turns across a web page reload (#1451).
+- Keep native goal attempts associated with their running chat turns across a web page reload (#1451). Expose the persisted goal and attempt binding through an authenticated conversation-scoped engine read.

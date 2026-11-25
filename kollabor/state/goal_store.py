@@ -813,6 +813,31 @@ class GoalStore:
         row = cur.fetchone()
         return self._row_to_record(row) if row is not None else None
 
+    def conversation_goal_state(self, conversation_uid: str) -> Optional[dict[str, Any]]:
+        """Read the unfinished goal and its latest unfinished attempt in one query."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT g.goal_id, g.status, a.attempt_id, a.state, a.turn_id "
+                "FROM goals g LEFT JOIN goal_attempts a ON a.attempt_id = ("
+                "SELECT attempt_id FROM goal_attempts WHERE goal_id = g.goal_id "
+                "AND conversation_uid = g.conversation_uid "
+                "AND state NOT IN ('settled', 'cancelled', 'ambiguous') "
+                "ORDER BY continuation_seq DESC LIMIT 1) "
+                "WHERE g.conversation_uid = ? "
+                f"AND g.status NOT IN {UNFINISHED_EXCLUDE_PLACEHOLDER}",
+                (conversation_uid,),
+            ).fetchone()
+        if row is None:
+            return None
+        attempt = None
+        if row["attempt_id"] is not None:
+            attempt = {
+                "attempt_id": row["attempt_id"],
+                "state": row["state"],
+                "turn_id": row["turn_id"],
+            }
+        return {"goal_id": row["goal_id"], "status": row["status"], "attempt": attempt}
+
     def history(self, conversation_uid: str, limit: int = 10) -> List[GoalRecord]:
         cur = self._conn.execute(
             "SELECT * FROM goals WHERE conversation_uid = ? "
