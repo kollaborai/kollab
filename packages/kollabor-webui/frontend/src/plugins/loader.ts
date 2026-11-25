@@ -178,7 +178,11 @@ function normalizePluginContributions(value: unknown, requireAllKinds = false): 
   const raw = record(value);
   const result: Record<string, unknown[]> = { menu: [], views: [], pages: [], modals: [], slash: [], renderers: [] };
   if (value === undefined)
-    return { contributes: result as PluginEntry["contributes"], malformed: false, omissions: 0 };
+    return {
+      contributes: result as PluginEntry["contributes"],
+      malformed: requireAllKinds,
+      omissions: requireAllKinds ? 1 : 0,
+    };
   if (!raw)
     return { contributes: result as PluginEntry["contributes"], malformed: true, omissions: 1 };
   let malformed = false;
@@ -413,8 +417,10 @@ export function normalizePluginEntry(value: unknown, previous?: PluginEntry): Pl
   const settingOmissionsFromInput = settingOmissions(raw.settings, settingsSection?.widgets);
   const reportedOmissions = record(raw.omitted);
   const normalizedContributions = normalizePluginContributions(raw.contributes, true);
+  const reportedContributionOmissions = safeInteger(reportedOmissions?.contributions) ?? 0;
+  const contributionOmissions = reportedContributionOmissions + normalizedContributions.omissions;
   const retainPreviousContributions = previous !== undefined &&
-    (raw.contributes === undefined || normalizedContributions.malformed);
+    (raw.contributes === undefined || normalizedContributions.malformed || reportedContributionOmissions > 0);
   const omitted = {
     services: (safeInteger(reportedOmissions?.services) ?? 0)
       + Math.max(0, rawServices.length - PLUGIN_INVENTORY_LIMITS.services),
@@ -426,8 +432,8 @@ export function normalizePluginEntry(value: unknown, previous?: PluginEntry): Pl
     setting_options: (safeInteger(reportedOmissions?.setting_options) ?? 0) + settingOmissionsFromInput.setting_options,
     option_labels: (safeInteger(reportedOmissions?.option_labels) ?? 0) + settingOmissionsFromInput.option_labels,
     contributions: raw.contributes === undefined && previous
-      ? previous.omitted.contributions
-      : (safeInteger(reportedOmissions?.contributions) ?? 0) + normalizedContributions.omissions,
+      ? Math.max(previous.omitted.contributions, contributionOmissions)
+      : contributionOmissions,
   };
   return {
     id,

@@ -240,7 +240,7 @@ export function describePluginAdds(manifest: NonNullable<Job["manifest"]>): stri
     omitted.services ? `${omitted.services} additional service${omitted.services === 1 ? "" : "s"} omitted from this review` : null,
     omitted.uses ? `${omitted.uses} additional use declaration${omitted.uses === 1 ? "" : "s"} omitted from this review` : null,
     omitted.service_secrets ? `${omitted.service_secrets} additional service secret${omitted.service_secrets === 1 ? "" : "s"} omitted from this review` : null,
-    omitted.contributions ? `${omitted.contributions} additional contribution omitted from this review` : null,
+    omitted.contributions ? `${omitted.contributions} additional contribution${omitted.contributions === 1 ? "" : "s"} omitted from this review` : null,
   ].filter((line): line is string => line !== null);
   return [
     ...contributions,

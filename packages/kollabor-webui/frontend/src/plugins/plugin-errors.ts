@@ -1,7 +1,10 @@
+import type { RootOptions } from "react-dom/client";
+
 export const SAFE_PLUGIN_ACTION_ERROR = "The plugin action failed. Check the browser console for redacted details.";
 export const SAFE_PLUGIN_SETTINGS_ERROR = "Could not complete this plugin settings action. Check the browser console for redacted details.";
 
 const URL_CREDENTIALS = /\b(https?:\/\/)[^/@\s]+@/gi;
+const URL_QUERY_OR_FRAGMENT = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>?#]+)(?:[?#][^\s"'<>]*)?/gi;
 const AUTH_SCHEME = /\b(?:bearer|basic)\s+([^\s,;]+)/gi;
 const AUTH_SCHEME_ASSIGNMENT = /\b(?:proxy-authorization|authorization|token)\b\s*[:=]\s*(?:bearer|basic)\s+[^\s,;]+/i;
 const SENSITIVE_ASSIGNMENT = /((?:^|[^A-Za-z0-9])(?:api[_-]?key|(?:private|signing|encryption|ssh|secret|access|master|client)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)(?![A-Za-z0-9_])\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("[^"]*"|'[^']*'|[^\s,;]+)/gi;
@@ -72,6 +75,7 @@ export function pluginRenderFailureMessage(renderer: string): string {
 export function redactPluginError(error: unknown): string {
   return describePluginError(error, true)
     .replace(URL_CREDENTIALS, "$1[redacted]@")
+    .replace(URL_QUERY_OR_FRAGMENT, "$1")
     .replace(SENSITIVE_ASSIGNMENT, "$1[redacted]")
     .replace(AUTH_SCHEME, "[redacted]")
     .replace(SECRET_VALUE, "[redacted]");
@@ -88,3 +92,16 @@ export function logPluginFailure(
   if (componentStack) console.error(message, redactPluginError(error), redactPluginError(componentStack));
   else console.error(message, redactPluginError(error));
 }
+
+/** Keep React root diagnostics on the same redacted path as plugin failures. */
+export const REDACTED_ROOT_ERROR_OPTIONS: RootOptions = {
+  onCaughtError(error, errorInfo) {
+    logPluginFailure("Kollab", "caught React error", error, errorInfo.componentStack);
+  },
+  onUncaughtError(error, errorInfo) {
+    logPluginFailure("Kollab", "uncaught React error", error, errorInfo.componentStack);
+  },
+  onRecoverableError(error, errorInfo) {
+    logPluginFailure("Kollab", "recoverable React error", error, errorInfo.componentStack);
+  },
+};
