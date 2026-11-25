@@ -7,6 +7,7 @@ import {
   type TextMessagePart,
   unstable_createMessageConverter as createMessageConverter,
   useAssistantTransportRuntime,
+  useAui,
   useAuiState,
 } from "@assistant-ui/react";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
@@ -1104,6 +1105,36 @@ function InitialMessagesGate({
   return ready ? children : null;
 }
 
+// Reads the running flag and sends /voice through the assistant-ui runtime, the
+// same sources VoiceModeProvider used before it took them as props. The hooks
+// need AssistantRuntimeProvider above this component.
+function VoiceModeBridge({
+  api,
+  sessionId,
+  children,
+}: {
+  api: EngineApi;
+  sessionId: string;
+  children: ReactNode;
+}) {
+  const aui = useAui();
+  const running = useAuiState((state) => state.thread.isRunning);
+  const sendCommand = useCallback(
+    (text: string) => aui.thread.append(text),
+    [aui],
+  );
+  return (
+    <VoiceModeProvider
+      api={api}
+      sessionId={sessionId}
+      running={running}
+      sendCommand={sendCommand}
+    >
+      {children}
+    </VoiceModeProvider>
+  );
+}
+
 export function EngineRuntimeProvider({
   api,
   sessionId,
@@ -2138,9 +2169,9 @@ export function EngineRuntimeProvider({
               messages={initialState.messages}
             >
               <PermissionToolUI />
-              <VoiceModeProvider api={api} sessionId={sessionId}>
+              <VoiceModeBridge api={api} sessionId={sessionId}>
                 {children}
-              </VoiceModeProvider>
+              </VoiceModeBridge>
             </InitialMessagesGate>
           </SendWaitingNowContext.Provider>
         </PermissionCancellationContext.Provider>
