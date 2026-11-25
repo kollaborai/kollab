@@ -70,7 +70,7 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 | `input.state` | `{id, state, turn_id, outcome}` |
 | `turn.state` | `{turn_id, state, input_ids}` |
 
-A client connects without `after` and gets a `snapshot`. It reconnects with the last `seq` it applied and gets every later event. It gets a new `snapshot` instead when that `seq` is older than the daemon keeps (default: the current turn and the last 2,000 events) or when `conversation_uid` changed. Older rows load through `GET /sessions/{id}/history?before=<cursor>` in the same row shape.
+A client connects without `after` and gets a `snapshot`. It reconnects with the last `seq` it applied and gets every later event. It gets a new `snapshot` instead when that `seq` is older than the daemon keeps (default: the current turn and the last 2,000 events) or when `conversation_uid` changed. Older rows load through `GET /sessions/{id}/rows?before=<cursor>&limit=<n>`, which answers `{rows, older}` in the same row shape, oldest first; `older` is the next older cursor or `null`, and a `409` means the cursor belongs to another conversation, so the client resyncs. The legacy `/history` route keeps its old envelope until cutover.
 
 **Sending.** `POST /sessions/{id}/inputs {id, text, attachments}` answers `202 {id, state}`. The reply arrives on the stream, for the sender as for every other client. `POST /sessions/{id}/inputs/{input_id}/cancel` cancels a queued input. `/assistant`, the `synced` point and the `history_updated` refetch are removed at cutover.
 
