@@ -126,7 +126,7 @@ describe("chat recorder analysis", () => {
         errText: "Stream ended abruptly",
         anc: 120,
       }),
-      frame({ t: 200, anc: null, err: 1 }),
+      frame({ t: 200, rows: ["u4:abc:1", "a5:def:1", "u6:ghi:1"], anc: null, err: 1 }),
       frame({ t: 300, n: 0, rows: [], err: 1 }),
     ];
 
@@ -156,6 +156,20 @@ describe("chat recorder analysis", () => {
     );
 
     expect(result.defects).toMatchObject({ dupReply: 1, dupTools: 1, replyGone: 1 });
+  });
+
+  it("counts every consecutive all-new-row frame as a remount", () => {
+    const result = analyzeChatFrames(
+      [
+        frame({ t: 0 }),
+        frame({ t: 100, rows: ["u4:abc:1", "a5:def:1", "u6:ghi:1"] }),
+        frame({ t: 200, rows: ["u7:abc:1", "a8:def:1", "u9:ghi:1"] }),
+        frame({ t: 300, rows: ["u10:abc:1", "a11:def:1", "u12:ghi:1"] }),
+      ],
+      ready,
+    );
+
+    expect(result.defects.remount).toBe(3);
   });
 
   it("lists the requested recorder flows", () => {
