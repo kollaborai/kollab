@@ -75,12 +75,14 @@ def validate(data: dict) -> list[str]:
             if field not in info:
                 errors.append(f"{name}: missing required field '{field}'")
         cw = info.get("context_window")
-        if not isinstance(cw, int) or cw <= 0:
+        if isinstance(cw, bool) or not isinstance(cw, int) or cw <= 0:
             errors.append(
                 f"{name}: context_window must be a positive int, got {_describe(cw)}"
             )
         out = info.get("max_output")
-        if out is not None and (not isinstance(out, int) or out <= 0):
+        if out is not None and (
+            isinstance(out, bool) or not isinstance(out, int) or out <= 0
+        ):
             errors.append(
                 f"{name}: max_output must be a positive int or null, got {_describe(out)}"
             )

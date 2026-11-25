@@ -56,6 +56,7 @@ MODELS_DEV_PROVIDERS = {
 # Fields a source may refresh on an existing entry. Everything else on the
 # entry is curated-only and survives every run.
 PRICE_FIELDS = ("pricing_in", "pricing_out", "pricing_cached_in")
+OUTPUT_LIMIT_FIELDS = ("max_output",)
 
 SOURCED_FIELDS = (
     "context_window",
@@ -69,6 +70,11 @@ SOURCED_FIELDS = (
     "supports_sampling",
     "released",
 )
+
+
+class _InvalidRetainedContextWindow(ValueError):
+    """A required registry field cannot safely survive a refresh."""
+
 
 # OpenRouter's top-provider cap can be larger than the model-level completion
 # limit. Keep these sourced values aligned with the public model FAQs so a
@@ -143,6 +149,10 @@ def _is_valid_existing_price(value) -> bool:
     except (TypeError, ValueError, OverflowError):
         return False
     return math.isfinite(price) and price >= 0
+
+
+def _is_valid_existing_output_limit(value) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value > 0
 
 
 def map_models_dev_model(name: str, entry: dict, provider_slug: str) -> dict:
@@ -311,6 +321,27 @@ def apply_merge(data: dict, models_dev: dict, openrouter: dict, today: str):
             if value is not None and not _is_valid_existing_price(value):
                 entry[field] = None
                 report.append(f"{key}.{field}: invalid existing price -> null")
+        for field in OUTPUT_LIMIT_FIELDS:
+            value = entry.get(field)
+            if value is not None and not _is_valid_existing_output_limit(value):
+                entry[field] = None
+                report.append(f"{key}.{field}: invalid existing output limit -> null")
+    invalid_context_windows = [
+        key
+        for key, entry in models.items()
+        if isinstance(entry, dict)
+        and (
+            isinstance(entry.get("context_window"), bool)
+            or not isinstance(entry.get("context_window"), int)
+            or entry["context_window"] <= 0
+        )
+    ]
+    if invalid_context_windows:
+        invalid = ", ".join(sorted(invalid_context_windows)[:10])
+        raise _InvalidRetainedContextWindow(
+            "invalid required context_window remains in model registry; "
+            f"refresh not written for: {invalid}"
+        )
     if not report:
         return False, ["no changes; model directory already matches the sources"]
     data.setdefault("_meta", {})["updated"] = today
@@ -322,7 +353,7 @@ def load_registry(path: Path) -> dict:
 
 
 def write_registry(path: Path, data: dict) -> None:
-    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
     path.write_text(text)
 
 
@@ -371,7 +402,11 @@ def main(argv=None) -> int:
 
     data = load_registry(args.registry)
     today = date.today().isoformat()
-    changed, report = apply_merge(data, models_dev, openrouter, today)
+    try:
+        changed, report = apply_merge(data, models_dev, openrouter, today)
+    except _InvalidRetainedContextWindow as exc:
+        print(f"FAIL: {exc}")
+        return 2
 
     for line in report:
         print(line)
@@ -386,7 +421,11 @@ def main(argv=None) -> int:
     if args.dry_run:
         print("dry run: nothing written")
         return 0
-    write_registry(args.registry, data)
+    try:
+        write_registry(args.registry, data)
+    except ValueError as exc:
+        print(f"FAIL: registry cannot be written as strict JSON: {exc}")
+        return 2
     print(f"wrote {args.registry} ({data['_meta']['updated']})")
     return 0
 
