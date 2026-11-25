@@ -826,9 +826,11 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
    menu row say so and a notice appears. If it exits 0 with `restart: on-failure`, it shows `Exited`.
 4. If the engine restarts while `loop` runs, then `loop` keeps running and the new engine finds its
    wrapper by pid, start time and nonce. A stage child or another install's process never matches.
-5. If a plugin starts an agent run with `approval: "trust_all"` without `agents:unattended`, then it gets
-   403 `pr-chain did not declare agents:unattended`. With the entries declared and granted, the agent
-   shows under PR Chain in the left sidebar while it runs.
+5. While agent-run support is unavailable, a plugin that declares `agents` or `agents:unattended` cannot
+   start an agent run; the review says agent runs are not available yet and `ctx.agents.run()` raises
+   `NotImplementedError`. After support ships, a `trust_all` run without `agents:unattended` gets 403
+   `pr-chain did not declare agents:unattended`. With the required entries declared and granted, the
+   agent shows under PR Chain in the left sidebar while it runs.
 6. After agent-run support ships, if a run passes `timeout_s` or `max_tokens`, then its daemon refuses
    further provider requests and the run reads `timeout` or `capped`, even while the engine is down. A
    run that finishes first reads `done`.
@@ -851,9 +853,10 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 14. If a plugin is installed, then its settings show in the terminal's `/config` and the web's Settings
     → Plugins with no change to kollab's code; if it is removed, they leave both. A built-in plugin shows
     in both lists too, without Update or Remove.
-15. If an agent's shell runs `kollab plugin add`, then it refuses because stdin is not a terminal. An agent
-    with a shell that reads `engine.token` and calls the engine itself is not stopped, which is why plugin
-    agent runs ask before each tool unless the sheet showed `agents:unattended`.
+15. If an agent's shell runs `kollab plugin add`, then it refuses because stdin is not a terminal. Plugin
+    code can still read `engine.token` and call the engine itself. Agent-run support is unavailable today,
+    so `agents:unattended` has no effect; once support ships, runs default to `approval: "ask"` and
+    `trust_all` requires that permission.
 16. If Turn Off is pressed while the loop is in a stage, then the row reads `Stopping` with the time left,
     the page stays, and both go when the loop exits; a second Turn On while it stops is refused with
     `Plugin is stopping or still has a running service; wait before enabling it`.
