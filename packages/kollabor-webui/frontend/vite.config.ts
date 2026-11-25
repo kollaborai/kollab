@@ -281,6 +281,7 @@ const mainConfig = defineConfig({
       "tests/composer-slot-mode.test.ts",
       "tests/new-chat-view.test.ts",
       "tests/app-store-wiring.test.ts",
+      "tests/chat-runtime-retired.test.ts",
     ],
     environment: "node",
   },
