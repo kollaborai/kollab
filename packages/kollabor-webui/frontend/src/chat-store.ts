@@ -195,7 +195,7 @@ export class LiveChatStore implements LiveStore {
   private connectionState: ConnectionState = "connecting";
   // Not named `olderStatus`: that name is the public getter below.
   private paging: OlderStatus = "idle";
-  // Counts the window replacements (a resync or a snapshot). A history page checks it to see that its window is still current.
+  // Counts the window replacements (a resync, a snapshot or a replace). A history page checks it to see that its window is still current.
   private epoch = 0;
   // Sends the stream has not delivered yet, by input id. Each row sits in `state.rows` until the stream's row replaces it.
   private readonly sends = new Map<string, LocalSend>();
@@ -362,7 +362,7 @@ export class LiveChatStore implements LiveStore {
     const cursor = this.state.olderCursor;
     // Until a snapshot restores the window, its cursor is not trusted: a resync, or a 409 that called it stale, may have left it.
     if (cursor === null || this.state.lastSeq === null) return;
-    // The page belongs to the window it was asked for. A resync or a snapshot while it is in flight replaces that window.
+    // The page belongs to the window it was asked for. A resync, a snapshot or a replace while it is in flight replaces that window.
     const { conversationUid } = this.state;
     const epoch = this.epoch;
     const current = () => this.epoch === epoch && this.state.conversationUid === conversationUid;
@@ -492,8 +492,8 @@ export class LiveChatStore implements LiveStore {
     }
     if (result.outcome.kind === "duplicate") return;
     this.state = result.state;
-    // A snapshot brings a new window with its own cursor, so the paging state follows it.
-    if (event.type === "snapshot") {
+    // A snapshot or a replace brings a new window: an older page still in flight is dropped, and the paging state restarts from the cursor.
+    if (event.type === "snapshot" || event.type === "replace") {
       this.epoch += 1;
       this.paging = this.state.olderCursor === null ? "complete" : "idle";
     }
