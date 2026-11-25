@@ -16508,6 +16508,24 @@ class HubPlugin(BasePlugin):
             if not isinstance(rows, list):
                 raise ValueError("rows must be a list")
             clean = [ScheduleRow.from_dict(row) for row in rows]
+            # Bare names in the Settings form mean agents on this device.
+            # Persist that ownership before the primary syncs the row to its
+            # peers, or every device would treat the same bare name as local.
+            device = self._relay_device_name()
+            if device:
+                for row in clean:
+                    bound_agents = []
+                    for agent in row.agents:
+                        if parse_handle(agent) is not None:
+                            bound_agents.append(agent)
+                            continue
+                        if "@" in agent:
+                            raise ValueError(f"invalid agent handle: {agent}")
+                        bound = format_handle(agent, device)
+                        if parse_handle(bound) is None:
+                            raise ValueError(f"invalid agent name: {agent}")
+                        bound_agents.append(bound)
+                    row.agents = bound_agents
             if len({row.id for row in clean}) != len(clean):
                 raise ValueError("duplicate schedule id")
         except (TypeError, ValueError, AttributeError) as exc:
