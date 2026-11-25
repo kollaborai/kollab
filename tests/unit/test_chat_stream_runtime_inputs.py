@@ -177,3 +177,28 @@ async def test_input_attachments_are_staged_and_bound_to_the_same_client_id():
         item.request_id, item.attachment_refs[0]
     )
     assert staged.data == image
+
+
+@pytest.mark.asyncio
+async def test_send_now_selects_one_input_from_a_shared_batch():
+    from kollabor.state.web_message_queue import WebMessage
+
+    server, state, runtime = _server_and_runtime()
+    await _call(server, "state.chat_stream.add_input", {"id": "web-seed", "text": "seed", "attachments": []})
+    scopes = await runtime.registry.known_scopes()
+    async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
+        await queue.enqueue_batch(
+            queue.new_operation_id(), queue.new_batch_id(),
+            tuple(WebMessage(f"web-{name}", ('{"text":"' + name + '"}').encode())
+                  for name in ("first", "selected", "last")),
+        )
+
+    sent = await _call(server, "state.chat_stream.send_now", {"id": "web-selected"})
+
+    assert [handoff.request_id for _, handoff, _ in state.dispatches] == ["web-selected"]
+    assert sent["result"]["accepted"] is True
+    async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
+        snapshot = await queue.snapshot()
+    assert [item.request_id for batch in snapshot.batches for item in batch.items] == [
+        "web-seed", "web-first", "web-last"
+    ]

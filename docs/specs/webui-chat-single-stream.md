@@ -74,6 +74,8 @@ A client connects without `after` and gets a `snapshot`. It reconnects with the 
 
 **Sending.** `POST /sessions/{id}/inputs {id, text, attachments}` answers `202 {id, state}`. The reply arrives on the stream, for the sender as for every other client. `POST /sessions/{id}/inputs/{input_id}/cancel` cancels a queued input. `/assistant`, the `synced` point and the `history_updated` refetch are removed at cutover.
 
+`POST /sessions/{id}/inputs/{input_id}/send-now` sends only the selected queued input, even when it shares a queue batch; siblings remain queued in their original order. It answers `202` when accepted. A retry after that input has started, joined, or ended with a turn answers `200` with its recorded state and turn id; an unknown input answers `404`, and an input that cannot be sent and has not moved answers `409`.
+
 **Runtimes.** The native loop and the ACP adapter admit inputs through one function and emit the same events. The ACP adapter maps session updates to rows: `agent_message_chunk` to `row.append`, and `tool_call` and `tool_call_update` to `row.upsert`. A harness that cannot steer leaves the input `queued` until its turn starts.
 
 **Web UI.** A store applies the stream and gives assistant-ui `useExternalStoreRuntime({ messageRepository })`, which mirrors the rows exactly, deletes included. `isRunning` follows `turn.state`. `useAssistantTransportRuntime`, the `importExternalState` reconciliation, `historyToMessages`, `live-turn.ts` and the six `onStale` remounts are removed.
