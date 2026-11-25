@@ -405,12 +405,16 @@ export async function waitForSessionReady(page, {
   const historyResponse = historyPath
     ? page.waitForResponse((response) =>
       response.request().method() === "GET" && new URL(response.url()).pathname === historyPath,
-    { timeout })
+    { timeout }).then(
+      (response) => ({ response }),
+      (error) => ({ error }),
+    )
     : null;
   if (clickTarget) await clickTarget.click({ timeout });
   if (historyResponse) {
-    const response = await historyResponse;
-    await response.finished();
+    const result = await historyResponse;
+    if ("error" in result) throw result.error;
+    await result.response.finished();
   }
   await page.waitForFunction(({ title, placeholder, headingText, nameText }) => {
     const activeRow = [...document.querySelectorAll('[data-sidebar="sidebar"] button')].some((button) =>
