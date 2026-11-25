@@ -3263,7 +3263,11 @@ class LLMService:
         history_row_uuid: str | None = None
         try:
             user_uuid = await self.conversation_logger.log_user_message(
-                display_text, parent_uuid=admission_parent_uuid
+                display_text,
+                parent_uuid=admission_parent_uuid,
+                # The saved row names the sender's id, so it pairs with the input
+                # it admits and with the events that answer that input (#1371).
+                message_metadata={"request_id": request_id} if request_id else None,
             )
         except Exception as exc:
             logger.error("User message not written to history: %s", exc)
@@ -3292,6 +3296,7 @@ class LLMService:
                 admission_serial=turn_serial,
                 operator_inputs=operator_inputs,
                 history_row_uuid=history_row_uuid,
+                request_ids=(request_id,) if request_id else (),
             )
             if voice or trusted_origin_context
             else TaggedInput(
@@ -4144,7 +4149,8 @@ class LLMService:
             try:
                 steered = await acp.steer(
                     message, origin=origin, thread_id=data.get("thread_id"),
-                    request_id=request_id,
+                    request_id=data.get("request_id") or None,
+                    record_request_id=request_id,
                     **({"images": images} if images else {}),
                 )
             except ACPSteeringUnconfirmed:
@@ -4158,7 +4164,12 @@ class LLMService:
                     return {"status": "rejected", "reason": "This harness can't take images."}
                 raise
             if steered:
-                return {"status": "injected", "request_id": request_id}
+                result = {"status": "injected", "request_id": request_id}
+                if isinstance(steered, dict):
+                    for key in ("joined_request_id", "joined_turn_id"):
+                        if key in steered:
+                            result[key] = steered[key]
+                return result
         # `steer` above can await while a relay is revoked; re-check at the
         # actual queue-admission boundary before sending anything to ACP.
         if not self._manual_relay_origin_authorized(origin):
