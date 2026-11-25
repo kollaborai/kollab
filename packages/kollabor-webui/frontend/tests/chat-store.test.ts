@@ -401,6 +401,18 @@ describe("LiveChatStore", () => {
     expect(store.rows.map((r) => r.id)).toEqual(["r3"]);
   });
 
+  it("fails after repeated snapshots followed by drops", async () => {
+    const { store, streams } = make({ maxAttempts: 3 });
+    store.start();
+    for (let i = 0; i < 3; i++) {
+      await vi.waitFor(() => expect(streams).toHaveLength(i + 1));
+      streams[i].open();
+      streams[i].emit(snapshot(5, [row("r1")]));
+      streams[i].drop();
+    }
+    await vi.waitFor(() => expect(store.connection).toBe("failed"));
+  });
+
   it("eight failed connects in a row set connection to failed; retry() connects again", async () => {
     const { store, streams, streamSse } = make();
     for (let attempt = 0; attempt < 8; attempt++) streamSse.mockRejectedValueOnce(new Error("refused"));
