@@ -766,11 +766,18 @@ async function record(flow, session, browser, target) {
       if (!await page.evaluate(() => !!document.querySelector('[aria-label="Stop generating"]'))) {
         throw new Error("the turn finished before the hub note could arrive");
       }
+      const details = await apiJson(`/sessions/${session}`);
+      const presence = await apiJson("/hub/agents?refresh=true");
+      const matches = (presence.agents ?? []).filter((item) =>
+        details.daemon_pid > 0 && item.pid === details.daemon_pid &&
+        item.identity === details.identity && item.agent_id);
+      if (matches.length !== 1) throw new Error("could not uniquely resolve the selected session hub presence");
       const from = `chat-recorder-${LABEL}`;
       const text = `${tag} hub note arriving during the active turn. Acknowledge it briefly, then finish the current request.`;
       const afterIndex = await page.evaluate(() => window.__rec.net.length);
       await postFromClient("/hub/messages", {
         target: agent,
+        agent_id: matches[0].agent_id,
         from_identity: from,
         content: text,
       }, "HUB NOTE ARRIVES MID-TURN");
