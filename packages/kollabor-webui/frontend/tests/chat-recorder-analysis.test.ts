@@ -161,7 +161,7 @@ describe("chat recorder analysis", () => {
         await check.after(turn, stream, stream);
       }, U: () => "u", R: () => "r",
     });
-    await expect(success()).resolves.toBeUndefined();
+    await expect(success()).rejects.toThrow(/rendered.*turn/i);
   });
 
   it("reports ACP goal reload as unsupported without sending a chat prompt", async () => {
