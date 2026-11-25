@@ -9,7 +9,7 @@ import { K_POLYS } from "@/components/icons/kollab-logo";
 
 type Listener = (event: { preventDefault: () => void }) => void;
 
-function mockThree(renders: { count: number; ratio?: number }) {
+function mockThree(renders: { count: number; ratio?: number; fail?: boolean }) {
   class Disposable {
     dispose() {}
   }
@@ -34,6 +34,7 @@ function mockThree(renders: { count: number; ratio?: number }) {
       return out;
     }
     render() {
+      if (renders.fail) throw new Error("first render failed");
       renders.count += 1;
     }
     dispose() {}
@@ -216,6 +217,52 @@ describe("glass K recovery", () => {
       expect(renders.ratio).toBeGreaterThanOrEqual(3);
     }
   });
+
+  it.each([false, true])(
+    "releases everything it registered and touches no timer (first render fails: %s)",
+    async (fail) => {
+      vi.resetModules();
+      const active = new Set<string>();
+      const clearTimeout = vi.fn();
+      vi.stubGlobal(
+        "ResizeObserver",
+        class {
+          observe() {
+            active.add("resize");
+          }
+          disconnect() {
+            active.delete("resize");
+          }
+        },
+      );
+      const target = (prefix: string) => ({
+        addEventListener: (type: string) => active.add(prefix + type),
+        removeEventListener: (type: string) => active.delete(prefix + type),
+      });
+      vi.stubGlobal("window", {
+        devicePixelRatio: 1,
+        matchMedia: () => ({ matches: true, ...target("motion:") }),
+        ...target("window:"),
+        clearTimeout,
+      });
+      vi.stubGlobal("document", {
+        documentElement: { classList: { contains: () => true } },
+      });
+      vi.stubGlobal("cancelAnimationFrame", vi.fn());
+      mockThree({ count: 0, fail });
+      const { startGlass } = await import("@/components/icons/kollab-logo-glass");
+      const { canvas, raw } = controllableCanvas();
+      raw.clientWidth = 40;
+      raw.clientHeight = 40;
+      Object.assign(raw, target("canvas:"));
+      const glass = startGlass(canvas, K_POLYS);
+      expect(glass === null).toBe(fail);
+      glass?.stop();
+      expect([...active]).toEqual([]);
+      // The frame id is not a timer id: clearing it could cancel someone else's timeout.
+      expect(clearTimeout).not.toHaveBeenCalled();
+    },
+  );
 
   it("reports a lost WebGL context so the flat mark can come back", async () => {
     vi.resetModules();
