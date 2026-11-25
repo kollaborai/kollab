@@ -187,6 +187,8 @@ export class LiveChatStore implements LiveStore {
   private connectionState: ConnectionState = "connecting";
   // Not named `olderStatus`: that name is the public getter below.
   private paging: OlderStatus = "idle";
+  // Counts the window replacements (a resync or a snapshot). A history page checks it to see that its window is still current.
+  private epoch = 0;
   private attempts = 0;
   private started = false;
   private disposed = false;
@@ -299,6 +301,10 @@ export class LiveChatStore implements LiveStore {
   async loadOlder(): Promise<void> {
     const cursor = this.state.olderCursor;
     if (cursor === null) return;
+    // The page belongs to the window it was asked for. A resync or a snapshot while it is in flight replaces that window.
+    const { conversationUid } = this.state;
+    const epoch = this.epoch;
+    const current = () => this.epoch === epoch && this.state.conversationUid === conversationUid;
     this.setPaging("loading");
     const path = `/sessions/${this.enc}/rows?before=${encodeURIComponent(cursor)}&limit=${HISTORY_PAGE_LIMIT}`;
     let page: HistoryPage;
@@ -306,15 +312,21 @@ export class LiveChatStore implements LiveStore {
       const response = await this.requestHistory(path);
       if (response === null) {
         // A stale cursor: resync, and the next snapshot brings a fresh one.
-        this.setPaging("idle");
-        this.resync();
+        if (current()) this.resync();
+        this.settlePaging();
         return;
       }
       page = (await response.json()) as HistoryPage;
       if (!Array.isArray(page.rows)) throw new Error("history failed: unexpected page");
     } catch (error) {
-      this.setPaging("failed");
+      if (current()) this.setPaging("failed");
+      else this.settlePaging();
       throw error;
+    }
+    if (!current()) {
+      // The window changed while the page was in flight, so its rows and cursor do not belong to it.
+      this.settlePaging();
+      return;
     }
     const held = new Set(this.state.rows.map((row) => row.id));
     const older = page.rows.filter((row) => !held.has(row.id));
@@ -353,6 +365,11 @@ export class LiveChatStore implements LiveStore {
   private publish(): void {
     this.snapshot = this.snapshotOf();
     for (const listener of [...this.listeners]) listener();
+  }
+
+  /** Sets the paging state from the window: complete when no older rows remain, idle when some do. */
+  private settlePaging(): void {
+    this.setPaging(this.state.olderCursor === null ? "complete" : "idle");
   }
 
   /** Sets the paging state and tells the listeners, unless the state is unchanged. */
@@ -412,13 +429,17 @@ export class LiveChatStore implements LiveStore {
     if (result.outcome.kind === "duplicate") return;
     this.state = result.state;
     // A snapshot brings a new window with its own cursor, so the paging state follows it.
-    if (event.type === "snapshot") this.paging = this.state.olderCursor === null ? "complete" : "idle";
+    if (event.type === "snapshot") {
+      this.epoch += 1;
+      this.paging = this.state.olderCursor === null ? "complete" : "idle";
+    }
     this.attempts = 0;
     this.publish();
   }
 
   /** Keeps rows on screen, forgets the cursor, and ends the connection so the loop reconnects without `after`. */
   private resync(): void {
+    this.epoch += 1;
     this.state = { ...this.state, conversationUid: null, lastSeq: null };
     this.controller?.abort();
   }
