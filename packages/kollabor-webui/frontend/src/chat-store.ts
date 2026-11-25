@@ -465,6 +465,7 @@ export class LiveChatStore implements LiveStore {
           controller.signal,
           (event) => this.onEvent(controller, event),
           () => this.onOpen(controller),
+          () => { if (this.controller === controller && !controller.signal.aborted) this.resync(); },
         );
       } catch {
         // A refused, failed or aborted connection counts as a drop below.
