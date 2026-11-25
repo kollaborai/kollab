@@ -36,7 +36,7 @@ The sync layer is written from scratch rather than patched: new files carry the 
 Non-goals:
 
 - How inputs reach the model. Several inputs may still reach the model in one step; the transcript keeps one row per input.
-- New chat design. Bubbles, labels and layout stay as they are, apart from the open question below.
+- New chat design. Bubbles, labels and layout stay as they are, apart from the open question below and one removal: the follow-up suggestion row and the new-chat suggestion chips go, because no agent kind produces suggestions (the new-chat composer sits about 7px lower). Edit and Reload stay hidden, as they are today: neither works on any agent kind, and edit and regenerate need their own spec.
 - Cross-device merging. The daemon is the only writer of its transcript.
 - The daemon-owned waiting queue itself, which is `docs/specs/webui-daemon-queue.md` (#1366). This spec relies on it for admission and adds ids, lifecycle events and the stream.
 
