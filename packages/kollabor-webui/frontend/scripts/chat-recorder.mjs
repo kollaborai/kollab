@@ -564,7 +564,20 @@ async function record(flow, session, browser, target) {
       expectedActiveTurn: activeTurn,
     }),
   ), expectedActiveTurn);
-  const reloadDuringRun = async (reply) => {
+  // /goal show reads the daemon's SQLite-backed record for its current conversation.
+  const readPersistedGoal = async () => {
+    const response = await engine(`/sessions/${session}/message`, {
+      method: "POST", body: JSON.stringify({ content: "/goal show" }),
+    });
+    if (!response.ok) throw new Error(`goal status request returned ${response.status}`);
+    const raw = await response.text();
+    const events = raw.split(/\r?\n/).filter((line) => line.startsWith("data:"))
+      .map((line) => { try { return JSON.parse(line.slice(5).trim()); } catch { return null; } });
+    const message = events.filter((event) => event?.type === "token").map((event) => event.text ?? "").join("");
+    const match = /^goal ([0-9a-f]{8})\s+(\w+)[^\n]*\nobjective: ([^\n]*)/m.exec(message);
+    return match ? { id: match[1], status: match[2], objective: match[3] } : null;
+  };
+  const reloadDuringRun = async (reply, goalCheck = null) => {
     await waitForRunning();
     await sleep(1200);
     const expectedActiveTurn = await page.evaluate(() => {
@@ -575,6 +588,7 @@ async function record(flow, session, browser, target) {
     if (!expectedActiveTurn) {
       throw new Error("the stream did not identify the running turn and its inputs before reload");
     }
+    if (goalCheck) await goalCheck.before(expectedActiveTurn);
     await collect();
     await preserveRecorderState(expectedActiveTurn);
     collected.marks.push({ t: Date.now() - wall0, name: "RELOAD" });
@@ -584,6 +598,7 @@ async function record(flow, session, browser, target) {
     if (!hasRunningTurnWithInputs(snapshot, preservedTurn)) {
       throw new Error("the reload snapshot did not retain the active running turn and its inputs");
     }
+    if (goalCheck) await goalCheck.after();
     await sleep(2500);
     await mark("RELOADED");
     await settle(reply);
@@ -798,7 +813,21 @@ async function record(flow, session, browser, target) {
     async "goal-reload"() {
       if (activeRuntime !== "native") throw new Error("goal-reload is unsupported for ACP: persisted goals are unavailable");
       await command(`/goal ${U(1)}: Use your terminal tool to run ` + "`sleep 10`" + `, then complete this goal with a concise report containing exactly ${R(1)}.`, "PAGE START GOAL");
-      await reloadDuringRun(R(1));
+      let expectedGoal;
+      await reloadDuringRun(R(1), {
+        before: async () => {
+          expectedGoal = await readPersistedGoal();
+          if (!expectedGoal || expectedGoal.status !== "active" || !expectedGoal.objective.includes(U(1))) {
+            throw new Error("the created goal is not active in the current conversation");
+          }
+        },
+        after: async () => {
+          const restored = await readPersistedGoal();
+          if (!restored || restored.id !== expectedGoal.id || restored.status !== expectedGoal.status || restored.objective !== expectedGoal.objective) {
+            throw new Error("the persisted goal was not restored after reload");
+          }
+        },
+      });
     },
     // Inject a real hub message while the page's turn is still running.
     async "hub-note"() {
