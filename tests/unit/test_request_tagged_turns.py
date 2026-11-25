@@ -12,11 +12,11 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
+import kollabor_agent.queue_processor as queue_processor_module
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.queue_processor import QueuedInput, QueueProcessor, TaggedInput, batch_request_ids
-import kollabor_agent.queue_processor as queue_processor_module
 from kollabor_events import EventBus, EventType, Hook, HookPriority
 from kollabor_tui.display_tap import DisplayTap, publish_semantic
 from kollabor_tui.turn_context import current_turn
@@ -66,6 +66,7 @@ async def test_native_admission_keeps_the_request_id_and_echoes_it():
             "hi",
             ("r1",),
             parent_uuid="parent-2",
+            history_row_uuid="parent-2",
             admission_serial=1,
             # The saved row names the send it carries, so a page tells its own
             # send from another sender's identical words (#1359).
@@ -82,6 +83,7 @@ async def test_native_admission_keeps_the_request_id_and_echoes_it():
             "typed here",
             (),
             parent_uuid="parent-2",
+            history_row_uuid="parent-2",
             admission_serial=2,
             operator_inputs=({"source": "user", "timestamp": ANY, "text": "typed here"},),
         )
