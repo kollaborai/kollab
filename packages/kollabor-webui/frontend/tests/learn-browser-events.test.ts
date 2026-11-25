@@ -53,3 +53,65 @@ test("a failed session click handles the pending history response rejection", ()
   assert.equal(child.status, 0, child.stderr || child.stdout);
   assert.match(child.stdout, /failure dump ran/);
 });
+
+test("session readiness bounds a stalled history body by one shared deadline", () => {
+  const helperUrl = new URL("./learn-browser-acceptance.mjs", import.meta.url).href;
+  const script = `
+    const { waitForSessionReady } = await import(${JSON.stringify(helperUrl)});
+    const timeout = 300;
+    const startedAt = Date.now();
+    let responseArrived = false;
+    let bodyTimer;
+    let bodyTimerCleared = false;
+    const nativeSetTimeout = globalThis.setTimeout;
+    const nativeClearTimeout = globalThis.clearTimeout;
+    globalThis.setTimeout = (callback, delay, ...args) => {
+      const timer = nativeSetTimeout(callback, delay, ...args);
+      if (responseArrived) bodyTimer = timer;
+      return timer;
+    };
+    globalThis.clearTimeout = (timer) => {
+      if (timer === bodyTimer) bodyTimerCleared = true;
+      return nativeClearTimeout(timer);
+    };
+    const response = {
+      url: () => "http://127.0.0.1:7433/sessions/remote/history",
+      request: () => ({ method: () => "GET" }),
+      finished: () => new Promise(() => {}),
+    };
+    const page = {
+      waitForResponse(_predicate, { timeout: responseTimeout }) {
+        return new Promise((resolve) => {
+          nativeSetTimeout(() => {
+            responseArrived = true;
+            resolve(response);
+          }, responseTimeout * 0.75);
+        });
+      },
+      waitForFunction() {
+        throw new Error("unexpected session readiness wait");
+      },
+    };
+    try {
+      await waitForSessionReady(page, { historyPath: "/sessions/remote/history", timeout });
+      throw new Error("helper resolved before the stalled history body");
+    } catch (error) {
+      if (error.message === "helper resolved before the stalled history body") throw error;
+      if (!/history response body timed out/.test(error.message)) throw error;
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > timeout + 100) throw new Error("helper exceeded its shared deadline: " + elapsed + "ms");
+      if (!bodyTimerCleared) throw new Error("history body deadline timer was not cleared");
+      console.log("stalled history body stayed within the shared deadline");
+    } finally {
+      globalThis.setTimeout = nativeSetTimeout;
+      globalThis.clearTimeout = nativeClearTimeout;
+    }
+  `;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+    encoding: "utf8",
+    timeout: 1_500,
+  });
+
+  assert.equal(child.status, 0, child.stderr || child.stdout);
+  assert.match(child.stdout, /stalled history body stayed within the shared deadline/);
+});
