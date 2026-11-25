@@ -276,6 +276,7 @@ const mainConfig = defineConfig({
       "tests/voice-mode-toggle.test.tsx",
       "tests/permission-respond.test.ts",
       "tests/thread-queue-controls.test.tsx",
+      "tests/history-status.test.ts",
     ],
     environment: "node",
   },

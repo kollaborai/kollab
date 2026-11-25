@@ -1,26 +1,35 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
+import { expect, test } from "vitest";
 
-import { olderLoadFailed, olderLoadRunning } from "../src/history-status.ts";
+import { nextOlderBanner, OLDER_LOAD_FAILED, OLDER_LOADING } from "../src/history-banner.ts";
 
-test("a failed load of older messages stays on screen while a scroll tries again", () => {
-  // Each scroll to the top tries again. Swapping the failure for the loading
-  // line and back on every try makes the red strip blink.
-  const loading = olderLoadRunning(null, "s1");
-  assert.deepEqual(loading, { sessionId: "s1", kind: "loading-older", message: "Loading older messages…" });
-  const failed = olderLoadFailed(loading, "s1");
-  assert.equal(failed?.kind, "error");
-  assert.match(failed?.message ?? "", /^Couldn't load older messages\./);
-  // The next try, and its failure: the same strip, not drawn again.
-  assert.equal(olderLoadRunning(failed, "s1"), failed);
-  assert.equal(olderLoadFailed(failed, "s1"), failed);
+// The banner over the chat comes from the store's olderStatus (#1451). Loading
+// shows the loading line; failed shows the failure with a way to retry.
+
+test("a loading load of older messages shows the loading line", () => {
+  expect(nextOlderBanner(null, "loading")).toEqual({ kind: "loading", message: OLDER_LOADING });
+  expect(OLDER_LOADING).toBe("Loading older messages…");
 });
 
-test("a load of older messages replaces any other history status", () => {
-  const other = { sessionId: "s1", kind: "error" as const, message: "Couldn't load the conversation." };
-  assert.equal(olderLoadRunning(other, "s1")?.kind, "loading-older");
-  // Another chat's failure is not this chat's.
-  const theirs = olderLoadFailed(null, "s2");
-  assert.equal(olderLoadRunning(theirs, "s1")?.kind, "loading-older");
-  assert.equal(olderLoadRunning(theirs, "s1")?.sessionId, "s1");
+test("a failed load of older messages shows the failure line", () => {
+  expect(nextOlderBanner(null, "failed")).toEqual({ kind: "error", message: OLDER_LOAD_FAILED });
+  expect(OLDER_LOAD_FAILED).toMatch(/^Couldn't load older messages\./);
+});
+
+test("idle and complete show no banner", () => {
+  expect(nextOlderBanner(null, "idle")).toBeNull();
+  expect(nextOlderBanner(null, "complete")).toBeNull();
+});
+
+test("a failed load stays on screen while a scroll tries again", () => {
+  // Each scroll to the top tries again. Swapping the failure for the loading
+  // line and back on every try makes the red strip blink.
+  const failed = nextOlderBanner(null, "failed");
+  expect(nextOlderBanner(failed, "loading")).toBe(failed);
+  expect(nextOlderBanner(failed, "failed")).toBe(failed);
+});
+
+test("a successful retry clears the failure", () => {
+  const failed = nextOlderBanner(null, "failed");
+  expect(nextOlderBanner(failed, "idle")).toBeNull();
+  expect(nextOlderBanner(failed, "complete")).toBeNull();
 });
