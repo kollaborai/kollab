@@ -283,7 +283,7 @@ def _data(answer: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-MAX_BATCH_INPUT = 32 * 1024  # under the daemon's 64 KiB input cap
+MAX_BATCH_INPUT_BYTES = 32 * 1024  # under the daemon's 64 KiB input cap
 
 
 def _coalesce(raws: list[str]) -> list[str]:
@@ -299,8 +299,9 @@ def _coalesce(raws: list[str]) -> list[str]:
         except ValueError:
             msg = None
         is_input = isinstance(msg, dict) and msg.get("type") == "input" and isinstance(msg.get("data"), str)
-        if is_input and merged is not None and len(merged["data"]) + len(msg["data"]) <= MAX_BATCH_INPUT:
-            merged["data"] += msg["data"]
+        combined = merged["data"] + msg["data"] if is_input and merged is not None else ""
+        if is_input and merged is not None and len(combined.encode("utf-8", errors="replace")) <= MAX_BATCH_INPUT_BYTES:
+            merged["data"] = combined
             out[-1] = json.dumps(merged)
             continue
         merged = msg if is_input else None
