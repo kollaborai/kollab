@@ -200,4 +200,15 @@ describe("PluginToolPart", () => {
     expect(html).toContain("data-host-tool-ui=\"hub_msg\"");
     expect(getSnapshot).toHaveBeenCalled();
   });
+
+  it("matches a live display name to the native tool and passes that name to the renderer", () => {
+    pluginRegistry.put(record("shell-live", [{ tool: "terminal", render: PluginToolRenderer }]));
+
+    for (const toolName of ["terminal: ls -la", "terminal: cat <<EOF...", "terminal: ", "terminal"]) {
+      const part = { toolName, args: {} } as ComponentProps<typeof PluginToolPart>["part"];
+      const html = renderToStaticMarkup(createElement(PluginToolPart, { part, fallback: "Host" }));
+
+      expect(html, toolName).toContain('data-plugin-tool-ui="terminal"');
+    }
+  });
 });
