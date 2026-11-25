@@ -41,6 +41,15 @@ function pluginTagFromSlotHref(
   }
 }
 
+function isPluginTagSlotHref(href: string | undefined): boolean {
+  if (!href) return false;
+  try {
+    return new URL(href).hostname === PLUGIN_TAG_SLOT_HOST;
+  } catch {
+    return false;
+  }
+}
+
 /** The tool-call fields a plugin tool renderer receives. */
 type ToolPart = {
   toolName: string;
@@ -115,6 +124,7 @@ export function PluginTaggedText({ text }: { text: string }) {
       a: ({ href, ...props }) => {
         const tag = pluginTagFromSlotHref(href, owner);
         if (!tag) {
+          if (isPluginTagSlotHref(href)) return null;
           return NativeAnchor ? (
             <NativeAnchor href={href} {...props} />
           ) : (
