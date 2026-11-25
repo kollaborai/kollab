@@ -13,7 +13,7 @@ import {
   ThreadListItemRuntimeProvider,
   useExternalStoreRuntime,
 } from "@assistant-ui/core/react";
-import { Thread } from "@/components/assistant-ui/thread";
+import { ComposerLockContext, Thread } from "@/components/assistant-ui/thread";
 import { DEFAULT_SLASH_COMMANDS, type SlashCommand } from "@/api";
 import { PANEL_COMMAND_NAMES } from "@/components/panels/panel-model";
 import { loadComposerDraft, saveComposerDraft } from "../composer-draft";
@@ -514,36 +514,45 @@ function LocalThreadHarness({
   commands,
   commandCatalogStatus,
   draftKey,
+  queueSessionId,
+  locked,
 }: {
   commands: SlashCommand[];
   commandCatalogStatus?: "loading" | "ready" | "empty" | "unavailable" | "fallback";
   draftKey?: string | null;
+  queueSessionId?: string | null;
+  locked?: string;
 }) {
   const runtime = useLocalRuntime(threadAdapter);
   sendCapture.runtime = runtime;
   return createElement(
     AssistantRuntimeProvider,
     { runtime },
-    createElement(Thread, {
-      agents: [],
-      commands,
-      commandCatalogStatus,
-      draftKey,
-      attachmentsEnabled: false,
-      onQueueBusyMessage: async (request: { text: string; sendNow: boolean }) => {
-        sendCapture.queueRequests.push({ text: request.text, sendNow: request.sendNow });
-        return {
-          admitted: true as const,
-          batchId: "b",
-          requestId: "r",
-          operationId: "o",
-          scopeId: "s",
-          incarnation: "i",
-          planKey: "p",
-          sendNowStatus: request.sendNow ? ("accepted" as const) : ("not-requested" as const),
-        };
-      },
-    }),
+    createElement(
+      ComposerLockContext.Provider,
+      { value: locked ?? "" },
+      createElement(Thread, {
+        agents: [],
+        commands,
+        commandCatalogStatus,
+        draftKey,
+        queueSessionId,
+        attachmentsEnabled: false,
+        onQueueBusyMessage: async (request: { text: string; sendNow: boolean }) => {
+          sendCapture.queueRequests.push({ text: request.text, sendNow: request.sendNow });
+          return {
+            admitted: true as const,
+            batchId: "b",
+            requestId: "r",
+            operationId: "o",
+            scopeId: "s",
+            incarnation: "i",
+            planKey: "p",
+            sendNowStatus: request.sendNow ? ("accepted" as const) : ("not-requested" as const),
+          };
+        },
+      }),
+    ),
   );
 }
 
@@ -551,7 +560,9 @@ const ThreadHarness: ComponentType<{
   commands?: SlashCommand[];
   commandCatalogStatus?: "loading" | "ready" | "empty" | "unavailable" | "fallback";
   draftKey?: string | null;
-}> = ({ commands = [], commandCatalogStatus, draftKey }) => {
+  queueSessionId?: string | null;
+  locked?: string;
+}> = ({ commands = [], commandCatalogStatus, draftKey, queueSessionId, locked }) => {
   const host = useExternalStoreRuntime<ThreadMessage>({
     messages: [],
     onNew: async () => { sendCapture.newMessages += 1; },
@@ -562,7 +573,7 @@ const ThreadHarness: ComponentType<{
     createElement(
       ThreadListItemRuntimeProvider,
       { runtime: host.threads.mainItem },
-      createElement(LocalThreadHarness, { commands, commandCatalogStatus, draftKey }),
+      createElement(LocalThreadHarness, { commands, commandCatalogStatus, draftKey, queueSessionId, locked }),
     ),
   );
 };
@@ -955,7 +966,7 @@ describe("early plugin command submission", () => {
       const form = host.querySelector("form");
       expect(form).not.toBeNull();
       await act(async () => form?.requestSubmit());
-      expect(sendCapture.modelRuns).toBe(0);
+      expect(sendCapture.modelRuns).toBe(knownPlugin ? 0 : 1);
       expect(sendCapture.text).toBe(text);
 
       await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
@@ -969,12 +980,57 @@ describe("early plugin command submission", () => {
     }
   });
 
-  it("keeps an unknown slash draft while the initial plugin inventory has not been read", () => {
+  it("does not replay a delayed slash into a replacement engine session", async () => {
+    vi.useFakeTimers();
+    prepareMountedThread();
+    const draft = "/zzz explain this";
+    pluginRegistry.setListed(null);
+    putLoadingThreadCommand("probe");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        draftKey: "same-conversation",
+        queueSessionId: "engine-before",
+      })));
+      const runtime = sendCapture.runtime as {
+        thread: { composer: { setText(text: string): void } };
+      };
+      await act(async () => {
+        runtime.thread.composer.setText(draft);
+        publishComposerText(draft);
+      });
+      const form = host.querySelector("form");
+      expect(form).not.toBeNull();
+      await act(async () => form?.requestSubmit());
+      expect(sendCapture.modelRuns).toBe(0);
+
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        draftKey: "same-conversation",
+        queueSessionId: "engine-after",
+        locked: "Switching session",
+      })));
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+
+      expect(sendCapture.modelRuns).toBe(0);
+      expect(sendCapture.text).toBe(draft);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      saveComposerDraft("same-conversation", "");
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not hold an unknown slash draft when the plugin inventory has no entries", () => {
     sendCapture.text = "/probe";
 
     renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus: "ready" }));
 
-    expect(invokeFormSubmit()).toBe(true);
+    expect(invokeFormSubmit()).toBe(false);
     expect(sendCapture.text).toBe("/probe");
   });
 
@@ -1052,7 +1108,7 @@ describe("early plugin command submission", () => {
     }
   });
 
-  it("preserves Cmd+Enter send-now intent when a slash submit is replayed", async () => {
+  it("sends Cmd+Enter slash prose immediately when no plugins are present", async () => {
     prepareMountedThread();
     pluginRegistry.setListed(null);
     const sendWaitingNow = vi.fn();
@@ -1096,14 +1152,14 @@ describe("early plugin command submission", () => {
         }));
         await Promise.resolve();
       });
-      expect(sendCapture.queueRequests).not.toContainEqual(expect.objectContaining({ text }));
+      expect(sendCapture.queueRequests).toContainEqual(expect.objectContaining({ text, sendNow: true }));
 
       await act(async () => {
         root.render(createElement(ThreadHarness, { commandCatalogStatus: "ready", draftKey }));
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
 
-      expect(sendCapture.queueRequests).toContainEqual(expect.objectContaining({ text, sendNow: true }));
+      expect(sendCapture.queueRequests).toHaveLength(1);
     } finally {
       resolveRun({ content: [] });
       await act(async () => root.unmount());

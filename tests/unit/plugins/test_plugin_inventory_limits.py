@@ -307,7 +307,7 @@ def test_plugin_slash_command_inventory_keeps_colon_namespaced_ids():
     assert omitted == 0
 
 
-def test_plugin_inventory_marks_missing_contribution_kinds_as_omitted():
+def test_plugin_inventory_does_not_count_absent_contribution_kinds_as_omitted():
     entry = _normalize_plugin_entry(
         {
             "id": "example-plugin",
@@ -318,7 +318,30 @@ def test_plugin_inventory_marks_missing_contribution_kinds_as_omitted():
     assert entry is not None
     assert entry["contributes"]["pages"] == ["settings"]
     assert entry["contributes"]["slash"] == ["publish"]
-    assert entry["omitted"]["contributions"] == 4
+    assert entry["omitted"]["contributions"] == 0
+
+
+def test_plugin_inventory_redacts_credential_shaped_renderer_namespaced_ids():
+    token = "ghp_" + "A" * 36
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [{"tool": f"{token}:fetch"}]
+
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
+def test_plugin_inventory_preserves_the_documented_sk_fetch_renderer_tag():
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [{"tag": "sk-fetch"}]
+
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == [{"tag": "sk-fetch"}]
+    assert entry["omitted"]["contributions"] == 0
 
 
 def test_plugin_inventory_drops_duplicate_contribution_identities_per_kind():

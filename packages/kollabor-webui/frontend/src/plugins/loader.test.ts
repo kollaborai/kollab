@@ -181,6 +181,24 @@ describe("plugin inventory text redaction", () => {
     expect(output).not.toContain("private-secret");
   });
 
+  it("redacts cookie, session, and JWT credentials from browser plugin errors", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.payload.signature";
+    const secrets = ["cookie-canary", "set-cookie-canary", "session-canary", jwt];
+    const messages = [
+      `Cookie: sid=${secrets[0]}; theme=dark`,
+      `Set-Cookie: sid=${secrets[1]}; HttpOnly`,
+      `session=${secrets[2]}`,
+      jwt,
+    ];
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    for (const message of messages) logPluginFailure("hello", "event listener failed", new Error(message));
+
+    const output = logged.mock.calls.flat().join(" ");
+    expect(output).toContain("[redacted]");
+    for (const secret of secrets) expect(output).not.toContain(secret);
+  });
+
   it("drops every URL query and fragment from logged errors and stacks", () => {
     const messageUrl = "https://store.example/object?opaque=message-secret#private-fragment";
     const stackUrl = "https://cdn.example/plugin.js?nonce=stack-secret#source-fragment";
@@ -616,6 +634,43 @@ describe("plugins-changed", () => {
     expect(plugin("hello")?.contributions.renderers.map((renderer) => renderer.tool)).toEqual(["git"]);
   });
 
+  it("replaces live declarations when a sparse inventory removes a contribution", async () => {
+    const oldContributes: PluginEntry["contributes"] = {
+      menu: [],
+      views: [],
+      pages: [],
+      modals: [],
+      slash: ["publish"],
+      renderers: [{ tool: "shell" }],
+    };
+    const oldEntry = entry("hello", { contributes: oldContributes });
+    const sparseEntry = entry("hello", {
+      contributes: { slash: ["deploy"] } as unknown as PluginEntry["contributes"],
+    });
+    const setup: Setup = (k) => {
+      k.command({ name: "publish", description: "Old", run: () => {} });
+      k.command({ name: "deploy", description: "New", run: () => {} });
+      k.renderer({ tool: "shell", render: Tab });
+    };
+    const { loader, plugin, deps } = harness(
+      [[oldEntry], [sparseEntry]],
+      { "/plugins/hello/web/index.js?v=abc": module(setup) },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
+
+    await loader.refresh();
+    await loader.idle();
+
+    expect(deps.importModule).toHaveBeenCalledTimes(2);
+    expect(plugin("hello")?.entry.contributes.slash).toEqual(["deploy"]);
+    expect(plugin("hello")?.entry.contributes.renderers).toEqual([]);
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["deploy"]);
+    expect(plugin("hello")?.contributions.renderers).toEqual([]);
+  });
+
   it("retains the last good contribution declarations when a refresh row omits them", async () => {
     const declared = entry("hello", {
       contributes: {
@@ -779,7 +834,7 @@ describe("plugins-changed", () => {
     expect(normalized?.omitted.contributions).toBeGreaterThan(0);
   });
 
-  it("retains the last-good declarations when an inventory omits one contribution kind", () => {
+  it("treats an absent contribution kind as an empty declaration list", () => {
     const contributes: PluginEntry["contributes"] = {
       menu: [],
       views: [],
@@ -802,8 +857,8 @@ describe("plugins-changed", () => {
 
     const normalized = normalizePluginEntry(partial, previous);
 
-    expect(normalized?.contributes).toEqual(contributes);
-    expect(normalized?.omitted.contributions).toBe(1);
+    expect(normalized?.contributes).toEqual({ ...contributes, renderers: [] });
+    expect(normalized?.omitted.contributions).toBe(0);
   });
 
   it.each(["menu", "views", "pages", "modals", "slash", "renderers"] as const)(

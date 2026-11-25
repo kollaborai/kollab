@@ -188,6 +188,37 @@ describe("plugin tagged text", () => {
     expect(calls).toBeLessThan(codeLines.length * 20);
   });
 
+  it("bounds rescanning across four-space paragraph continuations", () => {
+    const lineCount = 1200;
+    const continuationLines = Array.from({ length: lineCount }, (_, index) => `    continuation-${index}`);
+    const text = `<card>summary</card>\nIntro:\n${continuationLines.join("\n")}`;
+    const original = String.prototype.lastIndexOf;
+    let calls = 0;
+    String.prototype.lastIndexOf = function (this: string, search: string, position?: number) {
+      calls += 1;
+      return original.call(this, search, position);
+    };
+
+    try {
+      const parts = splitPluginTags(text, ["card"]);
+      expect(parts).toContainEqual({ type: "tag", name: "card", content: "summary" });
+    } finally {
+      String.prototype.lastIndexOf = original;
+    }
+
+    expect(calls).toBeLessThan(lineCount * 700);
+  });
+
+  it("does not pair an unmatched code opener in an ATX heading with the next paragraph", () => {
+    const text = "# `unfinished\n<card>render me</card> `";
+
+    expect(splitPluginTags(text, ["card"])).toContainEqual({
+      type: "tag",
+      name: "card",
+      content: "render me",
+    });
+  });
+
   it.each([
     ["ATX heading", "`unfinished\n# <card>heading</card> `", "heading"],
     ["setext heading", "`unfinished\nTitle\n=====\nSee <card>example</card> after`", "example"],
