@@ -388,3 +388,50 @@ def test_oversized_json_integer_in_registry_does_not_abort_refresh(tmp_path):
 
     models = json.loads(registry.read_text())["models"]
     assert models["vendor/valid"]["pricing_in"] == 0.5
+
+
+def test_refresh_clears_invalid_retained_prices_before_writing_strict_json(tmp_path):
+    source = {"data": [{"id": "vendor/retained", "context_length": 2000}]}
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/retained": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "pricing_in": "OVERSIZED_POSITIVE",
+                    "pricing_out": "OVERSIZED_NEGATIVE",
+                    "pricing_cached_in": "OVERSIZED_CACHED_NEGATIVE",
+                },
+                "vendor/valid-sibling": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "pricing_in": 0.5,
+                    "pricing_out": 1.25,
+                    "pricing_cached_in": 0.25,
+                },
+            }
+        }
+    )
+    registry_text = (
+        registry_text.replace('"OVERSIZED_POSITIVE"', "9" * 5000)
+        .replace('"OVERSIZED_NEGATIVE"', "-" + "9" * 5000)
+        .replace('"OVERSIZED_CACHED_NEGATIVE"', "-" + "8" * 5000)
+    )
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
+
+    assert upd.main(argv) == 0
+
+    def reject_non_json_number(value):
+        raise AssertionError(f"non-standard JSON number written: {value}")
+
+    models = json.loads(registry.read_text(), parse_constant=reject_non_json_number)[
+        "models"
+    ]
+    retained = models["vendor/retained"]
+    assert retained["context_window"] == 2000
+    assert retained["pricing_in"] is None
+    assert retained["pricing_out"] is None
+    assert retained["pricing_cached_in"] is None
+    assert models["vendor/valid-sibling"]["pricing_in"] == 0.5
+    assert models["vendor/valid-sibling"]["pricing_out"] == 1.25
+    assert models["vendor/valid-sibling"]["pricing_cached_in"] == 0.25
