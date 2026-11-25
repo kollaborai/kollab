@@ -68,5 +68,6 @@ async def test_engine_reads_only_current_conversation_persisted_goal(tmp_path, m
         assert response.json()["goal"]["goal_id"] != goal.goal_id
         assert response.json()["goal"]["attempt"] is None
         assert "secret" not in response.text and "/other/path" not in response.text
-        assert (await client.get("/sessions/missing/goal", headers={"Authorization": "Bearer valid"})).status_code == 404
+        missing = await client.get("/sessions/missing/goal", headers={"Authorization": "Bearer valid"})
+        assert missing.status_code == 404
     store.close()
