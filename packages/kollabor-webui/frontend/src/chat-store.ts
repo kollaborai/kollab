@@ -176,6 +176,9 @@ const HISTORY_PAGE_LIMIT = 50;
 
 type HistoryPage = { rows: ChatRow[]; older: string | null };
 
+/** A send whose row the stream has not delivered yet: the row, and how many POSTs for its id are still running. */
+type LocalSend = { row: ChatRow; posts: number };
+
 /** The HTTP status carried by an error the transport threw, if it has one. */
 function errorStatus(error: unknown): number | undefined {
   const status = (error as { status?: unknown } | null | undefined)?.status;
@@ -194,6 +197,8 @@ export class LiveChatStore implements LiveStore {
   private paging: OlderStatus = "idle";
   // Counts the window replacements (a resync or a snapshot). A history page checks it to see that its window is still current.
   private epoch = 0;
+  // Sends the stream has not delivered yet, by input id. Each row sits in `state.rows` until the stream's row replaces it.
+  private readonly sends = new Map<string, LocalSend>();
   private attempts = 0;
   private started = false;
   private disposed = false;
@@ -277,12 +282,62 @@ export class LiveChatStore implements LiveStore {
     this.listeners.clear();
   }
 
+  /** Shows the input at once as a pending row, then posts it. A failed post leaves the row as failed, and rethrows. */
   async send(input: InputRequest): Promise<void> {
-    const response = await this.transport.request(`/sessions/${this.enc}/inputs`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
+    this.beginSend(input);
+    let response: Response;
+    try {
+      response = await this.transport.request(`/sessions/${this.enc}/inputs`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+    } catch (error) {
+      this.endSend(input.id, false);
+      throw error;
+    }
+    this.endSend(input.id, response.ok);
     if (!response.ok) throw new Error(`send failed: ${response.status}`);
+  }
+
+  /** Adds the pending row at the end of the rows. A send whose id is already on screen adds nothing. */
+  private beginSend(input: InputRequest): void {
+    const send = this.sends.get(input.id);
+    if (send) {
+      send.posts += 1;
+      if (send.row.status === "failed") this.replaceLocalRow(send, { ...send.row, status: "pending" });
+      return;
+    }
+    if (this.state.rows.some((row) => row.id === input.id)) return;
+    const row: ChatRow = {
+      id: input.id,
+      seq: -1, // not on the stream yet
+      kind: "input",
+      role: "user",
+      turn_id: null,
+      status: "pending",
+      parts: [{ type: "text", text: input.text }],
+      created_at: new Date().toISOString(),
+    };
+    this.sends.set(input.id, { row, posts: 1 });
+    this.state = { ...this.state, rows: [...this.state.rows, row] };
+    this.publish();
+  }
+
+  /** Records one POST's answer. A failure with no other POST for the id still running marks the row failed. */
+  private endSend(id: string, ok: boolean): void {
+    const send = this.sends.get(id);
+    if (!send) return; // the stream has delivered the row, so it is no longer local
+    send.posts -= 1;
+    if (!ok && send.posts === 0) this.replaceLocalRow(send, { ...send.row, status: "failed" });
+  }
+
+  private replaceLocalRow(send: LocalSend, row: ChatRow): void {
+    send.row = row;
+    this.state = {
+      ...this.state,
+      rows: this.state.rows.map((candidate) => (candidate.id === row.id ? row : candidate)),
+    };
+    this.publish();
   }
 
   /** Starts a queued input now. Nothing local changes: the daemon answers with input.state on the stream. */
@@ -438,8 +493,29 @@ export class LiveChatStore implements LiveStore {
       this.epoch += 1;
       this.paging = this.state.olderCursor === null ? "complete" : "idle";
     }
+    this.followSends(event);
     this.attempts = 0;
     this.publish();
+  }
+
+  /** A row event with a local send's id retires that send: the stream's row now stands in its place. */
+  private followSends(event: ChatStreamEvent): void {
+    if (event.type === "row.upsert" || event.type === "row.delete") this.sends.delete(event.data.id);
+    else if (event.type === "snapshot" || event.type === "replace") this.keepUndelivered();
+  }
+
+  /**
+   * After a snapshot or a replace, the window's row wins over a local row with the same id. A local row the window
+   * lacks stays at the end while its POST runs, and after a failure, so the text stays on screen.
+   */
+  private keepUndelivered(): void {
+    const inWindow = new Set(this.state.rows.map((row) => row.id));
+    const kept: ChatRow[] = [];
+    for (const [id, send] of this.sends) {
+      if (!inWindow.has(id) && (send.posts > 0 || send.row.status === "failed")) kept.push(send.row);
+      else this.sends.delete(id);
+    }
+    if (kept.length > 0) this.state = { ...this.state, rows: [...this.state.rows, ...kept] };
   }
 
   /** Keeps rows on screen, forgets the cursor, and ends the connection so the loop reconnects without `after`. */
