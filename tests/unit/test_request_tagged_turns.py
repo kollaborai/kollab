@@ -194,12 +194,11 @@ async def test_a_stop_ends_a_message_still_waiting_for_room():
         admitting = asyncio.ensure_future(processor.enqueue(TaggedInput("b", ("B",))))
         await asyncio.sleep(0)  # B waits for room, or in the pause after A was dropped
         processor.request_cancellation(origin="human")
-        if strategy == "block":
-            assert processor.processing_queue.get_nowait() == TaggedInput("a", ("A",))
-            processor.processing_queue.task_done()
-            await asyncio.sleep(0.02)
         await admitting
-        assert processor.processing_queue.empty(), strategy
+        if strategy == "block":
+            assert list(processor.processing_queue._queue) == [TaggedInput("a", ("A",))]
+        else:
+            assert processor.processing_queue.empty(), strategy
         ended = [e["request_ids"] for e in _drain(events) if e["type"] == "turn_complete"]
         expected = [["B"]] if strategy == "block" else [["A"], ["B"]]
         assert sorted(ended) == expected, strategy
