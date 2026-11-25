@@ -1067,7 +1067,8 @@ class QueueProcessor:
         for item in [
             i
             for i in getattr(queue, "_queue", ())
-            if isinstance(i, TaggedInput) and not isinstance(i, QueueHandoffInput)
+            if isinstance(i, (TaggedInput, QueuedInput))
+            and not isinstance(i, QueueHandoffInput)
         ]:
             self._end_queued(item)
 
@@ -1107,7 +1108,7 @@ class QueueProcessor:
         if queue is None or entries is None:
             return
         for item in messages:
-            if isinstance(item, TaggedInput) and not isinstance(
+            if isinstance(item, (TaggedInput, QueuedInput)) and not isinstance(
                 item, QueueHandoffInput
             ):
                 self._end_dropped(item, "Stopped before this message ran. Send it again.")
@@ -1313,6 +1314,7 @@ class QueueProcessor:
             # Voice admission must never acknowledge a message silently dropped
             # by an overflow strategy. Reject before modifying the queue.
             if not self._has_unreserved_capacity():
+                self._end_dropped(message)
                 raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
             return True
@@ -1372,8 +1374,16 @@ class QueueProcessor:
         """A chat message that never runs: its stream ends, saying why (#551)."""
         if isinstance(item, TaggedInput):
             ids = list(item.request_ids)
-            publish_semantic(self.renderer, "error", request_ids=ids, message=why)
-            publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
+        elif isinstance(item, QueuedInput):
+            if not item.request_ids:
+                return
+            ids = list(item.request_ids)
+        else:
+            return
+        publish_semantic(self.renderer, "error", request_ids=ids, message=why)
+        publish_semantic(
+            self.renderer, "turn_complete", stop_reason="error", request_ids=ids
+        )
 
     def _end_requests(self, why: str) -> None:
         """A chain stopped short of its turn's completion still ends the requests
