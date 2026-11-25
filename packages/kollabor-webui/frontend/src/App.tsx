@@ -40,7 +40,7 @@ import { AppsDialog } from "@/components/apps/AppsDialog";
 import { PrChainDialog } from "@/components/pr-chain/PrChainDialog";
 import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
 import type { StreamEvent } from "@/supervisor-alerts";
-import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
+import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, threadActivityOf } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
 import { GalleryView } from "@/components/media/gallery-view";
 import { MediaImageProvider, MediaSessionProvider, MediaViewerProvider } from "@/components/media/media-view";
@@ -414,7 +414,8 @@ function RuntimeShell({
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
-  const activity = useThreadActivity(Boolean(transportError), eventActivity);
+  const store = useChatStore();
+  const activity = threadActivityOf(store.rows, store.inputs, store.running, store.connection === "failed") ?? eventActivity;
   const usageLabel = session.harness && session.acp_usage?.size !== undefined
     ? `${formatContextTokens(session.acp_usage.used ?? 0)}/${formatContextTokens(session.acp_usage.size)} Tokens${session.acp_usage.cost?.amount !== undefined ? ` · ${formatCost(session.acp_usage.cost)}` : ""}`
     : null;
