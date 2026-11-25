@@ -237,6 +237,9 @@ def test_send_now_route_returns_202_with_the_started_turn(monkeypatch):
 
 
 class _LiveQueueRuntime:
+    async def input_scope(self, conversation_uid):
+        return ("test-scope", conversation_uid, "test-principal")
+
     async def add_input(self, params):
         return {"accepted": True, "id": params["id"], "state": "queued"}
 
