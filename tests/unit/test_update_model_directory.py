@@ -310,3 +310,83 @@ def test_malformed_openrouter_nested_sections_do_not_abort_refresh():
     upd.apply_merge(data, {}, source, today="2026-11-16")
 
     assert data["models"]["vendor/model"]["supports_vision"] is False
+
+
+def _write_refresh_inputs(tmp_path, openrouter_text, registry_text):
+    models_dev = tmp_path / "models_dev.json"
+    models_dev.write_text("{}")
+    openrouter = tmp_path / "openrouter.json"
+    openrouter.write_text(openrouter_text)
+    registry = tmp_path / "models.json"
+    registry.write_text(registry_text)
+    return [
+        "--source-models-dev",
+        str(models_dev),
+        "--source-openrouter",
+        str(openrouter),
+        "--registry",
+        str(registry),
+    ], registry
+
+
+def test_oversized_json_integer_source_price_becomes_unknown(tmp_path):
+    # json.loads raises ValueError for a literal past Python's int-from-str
+    # digit limit. That price must map to unknown while valid prices refresh.
+    source = {
+        "data": [
+            {
+                "id": "vendor/valid",
+                "context_length": 1000,
+                "pricing": {"prompt": "0.0000005", "completion": "0.000001"},
+            },
+            {
+                "id": "vendor/overflow",
+                "context_length": 1000,
+                "pricing": {"prompt": "PLACEHOLDER", "completion": "0.000001"},
+            },
+        ]
+    }
+    argv, registry = _write_refresh_inputs(
+        tmp_path,
+        json.dumps(source).replace('"PLACEHOLDER"', "9" * 5000),
+        json.dumps({"models": {}}),
+    )
+
+    assert upd.main(argv) == 0
+
+    models = json.loads(registry.read_text())["models"]
+    assert models["vendor/valid"]["pricing_in"] == 0.5
+    assert models["vendor/overflow"]["pricing_in"] is None
+
+
+def test_oversized_json_integer_in_registry_does_not_abort_refresh(tmp_path):
+    # load_registry reads the existing registry with json.loads. A price past
+    # the digit limit must not stop the refresh; the source price replaces it.
+    source = {
+        "data": [
+            {
+                "id": "vendor/valid",
+                "context_length": 1000,
+                "pricing": {"prompt": "0.0000005", "completion": "0.000001"},
+            }
+        ]
+    }
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/valid": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "pricing_in": "PLACEHOLDER",
+                }
+            }
+        }
+    ).replace('"PLACEHOLDER"', "9" * 5000)
+    argv, registry = _write_refresh_inputs(
+        tmp_path, json.dumps(source), registry_text
+    )
+
+    assert upd.main(argv) == 0
+
+    models = json.loads(registry.read_text())["models"]
+    assert models["vendor/valid"]["pricing_in"] == 0.5
