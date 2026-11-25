@@ -170,6 +170,39 @@ class TestPricingRegistryLoad(unittest.TestCase):
                 self.assertAlmostEqual(valid.cache_discount, 0.2)
                 self.assertIsNone(reg.get_pricing("openai", "overflow-model"))
 
+    def test_oversized_json_integer_pricing_entries_are_skipped(self):
+        # json.load raises ValueError for a literal past Python's int-from-str
+        # digit limit. That entry must be skipped like any other unrepresentable
+        # rate, and the valid entries in the same file must still load.
+        valid_info = {
+            "prompt_per_million": 0.25,
+            "completion_per_million": 0.75,
+            "cache_read_per_million": 0.05,
+        }
+        for field in (
+            "prompt_per_million",
+            "completion_per_million",
+            "cache_read_per_million",
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                data = {
+                    "openai": {
+                        "valid-model": valid_info,
+                        "overflow-model": {**valid_info, field: "PLACEHOLDER"},
+                    }
+                }
+                path = Path(tmp) / "pricing.json"
+                path.write_text(json.dumps(data).replace('"PLACEHOLDER"', "9" * 5000))
+
+                PricingRegistry.reset()
+                reg = PricingRegistry()
+                reg.load_from_file(path)
+
+                valid = reg.get_pricing("openai", "valid-model")
+                self.assertIsNotNone(valid)
+                self.assertAlmostEqual(valid.prompt_per_token, 0.25 / 1_000_000)
+                self.assertIsNone(reg.get_pricing("openai", "overflow-model"))
+
     def test_model_registry_loader_skips_malformed_prices_and_preserves_valid_rates(
         self,
     ):
