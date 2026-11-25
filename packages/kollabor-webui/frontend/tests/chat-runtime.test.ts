@@ -84,6 +84,13 @@ describe("toThreadMessageLike", () => {
     ]);
   });
 
+  it("normalizes a null tool error flag to undefined", () => {
+    const message = toThreadMessageLike(
+      row("nullable", [{ type: "tool-call", tool_call_id: "c", tool_name: "test", args: {}, is_error: null }]),
+    );
+    expect((message.content as { isError?: boolean }[])[0].isError).toBeUndefined();
+  });
+
   it("gives empty args when the tool-call args are not a plain object", () => {
     const message = toThreadMessageLike(
       row("row-4", [{ type: "tool-call", tool_call_id: "call-2", tool_name: "list", args: ["a"] }]),
