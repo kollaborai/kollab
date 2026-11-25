@@ -736,6 +736,19 @@ describe("plugins-changed", () => {
     expect(normalized?.omitted.contributions).toBeGreaterThan(0);
   });
 
+  it("retains the last-good declarations when rows over the limit are cut locally", () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [], views: [], pages: [], modals: [], slash: ["publish"], renderers: [],
+    };
+    const previous = entry("hello", { contributes });
+    const slash = [...Array.from({ length: 256 }, (_, index) => `cmd${index}`), "publish"];
+
+    const normalized = normalizePluginEntry({ ...previous, contributes: { ...contributes, slash } }, previous);
+
+    expect(normalized?.contributes).toEqual(contributes);
+    expect(normalized?.omitted.contributions).toBeGreaterThan(0);
+  });
+
   it("retains the last-good declarations when an inventory omits one contribution kind", () => {
     const contributes: PluginEntry["contributes"] = {
       menu: [],
