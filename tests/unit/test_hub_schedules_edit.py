@@ -295,7 +295,12 @@ def test_no_coordinator_taking_it_is_503(client, monkeypatch, tmp_path):
 def test_a_coordinator_error_is_passed_through(client, monkeypatch):
     bridge = _Bridge(
         agents=[{"agent_id": "koord-1", "identity": "koordinator"}],
-        replies={"koord-1": {"type": "schedules_save", "error": "the network primary did not take the change (failed)"}},
+        replies={
+            "koord-1": {
+                "type": "schedules_save",
+                "error": "the network primary did not take the change (failed)",
+            }
+        },
     )
     _install(monkeypatch, bridge)
     res = client.post("/hub/schedules", json={"agents": ["lapis"], "prompt": "x", "interval_seconds": 60})
