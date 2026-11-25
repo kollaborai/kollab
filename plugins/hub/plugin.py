@@ -101,7 +101,7 @@ from .rosters import (
     roster_personas,
     split_ref,
 )
-from .schedules import RunLog, ScheduleStore, ScheduleTimer
+from .schedules import RunLog, ScheduleRow, ScheduleStore, ScheduleTimer
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateError, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
@@ -6186,6 +6186,7 @@ class HubPlugin(BasePlugin):
                 on_acp_hub_status=self._handle_acp_hub_status,
                 on_acp_hub_call=self._handle_acp_hub_call,
                 on_cron_jobs=self._cron_jobs_payload,
+                on_schedules_save=self._schedules_save,
                 socket_name=self._identity.identity,
             )
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
@@ -16460,6 +16461,43 @@ class HubPlugin(BasePlugin):
         self._hub_cron_jobs.clear()
         logger.info(f"hub cron cleared: {count} job(s) removed")
         return f"hub cron cleared: {count} job(s) removed"
+
+    async def _schedules_save(self, rows: Any) -> Dict[str, Any]:
+        """Replace schedules.json with ``rows`` for the Web UI (#612, stage 4).
+
+        Only the coordinator takes it. A secondary on a network forwards the
+        whole list to the primary (the only writer; its push brings it back);
+        a primary, or a device on no network, writes the file and wakes the
+        grid timer.
+        """
+        from kollabor_config.config_utils import get_config_directory
+
+        if not (self._identity and getattr(self._identity, "is_coordinator", False)):
+            return {"error": "not_coordinator"}
+        try:
+            if not isinstance(rows, list):
+                raise ValueError("rows must be a list")
+            clean = [ScheduleRow.from_dict(row) for row in rows]
+            if len({row.id for row in clean}) != len(clean):
+                raise ValueError("duplicate schedule id")
+        except (TypeError, ValueError, AttributeError) as exc:
+            return {"error": f"invalid schedule: {exc}"}
+        relay = getattr(self, "_relay_agent", None)
+        sync = getattr(relay, "config_sync", None) if relay else None
+        if sync is not None:
+            reply = await sync.send_schedule_edit([row.to_dict() for row in clean])
+            if reply.get("error") != "is_primary":
+                if reply.get("error"):
+                    return {
+                        "error": "the network primary did not take the change "
+                        f"({reply['error']})"
+                    }
+                return {"ok": True, "via": "primary"}
+        ScheduleStore(get_config_directory() / "schedules.json").save(clean)
+        timer = getattr(self, "_schedule_timer", None)
+        if timer is not None:
+            timer.wake()
+        return {"ok": True, "via": "local"}
 
     def _cron_jobs_payload(self) -> List[Dict[str, Any]]:
         """Cron jobs as plain dicts for the read-only socket view (#612).

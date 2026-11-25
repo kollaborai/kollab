@@ -258,3 +258,145 @@ async def list_cron_jobs(
         "agents_unavailable": unavailable,
         "agents_errors": errors,
     }
+
+
+# -- persistent schedules (#612, stage 4) -------------------------------------
+#
+# Reads come straight from ~/.kollab/schedules.json. Writes never touch the
+# file while a hub runs: the whole new list goes to the hub coordinator's
+# local-only `schedules_save` socket op, which forwards it to the network
+# primary or writes it and wakes the grid timer. With no live agent at all
+# nothing else can write, so the route writes the file itself.
+
+
+def _schedules_dir():
+    from kollabor_config.config_utils import get_config_directory
+
+    return get_config_directory()
+
+
+def _load_schedule_rows() -> list:
+    from plugins.hub.schedules import ScheduleStore
+
+    return [row.to_dict() for row in ScheduleStore(_schedules_dir() / "schedules.json").load()]
+
+
+class ScheduleFields(BaseModel):
+    agents: list[str] | None = None
+    prompt: str | None = None
+    interval_seconds: float | None = None
+    active: bool | None = None
+    when_busy: str | None = None
+    skill: str | None = None
+
+
+def _checked(row: dict) -> dict:
+    from plugins.hub.schedules import ScheduleRow
+
+    row["agents"] = [a.strip() for a in row.get("agents") or [] if a and a.strip()]
+    row["prompt"] = str(row.get("prompt") or "").strip()
+    try:
+        return ScheduleRow.from_dict(row).to_dict()
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _save_schedule_rows(rows: list) -> str:
+    agents = _bridge.get_agents(use_cache=False)
+    if not agents:
+        from plugins.hub.schedules import ScheduleRow, ScheduleStore
+
+        ScheduleStore(_schedules_dir() / "schedules.json").save(
+            [ScheduleRow.from_dict(r) for r in rows]
+        )
+        return "file"
+    replies = await asyncio.gather(
+        *[
+            _bridge.query_socket(
+                str(agent.get("agent_id") or ""), "schedules_save", {"rows": rows}, timeout=35.0
+            )
+            for agent in agents
+        ]
+    )
+    for reply in replies:
+        if not isinstance(reply, dict) or reply.get("type") != "schedules_save":
+            continue
+        if reply.get("ok"):
+            return str(reply.get("via") or "local")
+        if reply.get("error") and reply["error"] != "not_coordinator":
+            raise HTTPException(status_code=502, detail=str(reply["error"]))
+    raise HTTPException(
+        status_code=503,
+        detail="No hub coordinator took the change, so nothing was saved. Start an agent and try again.",
+    )
+
+
+@router.get("/schedules")
+async def list_schedules():
+    """Every row of schedules.json plus its last run record."""
+    from plugins.hub.schedules import RunLog
+
+    runs = RunLog(_schedules_dir() / "schedules-runs.jsonl")
+    rows = _load_schedule_rows()
+    for row in rows:
+        row["last_run"] = runs.last_run(row["id"])
+    return {"schedules": rows, "file": str(_schedules_dir() / "schedules.json")}
+
+
+@router.post("/schedules")
+async def create_schedule(body: ScheduleFields):
+    import time
+    import uuid
+
+    now = time.time()
+    fields = body.model_dump(exclude_none=True)
+    interval = float(fields.get("interval_seconds") or 0)
+    row = _checked(
+        {
+            "id": uuid.uuid4().hex[:8],
+            "agents": fields.get("agents") or [],
+            "prompt": fields.get("prompt") or "",
+            "interval_seconds": interval,
+            "anchor": now + interval,  # first fire one interval from now
+            "active": fields.get("active", True),
+            "when_busy": fields.get("when_busy", "queue"),
+            "skill": fields.get("skill", ""),
+            "created_by": "web",
+            "created_at": now,
+            "updated_at": now,
+            "revision": 1,
+        }
+    )
+    via = await _save_schedule_rows(_load_schedule_rows() + [row])
+    return {"schedule": row, "via": via}
+
+
+@router.put("/schedules/{schedule_id}")
+async def update_schedule(schedule_id: str, body: ScheduleFields):
+    import time
+
+    rows = _load_schedule_rows()
+    for i, old in enumerate(rows):
+        if old["id"] == schedule_id:
+            row = _checked(
+                {
+                    **old,
+                    **body.model_dump(exclude_none=True),
+                    "updated_at": time.time(),
+                    "revision": int(old.get("revision") or 1) + 1,
+                }
+            )
+            rows[i] = row
+            via = await _save_schedule_rows(rows)
+            return {"schedule": row, "via": via}
+    raise HTTPException(status_code=404, detail=f"No schedule '{schedule_id}'")
+
+
+@router.delete("/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: str):
+    rows = _load_schedule_rows()
+    kept = [row for row in rows if row["id"] != schedule_id]
+    if len(kept) == len(rows):
+        raise HTTPException(status_code=404, detail=f"No schedule '{schedule_id}'")
+    via = await _save_schedule_rows(kept)
+    return {"ok": True, "via": via}

@@ -478,6 +478,7 @@ class AgentSocketServer:
         on_acp_hub_status: Optional[Callable] = None,
         on_acp_hub_call: Optional[Callable] = None,
         on_cron_jobs: Optional[Callable] = None,
+        on_schedules_save: Optional[Callable] = None,
         socket_name: Optional[str] = None,
     ):
         self.agent_id = agent_id
@@ -503,6 +504,7 @@ class AgentSocketServer:
         # the local operator (and the engine on its behalf) may list them,
         # nobody may create or delete them through this action.
         self._on_cron_jobs = on_cron_jobs
+        self._on_schedules_save = on_schedules_save
         self._identity: Optional[Dict] = None
         self._started_at: float = time.time()
         self._shutdown_requested = False
@@ -1782,6 +1784,22 @@ class AgentSocketServer:
                         {"type": "cron_jobs", "jobs": jobs, "error": error}
                     ) + "\n"
                     writer.write(resp.encode())
+
+                elif action == "schedules_save":
+                    # Web UI schedule edits (#612, stage 4). Local operator
+                    # only, like cron_jobs: absent from the remote allowlist.
+                    # The coordinator answers; every other agent declines.
+                    if self._on_schedules_save is None:
+                        result = {"error": "not_coordinator"}
+                    else:
+                        try:
+                            result = await self._on_schedules_save(msg_data.get("rows"))
+                        except Exception as exc:
+                            logger.warning(f"schedules_save callback error: {exc}")
+                            result = {"error": f"save failed ({type(exc).__name__})"}
+                    writer.write(
+                        (json.dumps({"type": "schedules_save", **result}) + "\n").encode()
+                    )
 
                 elif action == "shutdown_generation_check":
                     if all(
