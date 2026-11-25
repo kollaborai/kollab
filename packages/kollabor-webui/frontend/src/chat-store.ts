@@ -4,6 +4,7 @@
 // and the sends on top of it. Spec: docs/specs/webui-chat-single-stream.md.
 // Shapes: ./chat-stream.ts.
 
+import { createContext, createElement, useContext, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import type { EngineApi } from "./api";
 import {
   isChatStreamEvent,
@@ -429,4 +430,43 @@ export class LiveChatStore implements LiveStore {
       }, ms);
     });
   }
+}
+
+// React access: ChatStoreProvider puts one session's store in reach of the chat's components, and
+// useChatStore reads its snapshot (re-rendering when the store publishes a new one) plus its actions.
+
+/** What a component reads from the chat store: the current snapshot and the store's actions. */
+export type ChatStoreView = ChatSnapshot & {
+  readonly send: LiveStore["send"];
+  readonly sendNow: LiveStore["sendNow"];
+  readonly cancel: LiveStore["cancel"];
+  readonly stop: LiveStore["stop"];
+  readonly loadOlder: LiveStore["loadOlder"];
+  readonly retry: LiveStore["retry"];
+};
+
+const ChatStoreContext = createContext<LiveStore | null>(null);
+
+/** Puts one session's chat store in reach of useChatStore below it. */
+export function ChatStoreProvider(props: { store: LiveStore; children?: ReactNode }) {
+  return createElement(ChatStoreContext.Provider, { value: props.store }, props.children);
+}
+
+/** The chat store's snapshot and actions. The view object changes only when the snapshot does. */
+export function useChatStore(): ChatStoreView {
+  const store = useContext(ChatStoreContext);
+  if (!store) throw new Error("useChatStore needs a ChatStoreProvider above it");
+  const snap = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  return useMemo(
+    () => ({
+      ...snap,
+      send: (input) => store.send(input),
+      sendNow: (inputId) => store.sendNow(inputId),
+      cancel: (inputId) => store.cancel(inputId),
+      stop: () => store.stop(),
+      loadOlder: () => store.loadOlder(),
+      retry: () => store.retry(),
+    }),
+    [snap, store],
+  );
 }
