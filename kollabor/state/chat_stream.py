@@ -319,7 +319,24 @@ class ChatStreamService:
         input_id = params.get("id")
         if not isinstance(input_id, str) or not input_id:
             return {"found": False}
+        uid = self._conversation_uid()
+        current = self._inputs.get(uid, {}).get(input_id, {})
+        if current.get("state") in {"started", "joined", "ended"} and current.get("turn_id"):
+            return {
+                "found": True, "accepted": False,
+                "state": current["state"], "turn_id": current["turn_id"],
+            }
         result = await self._queue_runtime().send_now({"id": input_id})
+        current = self._inputs.get(uid, {}).get(input_id, {})
+        if (
+            (not isinstance(result, dict) or result.get("found") is not True)
+            and current.get("state") in {"started", "joined", "ended"}
+            and current.get("turn_id")
+        ):
+            return {
+                "found": True, "accepted": False,
+                "state": current["state"], "turn_id": current["turn_id"],
+            }
         if not isinstance(result, dict) or result.get("found") is not True:
             return {"found": False}
         state = result.get("state")
