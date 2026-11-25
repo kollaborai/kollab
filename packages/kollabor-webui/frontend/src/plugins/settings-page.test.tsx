@@ -617,6 +617,48 @@ describe("plugin settings page", () => {
     }
   });
 
+  it("keeps a plugin settings action failure fixed and sends only redacted detail to the log", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const voice = {
+      ...plugin([]), id: "voice", name: "Voice", kind: "built-in", enabled: false, state: "off",
+    } as PluginEntry;
+    const loader = createPluginLoader(pluginRegistry, {
+      list: async () => ({ plugins: [voice], server_time: undefined }),
+      importModule: async () => ({}),
+      fetchText: async () => "",
+      loadCode: false,
+      api: { request: async () => new Response(), stream: async () => {} },
+    });
+    await loader.refresh();
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await act(async () => root.render(<PluginsSettings api={{
+        json: async () => { throw new Error(`GITHUB_TOKEN=${CANARY}`); },
+      } as never} />));
+
+      const toggle = host.querySelector('[role="switch"]');
+      expect(toggle).toBeDefined();
+      await act(async () => {
+        toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(host.querySelector('[role="alert"]')?.textContent).toBe(
+        "Could not complete this plugin settings action. Check the browser console for redacted details.",
+      );
+      expect(log.mock.calls.flat().join(" ")).toContain("[redacted]");
+      expect(log.mock.calls.flat().join(" ")).not.toContain(CANARY);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      pluginRegistry.reset();
+    }
+  });
+
   it("asks before closing Settings when a plugin setting draft is dirty", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.stubGlobal("matchMedia", () => ({

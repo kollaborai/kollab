@@ -1,12 +1,15 @@
+// @vitest-environment jsdom
 // @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
-import { cloneElement, type ComponentType, type ReactElement } from "react";
+import { act, cloneElement, type ComponentType, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Puzzle } from "lucide-react";
 import { PluginBoundary, PluginFailure, PluginMount, PluginTabs, pluginIcon } from "./mount";
-import { EMPTY_CONTRIBUTIONS, type PluginRecord } from "./registry";
+import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
 import type { PluginApi, PluginEntry } from "./sdk";
+import { PluginToolPart } from "./renderers";
 
 const XSS = '"><img src=x onerror=alert(1)>';
 
@@ -24,7 +27,12 @@ const record = (extra: Partial<PluginRecord> = {}): PluginRecord => ({
   ...extra,
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  pluginRegistry.reset();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("PluginMount", () => {
   it("mounts plugin UI inside <div data-plugin> so its CSS can scope to it", () => {
@@ -36,6 +44,64 @@ describe("PluginMount", () => {
     expect(html).toMatch(
       /^<div data-plugin="hello"[^>]*><p>plugin body<\/p><div data-plugin-portal-root=""[^>]*><\/div><\/div>$/,
     );
+  });
+
+  it.each([
+    ["tool renderer error", "tool:deploy", false, "tool-error"],
+    ["tool renderer suspension", "tool:deploy", false, "tool-suspend"],
+    ["tag renderer suspension", "tag:deploy", true, "mount-suspend"],
+    ["view panel suspension", "view:peek", false, "mount-suspend"],
+    ["page panel suspension", "page-tab:board", false, "mount-suspend"],
+    ["modal panel suspension", "modal-tab:settings", false, "mount-suspend"],
+    ["settings panel suspension", "settings", false, "mount-suspend"],
+  ] as const)("shows a bounded Failed to Render state with Retry for a %s", async (_surface, renderer, inline, kind) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const Suspends = () => { throw new Promise<void>(() => {}); };
+    const Throws = () => { throw new Error("GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz"); };
+    const Render = kind === "tool-error" ? Throws : Suspends;
+    const element = kind.startsWith("tool") ? (
+      <PluginToolPart
+        part={{ toolName: "deploy", args: {}, status: "complete" }}
+        fallback={<p>Native tool card</p>}
+      />
+    ) : (
+      <PluginMount record={record()} renderer={renderer} inline={inline}>
+        <Render />
+      </PluginMount>
+    );
+    if (kind.startsWith("tool")) {
+      pluginRegistry.put(record({
+        contributions: {
+          ...EMPTY_CONTRIBUTIONS,
+          renderers: [{ tool: "deploy", render: Render }],
+        },
+      }));
+    }
+
+    try {
+      await act(async () => root.render(element));
+      if (kind.endsWith("suspend")) {
+        expect(host.textContent).toContain("Rendering plugin view");
+        await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      }
+      expect(host.textContent).toContain("Hello Failed to Render");
+      expect(host.textContent).toContain("Retry");
+      expect(host.textContent).not.toContain("Native tool card");
+
+      await act(async () => {
+        host.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      if (kind.endsWith("suspend")) expect(host.textContent).toContain("Rendering plugin view");
+      else expect(host.textContent).toContain("Hello Failed to Render");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });
 
@@ -82,7 +148,8 @@ describe("PluginBoundary", () => {
     expect(html).toContain("Hello Failed to Render");
     expect(html).not.toContain(secret);
     expect(html).toContain("Check the browser console for details.");
-    expect(log).toHaveBeenCalledWith("Hello failed to render", error, "at SettingsView");
+    expect(log).toHaveBeenCalledWith("Hello failed to render", expect.stringContaining("[redacted]"), "at SettingsView");
+    expect(log.mock.calls.flat().join(" ")).not.toContain(secret);
   });
 
   it("turns an error thrown while drawing into Failed to Render, not a blank app", () => {

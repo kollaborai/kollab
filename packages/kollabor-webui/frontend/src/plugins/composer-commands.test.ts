@@ -12,6 +12,7 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/core/react";
 import { Thread } from "@/components/assistant-ui/thread";
+import type { SlashCommand } from "@/api";
 import {
   EMPTY_CONTRIBUTIONS,
   pluginRegistry,
@@ -284,14 +285,14 @@ describe("pluginCommandItems", () => {
 });
 
 describe("pluginCommandFailure", () => {
-  it("names the command and keeps the error on one line", () => {
-    expect(pluginCommandFailure("hello", new Error("first line\nsecond line"))).toBe(
-      "Could not run /hello: first line second line",
+  it.each([
+    ["Error", new Error("GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz")],
+    ["string", "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz"],
+    ["empty Error", new Error("  ")],
+  ])("keeps %s command failures fixed and safe", (_kind, error) => {
+    expect(pluginCommandFailure("hello", error)).toBe(
+      "Could not run /hello. Check the browser console for redacted details.",
     );
-  });
-
-  it("names the command alone when the error has no text", () => {
-    expect(pluginCommandFailure("hello", new Error("  "))).toBe("Could not run /hello.");
   });
 });
 
@@ -314,16 +315,16 @@ function putThreadCommand(name: string, run = () => {}, toast = vi.fn()) {
   return toast;
 }
 
-function LocalThreadHarness() {
+function LocalThreadHarness({ commands }: { commands: SlashCommand[] }) {
   const runtime = useLocalRuntime(threadAdapter);
   return createElement(
     AssistantRuntimeProvider,
     { runtime },
-    createElement(Thread, { agents: [], commands: [], attachmentsEnabled: false }),
+    createElement(Thread, { agents: [], commands, attachmentsEnabled: false }),
   );
 }
 
-function ThreadHarness() {
+function ThreadHarness({ commands = [] }: { commands?: SlashCommand[] } = {}) {
   const host = useExternalStoreRuntime<ThreadMessage>({
     messages: [],
     onNew: async () => {},
@@ -334,7 +335,7 @@ function ThreadHarness() {
     createElement(
       ThreadListItemRuntimeProvider,
       { runtime: host.threads.mainItem },
-      createElement(LocalThreadHarness),
+      createElement(LocalThreadHarness, { commands }),
     ),
   );
 }
@@ -356,14 +357,18 @@ describe("plugin command composer labels", () => {
     expect(html).toContain(">__</span>");
   });
 
-  it.each(["throws", "rejects"] as const)(
+  it.each(["throws", "rejects", "returns a thenable"] as const)(
     "restores a plugin command draft when its handler %s",
     async (failure) => {
       const draft = "/publish now";
+      const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz";
+      const error = new Error(secret);
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
       sendCapture.text = draft;
       const execute = vi.fn(() => {
-        if (failure === "throws") throw new Error("offline");
-        return Promise.reject(new Error("offline"));
+        if (failure === "throws") throw error;
+        if (failure === "rejects") return Promise.reject(error);
+        return { then: (_resolve: unknown, reject: (reason: unknown) => void) => reject(error) };
       });
       const toast = putThreadCommand("publish", execute);
 
@@ -375,11 +380,40 @@ describe("plugin command composer labels", () => {
       beforeSend?.({ preventDefault: () => { prevented = true; } });
       expect(prevented).toBe(true);
       expect(execute).toHaveBeenCalledWith("now");
-      if (failure === "rejects") await Promise.resolve();
+      if (failure !== "throws") await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(sendCapture.text).toBe(draft);
       expect(sendCapture.setTextCalls).toBe(2);
-      expect(toast).toHaveBeenCalledOnce();
+      expect(toast).toHaveBeenCalledWith(
+        "Could not run /publish. Check the browser console for redacted details.",
+      );
+      expect(log.mock.calls.flat().join(" ")).toContain("[redacted]");
+      expect(log.mock.calls.flat().join(" ")).not.toContain(secret);
+    },
+  );
+});
+
+describe("native command reservations", () => {
+  it.each([
+    ["loading", [{ name: "welcome", description: "Welcome" }]],
+    ["failed", []],
+    ["ready", [{ name: "save", description: "Save" }]],
+  ] satisfies Array<[string, SlashCommand[]]>) (
+    "does not let a plugin claim /save while the native catalog is %s",
+    (_status, commands) => {
+      const execute = vi.fn();
+      sendCapture.text = "/save";
+      putThreadCommand("save", execute);
+
+      renderToStaticMarkup(createElement(ThreadHarness, { commands }));
+      const submit = sendCapture.handlers.at(-1);
+      expect(submit).toBeTypeOf("function");
+      let prevented = false;
+      submit?.({ preventDefault: () => { prevented = true; } });
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(sendCapture.text).toBe("/save");
+      expect(prevented).toBe(false);
     },
   );
 });

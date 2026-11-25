@@ -1,5 +1,7 @@
-import type { ReactNode } from "react";
+// @vitest-environment jsdom
+import { act, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarProvider } from "@/components/ui/sidebar";
@@ -82,7 +84,12 @@ const page = (pluginId = "hello", pageId = "main") =>
     </SidebarProvider>,
   );
 
-afterEach(() => pluginRegistry.reset());
+afterEach(() => {
+  pluginRegistry.reset();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("with no plugins", () => {
   it("draws nothing at all, so the app looks exactly as before", () => {
@@ -215,6 +222,47 @@ describe("notices", () => {
     expect(html.match(/aria-label="Dismiss"/g)).toHaveLength(2);
     expect(html.match(/>Open<\/button>/g)).toHaveLength(1);
   });
+
+  it.each(["throws", "rejects"] as const)(
+    "shows a fixed safe toast when a plugin notice action %s",
+    async (failure) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz";
+      const toast = vi.fn();
+      const run = () => {
+        if (failure === "throws") throw new Error(secret);
+        return Promise.reject(new Error(secret));
+      };
+      put("hello", "Hello", {
+        k: { id: "hello", toast } as unknown as PluginApi,
+        contributions: contributions({
+          notices: [{ key: 3, text: "Action", button: { label: "Open", run } }],
+        }),
+      });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => root.render(<PluginNotices />));
+        const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.trim() === "Open");
+        expect(button).toBeDefined();
+        await act(async () => {
+          button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+
+        expect(toast).toHaveBeenCalledWith(
+          "The plugin action failed. Check the browser console for redacted details.",
+        );
+        expect(log.mock.calls.flat().join(" ")).toContain("[redacted]");
+        expect(log.mock.calls.flat().join(" ")).not.toContain(secret);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
 });
 
 describe("main-area views", () => {
