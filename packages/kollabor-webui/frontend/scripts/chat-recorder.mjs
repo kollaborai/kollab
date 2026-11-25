@@ -205,7 +205,8 @@ function installRecorder(cfg) {
     try { parsed = new URL(String(input instanceof Request ? input.url : input), location.href); } catch { return realFetch(input, init); }
     const match = /\/sessions\/[^/]+\/(events|history|stream|inputs)(?:\/|$)/.exec(parsed.pathname);
     if (!match) return realFetch(input, init);
-    if (match[1] === "stream" && !parsed.pathname.endsWith(cfg.sessionStreamSuffix)) {
+    const sessionSuffix = cfg.sessionStreamSuffix.replace(/\/stream$/, `/${match[1]}`);
+    if (["stream", "events"].includes(match[1]) && !parsed.pathname.endsWith(sessionSuffix)) {
       return realFetch(input, init);
     }
     const id = ++seq;
