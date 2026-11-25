@@ -560,7 +560,7 @@ async function record(flow, session, browser, target) {
           ["failed", "paused", "warning", "rolled_over"].includes(latestEventStatus)) {
         throw new Error(`compaction ended with status ${status === "compacting" ? latestEventStatus : status}`);
       }
-      if (isCompactionComplete({ sawStart, status, latestEventStatus, replaced })) return;
+      if (isCompactionComplete({ sawStart, status, latestEventStatus, replaced, runtime: activeRuntime })) return;
       await sleep(1000);
     }
     throw new Error("the compaction did not finish within 240 seconds");

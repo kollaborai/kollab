@@ -62,9 +62,11 @@ export function classifyChatRuntime(session) {
   return "acp";
 }
 
-/** Require the transcript replacement before treating a compaction as complete. */
-export function isCompactionComplete({ sawStart, status, latestEventStatus, replaced }) {
-  return sawStart && replaced && (status !== "compacting" || latestEventStatus === "idle");
+/** Check completion against the transcript behavior of the active runtime. */
+export function isCompactionComplete({ sawStart, status, latestEventStatus, replaced, runtime }) {
+  if (!sawStart) return false;
+  if (runtime !== "native") return status === "idle" || latestEventStatus === "idle";
+  return replaced && (status !== "compacting" || latestEventStatus === "idle");
 }
 
 /** Check that a reload snapshot still contains the same live turn and inputs. */
