@@ -731,6 +731,24 @@ describe("LiveChatStore", () => {
     expect(streams[1].signal.aborted).toBe(false);
   });
 
+  it("discards an in-flight older page after a stream deletion and retries the same cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one"), row("r2", "two")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(5, "row.delete", { id: "r1" }));
+    respond([row("r0", "zero"), row("r1", "stale")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["r2"]);
+    expect(store.olderStatus).toBe("idle");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [row("r0", "zero")], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c1&limit=50");
+    expect(store.rows.map((r) => r.id)).toEqual(["r0", "r2"]);
+    expect(store.olderStatus).toBe("complete");
+  });
+
   it("a history page that finishes after a resync and a new snapshot is dropped: its rows and cursor do not join the new window", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
