@@ -8,6 +8,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -557,9 +558,21 @@ def test_a_non_integer_expected_mtime_is_refused_not_ignored(ws):
     assert (ws.root / "a.txt").read_text() == "one"
 
 
-def test_two_saves_with_the_same_expected_mtime_cannot_both_win(ws):
-    _write(ws.root / "a.txt", "one")
+def test_two_saves_with_the_same_expected_mtime_cannot_both_win(ws, monkeypatch):
+    path = ws.root / "a.txt"
+    _write(path, "one")
     mtime = _fs("file", ws.root, {"path": "a.txt"}).content["data"]["mtime"]
+    read_existing = code_files._existing_bytes
+    both_read_original = threading.Barrier(2)
+
+    def read_before_either_write(file_path, limit):
+        content = read_existing(file_path, limit)
+        if Path(file_path) == path:
+            both_read_original.wait(timeout=5)
+        return content
+
+    monkeypatch.setattr(code_files, "_existing_bytes", read_before_either_write)
+    monkeypatch.setattr(code_files, "_mtime_ms", lambda _path: mtime)
 
     async def both():
         params = {"path": "a.txt", "expectedMtime": mtime}
@@ -571,6 +584,47 @@ def test_two_saves_with_the_same_expected_mtime_cannot_both_win(ws):
     first, second = asyncio.run(both())
 
     assert sorted([first.status_code, second.status_code]) == [200, 409]
+    assert path.read_text(encoding="utf-8") in {"A", "B"}
+
+
+def test_stale_version_is_rejected_when_content_changes_within_one_stat_tick(ws, monkeypatch):
+    path = ws.root / "a.txt"
+    _write(path, "old")
+    real_stat = os.stat
+    real_fstat = os.fstat
+    original = real_stat(path)
+
+    def same_tick(result):
+        return SimpleNamespace(
+            st_mode=result.st_mode,
+            st_dev=original.st_dev,
+            st_ino=original.st_ino,
+            st_size=original.st_size,
+            st_mtime_ns=original.st_mtime_ns,
+            st_ctime_ns=original.st_ctime_ns,
+        )
+
+    def coarse_stat(file_path, *args, **kwargs):
+        result = real_stat(file_path, *args, **kwargs)
+        if os.fspath(file_path) == os.fspath(path):
+            return same_tick(result)
+        return result
+
+    monkeypatch.setattr(os, "stat", coarse_stat)
+    monkeypatch.setattr(os, "fstat", lambda fd: same_tick(real_fstat(fd)))
+    read = _fs("file", ws.root, {"path": "a.txt"}).content["data"]
+    params = {
+        "path": "a.txt",
+        "expectedMtime": read["mtime"],
+        "expectedVersion": read["version"],
+    }
+
+    first = _fs("write_file", ws.root, {**params, "content": "one"})
+    second = _fs("write_file", ws.root, {**params, "content": "two"})
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert path.read_text(encoding="utf-8") == "one"
 
 
 def test_a_write_to_a_fifo_path_does_not_hang(ws):
