@@ -7,6 +7,7 @@ import {
   findPromptStatusUpdate,
   hasRunningTurnWithInputs,
   isCompactionComplete,
+  requireRecorderApprovalMode,
   parseRuntimeMatrix,
 } from "../scripts/chat-recorder-analysis.mjs";
 
@@ -197,5 +198,14 @@ describe("chat recorder analysis", () => {
     expect(`/sessions/${encodeURIComponent("session one")}/stream`.endsWith(suffix)).toBe(true);
     expect("/sessions/another-session/stream".endsWith(suffix)).toBe(false);
     expect(`/sessions/${encodeURIComponent("session one")}/inputs`.endsWith(suffix)).toBe(false);
+  });
+
+  it("requires a known approval mode before the prompt flow changes it", () => {
+    expect(requireRecorderApprovalMode("trust_all")).toBe("trust_all");
+    expect(requireRecorderApprovalMode("confirm_all")).toBe("confirm_all");
+    expect(() => requireRecorderApprovalMode("")).toThrow(
+      "the engine does not know this agent's approval mode; open the agent and retry",
+    );
+    expect(() => requireRecorderApprovalMode("unknown")).toThrow();
   });
 });
