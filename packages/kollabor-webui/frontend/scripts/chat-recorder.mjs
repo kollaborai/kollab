@@ -51,6 +51,7 @@ import {
   captureRecorderFailure,
   findPromptStatusUpdate,
   hasRunningTurnWithInputs,
+  hasMatchingGoalTurn,
   isCompactionComplete,
   parseRuntimeMatrix,
   requireRecorderApprovalMode,
@@ -216,6 +217,7 @@ function installRecorder(cfg) {
       if (type === "snapshot") {
         rec.streamReady = true;
         rec.latestSnapshot = {
+          conversation_uid: event.conversation_uid,
           turns: Array.isArray(data.turns) ? data.turns : [],
           inputs: Array.isArray(data.inputs) ? data.inputs : [],
         };
@@ -238,6 +240,7 @@ function installRecorder(cfg) {
       } else if (type === "row.upsert") {
         rec.noteToolRow(data);
       }
+      rec.streamConversation = event.conversation_uid;
       if (rec.measuring) rec.refreshMeasured();
       if (Number.isInteger(event.seq)) rec.lastStreamSeq = Math.max(rec.lastStreamSeq ?? -1, event.seq);
       const entry = { id, kind, t: now(), ev: type, seq: event.seq };
@@ -245,6 +248,11 @@ function installRecorder(cfg) {
       if (data.kind) entry.rowKind = data.kind;
       if (data.kind === "note" && Array.isArray(data.parts)) entry.parts = data.parts.filter((part) => part.type === "hub-note");
       if (data.state) entry.state = data.state;
+      if (type === "turn.state") {
+        entry.conversation_uid = event.conversation_uid;
+        entry.turn_id = data.turn_id;
+        if (data.origin) entry.origin = data.origin;
+      }
       if (data.status !== undefined) entry.status = data.status;
       if (Array.isArray(data.rows)) entry.rows = data.rows.length;
       return void rec.net.push(entry);
@@ -591,31 +599,24 @@ async function record(flow, session, browser, target) {
       expectedActiveTurn: activeTurn,
     }),
   ), expectedActiveTurn);
-  // /goal show reads the daemon's SQLite-backed record for its current conversation.
-  const readPersistedGoal = async () => {
-    const response = await engine(`/sessions/${session}/message`, {
-      method: "POST", body: JSON.stringify({ content: "/goal show" }),
-    });
-    if (!response.ok) throw new Error(`goal status request returned ${response.status}`);
-    const raw = await response.text();
-    const events = raw.split(/\r?\n/).filter((line) => line.startsWith("data:"))
-      .map((line) => { try { return JSON.parse(line.slice(5).trim()); } catch { return null; } });
-    const message = events.filter((event) => event?.type === "token").map((event) => event.text ?? "").join("");
-    const match = /^goal ([0-9a-f]{8})\s+(\w+)[^\n]*\nobjective: ([^\n]*)/m.exec(message);
-    return match ? { id: match[1], status: match[2], objective: match[3] } : null;
-  };
+  const readPersistedGoal = () => apiJson(`/sessions/${session}/goal`);
+  const currentStreamState = () => page.evaluate(() => ({
+    conversation_uid: window.__rec.streamConversation,
+    turns: window.__rec.streamTurns,
+    inputs: window.__rec.streamInputs,
+  }));
   const reloadDuringRun = async (reply, goalCheck = null) => {
     await waitForRunning();
     await sleep(1200);
     const expectedActiveTurn = await page.evaluate((allowEmptyInputs) => {
       const turn = window.__rec.streamTurns.filter((item) => item.state === "running").at(-1);
       if (!turn || !Array.isArray(turn.input_ids) || (!allowEmptyInputs && turn.input_ids.length === 0)) return null;
-      return { turn_id: turn.turn_id, input_ids: [...turn.input_ids] };
+      return { turn_id: turn.turn_id, input_ids: [...turn.input_ids], origin: turn.origin };
     }, goalCheck?.allowEmptyInputs === true);
     if (!expectedActiveTurn) {
       throw new Error("the stream did not identify the running turn and its inputs before reload");
     }
-    if (goalCheck) await goalCheck.before(expectedActiveTurn);
+    if (goalCheck) await goalCheck.before(expectedActiveTurn, await currentStreamState());
     await collect();
     await preserveRecorderState(expectedActiveTurn);
     collected.marks.push({ t: Date.now() - wall0, name: "RELOAD" });
@@ -623,9 +624,9 @@ async function record(flow, session, browser, target) {
     const snapshot = await waitForStreamSnapshot();
     const preservedTurn = await page.evaluate(() => window.__rec.expectedActiveTurn);
     if (!hasRunningTurnWithInputs(snapshot, preservedTurn, { allowEmptyInputs: goalCheck?.allowEmptyInputs === true })) {
-      throw new Error("the reload snapshot did not retain the active running turn and its inputs");
+      throw new Error("reload proof inconclusive: the snapshot did not retain the active running turn and its inputs");
     }
-    if (goalCheck) await goalCheck.after();
+    if (goalCheck) await goalCheck.after(preservedTurn, snapshot, await currentStreamState());
     await sleep(2500);
     await mark("RELOADED");
     await settle(reply);
@@ -843,20 +844,29 @@ async function record(flow, session, browser, target) {
       let expectedGoal;
       await reloadDuringRun(R(1), {
         allowEmptyInputs: true,
-        before: async () => {
+        before: async (turn, stream) => {
           expectedGoal = await readPersistedGoal();
-          if (!expectedGoal || expectedGoal.status !== "active" || !expectedGoal.objective.includes(U(1))) {
-            throw new Error("the created goal is not active in the current conversation");
+          if (!hasMatchingGoalTurn(stream, expectedGoal, turn) ||
+              !hasMatchingGoalTurn(await currentStreamState(), expectedGoal, turn)) {
+            throw new Error("goal reload proof inconclusive: persisted goal and running stream turn do not match before reload");
           }
+          await mark(`GOAL BEFORE ${JSON.stringify({ persisted: expectedGoal, turn, conversation_uid: stream.conversation_uid })}`);
         },
-        after: async () => {
+        after: async (turn, snapshot, stream) => {
           const restored = await readPersistedGoal();
-          if (!restored || restored.id !== expectedGoal.id || restored.status !== expectedGoal.status || restored.objective !== expectedGoal.objective) {
-            throw new Error("the persisted goal was not restored after reload");
+          if (!hasMatchingGoalTurn(snapshot, restored, turn) ||
+              !hasMatchingGoalTurn(stream, restored, turn) ||
+              !hasMatchingGoalTurn(await currentStreamState(), restored, turn) ||
+              restored.conversation_uid !== expectedGoal.conversation_uid ||
+              restored.goal.goal_id !== expectedGoal.goal.goal_id ||
+              restored.goal.attempt.attempt_id !== expectedGoal.goal.attempt.attempt_id ||
+              restored.goal.attempt.turn_id !== expectedGoal.goal.attempt.turn_id) {
+            throw new Error("goal reload proof inconclusive: persisted goal or running turn changed during reload");
           }
+          const reloadedTurn = snapshot.turns.find((item) => item.turn_id === turn.turn_id);
+          await mark(`GOAL AFTER ${JSON.stringify({ persisted: restored, turn: reloadedTurn, conversation_uid: snapshot.conversation_uid })}`);
         },
       });
-      throw new Error("goal reload proof incomplete: the stream exposes no goal-to-turn association");
     },
     // Inject a real hub message while the page's turn is still running.
     async "hub-note"() {

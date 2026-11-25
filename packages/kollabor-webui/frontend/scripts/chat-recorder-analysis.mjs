@@ -115,6 +115,20 @@ export function hasRunningTurnWithInputs(snapshot, expectedTurn, { allowEmptyInp
       (input.state === "started" || input.state === "joined")));
 }
 
+/** Compare a running stream turn with the independently persisted goal attempt. */
+export function hasMatchingGoalTurn(snapshot, persisted, expectedTurn) {
+  const goal = persisted?.goal, attempt = goal?.attempt, origin = expectedTurn?.origin;
+  if (!snapshot?.conversation_uid || snapshot.conversation_uid !== persisted?.conversation_uid ||
+      !origin || origin.kind !== "goal" || !origin.goal_id || !origin.attempt_id ||
+      goal?.status !== "active" || goal.goal_id !== origin.goal_id ||
+      !attempt?.state || ["settled", "cancelled", "ambiguous"].includes(attempt.state) ||
+      attempt.attempt_id !== origin.attempt_id || attempt.turn_id !== expectedTurn.turn_id ||
+      !hasRunningTurnWithInputs(snapshot, expectedTurn, { allowEmptyInputs: true })) return false;
+  const actual = snapshot.turns.find((turn) => turn.turn_id === expectedTurn.turn_id);
+  return actual?.origin?.kind === "goal" && actual.origin.goal_id === origin.goal_id &&
+    actual.origin.attempt_id === origin.attempt_id;
+}
+
 /** Find a post-action upsert that changes the status of the same prompt row. */
 export function findPromptStatusUpdate(entries, promptId, initialStatus, afterIndex = 0) {
   if (!Array.isArray(entries) || !promptId || typeof initialStatus !== "string" ||

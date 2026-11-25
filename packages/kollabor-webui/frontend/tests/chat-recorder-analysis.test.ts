@@ -134,18 +134,34 @@ describe("chat recorder analysis", () => {
     expect(rendered).toBe(true);
   });
 
-  it("requires the same persisted native goal across reload", async () => {
+  it("requires the same persisted native goal and running origin across reload", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const start = source.indexOf('    async "goal-reload"() {');
     const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
-    let reads = 0;
+    const origin = { kind: "goal", goal_id: "goal-full", attempt_id: "attempt-full" };
+    const turn = { turn_id: "turn-full", state: "running", input_ids: [], origin };
+    const stream = { conversation_uid: "conv-full", turns: [turn], inputs: [] };
+    const persisted = { conversation_uid: "conv-full", goal: { goal_id: "goal-full", status: "active", attempt: { attempt_id: "attempt-full", state: "dispatched", turn_id: "turn-full" } } };
+    let after: any = persisted;
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
-      activeRuntime: "native", command: async () => {},
-      readPersistedGoal: async () => ++reads === 1 ? { id: "abc12345", status: "active", objective: "u: work" } : null,
-      reloadDuringRun: async (_reply: string, check: any) => { if (check) { await check.before({ turn_id: "t", input_ids: ["i"] }); await check.after(); } },
-      U: () => "u", R: () => "r",
+      activeRuntime: "native", command: async () => {}, mark: async () => {}, hasMatchingGoalTurn,
+      readPersistedGoal: async () => after, currentStreamState: async () => stream,
+      reloadDuringRun: async (_reply: string, check: any) => {
+        await check.before(turn, stream);
+        after = null;
+        await check.after(turn, stream, stream);
+      }, U: () => "u", R: () => "r",
     });
-    await expect(flow()).rejects.toThrow(/goal/i);
+    await expect(flow()).rejects.toThrow(/goal reload proof inconclusive/i);
+    const success = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native", command: async () => {}, mark: async () => {}, hasMatchingGoalTurn,
+      readPersistedGoal: async () => persisted, currentStreamState: async () => stream,
+      reloadDuringRun: async (_reply: string, check: any) => {
+        await check.before(turn, stream);
+        await check.after(turn, stream, stream);
+      }, U: () => "u", R: () => "r",
+    });
+    await expect(success()).resolves.toBeUndefined();
   });
 
   it("reports ACP goal reload as unsupported without sending a chat prompt", async () => {
