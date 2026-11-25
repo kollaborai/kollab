@@ -33,7 +33,7 @@ import {
   type PluginService,
 } from "./sdk";
 import { containsSensitiveText, describePluginError, logPluginFailure } from "./plugin-errors";
-import { isPluginDeclarationId } from "./plugin-declarations";
+import { hasSinglePluginDeclarationIdentity, isPluginDeclarationId } from "./plugin-declarations";
 
 export const LOAD_TIMEOUT_MS = 5_000;
 
@@ -155,7 +155,7 @@ function normalizeDeclared(value: unknown): string | Record<string, string> | nu
   const text = safeIdentifier(value, 512);
   if (text) return isPluginDeclarationId(text) ? text : null;
   const raw = record(value);
-  if (!raw) return null;
+  if (!raw || !hasSinglePluginDeclarationIdentity(raw)) return null;
   const next: Record<string, string> = {};
   for (const key of ["id", "name", "tool", "tag", "label", "title"] as const) {
     if (raw[key] === undefined) continue;
@@ -174,16 +174,27 @@ type NormalizedPluginContributions = {
   omissions: number;
 };
 
-function normalizePluginContributions(value: unknown): NormalizedPluginContributions {
+function normalizePluginContributions(value: unknown, requireAllKinds = false): NormalizedPluginContributions {
   const raw = record(value);
   const result: Record<string, unknown[]> = { menu: [], views: [], pages: [], modals: [], slash: [], renderers: [] };
-  if (value !== undefined && !raw)
+  if (value === undefined)
+    return { contributes: result as PluginEntry["contributes"], malformed: false, omissions: 0 };
+  if (!raw)
     return { contributes: result as PluginEntry["contributes"], malformed: true, omissions: 1 };
   let malformed = false;
-  let omissions = 0;
+  let omissions = Object.keys(raw).filter(
+    (key) => !CONTRIBUTION_KINDS.includes(key as (typeof CONTRIBUTION_KINDS)[number]),
+  ).length;
+  if (omissions) malformed = true;
   for (const kind of CONTRIBUTION_KINDS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, kind)) {
+      if (requireAllKinds) {
+        malformed = true;
+        omissions += 1;
+      }
+      continue;
+    }
     const items = raw?.[kind];
-    if (items === undefined) continue;
     if (!Array.isArray(items)) {
       malformed = true;
       omissions += 1;
@@ -201,6 +212,11 @@ function normalizePluginContributions(value: unknown): NormalizedPluginContribut
         continue;
       }
       const row = record(item);
+      if (!row || !hasSinglePluginDeclarationIdentity(row, "id")) {
+        malformed = true;
+        omissions += 1;
+        continue;
+      }
       const id = safeIdentifier(row?.id, 128);
       const label = safeText(row?.label, 256);
       const open = normalizeOpenTarget(row?.open);
@@ -396,7 +412,7 @@ export function normalizePluginEntry(value: unknown, previous?: PluginEntry): Pl
   const settingsSection = record(raw.settings_section);
   const settingOmissionsFromInput = settingOmissions(raw.settings, settingsSection?.widgets);
   const reportedOmissions = record(raw.omitted);
-  const normalizedContributions = normalizePluginContributions(raw.contributes);
+  const normalizedContributions = normalizePluginContributions(raw.contributes, true);
   const retainPreviousContributions = previous !== undefined &&
     (raw.contributes === undefined || normalizedContributions.malformed);
   const omitted = {

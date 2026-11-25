@@ -19,6 +19,9 @@ import pytest
         ("service-name", "service"),
         ("undeclared-secret", "secret"),
         ("contributes", "contributes"),
+        ("multiple-slash-identities", "contributes"),
+        ("multiple-renderer-identities", "contributes"),
+        ("multiple-menu-identities", "contributes"),
     ],
 )
 def test_manifest_checks(change, message, tmp_path, monkeypatch):
@@ -61,6 +64,14 @@ def test_manifest_checks(change, message, tmp_path, monkeypatch):
         manifest["services"] = {"loop": {"command": ["python3"], "secrets": ["KEY"]}}
     elif change == "contributes":
         manifest["contributes"] = {"typo": []}
+    elif change == "multiple-slash-identities":
+        manifest["contributes"] = {"slash": [{"id": "deploy", "name": "review"}]}
+    elif change == "multiple-renderer-identities":
+        manifest["contributes"] = {"renderers": [{"tool": "shell", "tag": "card"}]}
+    elif change == "multiple-menu-identities":
+        manifest["contributes"] = {
+            "menu": [{"id": "home", "name": "other", "label": "Home", "open": {"view": "home"}}]
+        }
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
     if message:
         with pytest.raises(ValueError, match=message):

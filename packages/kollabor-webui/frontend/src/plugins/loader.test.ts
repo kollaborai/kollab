@@ -15,6 +15,7 @@ import {
 import { createPluginRegistry } from "./registry";
 import { pluginsByEnableOrder } from "./plugin-order";
 import { logPluginFailure } from "./plugin-errors";
+import { declaredIds } from "./plugin-declarations";
 import type { PluginApi, PluginEntry } from "./sdk";
 
 const Tab = () => null;
@@ -31,7 +32,11 @@ function entry(id: string, extra: Partial<PluginEntry> = {}): PluginEntry {
     web: { entry: "web/dist/index.js", style: "web/dist/index.css", hash: "abc" },
     contributes: {
       menu: [{ id, label: "Row", open: { page: "main" } }],
+      views: [],
       pages: [{ id: "main", title: "Main" }],
+      modals: [],
+      slash: [],
+      renderers: [],
     },
     services: [],
     omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
@@ -554,6 +559,51 @@ describe("plugins-changed", () => {
     expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
     expect(plugin("hello")?.contributions.renderers.map((renderer) => renderer.tool)).toEqual(["shell"]);
     expect(deps.importModule).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects contribution rows with multiple identity fields", () => {
+    const normalized = normalizePluginEntry(entry("hello", {
+      contributes: {
+        menu: [],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: [{ id: "deploy", name: "review" }],
+        renderers: [{ tool: "shell", tag: "card" }],
+      },
+    }));
+
+    expect(normalized?.contributes.slash).toEqual([]);
+    expect(normalized?.contributes.renderers).toEqual([]);
+    expect(normalized?.omitted.contributions).toBe(2);
+    expect(declaredIds([{ id: "deploy", name: "review" }, { tool: "shell", tag: "card" }])).toEqual(new Set());
+  });
+
+  it("retains the last-good declarations when an inventory omits one contribution kind", () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [],
+      views: [],
+      pages: [],
+      modals: [],
+      slash: ["publish"],
+      renderers: [{ tool: "shell" }],
+    };
+    const previous = entry("hello", { contributes });
+    const partial = {
+      ...previous,
+      contributes: {
+        menu: [],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: ["publish"],
+      },
+    };
+
+    const normalized = normalizePluginEntry(partial, previous);
+
+    expect(normalized?.contributes).toEqual(contributes);
+    expect(normalized?.omitted.contributions).toBe(1);
   });
 
   it.each(["menu", "views", "pages", "modals", "slash", "renderers"] as const)(

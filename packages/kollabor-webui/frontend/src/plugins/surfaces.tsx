@@ -206,6 +206,7 @@ function pressNotice(record: PluginRecord, notice: PluginNotice) {
   dismissNotice(record.id, notice.key);
   if (button.open) return openTarget(record.id, button.open);
   const fail = (error: unknown) => {
+    if (!pluginRegistry.getSnapshot().plugins.some((current) => current.id === record.id && current.k === record.k)) return;
     logPluginFailure(record.id, "notice action failed", error);
     record.k?.toast(SAFE_PLUGIN_ACTION_ERROR);
   };

@@ -261,7 +261,7 @@ as `kollab_plugin_pr_chain` and two packages never collide.
 | `engine` | `make_router(ctx: PluginContext) -> APIRouter`, mounted under `/plugins/{id}/api/` |
 | `services.<name>` | `<name>` matches `^[a-z0-9][a-z0-9-]{0,39}$`; `command` (run from the plugin folder); `autostart`; `restart` (`on-failure` default, `always`, `never`); `stop_timeout_s` (default 30); `heartbeat_s` (optional); both must be numbers above 0 and at most 86400 seconds; `secrets` (granted secrets the wrapper puts in its environment) |
 | `web` | the entry module and stylesheet, both inside `web/dist/` |
-| `contributes` | everything the plugin adds, by id: `menu` rows, `views`, `pages`, `modals`, `slash` commands and chat `renderers`. The sheet's Adds line and the app's rows come from here, so a row exists even when the bundle fails; the bundle's `k.*` calls bind to these ids, and an undeclared id is ignored with a warning |
+| `contributes` | everything the plugin adds: `menu` rows, `views`, `pages`, `modals`, `slash` commands and chat `renderers`. Each row has exactly one identity field (`id`, `name`, `tool` or `tag`); menu rows use `id`. The sheet's Adds line and the app's rows come from here, so a row exists even when the bundle fails; the bundle's `k.*` calls bind to these ids, and an undeclared id is ignored with a warning |
 | `version`, `description` | strings |
 | `agents`, `skills`, `commands`, `hooks`, `mcp`, `settings` | paths inside the plugin, in the formats kollab already reads |
 | `uses` | see the next section |
@@ -676,6 +676,7 @@ already applies to `get_config_widgets()` sections, with current values from the
 that do not apply to a kind are `null`. The terminal's `/config` builds its Plugins part from it, the web
 reads it from `GET /plugins`, and the `config` panel stops adding plugin sections. `PluginConfigManager`
 folds into it; its readers (`kollabor_config/loader.py:310-315` and `:770`) move in the same change.
+The inventory always includes all six contribution arrays; a missing contribution kind makes that row incomplete, not empty.
 
 ### Background processes
 

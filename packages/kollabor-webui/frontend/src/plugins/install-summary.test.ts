@@ -36,6 +36,23 @@ describe("plugin review manifest boundary", () => {
       services: { worker: { secrets: ["API_TOKEN"] } }, contributes: { views: ["home"] }, hooks: false, mcp: false,
     },
   });
+  it("does not count undeclared manifest contribution kinds as omissions", () => {
+    expect(normalizeReviewJob(job())?.manifest?.omitted?.contributions).toBe(0);
+  });
+  it("omits multi-identity rows from the consent count and reports them", () => {
+    const input = job() as Record<string, any>;
+    input.manifest.contributes = {
+      slash: [{ id: "deploy", name: "review" }],
+      renderers: [{ tool: "shell", tag: "card" }],
+    };
+    const manifest = normalizeReviewJob(input)?.manifest;
+    const adds = describePluginAdds(manifest!);
+
+    expect(manifest?.omitted?.contributions).toBe(2);
+    expect(adds).not.toContain("1 slash command");
+    expect(adds).not.toContain("1 chat renderer");
+    expect(adds).toContain("2 additional contribution omitted from this review");
+  });
   const cases = [
     ["manifest name", (value: Record<string, any>) => { value.manifest.name = canary; }],
     ["manifest version", (value: Record<string, any>) => { value.manifest.version = { token: canary }; }],

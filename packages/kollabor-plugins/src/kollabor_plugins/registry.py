@@ -30,6 +30,7 @@ from .packages import (
     _MAX_PLUGIN_SETTINGS,
     _MAX_PLUGIN_USES,
     _SYMBOL,
+    _has_single_contribution_identity,
     _normalize_plugin_use,
     _read_registry,
     _within,
@@ -778,7 +779,7 @@ def _normalize_declared(value: object) -> str | dict | None:
     if isinstance(value, str):
         safe = _bounded_inventory_identifier(value, 512)
         return safe if safe and _DECLARATION_ID.fullmatch(safe) else None
-    if not isinstance(value, dict):
+    if not _has_single_contribution_identity(value):
         return None
     result: dict[str, str] = {}
     for key in ("id", "name", "tool", "tag", "label", "title"):
@@ -792,33 +793,43 @@ def _normalize_declared(value: object) -> str | dict | None:
     return result if any(key in result for key in ("id", "name", "tool", "tag")) else None
 
 
-def _normalize_contributes(value: object) -> dict:
+def _normalize_contributes(value: object) -> tuple[dict, int]:
     kinds = ("menu", "views", "pages", "modals", "slash", "renderers")
     result = {kind: [] for kind in kinds}
     if not isinstance(value, dict):
-        return result
+        return result, 1
+    omissions = sum(1 for kind in value if kind not in kinds)
     for kind in kinds:
+        if kind not in value:
+            continue
         items = value.get(kind)
         if not isinstance(items, list):
+            omissions += 1
             continue
+        omissions += max(0, len(items) - _MAX_PLUGIN_CONTRIBUTIONS)
         for item in items[:_MAX_PLUGIN_CONTRIBUTIONS]:
             if kind != "menu":
                 declared = _normalize_declared(item)
                 if declared is not None:
                     result[kind].append(declared)
+                else:
+                    omissions += 1
                 continue
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or not _has_single_contribution_identity(item, required="id"):
+                omissions += 1
                 continue
             row_id = _bounded_inventory_identifier(item.get("id"), 128)
             label = _bounded_inventory_text(item.get("label"), 256)
             raw_open = item.get("open")
             if not row_id or not _DECLARATION_ID.fullmatch(row_id) or not label:
+                omissions += 1
                 continue
             if (
                 not isinstance(raw_open, dict)
                 or len(raw_open) != 1
                 or next(iter(raw_open), None) not in {"page", "modal", "view", "url"}
             ):
+                omissions += 1
                 continue
             target_key = next(iter(raw_open))
             target_value = (
@@ -828,6 +839,7 @@ def _normalize_contributes(value: object) -> dict:
             )
             icon = _bounded_inventory_text(item.get("icon"), 64) if item.get("icon") is not None else None
             if not target_value or (item.get("icon") is not None and not icon):
+                omissions += 1
                 continue
             result["menu"].append({
                 "id": row_id,
@@ -835,7 +847,7 @@ def _normalize_contributes(value: object) -> dict:
                 "open": {target_key: target_value},
                 **({"icon": icon} if icon else {}),
             })
-    return result
+    return result, omissions
 
 
 def _normalize_setting(value: object) -> dict | None:
@@ -1031,14 +1043,9 @@ def _normalize_plugin_entry(value: object) -> dict | None:
         labels = setting.get("option_labels")
         if isinstance(labels, dict):
             omitted_option_labels += max(0, len(labels) - _MAX_PLUGIN_OPTION_LABELS)
-    raw_contributes = value.get("contributes")
-    omitted_contributions = _reported_omissions(value, "contributions")
-    if isinstance(raw_contributes, dict):
-        omitted_contributions += sum(
-            max(0, len(items) - _MAX_PLUGIN_CONTRIBUTIONS)
-            for items in raw_contributes.values()
-            if isinstance(items, list)
-        )
+    raw_contributes = value.get("contributes", {})
+    contributes, dropped_contributions = _normalize_contributes(raw_contributes)
+    omitted_contributions = _reported_omissions(value, "contributions") + dropped_contributions
     version = _bounded_inventory_text(value.get("version"), 256)
     source = _bounded_inventory_text(value.get("source"))
     raw_commit = value.get("commit")
@@ -1062,7 +1069,7 @@ def _normalize_plugin_entry(value: object) -> dict | None:
         "state": state,
         "error": error,
         "web": web,
-        "contributes": _normalize_contributes(raw_contributes),
+        "contributes": contributes,
         "services": services,
         "settings": settings,
         "settings_section": {"title": section_title or "Settings", "widgets": section_widgets}

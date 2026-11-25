@@ -194,6 +194,16 @@ def heartbeat_seconds(service: object) -> float | None:
         return None
     return float(value)
 _CONTRIBUTION_KEYS = {"menu", "views", "pages", "modals", "slash", "renderers"}
+_CONTRIBUTION_IDENTITY_FIELDS = ("id", "name", "tool", "tag")
+
+
+def _has_single_contribution_identity(value: object, *, required: str | None = None) -> bool:
+    if isinstance(value, str):
+        return bool(value) and required is None
+    if not isinstance(value, dict):
+        return False
+    identities = [field for field in _CONTRIBUTION_IDENTITY_FIELDS if field in value]
+    return len(identities) == 1 and (required is None or identities[0] == required)
 
 
 def _within(root: Path, value: object, label: str) -> Path:
@@ -283,6 +293,11 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
             raise ManifestReviewLimitError(
                 f"Plugin manifest exceeds {_MAX_PLUGIN_CONTRIBUTIONS} {kind} contributions"
             )
+        if any(
+            not _has_single_contribution_identity(item, required="id" if kind == "menu" else None)
+            for item in items
+        ):
+            raise ValueError("Invalid contributes identity")
     services = manifest.get("services", {})
     if not isinstance(services, dict):
         raise ValueError("Invalid services")

@@ -264,6 +264,43 @@ describe("notices", () => {
       }
     },
   );
+
+  it("ignores a notice action rejection after its plugin unloads", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz";
+    let rejectAction!: (reason: unknown) => void;
+    const action = new Promise<void>((_resolve, reject) => { rejectAction = reject; });
+    const toast = vi.fn();
+    put("hello", "Hello", {
+      k: { id: "hello", toast } as unknown as PluginApi,
+      contributions: contributions({
+        notices: [{ key: 4, text: "Action", button: { label: "Open", run: () => action } }],
+      }),
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<PluginNotices />));
+      const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.trim() === "Open");
+      await act(async () => {
+        button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+      await act(async () => { pluginRegistry.remove("hello"); });
+      await act(async () => {
+        rejectAction(new Error(secret));
+        await action.catch(() => {});
+      });
+
+      expect(toast).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("main-area views", () => {

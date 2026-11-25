@@ -69,7 +69,12 @@ const inventoryOmissionCases: Array<{
   },
   ...CONTRIBUTION_KINDS.map((kind) => ({
     name: `contributes.${kind}`,
-    input: () => ({ contributes: { [kind]: contributionItems(kind, 257) } }),
+    input: () => ({
+      contributes: Object.fromEntries(CONTRIBUTION_KINDS.map((candidate) => [
+        candidate,
+        candidate === kind ? contributionItems(kind, 257) : [],
+      ])),
+    }),
     omitted: (entry: ReturnType<typeof normalizePluginEntry>) => entry?.omitted.contributions ?? 0,
   })),
 ];

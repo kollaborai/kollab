@@ -286,6 +286,40 @@ def test_plugin_web_entry_normalizes_manifest_relative_paths(path, expected):
 def test_plugin_slash_command_inventory_uses_ascii_declaration_names():
     from kollabor_plugins.registry import _normalize_contributes
 
-    normalized = _normalize_contributes({"slash": ["publish", "_publish", "café"]})
+    normalized, omitted = _normalize_contributes({"slash": ["publish", "_publish", "café"]})
 
     assert normalized["slash"] == ["publish"]
+    assert omitted == 2
+
+
+@pytest.mark.parametrize(
+    ("surface", "declaration"),
+    [
+        ("menu", {"id": "home", "name": "other", "label": "Home", "open": {"view": "home"}}),
+        ("slash", {"id": "deploy", "name": "review"}),
+        ("renderers", {"tool": "shell", "tag": "card"}),
+    ],
+)
+def test_plugin_inventory_drops_multiple_identity_declarations(surface, declaration):
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": {surface: [declaration]}})
+
+    assert entry is not None
+    assert entry["contributes"][surface] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
+@pytest.mark.parametrize("surface", ["menu", "views", "pages", "modals", "slash", "renderers"])
+def test_plugin_inventory_reports_malformed_contribution_rows(surface):
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": {surface: [None]}})
+
+    assert entry is not None
+    assert entry["contributes"][surface] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
+def test_plugin_inventory_reports_malformed_contribution_kind():
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": {"slash": "publish"}})
+
+    assert entry is not None
+    assert entry["contributes"]["slash"] == []
+    assert entry["omitted"]["contributions"] == 1
