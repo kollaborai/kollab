@@ -844,6 +844,17 @@ describe("LiveChatStore", () => {
     expect(store.rows[1]).toEqual(row("web-a1", "hello", "input", "user"));
   });
 
+  it("orders interleaved clients by stream delivery", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    await store.send({ id: "web-a1", text: "hello" });
+    first.emit(streamEvent(5, "row.upsert", row("other", "other", "input", "user")));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "other", "web-a1"]);
+    first.emit(streamEvent(6, "row.upsert", row("web-a1", "hello", "input", "user")));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "other", "web-a1"]);
+  });
+
   it("a snapshot that contains the pending row's id takes the window's row in its place", async () => {
     const { store, streams } = make();
     const first = await startOpen(store, streams);
