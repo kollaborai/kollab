@@ -1342,6 +1342,7 @@ class ACPOrchestrator:
     async def steer(
         self, text: str, *, origin: dict[str, Any], thread_id: str | None = None,
         request_id: str | None = None,
+        record_request_id: str | None = None,
         images: tuple[dict[str, str], ...] = (),
     ) -> dict[str, Any] | bool:
         runner = self._runner
@@ -1372,7 +1373,9 @@ class ACPOrchestrator:
             raise ACPSteeringUnconfirmed(
                 "ACP turn changed before steering was confirmed"
             )
-        record_request_id = request_id or f"steering-{uuid.uuid4().hex}"
+        # The row keeps the sender's id; the admission id names it when the
+        # sender sent none. The steering- fallback is for callers with neither (#1371).
+        record_request_id = record_request_id or request_id or f"steering-{uuid.uuid4().hex}"
         self._record_user(record_request_id, text, "steering", thread_id)
         self._parents.pop(record_request_id, None)
         if request_id and owner_correlatable:

@@ -3090,6 +3090,7 @@ class LLMService:
                     "operator_inputs": operator_inputs,
                     "queue_handoff": queue_handoff,
                     "queue_handoff_batch": queue_handoff_batch,
+                    "request_id": request_id if isinstance(request_id, str) and request_id else None,
                 },
                 input_source if operator_inputs else UserInputSource.TUI.value,
             )
@@ -4045,6 +4046,8 @@ class LLMService:
             try:
                 steered = await acp.steer(
                     message, origin=origin, thread_id=data.get("thread_id"),
+                    request_id=data.get("request_id") or None,
+                    record_request_id=request_id,
                     **({"images": images} if images else {}),
                 )
             except ACPSteeringUnconfirmed:
