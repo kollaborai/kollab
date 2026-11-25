@@ -8,33 +8,54 @@ import {
   takeComposerDraftSubmission,
   type ComposerDraftStorage,
 } from "../src/composer-draft";
-import {
-  historyMessageIndex,
-  mergeCompactionHistorySnapshot,
-  mergeMissingHistoryMessages,
-  shownMessagesChanged,
-} from "../src/history-merge";
+import { applyChatStreamEvent, initialStreamState, type StreamState } from "../src/chat-store";
+import { toRepository, toThreadMessageLike } from "../src/chat-runtime";
+import type { ChatRow } from "../src/chat-stream";
 
-type Message = {
-  id: string;
-  content: unknown;
-  metadata?: { custom?: Record<string, unknown> };
-};
+const CONV = "conv-1";
+const WHEN = "2026-11-25T12:00:00Z";
+const NOTICE = "Earlier messages compacted";
 
-const message = (id: string, content: string): Message => ({ id, content });
+function row(
+  id: string,
+  text: string,
+  kind: ChatRow["kind"] = "reply",
+  role: ChatRow["role"] = "assistant",
+  status = "complete",
+): ChatRow {
+  return {
+    id,
+    seq: 1,
+    kind,
+    role,
+    turn_id: null,
+    status,
+    parts: [{ type: "text", text }],
+    created_at: WHEN,
+  };
+}
 
-const compaction = (round: number, content = `Summary ${round}`): Message => ({
-  id: "history-0",
-  content,
-  metadata: {
-    custom: {
-      contextCompaction: true,
-      compactionRound: round,
-      preMessageCount: 20,
-      postMessageCount: 4,
-    },
-  },
-});
+/** A compaction marker: the notice the daemon sends in place of the rows it dropped. */
+const marker = (id: string, text = NOTICE): ChatRow => row(id, text, "marker", "system");
+
+/** The store after a snapshot of `rows`; the next live event must carry `nextSeq`. */
+function windowOf(rows: ChatRow[], nextSeq: number): StreamState {
+  const result = applyChatStreamEvent(initialStreamState, {
+    seq: 1,
+    conversation_uid: CONV,
+    type: "snapshot",
+    data: { rows, next_seq: nextSeq, older: null, turns: [], inputs: [] },
+  });
+  expect(result.outcome).toEqual({ kind: "applied" });
+  return result.state;
+}
+
+/** Applies one live event and asserts it was applied, not resynced or dropped. */
+function applyLive(state: StreamState, seq: number, type: string, data: unknown): StreamState {
+  const result = applyChatStreamEvent(state, { seq, conversation_uid: CONV, type, data });
+  expect(result.outcome).toEqual({ kind: "applied" });
+  return result.state;
+}
 
 class MemoryStorage implements ComposerDraftStorage {
   private readonly values = new Map<string, string>();
@@ -52,81 +73,64 @@ class MemoryStorage implements ComposerDraftStorage {
   }
 }
 
-describe("compaction history reconciliation", () => {
-  it("keeps the visible transcript and imports the compacted snapshot without stale rows", () => {
-    const shown = [
-      message("history-0", "Original opening"),
-      message("history-1", "Original answer"),
-      message("live-message:active", "Streaming reply"),
-    ];
-    const loaded = [
-      compaction(1),
-      message("history-1", "Recent retained turn"),
-      message("history-2", "Turn appended during compaction"),
-    ];
-
-    const rebased = mergeCompactionHistorySnapshot(shown, loaded);
-
-    expect(rebased).not.toBeNull();
-    expect(rebased?.messages.map((item) => item.content)).toEqual([
-      "Original opening",
-      "Original answer",
-      "Summary 1",
-      "Recent retained turn",
-      "Turn appended during compaction",
-      "Streaming reply",
-    ]);
-    expect(rebased!.messages[0].id).toBe(shown[0].id);
-    expect(historyMessageIndex(rebased!.messages[0])).toBeNull();
-    expect(historyMessageIndex(rebased!.messages[2])).toBe(0);
-    expect(new Set(rebased!.messages.map((row) => row.id)).size).toBe(rebased!.messages.length);
-    expect(shownMessagesChanged(rebased!.messages, loaded)).toBe(false);
-    expect(mergeCompactionHistorySnapshot(rebased!.messages, loaded)).toBeNull();
-  });
-
-  it("appends post-compaction history after the retained transcript", () => {
-    const shown = [message("history-0", "Before compaction")];
-    const snapshot = [compaction(1), message("history-1", "Retained")];
-    const rebased = mergeCompactionHistorySnapshot(shown, snapshot)!;
-    const next = mergeMissingHistoryMessages(
-      rebased.messages,
-      [message("history-2", "New after compaction")],
+describe("compaction replace over marker rows", () => {
+  it("keeps the rows the replace carries under their ids, puts the marker first, and drops the rest", () => {
+    const shown = windowOf(
+      [
+        row("web-a1", "hello", "input", "user"),
+        row("r1", "hi"),
+        row("live-1", "partial reply", "reply", "assistant", "streaming"),
+      ],
+      5,
     );
+    const compacted = applyLive(shown, 5, "replace", {
+      rows: [marker("m1"), row("web-a1", "hello", "input", "user"), row("r1", "hi")],
+    });
 
-    expect(next.messages.map((item) => item.content)).toEqual([
-      "Before compaction",
-      "Summary 1",
-      "Retained",
-      "New after compaction",
-    ]);
+    expect(compacted.rows.map((item) => item.id)).toEqual(["m1", "web-a1", "r1"]);
+    // The replace is the window: the streaming row it omits is gone, and kept rows keep their content.
+    expect(compacted.rows.slice(1)).toEqual(shown.rows.slice(0, 2));
+    expect(new Set(compacted.rows.map((item) => item.id)).size).toBe(compacted.rows.length);
   });
 
-  it("archives earlier rounds again when a distinct compaction round arrives", () => {
-    const initial = [message("history-0", "Original transcript")];
-    const first = mergeCompactionHistorySnapshot(initial, [compaction(1)])!;
-    const second = mergeCompactionHistorySnapshot(first.messages, [compaction(2)])!;
+  it("appends rows that arrive after the compaction behind the retained rows", () => {
+    const compacted = applyLive(
+      windowOf([row("web-a1", "hello", "input", "user"), row("r1", "hi")], 3),
+      3,
+      "replace",
+      { rows: [marker("m1"), row("web-a1", "hello", "input", "user"), row("r1", "hi")] },
+    );
+    const next = applyLive(compacted, 4, "row.upsert", row("r2", "after the compaction"));
 
-    expect(second.messages.map((item) => item.content)).toEqual([
-      "Original transcript",
-      "Summary 1",
-      "Summary 2",
-    ]);
-    expect(shownMessagesChanged(second.messages, [compaction(2)])).toBe(false);
+    expect(next.rows.map((item) => item.id)).toEqual(["m1", "web-a1", "r1", "r2"]);
   });
 
-  it("keeps ordinary removed history on the existing stale-reset path", () => {
-    expect(
-      mergeCompactionHistorySnapshot(
-        [message("history-0", "Visible")],
-        [message("history-0", "Replacement")],
-      ),
-    ).toBeNull();
-    expect(
-      shownMessagesChanged(
-        [message("history-0", "Visible"), message("history-1", "Removed")],
-        [message("history-0", "Visible")],
-      ),
-    ).toBe(true);
+  it("keeps each later round's markers in the order the replace sends them", () => {
+    const first = applyLive(windowOf([row("r1", "hi")], 2), 2, "replace", {
+      rows: [marker("m1"), row("r1", "hi")],
+    });
+    const second = applyLive(first, 3, "replace", {
+      rows: [marker("m1"), marker("m2", "Earlier messages compacted again"), row("r2", "after")],
+    });
+
+    expect(second.rows.map((item) => item.id)).toEqual(["m1", "m2", "r2"]);
+    expect(second.rows.filter((item) => item.kind === "marker")).toHaveLength(2);
+  });
+
+  it("renders a marker row as a system message that carries the compaction notice", () => {
+    const state = applyLive(windowOf([], 2), 2, "replace", { rows: [marker("m1")] });
+    const repositoryMessage = toRepository(state.rows).messages[0]?.message;
+
+    expect(toThreadMessageLike(marker("m1"))).toMatchObject({
+      id: "m1",
+      role: "system",
+      content: [{ type: "text", text: NOTICE }],
+    });
+    expect(repositoryMessage).toMatchObject({
+      id: "m1",
+      role: "system",
+      content: [{ type: "text", text: NOTICE }],
+    });
   });
 });
 
