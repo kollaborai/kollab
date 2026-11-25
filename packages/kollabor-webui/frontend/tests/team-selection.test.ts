@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import type { Persona, Team, TeamMember } from "../src/api.ts";
 import { effectiveTeam, teamRows } from "../src/components/agents/team-model.ts";
@@ -28,6 +29,12 @@ const team: Team = {
   path: "",
   members: [seat("lead", null), seat("manager", "lead"), seat("writer", "manager"), seat("analyst", "lead")],
 };
+
+test("team member count reserves the coarse-pointer dialog close target", () => {
+  const source = readFileSync(new URL("../src/components/agents/TeamLaunchSheet.tsx", import.meta.url), "utf8");
+  const memberRow = /<div className="([^"]+)">(?:(?!<\/div>)[\s\S])*?<span className="[^"]*ml-auto[^"]*">\{team\.members\.length\} members/.exec(source);
+  assert.match(memberRow?.[1] ?? "", /pointer-coarse:pr-12/);
+});
 
 test("selection preview re-parents retained members without mutating the source team", () => {
   const before = team.members.map((member) => member.reports_to);
