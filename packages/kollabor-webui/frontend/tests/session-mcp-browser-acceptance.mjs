@@ -127,6 +127,42 @@ try {
   assert.equal(await dialog.getByRole("button", { name: "Edit global-server" }).isEnabled(), true);
   assert.equal(await dialog.getByRole("button", { name: "Delete global-server" }).isEnabled(), true);
   assert.equal(await dialog.getByRole("button", { name: "Disconnect" }).isEnabled(), true);
+
+  // A screenshot taken right after a resize and a theme change must show the
+  // settled page, not a frame halfway between two colors or two widths.
+  const look = () => dialog.evaluate((node) => [node, ...node.querySelectorAll("*")].map((el) => {
+    const style = getComputedStyle(el);
+    const box = el.getBoundingClientRect();
+    return `${el.tagName} ${style.color} ${style.backgroundColor} ${Math.round(box.x)} ${Math.round(box.width)}`;
+  }));
+  await page.evaluate(() => document.documentElement.classList.remove("dark"));
+  await page.waitForTimeout(500);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => document.documentElement.classList.add("dark"));
+  const immediate = await look();
+  await page.waitForTimeout(500);
+  assert.deepEqual(immediate, await look(), "a capture right after a resize and theme change must not be mid-fade");
+
+  // Server rows end where the full-width buttons under them end.
+  const rightEdge = async (locator) => {
+    const box = await locator.boundingBox();
+    return Math.round(box.x + box.width);
+  };
+  assert.equal(
+    await rightEdge(dialog.locator("div.rounded-lg").first()),
+    await rightEdge(dialog.getByRole("button", { name: "Refresh" })),
+    "server rows must line up with the buttons below them",
+  );
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  // The app only ships the dark theme, so the fixture must start in it.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  assert.ok(
+    await page.evaluate(() => document.documentElement.classList.contains("dark")),
+    "the fixture must render the dark theme the app ships",
+  );
+  await page.getByRole("button", { name: "MCP Servers" }).click();
+  await dialog.getByText("global-server", { exact: true }).waitFor();
   denyDisconnect = true;
   await dialog.getByRole("button", { name: "Disconnect" }).click();
   assert.ok(requests.includes("/sessions/session-a/mcp/session-only/disconnect"));
