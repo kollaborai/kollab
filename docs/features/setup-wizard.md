@@ -2,6 +2,7 @@
 
 A guided, fullscreen wizard that walks a new user through configuring their
 first LLM provider — no environment variables or hand-edited JSON required.
+Settings > Setup in the Web UI and desktop app also supports ChatGPT sign-in.
 
 ```
 /setup            # aliases: /onboard, /wizard
@@ -15,6 +16,21 @@ the same screen `/setup` opens. Leaving it (Esc) saves
 `application.setup_completed`, so it does not open again; `/setup` always does.
 A detached daemon or a pipe run has no terminal, so it leaves the wizard for the
 next interactive launch.
+
+## Web UI welcome guide
+
+In the Web UI the welcome guide is three cards: Welcome, Join a network and Start
+your first agent. It has no provider card of its own: Settings > Setup is the one
+provider screen. **Get Started** opens it while the active profile has no real
+provider (a fresh install runs the built-in `default` profile, whose provider is
+`auto`, and that does not count as a choice). Once a provider is chosen,
+**Get Started** moves on to the network and agent cards, and a card whose goal is
+already done (a live network, a running agent) is skipped.
+
+While the guide is still loading provider facts, **Open provider setup** remains
+available as a direct recovery action. It stays available if `/profiles` fails
+or never responds; **Get Started** does not open Setup until the provider lookup
+finishes.
 
 ## What it does
 
@@ -46,11 +62,20 @@ next interactive launch.
 
 ## Special routes
 
-- **OpenAI — sign in with ChatGPT**: delegates to the existing OAuth device-code
-  flow (the same one `/login openai` runs). No API key is requested.
+- **OpenAI — sign in with ChatGPT**: uses the existing OAuth device-code flow
+  used by `/login openai`. No API key or endpoint is requested.
 - **Azure / Advanced**: routed to manual `config.json` editing (see
   [`docs/providers.md`](../providers.md)), since Azure profiles need an
   endpoint + deployment that the guided flow does not capture.
+
+## Web UI sign-in
+
+Choose **OpenAI (sign in with ChatGPT)** in Settings > Setup. The wizard opens
+the device-code page, shows a code to enter, and reports waiting, success,
+expiry, denial, and network errors in the sign-in step. After sign-in, choose a
+model and save the review. Save and Activate stores the OAuth tokens, creates or
+updates the `openai-oauth` profile, and makes it active. Cancel, closing Setup,
+or selecting another provider stops the pending sign-in.
 
 ## Where things live
 
