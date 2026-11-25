@@ -540,3 +540,21 @@ def test_refresh_repairs_oversized_context_and_output_from_source(tmp_path):
     ]
     assert models["vendor/repaired"]["context_window"] == 2000
     assert models["vendor/repaired"]["max_output"] == 4096
+
+
+def test_write_registry_rejects_non_finite_numbers_before_writing(tmp_path):
+    registry = tmp_path / "models.json"
+    original = '{"models": {"preserved": true}}\n'
+    registry.write_text(original)
+
+    try:
+        upd.write_registry(
+            registry,
+            {"models": {"vendor/non-finite": {"max_output": float("inf")}}},
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("write_registry accepted a non-finite JSON number")
+
+    assert registry.read_text() == original
