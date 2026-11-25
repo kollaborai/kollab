@@ -711,4 +711,15 @@ describe("LiveChatStore", () => {
     expect(store.rows.map((r) => r.id)).toEqual(["r9"]);
     expect(store.olderStatus).toBe("idle");
   });
+
+  it("a snapshot without an older field has no earlier page: hasEarlier is false, paging is complete, and loadOlder sends nothing", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    // The shared validators do not check `older`, so a snapshot can arrive without it.
+    first.emit(streamEvent(1, "snapshot", { rows: [row("r1")], next_seq: 5, turns: [], inputs: [] }));
+    expect(store.hasEarlier).toBe(false);
+    expect(store.olderStatus).toBe("complete");
+    await store.loadOlder();
+    expect(request).not.toHaveBeenCalled();
+  });
 });
