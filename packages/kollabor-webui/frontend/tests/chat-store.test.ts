@@ -855,6 +855,17 @@ describe("LiveChatStore", () => {
     expect(store.rows.map((r) => r.id)).toEqual(["r1", "other", "web-a1"]);
   });
 
+  it("reconciles an accepted local send found in an older history page", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("recent")], { older: "cursor" }));
+    await store.send({ id: "web-a1", text: "hello" });
+    const accepted = row("web-a1", "hello", "input", "user");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [accepted], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(store.rows).toEqual([accepted, row("recent")]);
+  });
+
   it("a snapshot that contains the pending row's id takes the window's row in its place", async () => {
     const { store, streams } = make();
     const first = await startOpen(store, streams);
