@@ -23,6 +23,11 @@ export const CHAT_RECORDER_RUNTIMES = Object.freeze([
   "claude-code",
 ]);
 
+/** Build the path suffix for the only session stream a recorder flow owns. */
+export function chatRecorderStreamSuffix(session) {
+  return `/sessions/${encodeURIComponent(session)}/stream`;
+}
+
 /** Parse --runtime-matrix runtime=identity,... into its fixed runtime order. */
 export function parseRuntimeMatrix(value) {
   if (typeof value !== "string" || !value.trim()) {

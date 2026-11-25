@@ -47,6 +47,7 @@ import {
   analyzeChatFrames,
   CHAT_RECORDER_FLOWS,
   classifyChatRuntime,
+  chatRecorderStreamSuffix,
   findPromptStatusUpdate,
   hasRunningTurnWithInputs,
   isCompactionComplete,
@@ -202,6 +203,9 @@ function installRecorder(cfg) {
     try { parsed = new URL(String(input instanceof Request ? input.url : input), location.href); } catch { return realFetch(input, init); }
     const match = /\/sessions\/[^/]+\/(events|history|stream|inputs)(?:\/|$)/.exec(parsed.pathname);
     if (!match) return realFetch(input, init);
+    if (match[1] === "stream" && !parsed.pathname.endsWith(cfg.sessionStreamSuffix)) {
+      return realFetch(input, init);
+    }
     const id = ++seq;
     const kind = match[1];
     const entry = { id, kind, t: now(), req: `${init?.method ?? "GET"} ${parsed.pathname.replace(/^.*\/sessions\/[^/]+/, "")}${parsed.search.slice(0, 40)}` };
@@ -364,7 +368,12 @@ async function record(flow, session, browser, target) {
   const U = (n) => `U${n}-${tag}`;
   const R = (n) => `zebra${n}${tag}`;
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, recordVideo: { dir, size: { width: 1280, height: 860 } } });
-  await context.addInitScript(installRecorder, { wall0, user: [U(1), U(2), U(3)], reply: [R(1), R(2), R(3)] });
+  await context.addInitScript(installRecorder, {
+    wall0,
+    sessionStreamSuffix: chatRecorderStreamSuffix(session),
+    user: [U(1), U(2), U(3)],
+    reply: [R(1), R(2), R(3)],
+  });
   const page = await context.newPage();
   const videoStart = Date.now() - wall0;
   const consoleLog = [];
