@@ -1,11 +1,13 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
-import type { ChatRow, InputInfo, TurnInfo } from "../src/chat-stream";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ChatRow, InputInfo, InputRequest, TurnInfo } from "../src/chat-stream";
 import {
   applyChatStreamEvent,
   initialStreamState,
+  LiveChatStore,
   turnsRunning,
   type ApplyOutcome,
+  type ChatTransport,
   type StreamState,
 } from "../src/chat-store";
 
@@ -277,5 +279,258 @@ describe("fixture replay", () => {
       index: 1,
       outcome: { kind: "resync", reason: "seq gap" },
     });
+  });
+});
+
+describe("LiveChatStore", () => {
+  type FakeStream = {
+    path: string;
+    signal: AbortSignal;
+    settled: boolean;
+    open(): void;
+    emit(event: unknown): void;
+    finish(): void;
+    drop(): void;
+  };
+
+  const stores: LiveChatStore[] = [];
+
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.dispose();
+  });
+
+  /** A transport whose streams the test drives by hand: open, emit, then finish or drop. */
+  function fakeTransport() {
+    const streams: FakeStream[] = [];
+    const streamSse = vi.fn(
+      (path: string, signal?: AbortSignal, onEvent?: (event: unknown) => void, onOpen?: () => void) =>
+        new Promise<void>((resolve, reject) => {
+          const stream: FakeStream = {
+            path,
+            signal: signal ?? new AbortController().signal,
+            settled: false,
+            open: () => onOpen?.(),
+            emit: (event) => onEvent?.(event),
+            finish: () => {
+              stream.settled = true;
+              resolve();
+            },
+            drop: () => {
+              stream.settled = true;
+              reject(new Error("connection dropped"));
+            },
+          };
+          stream.signal.addEventListener("abort", () => stream.drop());
+          streams.push(stream);
+        }),
+    );
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => new Response(null, { status: 202 }));
+    const transport = { request, streamSse } as unknown as ChatTransport;
+    return { transport, request, streamSse, streams };
+  }
+
+  function make(options: { maxAttempts?: number } = {}) {
+    const fake = fakeTransport();
+    const store = new LiveChatStore(fake.transport, "s1", { retryBaseMs: 0, ...options });
+    stores.push(store);
+    return { ...fake, store };
+  }
+
+  /** Starts the store and opens its first connection. */
+  async function startOpen(store: LiveChatStore, streams: FakeStream[]): Promise<FakeStream> {
+    store.start();
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    streams[0].open();
+    return streams[0];
+  }
+
+  /** Lets a stray reconnect, if there were one, run before a check that nothing happened. */
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+  it("start() with no snapshot opens /sessions/s1/stream with no after parameter", async () => {
+    const { store, streams } = make();
+    store.start();
+    await vi.waitFor(() => expect(streams.map((stream) => stream.path)).toEqual(["/sessions/s1/stream"]));
+    expect(store.connection).toBe("connecting");
+  });
+
+  it("after a snapshot with next_seq 5, a dropped connection reconnects to /sessions/s1/stream?after=4", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    first.drop();
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream?after=4");
+  });
+
+  it("a normal end of the stream also reconnects, with after", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    first.finish();
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream?after=4");
+  });
+
+  it("a seq gap resyncs: the next connect has no after, and rows stay visible until the next snapshot replaces them", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    first.emit(streamEvent(7, "row.upsert", row("r2", "two")));
+    expect(first.signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+    streams[1].open();
+    streams[1].emit(snapshot(8, [row("r3", "three")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r3"]);
+  });
+
+  it("eight failed connects in a row set connection to failed; retry() connects again", async () => {
+    const { store, streams, streamSse } = make();
+    for (let attempt = 0; attempt < 8; attempt++) streamSse.mockRejectedValueOnce(new Error("refused"));
+    store.start();
+    await vi.waitFor(() => expect(store.connection).toBe("failed"));
+    expect(streamSse).toHaveBeenCalledTimes(8);
+    store.retry();
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    expect(streams[0].path).toBe("/sessions/s1/stream");
+    streams[0].open();
+    expect(store.connection).toBe("live");
+  });
+
+  it("dispose() aborts the open stream, makes no further connect, and the abort is not counted as a drop", async () => {
+    const { store, streams, streamSse } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    store.dispose();
+    expect(first.signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(first.settled).toBe(true));
+    await settle();
+    expect(streamSse).toHaveBeenCalledTimes(1);
+    expect(store.connection).toBe("live");
+  });
+
+  it("send POSTs the input JSON to /sessions/s1/inputs and resolves on a 202", async () => {
+    const { store, request } = make();
+    const input: InputRequest = { id: "web-a1", text: " hello " };
+    request.mockResolvedValueOnce(new Response(null, { status: 202 }));
+    await expect(store.send(input)).resolves.toBeUndefined();
+    expect(request).toHaveBeenCalledWith("/sessions/s1/inputs", { method: "POST", body: JSON.stringify(input) });
+  });
+
+  it("send throws when the POST answers 500", async () => {
+    const { store, request } = make();
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "web-a1", text: "hello" })).rejects.toThrow("send failed: 500");
+  });
+
+  it("cancel POSTs to /sessions/s1/inputs/<encoded input id>/cancel", async () => {
+    const { store, request } = make();
+    await store.cancel("web/a 1");
+    expect(request).toHaveBeenCalledWith("/sessions/s1/inputs/web%2Fa%201/cancel", { method: "POST" });
+  });
+
+  it("stop POSTs to /sessions/s1/cancel", async () => {
+    const { store, request } = make();
+    await store.stop();
+    expect(request).toHaveBeenCalledWith("/sessions/s1/cancel", { method: "POST" });
+  });
+
+  it("loadOlder GETs /sessions/s1/history?before=<encoded cursor>, prepends rows not already held, and takes the returned cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one"), row("r2", "two")], { older: "cursor/1 x" }));
+    request.mockResolvedValueOnce(
+      new Response(JSON.stringify({ rows: [row("r0", "zero"), row("r1", "changed")], older: "cursor-0" }), {
+        status: 200,
+      }),
+    );
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/history?before=cursor%2F1%20x");
+    expect(store.rows.map((r) => r.id)).toEqual(["r0", "r1", "r2"]);
+    expect(store.rows[1]).toEqual(row("r1", "one"));
+    expect(store.hasEarlier).toBe(true);
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/history?before=cursor-0");
+    expect(store.hasEarlier).toBe(false);
+  });
+
+  it("loadOlder does nothing when there is no cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    await store.loadOlder();
+    expect(request).not.toHaveBeenCalled();
+    expect(store.hasEarlier).toBe(false);
+  });
+
+  it("loadOlder on a 409 answer resyncs", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(first.signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("loadOlder resyncs when the transport throws a 409, as EngineApi.request does for any non-2xx", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockRejectedValueOnce(Object.assign(new Error("stale cursor"), { status: 409 }));
+    await store.loadOlder();
+    expect(first.signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+  });
+
+  it("getSnapshot returns the same object until something changes; each applied event calls each listener once", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    const listenerA = vi.fn();
+    const listenerB = vi.fn();
+    store.subscribe(listenerA);
+    store.subscribe(listenerB);
+    const { getSnapshot } = store;
+    const before = getSnapshot();
+    expect(store.getSnapshot()).toBe(before);
+    first.emit(snapshot(5, [row("r1")]));
+    expect(listenerA).toHaveBeenCalledTimes(1);
+    expect(listenerB).toHaveBeenCalledTimes(1);
+    const after = getSnapshot();
+    expect(after).not.toBe(before);
+    expect(after.rows.map((r) => r.id)).toEqual(["r1"]);
+    first.emit(streamEvent(5, "row.upsert", row("r2")));
+    expect(listenerA).toHaveBeenCalledTimes(2);
+    expect(listenerB).toHaveBeenCalledTimes(2);
+    const latest = getSnapshot();
+    expect(latest).not.toBe(after);
+    first.emit(streamEvent(5, "row.upsert", row("r2")));
+    expect(listenerA).toHaveBeenCalledTimes(2);
+    expect(getSnapshot()).toBe(latest);
+  });
+
+  it("events from a superseded connection are ignored", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    first.emit(streamEvent(7, "row.upsert", row("r2")));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(snapshot(10, [row("b1")]));
+    const listener = vi.fn();
+    store.subscribe(listener);
+    first.emit(streamEvent(10, "row.upsert", row("stale")));
+    expect(listener).not.toHaveBeenCalled();
+    expect(store.rows.map((r) => r.id)).toEqual(["b1"]);
+    await settle();
+    expect(streams).toHaveLength(2);
+    expect(streams[1].signal.aborted).toBe(false);
+    expect(store.connection).toBe("live");
   });
 });

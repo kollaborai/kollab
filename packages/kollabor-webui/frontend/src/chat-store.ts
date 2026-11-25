@@ -1,13 +1,18 @@
-// The web UI's chat stream reducer (#1451). It applies one stream event to the
-// state the chat shows. Pure: no React, no fetch, and it never mutates its input.
-// Spec: docs/specs/webui-chat-single-stream.md. Shapes: ./chat-stream.ts.
+// The web UI's chat stream (#1451). applyChatStreamEvent applies one stream event
+// to the state the chat shows; it is pure: no React, no fetch, and it never
+// mutates its input. LiveChatStore, at the end of this file, runs the stream loop
+// and the sends on top of it. Spec: docs/specs/webui-chat-single-stream.md.
+// Shapes: ./chat-stream.ts.
 
+import type { EngineApi } from "./api";
 import {
   isChatStreamEvent,
   type ChatPart,
   type ChatRow,
+  type ChatStore,
   type ChatStreamEvent,
   type InputInfo,
+  type InputRequest,
   type TurnInfo,
 } from "./chat-stream";
 
@@ -128,4 +133,258 @@ function appendText(state: StreamState, id: string, index: number, text: string)
     ...state,
     rows: state.rows.map((candidate) => (candidate.id === id ? { ...candidate, parts } : candidate)),
   };
+}
+
+/** The transport the store uses: the engine's request and its SSE reader. */
+export type ChatTransport = Pick<EngineApi, "request" | "streamSse">;
+
+/** What the chat renders. A new object is made only when something changed. */
+export type ChatSnapshot = {
+  readonly rows: readonly ChatRow[];
+  readonly inputs: Readonly<Record<string, InputInfo>>;
+  readonly running: boolean;
+  readonly connection: ConnectionState;
+  readonly hasEarlier: boolean;
+};
+
+/** The store the chat renders from. LiveChatStore is the implementation. */
+export interface LiveStore extends ChatStore {
+  readonly connection: ConnectionState;
+  readonly hasEarlier: boolean;
+  subscribe(listener: () => void): () => void;
+  getSnapshot(): ChatSnapshot;
+  start(): void;
+  retry(): void;
+  dispose(): void;
+}
+
+/** The client prefix for the input ids the web UI picks: newInputId(WEB_INPUT_PREFIX). */
+export const WEB_INPUT_PREFIX = "web";
+
+const MAX_BACKOFF_MS = 10_000;
+
+type HistoryPage = { rows: ChatRow[]; older: string | null };
+
+/** The HTTP status carried by an error the transport threw, if it has one. */
+function errorStatus(error: unknown): number | undefined {
+  const status = (error as { status?: unknown } | null | undefined)?.status;
+  return typeof status === "number" ? status : undefined;
+}
+
+/**
+ * Follows one session's stream and sends its inputs. Rows stay on screen across
+ * a dropped connection; a seq gap or a conflict resyncs from a new snapshot.
+ */
+export class LiveChatStore implements LiveStore {
+  private state: StreamState = initialStreamState;
+  // Not named `connection`: that name is the public getter below.
+  private connectionState: ConnectionState = "connecting";
+  private attempts = 0;
+  private started = false;
+  private disposed = false;
+  private controller: AbortController | null = null;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private wake: (() => void) | null = null;
+  private readonly listeners = new Set<() => void>();
+  private readonly transport: ChatTransport;
+  private readonly enc: string;
+  private readonly retryBaseMs: number;
+  private readonly maxAttempts: number;
+  private snapshot: ChatSnapshot;
+
+  constructor(
+    transport: ChatTransport,
+    sessionId: string,
+    options: { retryBaseMs?: number; maxAttempts?: number } = {},
+  ) {
+    this.transport = transport;
+    this.enc = encodeURIComponent(sessionId);
+    this.retryBaseMs = options.retryBaseMs ?? 500;
+    this.maxAttempts = options.maxAttempts ?? 8;
+    this.snapshot = this.snapshotOf();
+  }
+
+  // Arrow properties, so these references stay the same for useSyncExternalStore.
+  readonly subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  };
+
+  readonly getSnapshot = (): ChatSnapshot => this.snapshot;
+
+  get rows(): readonly ChatRow[] {
+    return this.snapshot.rows;
+  }
+
+  get inputs(): Readonly<Record<string, InputInfo>> {
+    return this.snapshot.inputs;
+  }
+
+  get running(): boolean {
+    return this.snapshot.running;
+  }
+
+  get connection(): ConnectionState {
+    return this.snapshot.connection;
+  }
+
+  get hasEarlier(): boolean {
+    return this.snapshot.hasEarlier;
+  }
+
+  start(): void {
+    if (this.started || this.disposed) return;
+    this.started = true;
+    void this.run();
+  }
+
+  /** Connects again after the connection has failed for good. */
+  retry(): void {
+    if (this.disposed || this.connectionState !== "failed") return;
+    this.attempts = 0;
+    this.started = true;
+    void this.run();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.controller?.abort();
+    clearTimeout(this.timer);
+    const wake = this.wake;
+    this.wake = null;
+    wake?.();
+    this.listeners.clear();
+  }
+
+  async send(input: InputRequest): Promise<void> {
+    const response = await this.transport.request(`/sessions/${this.enc}/inputs`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw new Error(`send failed: ${response.status}`);
+  }
+
+  async cancel(inputId: string): Promise<void> {
+    const path = `/sessions/${this.enc}/inputs/${encodeURIComponent(inputId)}/cancel`;
+    const response = await this.transport.request(path, { method: "POST" });
+    if (!response.ok) throw new Error(`cancel failed: ${response.status}`);
+  }
+
+  async stop(): Promise<void> {
+    const response = await this.transport.request(`/sessions/${this.enc}/cancel`, { method: "POST" });
+    if (!response.ok) throw new Error(`stop failed: ${response.status}`);
+  }
+
+  async loadOlder(): Promise<void> {
+    const cursor = this.state.olderCursor;
+    if (cursor === null) return;
+    const path = `/sessions/${this.enc}/history?before=${encodeURIComponent(cursor)}`;
+    let response: Response;
+    try {
+      response = await this.transport.request(path);
+    } catch (error) {
+      // EngineApi.request throws ApiError on any non-2xx answer, so a 409 can arrive here.
+      if (errorStatus(error) !== 409) throw error;
+      this.resync();
+      return;
+    }
+    if (response.status === 409) {
+      this.resync();
+      return;
+    }
+    if (!response.ok) throw new Error(`history failed: ${response.status}`);
+    const page = (await response.json()) as HistoryPage;
+    if (!Array.isArray(page.rows)) throw new Error("history failed: unexpected page");
+    const held = new Set(this.state.rows.map((row) => row.id));
+    const older = page.rows.filter((row) => !held.has(row.id));
+    this.state = { ...this.state, rows: [...older, ...this.state.rows], olderCursor: page.older ?? null };
+    this.publish();
+  }
+
+  private snapshotOf(): ChatSnapshot {
+    return {
+      rows: this.state.rows,
+      inputs: this.state.inputs,
+      running: turnsRunning(this.state.turns),
+      connection: this.connectionState,
+      hasEarlier: this.state.olderCursor !== null,
+    };
+  }
+
+  /** Builds the next snapshot and tells every listener once. */
+  private publish(): void {
+    this.snapshot = this.snapshotOf();
+    for (const listener of [...this.listeners]) listener();
+  }
+
+  /** Connects, applies events, and reconnects after a drop until the attempts run out. */
+  private async run(): Promise<void> {
+    while (!this.disposed) {
+      const controller = new AbortController();
+      this.controller = controller;
+      const after = this.state.lastSeq;
+      const path = `/sessions/${this.enc}/stream` + (after === null ? "" : `?after=${after}`);
+      this.connectionState = "connecting";
+      this.publish();
+      try {
+        await this.transport.streamSse<ChatStreamEvent>(
+          path,
+          controller.signal,
+          (event) => this.onEvent(controller, event),
+          () => this.onOpen(controller),
+        );
+      } catch {
+        // A refused, failed or aborted connection counts as a drop below.
+      }
+      this.controller = null;
+      if (this.disposed) return;
+      this.attempts += 1;
+      if (this.attempts >= this.maxAttempts) {
+        this.connectionState = "failed";
+        this.publish();
+        return;
+      }
+      this.connectionState = "reconnecting";
+      this.publish();
+      await this.sleep(Math.min(MAX_BACKOFF_MS, this.retryBaseMs * 2 ** (this.attempts - 1)));
+    }
+  }
+
+  private onOpen(controller: AbortController): void {
+    if (this.disposed || this.controller !== controller || controller.signal.aborted) return;
+    this.connectionState = "live";
+    this.publish();
+  }
+
+  private onEvent(controller: AbortController, event: ChatStreamEvent): void {
+    // An event from a superseded or aborted connection is stale: ignore it.
+    if (this.disposed || this.controller !== controller || controller.signal.aborted) return;
+    const result = applyChatStreamEvent(this.state, event);
+    if (result.outcome.kind === "resync") {
+      this.resync();
+      return;
+    }
+    if (result.outcome.kind === "duplicate") return;
+    this.state = result.state;
+    this.attempts = 0;
+    this.publish();
+  }
+
+  /** Keeps rows on screen, forgets the cursor, and ends the connection so the loop reconnects without `after`. */
+  private resync(): void {
+    this.state = { ...this.state, conversationUid: null, lastSeq: null };
+    this.controller?.abort();
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.wake = () => resolve();
+      this.timer = setTimeout(() => {
+        this.wake = null;
+        resolve();
+      }, ms);
+    });
+  }
 }
