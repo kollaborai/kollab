@@ -253,6 +253,7 @@ const mainConfig = defineConfig({
       "tests/plugin-touch-size.test.ts",
       "tests/settings-tabs-width.test.ts",
       "tests/plugins-settings-tab.test.ts",
+      "tests/chat-stream-contract.test.ts",
       "src/plugins/registry.test.ts",
       "src/plugins/sdk.test.ts",
       "src/plugins/loader.test.ts",
