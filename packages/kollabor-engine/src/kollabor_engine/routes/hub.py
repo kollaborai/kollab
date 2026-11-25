@@ -318,11 +318,15 @@ async def _save_schedule_rows(rows: list) -> str:
             for agent in agents
         ]
     )
-    for reply in replies:
-        if not isinstance(reply, dict) or reply.get("type") != "schedules_save":
-            continue
+    # Every agent is asked on purpose: each project folder has its own
+    # coordinator and timer over the one schedules.json, and only the ones
+    # asked wake up. Identical rows written twice are harmless. One success
+    # is a saved change; a coordinator's failure only counts when none saved.
+    frames = [r for r in replies if isinstance(r, dict) and r.get("type") == "schedules_save"]
+    for reply in frames:
         if reply.get("ok"):
             return str(reply.get("via") or "local")
+    for reply in frames:
         if reply.get("error") and reply["error"] != "not_coordinator":
             raise HTTPException(status_code=502, detail=str(reply["error"]))
     raise HTTPException(
