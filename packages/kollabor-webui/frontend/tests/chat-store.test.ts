@@ -533,4 +533,15 @@ describe("LiveChatStore", () => {
     expect(streams[1].signal.aborted).toBe(false);
     expect(store.connection).toBe("live");
   });
+
+  it("frames already buffered on a connection that a resync aborted are ignored", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    first.emit(streamEvent(7, "row.upsert", row("r2")));
+    first.emit(snapshot(9, [row("stale")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+  });
 });
