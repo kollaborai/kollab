@@ -591,3 +591,22 @@ def test_snapshot_cursor_is_atomic_with_goal_turn_transition(transition):
     assert turn["origin"] == origin
     assert turn["state"] == ("running" if transition == "start" else "ended")
     assert snapshots[0]["data"]["next_seq"] == log.next_seq
+
+
+def test_goal_continuation_responses_replace_only_current_segment():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    _publish(state, "turn_start", turn_id="t", origin=origin)
+    for raw, clean in [("First <tool>", "First "), ("Second <tool>", "Second "), ("Third <tool>", "Third")]:
+        _publish(state, "reply_segment_start", turn_id="t", origin=origin)
+        _publish(state, "token", turn_id="t", text=raw)
+        _publish(state, "response", turn_id="t", text=clean)
+    events = _events(stream, initial)
+    replies = [e["data"] for e in events if e["type"] == "row.upsert" and e["data"]["kind"] == "reply"]
+    assert replies[-1]["parts"][0]["text"] == "First Second Third"
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    reply = next(row for row in snapshot["data"]["rows"] if row["kind"] == "reply")
+    assert reply["parts"][0]["text"] == "First Second Third"
