@@ -77,6 +77,20 @@ OPENROUTER_MAX_OUTPUT_OVERRIDES = {
 }
 
 
+def _parse_json_int(text: str) -> int | float:
+    """Read a JSON integer literal without raising past Python's digit limit.
+
+    int() refuses a literal longer than sys.get_int_max_str_digits() with a
+    plain ValueError, which json.loads does not wrap. Such a price is
+    unrepresentable, so it reads as the float it overflows to (inf or -inf),
+    which _catalog_price maps to unknown.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        return float(text)
+
+
 def fetch_json(url: str) -> dict:
     request = urllib.request.Request(
         url,
@@ -86,7 +100,7 @@ def fetch_json(url: str) -> dict:
         },
     )
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+        return json.loads(response.read().decode("utf-8"), parse_int=_parse_json_int)
 
 
 def unix_to_date(unix: int) -> str:
@@ -278,7 +292,7 @@ def apply_merge(data: dict, models_dev: dict, openrouter: dict, today: str):
 
 
 def load_registry(path: Path) -> dict:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(), parse_int=_parse_json_int)
 
 
 def write_registry(path: Path, data: dict) -> None:
@@ -316,10 +330,14 @@ def main(argv=None) -> int:
 
     try:
         models_dev = (
-            json.loads(args.source_models_dev.read_text()) if args.source_models_dev else fetch_json(MODELS_DEV_URL)
+            json.loads(args.source_models_dev.read_text(), parse_int=_parse_json_int)
+            if args.source_models_dev
+            else fetch_json(MODELS_DEV_URL)
         )
         openrouter = (
-            json.loads(args.source_openrouter.read_text()) if args.source_openrouter else fetch_json(OPENROUTER_URL)
+            json.loads(args.source_openrouter.read_text(), parse_int=_parse_json_int)
+            if args.source_openrouter
+            else fetch_json(OPENROUTER_URL)
         )
     except (OSError, json.JSONDecodeError) as exc:
         print(f"FAIL: cannot load sources: {exc}")
