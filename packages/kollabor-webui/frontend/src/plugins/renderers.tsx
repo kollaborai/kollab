@@ -1,3 +1,4 @@
+import { nativeToolName } from "@/utils/tool-summary";
 import { type ComponentProps, type ComponentType, type ReactNode, useCallback, useId, useMemo, useRef } from "react";
 
 import {
@@ -73,19 +74,20 @@ export function PluginToolPart({
 }) {
   const { plugins } = usePlugins();
   if (part.toolUI != null) return <>{fallback}</>;
-  const found = findToolRenderer(plugins, part.toolName);
+  const name = nativeToolName(part.toolName);
+  const found = findToolRenderer(plugins, name);
   if (!found) return <>{fallback}</>;
   const Render = found.spec.render;
   return (
     <PluginMount
       record={found.record}
-      renderer={`tool:${part.toolName}`}
+      renderer={`tool:${name}`}
       resetKey={toolRendererResetKey(part)}
     >
       <Render
         k={found.k}
         toolCall={{
-          name: part.toolName,
+          name,
           args: part.args,
           result: part.result,
           status: part.status,
