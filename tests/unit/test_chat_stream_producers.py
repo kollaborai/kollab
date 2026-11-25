@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from kollabor.state.chat_stream import ChatStreamService
 from kollabor_events.chat_stream import sequence_problems
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import DisplayTap
-from kollabor.state.chat_stream import ChatStreamService
 
 
 class _QueueRuntime:

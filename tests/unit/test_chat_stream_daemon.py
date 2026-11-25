@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from kollabor_events.chat_stream import sequence_problems
-from kollabor_rpc import RpcRequest, RpcServer
 
 from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
+from kollabor_events.chat_stream import sequence_problems
+from kollabor_rpc import RpcRequest, RpcServer
 
 
 class _QueueRuntime:

@@ -5,7 +5,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
-
 from kollabor_engine import server
 from kollabor_engine.routes import stream
 
