@@ -214,6 +214,17 @@ describe("plugin inventory text redaction", () => {
     expect(error).not.toContain("canary");
   });
 
+  it.each(["client_secret", "clientSecret", "oauth_client_secret"])(
+    "redacts JSON-quoted compound secret key %s",
+    (key) => {
+      const secret = "CSECRETVALUE123";
+      const error = redactPluginError(new Error(JSON.stringify({ [key]: secret })));
+
+      expect(error).toContain("[redacted]");
+      expect(error).not.toContain(secret);
+    },
+  );
+
   it("redacts plugin and action text in the log prefix", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -727,6 +738,25 @@ describe("plugins-changed", () => {
     }));
 
     expect(normalized?.contributes.renderers).toEqual([{ tool: "todo_write" }, { tag: "status_card" }]);
+    expect(normalized?.omitted.contributions).toBe(0);
+  });
+
+  it("treats an explicit null menu icon as an absent optional icon", () => {
+    const normalized = normalizePluginEntry({
+      ...entry("hello"),
+      contributes: {
+        menu: [{ id: "settings", label: "Settings", open: { view: "settings" }, icon: null }],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: [],
+        renderers: [],
+      },
+    });
+
+    expect(normalized?.contributes.menu).toEqual([
+      { id: "settings", label: "Settings", open: { view: "settings" } },
+    ]);
     expect(normalized?.omitted.contributions).toBe(0);
   });
 

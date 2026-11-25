@@ -20,6 +20,10 @@ describe("plugin tagged text", () => {
       { type: "tag", name: "todo_write", content: "real" },
     ]);
   });
+  it("does not interpret tags inside quote-indented Markdown code blocks", () => {
+    const text = ">     <card>example</card>";
+    expect(splitPluginTags(text, ["card"])).toEqual([{ type: "text", text }]);
+  });
   it("does not treat an indented paragraph continuation as a code block", () => {
     const parts = splitPluginTags("Intro line\n    <todo_write>x</todo_write>\nAfter", ["todo_write"]);
     expect(parts).toContainEqual({ type: "tag", name: "todo_write", content: "x" });
@@ -163,8 +167,30 @@ describe("plugin tagged text", () => {
     expect(calls).toBeLessThan(10);
   });
 
+  it("does not scan backward through every line of a long indented code block", () => {
+    const codeLines = Array.from({ length: 400 }, (_, index) => `    code-${index}`);
+    const text = `<card>summary</card>\n\n${codeLines.join("\n")}\n`;
+    const original = String.prototype.lastIndexOf;
+    let calls = 0;
+    String.prototype.lastIndexOf = function (this: string, search: string, position?: number) {
+      calls += 1;
+      return original.call(this, search, position);
+    };
+
+    try {
+      const parts = splitPluginTags(text, ["card"]);
+      expect(parts).toContainEqual({ type: "tag", name: "card", content: "summary" });
+      expect(parts.some((part) => part.type === "tag" && part.content.startsWith("code-"))).toBe(false);
+    } finally {
+      String.prototype.lastIndexOf = original;
+    }
+
+    expect(calls).toBeLessThan(codeLines.length * 20);
+  });
+
   it.each([
     ["ATX heading", "`unfinished\n# <card>heading</card> `", "heading"],
+    ["setext heading", "`unfinished\nTitle\n=====\nSee <card>example</card> after`", "example"],
     ["thematic break", "`unfinished\n___\n<card>thematic</card> `", "thematic"],
     ["list item", "`unfinished\n- <card>list</card> `", "list"],
     ["blockquote line", "`unfinished\n> <card>quote</card> `", "quote"],

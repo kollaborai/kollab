@@ -296,6 +296,29 @@ def test_plugin_slash_command_inventory_uses_ascii_declaration_names():
     assert omitted == 2
 
 
+def test_plugin_slash_command_inventory_keeps_colon_namespaced_ids():
+    from kollabor_plugins.registry import _normalize_contributes
+
+    normalized, omitted = _normalize_contributes({"slash": ["client-key:status"]})
+
+    assert normalized["slash"] == ["client-key:status"]
+    assert omitted == 0
+
+
+def test_plugin_inventory_marks_missing_contribution_kinds_as_omitted():
+    entry = _normalize_plugin_entry(
+        {
+            "id": "example-plugin",
+            "contributes": {"pages": ["settings"], "slash": ["publish"]},
+        }
+    )
+
+    assert entry is not None
+    assert entry["contributes"]["pages"] == ["settings"]
+    assert entry["contributes"]["slash"] == ["publish"]
+    assert entry["omitted"]["contributions"] == 4
+
+
 def test_plugin_inventory_drops_duplicate_contribution_identities_per_kind():
     from kollabor_plugins.registry import _normalize_contributes
 

@@ -396,6 +396,42 @@ describe("PluginTabs", () => {
     expect(html).not.toContain("second");
     expect(html).not.toContain("<img");
   });
+
+  it.each(["page-tab", "modal-tab"] as const)(
+    "resets a failed %s boundary when a sibling surface reuses its local tab id",
+    async (rendererPrefix) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const Broken = () => { throw new Error("sibling renderer failed"); };
+      const Healthy = () => <p>healthy sibling surface</p>;
+      const view = (surfaceId: string, render: ComponentType<PluginRendererProps>) => (
+        <PluginTabs
+          {...({
+            record: record(),
+            rendererPrefix,
+            surfaceId,
+            tabs: [{ id: "overview", label: "Overview", render }],
+          } as Parameters<typeof PluginTabs>[0])}
+        />
+      );
+
+      try {
+        await act(async () => root.render(view("first-surface", Broken)));
+        expect(host.textContent).toContain("Failed to Render");
+
+        await act(async () => root.render(view("second-surface", Healthy)));
+
+        expect(host.textContent).toContain("healthy sibling surface");
+        expect(host.textContent).not.toContain("Failed to Render");
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
 });
 
 describe("pluginIcon", () => {

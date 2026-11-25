@@ -39,6 +39,19 @@ describe("plugin review manifest boundary", () => {
   it("does not count undeclared manifest contribution kinds as omissions", () => {
     expect(normalizeReviewJob(job())?.manifest?.omitted?.contributions).toBe(0);
   });
+  it("keeps a menu row whose optional icon is explicitly null", () => {
+    const input = job() as Record<string, any>;
+    input.manifest.contributes = {
+      menu: [{ id: "settings", label: "Settings", open: { view: "settings" }, icon: null }],
+    };
+
+    const normalized = normalizeReviewJob(input)?.manifest;
+
+    expect(normalized?.contributes.menu).toEqual([
+      { id: "settings", label: "Settings", open: { view: "settings" } },
+    ]);
+    expect(normalized?.omitted.contributions).toBe(0);
+  });
   it("omits multi-identity rows from the consent count and reports them", () => {
     const input = job() as Record<string, any>;
     input.manifest.contributes = {

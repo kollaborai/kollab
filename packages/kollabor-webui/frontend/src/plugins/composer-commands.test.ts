@@ -704,6 +704,59 @@ describe("plugin command composer labels", () => {
     }
   });
 
+  it.each([
+    ["the same session", false],
+    ["returning from another session", true],
+  ] as const)(
+    "preserves a newer identical draft after command success while %s",
+    async (_timing, switchSession) => {
+      prepareMountedThread();
+      sendCapture.syncComposerState = true;
+      const sessionA = `plugin-command-draft-success-a-${switchSession}`;
+      const sessionB = `plugin-command-draft-success-b-${switchSession}`;
+      const draft = "/publish now";
+      saveComposerDraft(sessionA, "");
+      saveComposerDraft(sessionB, "draft owned by session b");
+      let resolve!: () => void;
+      const pending = new Promise<void>((done) => { resolve = done; });
+      putThreadCommand("publish", () => pending);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(createElement(ThreadHarness, { draftKey: sessionA })));
+        publishComposerText(draft);
+        const submit = sendCapture.handlers.at(-1);
+        expect(submit).toBeTypeOf("function");
+        await act(async () => submit?.({ preventDefault: () => {} }));
+        expect(sendCapture.text).toBe("");
+        expect(loadComposerDraft(sessionA)).toBe(draft);
+
+        // The composer autosaves a newly typed generation with the same text.
+        publishComposerText(draft);
+        saveComposerDraft(sessionA, draft);
+        if (switchSession) {
+          await act(async () => root.render(createElement(ThreadHarness, { draftKey: sessionB })));
+          await act(async () => root.render(createElement(ThreadHarness, { draftKey: sessionA })));
+        }
+
+        await act(async () => {
+          resolve();
+          await Promise.resolve();
+        });
+
+        expect(loadComposerDraft(sessionA)).toBe(draft);
+        expect(sendCapture.text).toBe(draft);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+        saveComposerDraft(sessionA, "");
+        saveComposerDraft(sessionB, "");
+      }
+    },
+  );
+
   it("ignores a command rejection after its plugin unloads", async () => {
     prepareMountedThread();
     let reject!: (error: unknown) => void;
