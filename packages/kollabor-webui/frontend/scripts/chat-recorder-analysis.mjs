@@ -62,6 +62,11 @@ export function classifyChatRuntime(session) {
   return "acp";
 }
 
+/** Require the transcript replacement before treating a compaction as complete. */
+export function isCompactionComplete({ sawStart, status, latestEventStatus, replaced }) {
+  return sawStart && replaced && (status !== "compacting" || latestEventStatus === "idle");
+}
+
 /** Count the recorder's frame-level defects without accessing a browser. */
 export function analyzeChatFrames(frames, marks) {
   const at = (name) => marks.find((mark) => mark.name === name)?.t;
