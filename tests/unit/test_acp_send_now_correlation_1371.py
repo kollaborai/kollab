@@ -83,13 +83,17 @@ async def test_finished_turn_update_keeps_its_generation():
 
     await runner._run_prompt(admission, 7)
 
-    assert updates[-1] == {
+    finished = updates[-1]
+    assert {
+        key: value for key, value in finished.items() if key != "acp_turn_key"
+    } == {
         "kind": "turn_finished",
         "request_id": "active-request-A",
         "turn_id": 12,
         "generation": 7,
         "source": "state_rpc",
     }
+    assert isinstance(finished["acp_turn_key"], str) and finished["acp_turn_key"]
 
 
 @pytest.mark.asyncio
