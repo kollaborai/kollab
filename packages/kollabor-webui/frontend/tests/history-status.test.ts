@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { nextOlderBanner, OLDER_LOAD_FAILED, OLDER_LOADING } from "../src/history-banner.ts";
+import { initialHistoryBanner, nextOlderBanner, OLDER_LOAD_FAILED, OLDER_LOADING } from "../src/history-banner.ts";
 
 // The banner over the chat comes from the store's olderStatus (#1451). Loading
 // shows the loading line; failed shows the failure with a way to retry.
@@ -32,4 +32,16 @@ test("a successful retry clears the failure", () => {
   const failed = nextOlderBanner(null, "failed");
   expect(nextOlderBanner(failed, "idle")).toBeNull();
   expect(nextOlderBanner(failed, "complete")).toBeNull();
+});
+
+// The first load of a chat shows the load line the old history status showed, until its
+// rows arrive or its stream is open (#1451). Nothing shows once rows are on screen.
+test("connecting with nothing on screen shows the load line", () => {
+  expect(initialHistoryBanner("connecting", 0)).toEqual({ kind: "loading", message: "Loading conversation history…" });
+});
+
+test("rows on screen, or a stream that is open or failed, show no load line", () => {
+  expect(initialHistoryBanner("connecting", 2)).toBeNull();
+  expect(initialHistoryBanner("live", 0)).toBeNull();
+  expect(initialHistoryBanner("failed", 0)).toBeNull();
 });
