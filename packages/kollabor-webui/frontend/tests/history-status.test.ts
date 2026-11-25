@@ -40,8 +40,21 @@ test("connecting with nothing on screen shows the load line", () => {
   expect(initialHistoryBanner("connecting", 0)).toEqual({ kind: "loading", message: "Loading conversation history…" });
 });
 
-test("rows on screen, or a stream that is open or failed, show no load line", () => {
+test("rows on screen, or a stream that is open, show no load line", () => {
   expect(initialHistoryBanner("connecting", 2)).toBeNull();
   expect(initialHistoryBanner("live", 0)).toBeNull();
-  expect(initialHistoryBanner("failed", 0)).toBeNull();
+});
+
+// A stream that fails before its first rows arrive means the conversation did not load: the old
+// history status showed this line with a Retry, which now reconnects the store (#1451).
+test("a failed stream with nothing on screen shows the old load failure with a retry", () => {
+  expect(initialHistoryBanner("failed", 0)).toEqual({
+    kind: "error",
+    message: "Couldn't load conversation history. Check the connection and retry.",
+    retry: "reconnect",
+  });
+});
+
+test("a failed stream with rows on screen shows no load failure", () => {
+  expect(initialHistoryBanner("failed", 3)).toBeNull();
 });
