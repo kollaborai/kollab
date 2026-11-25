@@ -45,7 +45,7 @@ function plugin(id: string): PluginRecord {
   return {
     id,
     name: id,
-    entry: {} as PluginRecord["entry"],
+    entry: { contributes: { renderers: [{ tag: "card" }] } } as PluginRecord["entry"],
     status: "ready",
     error: null,
     retries: 0,

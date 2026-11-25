@@ -31,6 +31,10 @@ import {
   reservedCommandKeys,
 } from "./composer-commands";
 
+if (typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.scrollTo !== "function") {
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => {} });
+}
+
 const sendCapture = vi.hoisted(() => ({
   handlers: [] as Array<(event: { preventDefault: () => void }) => void>,
   text: "",
@@ -601,7 +605,7 @@ describe("plugin command composer labels", () => {
       await act(async () => submit?.({ preventDefault: () => {} }));
       expect(sendCapture.text).toBe("");
 
-      pluginRegistry.remove("punctuation");
+      await act(async () => pluginRegistry.remove("punctuation"));
       await act(async () => {
         reject(new Error("late rejection"));
         await Promise.resolve();

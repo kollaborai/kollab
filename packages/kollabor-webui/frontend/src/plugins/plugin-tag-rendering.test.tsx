@@ -72,7 +72,7 @@ function addTagRenderer(render: RendererSpec["render"] = TagView) {
   const record: PluginRecord = {
     id: "renderer-test",
     name: "Renderer Test",
-    entry: {} as PluginRecord["entry"],
+    entry: { contributes: { renderers: [{ tag: "card" }] } } as PluginRecord["entry"],
     status: "ready",
     error: null,
     retries: 0,
