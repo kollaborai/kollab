@@ -106,3 +106,28 @@ def test_F1_json_oversized_integer_price_reports_field_error(
 
     assert validator.main() == 1
     assert f"FAIL: model-0: {field} must be" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        pytest.param("9" * 5000, id="huge-integer"),
+        pytest.param("1", id="small-integer"),
+    ],
+)
+def test_non_string_registry_date_reports_field_error(
+    literal, tmp_path, monkeypatch, capsys
+):
+    # A number in _meta.updated must be reported as a bad date, not raised
+    # out of main() by date.fromisoformat.
+    models = {
+        f"model-{index}": {"provider": "openrouter", "context_window": 1000}
+        for index in range(5)
+    }
+    text = json.dumps({"models": models, "_meta": {"updated": "PLACEHOLDER"}})
+    registry = tmp_path / "models.json"
+    registry.write_text(text.replace('"PLACEHOLDER"', literal))
+    monkeypatch.setattr(validator, "REGISTRY", registry)
+
+    assert validator.main() == 1
+    assert "FAIL: _meta.updated is not an ISO date" in capsys.readouterr().out
