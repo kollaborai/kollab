@@ -471,6 +471,76 @@ describe("plugins-changed", () => {
     expect(plugin("hello")?.contributions.pages.map((item) => item.title)).toEqual(["New"]);
   });
 
+  it("re-registers contributions when declarations change without a new web hash", async () => {
+    const declaration = (slash: string, tool: string) => ({
+      menu: [],
+      views: [],
+      pages: [],
+      modals: [],
+      slash: [slash],
+      renderers: [{ tool }],
+    });
+    const oldEntry = entry("hello", { contributes: declaration("publish", "shell") });
+    const newEntry = entry("hello", { contributes: declaration("deploy", "git") });
+    const setup: Setup = (k) => {
+      k.command({ name: "publish", description: "Old", run: () => {} });
+      k.command({ name: "deploy", description: "New", run: () => {} });
+      k.renderer({ tool: "shell", render: Tab });
+      k.renderer({ tool: "git", render: Tab });
+    };
+    const { loader, plugin, deps } = harness(
+      [[oldEntry], [newEntry]],
+      { "/plugins/hello/web/index.js?v=abc": module(setup) },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
+    expect(plugin("hello")?.contributions.renderers.map((renderer) => renderer.tool)).toEqual(["shell"]);
+
+    await loader.refresh();
+    await loader.idle();
+
+    expect(deps.importModule).toHaveBeenCalledTimes(2);
+    expect(plugin("hello")?.entry.contributes.slash).toEqual(["deploy"]);
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["deploy"]);
+    expect(plugin("hello")?.contributions.renderers.map((renderer) => renderer.tool)).toEqual(["git"]);
+  });
+
+  it("retains the last good contribution declarations when a refresh row omits them", async () => {
+    const declared = entry("hello", {
+      contributes: {
+        menu: [],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: ["publish"],
+        renderers: [{ tool: "shell" }],
+      },
+    });
+    const partial = { ...declared } as Partial<PluginEntry>;
+    delete partial.contributes;
+    const { loader, plugin, deps } = harness(
+      [[declared], [partial as PluginEntry]],
+      {
+        "/plugins/hello/web/index.js?v=abc": module((k) => {
+          k.command({ name: "publish", description: "Publish", run: () => {} });
+          k.renderer({ tool: "shell", render: Tab });
+        }),
+      },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    await loader.refresh();
+    await loader.idle();
+
+    expect(plugin("hello")?.entry.contributes.slash).toEqual(["publish"]);
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
+    expect(plugin("hello")?.contributions.renderers.map((renderer) => renderer.tool)).toEqual(["shell"]);
+    expect(deps.importModule).toHaveBeenCalledTimes(1);
+  });
+
   it("a plugin turned off while it loads never shows", async () => {
     const gate = deferred();
     const { loader, plugin } = harness([[entry("hello")], []], {

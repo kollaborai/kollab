@@ -1,6 +1,8 @@
+// @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createElement, type ComponentType, type ReactNode } from "react";
+import { createRoot } from "react-dom/client";
+import { act, createElement, type ComponentType, type ReactNode } from "react";
 import type { ThreadMessage } from "@assistant-ui/core";
 import {
   AssistantRuntimeProvider,
@@ -32,7 +34,13 @@ const sendCapture = vi.hoisted(() => ({
   handlers: [] as Array<(event: { preventDefault: () => void }) => void>,
   text: "",
   attachments: [] as unknown[],
+  composerState: null as { text: string; attachments: unknown[] } | null,
+  composerListeners: new Set<() => void>(),
+  slashPaletteIds: [] as string[],
   setTextCalls: 0,
+  busySubmit: null as ((event: { preventDefault: () => void; defaultPrevented?: boolean }) => void) | null,
+  runtime: null as unknown,
+  transportCommands: [] as unknown[],
 }));
 
 vi.mock("@assistant-ui/react", async (importOriginal) => {
@@ -42,17 +50,41 @@ vi.mock("@assistant-ui/react", async (importOriginal) => {
     ...actual,
     useAui: () => {
       const aui = actual.useAui();
-      return {
+      return React.useMemo(() => ({
         ...aui,
         composer: {
           ...aui.composer,
-          getState: () => ({ text: sendCapture.text, attachments: sendCapture.attachments }),
+          getState: () => {
+            if (
+              !sendCapture.composerState ||
+              sendCapture.composerState.text !== sendCapture.text ||
+              sendCapture.composerState.attachments !== sendCapture.attachments
+            ) {
+              sendCapture.composerState = {
+                text: sendCapture.text,
+                attachments: sendCapture.attachments,
+              };
+            }
+            return sendCapture.composerState;
+          },
+          subscribe: (listener: () => void) => {
+            sendCapture.composerListeners.add(listener);
+            return () => sendCapture.composerListeners.delete(listener);
+          },
           setText: (text: string) => {
             sendCapture.setTextCalls += 1;
             sendCapture.text = text;
+            sendCapture.composerState = {
+              text,
+              attachments: sendCapture.attachments,
+            };
+            for (const listener of sendCapture.composerListeners) listener();
           },
         },
-      };
+      }), [aui]);
+    },
+    useAssistantTransportSendCommand: () => (command: unknown) => {
+      sendCapture.transportCommands.push(command);
     },
     ComposerPrimitive: {
       ...actual.ComposerPrimitive,
@@ -64,7 +96,7 @@ vi.mock("@assistant-ui/react", async (importOriginal) => {
         children?: ReactNode;
       }) => {
         if (onClick) sendCapture.handlers.push(onClick);
-        return React.createElement("button", null, children);
+        return React.createElement(React.Fragment, null, children);
       },
     },
   };
@@ -73,12 +105,32 @@ vi.mock("@assistant-ui/react", async (importOriginal) => {
 vi.mock("@/components/assistant-ui/composer-palette", async () => {
   const React = await import("react");
   return {
-    ComposerPalette: ({ items }: { items: readonly { id: string; label: string }[] }) =>
-      React.createElement(
+    ComposerPalette: ({ char, items }: { char: "/" | "@"; items: readonly { id: string; label: string }[] }) => {
+      if (char === "/") sendCapture.slashPaletteIds = items.map((item) => item.id);
+      return React.createElement(
         "div",
         { "data-testid": "composer-palette" },
         ...items.map((item) => React.createElement("span", { key: item.id }, item.label)),
-      ),
+      );
+    },
+  };
+});
+
+vi.mock("@/components/assistant-ui/tooltip-icon-button", async () => {
+  const React = await import("react");
+  return {
+    TooltipIconButton: ({
+      children,
+      onClick,
+      ...props
+    }: {
+      children?: ReactNode;
+      onClick?: (event: { preventDefault: () => void; defaultPrevented?: boolean }) => void;
+      "aria-label"?: string;
+    }) => {
+      if (props["aria-label"] === "Send message while generating") sendCapture.busySubmit = onClick ?? null;
+      return React.createElement("button", { ...props, onClick }, children);
+    },
   };
 });
 
@@ -296,6 +348,40 @@ describe("pluginCommandFailure", () => {
   });
 });
 
+describe("plugin command draft restoration", () => {
+  it("requires an unchanged composer revision and the same session", async () => {
+    const module = (await import("./composer-commands")) as unknown as {
+      canRestorePluginCommandDraft?: (
+        currentRevision: number,
+        clearedRevision: number,
+        currentSession: unknown,
+        commandSession: unknown,
+      ) => boolean;
+    };
+    expect(module.canRestorePluginCommandDraft).toBeTypeOf("function");
+    if (!module.canRestorePluginCommandDraft) return;
+
+    expect(module.canRestorePluginCommandDraft(4, 4, "session-a", "session-a")).toBe(true);
+    expect(module.canRestorePluginCommandDraft(5, 4, "session-a", "session-a")).toBe(false);
+    expect(module.canRestorePluginCommandDraft(4, 4, "session-b", "session-a")).toBe(false);
+  });
+});
+
+function publishComposerText(text: string) {
+  sendCapture.text = text;
+  sendCapture.composerState = { text, attachments: sendCapture.attachments };
+  for (const listener of sendCapture.composerListeners) listener();
+}
+
+function prepareMountedThread() {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
+}
+
 const threadAdapter: ChatModelAdapter = { run: async () => ({ content: [] }) };
 
 function putThreadCommand(name: string, run = () => {}, toast = vi.fn()) {
@@ -315,16 +401,29 @@ function putThreadCommand(name: string, run = () => {}, toast = vi.fn()) {
   return toast;
 }
 
-function LocalThreadHarness({ commands }: { commands: SlashCommand[] }) {
+function LocalThreadHarness({
+  commands,
+  commandCatalogStatus,
+  draftKey,
+}: {
+  commands: SlashCommand[];
+  commandCatalogStatus?: "loading" | "ready" | "empty" | "unavailable" | "fallback";
+  draftKey?: string | null;
+}) {
   const runtime = useLocalRuntime(threadAdapter);
+  sendCapture.runtime = runtime;
   return createElement(
     AssistantRuntimeProvider,
     { runtime },
-    createElement(Thread, { agents: [], commands, attachmentsEnabled: false }),
+    createElement(Thread, { agents: [], commands, commandCatalogStatus, draftKey, attachmentsEnabled: false }),
   );
 }
 
-const ThreadHarness: ComponentType<{ commands?: SlashCommand[] }> = ({ commands = [] }) => {
+const ThreadHarness: ComponentType<{
+  commands?: SlashCommand[];
+  commandCatalogStatus?: "loading" | "ready" | "empty" | "unavailable" | "fallback";
+  draftKey?: string | null;
+}> = ({ commands = [], commandCatalogStatus, draftKey }) => {
   const host = useExternalStoreRuntime<ThreadMessage>({
     messages: [],
     onNew: async () => {},
@@ -335,17 +434,24 @@ const ThreadHarness: ComponentType<{ commands?: SlashCommand[] }> = ({ commands 
     createElement(
       ThreadListItemRuntimeProvider,
       { runtime: host.threads.mainItem },
-      createElement(LocalThreadHarness, { commands }),
+      createElement(LocalThreadHarness, { commands, commandCatalogStatus, draftKey }),
     ),
   );
 };
 
 afterEach(() => pluginRegistry.reset());
 afterEach(() => {
+  vi.unstubAllGlobals();
   sendCapture.handlers.length = 0;
+  sendCapture.composerListeners.clear();
   sendCapture.text = "";
   sendCapture.attachments.length = 0;
+  sendCapture.composerState = null;
+  sendCapture.slashPaletteIds = [];
   sendCapture.setTextCalls = 0;
+  sendCapture.busySubmit = null;
+  sendCapture.runtime = null;
+  sendCapture.transportCommands.length = 0;
 });
 
 describe("plugin command composer labels", () => {
@@ -391,31 +497,136 @@ describe("plugin command composer labels", () => {
       expect(log.mock.calls.flat().join(" ")).not.toContain(secret);
     },
   );
+
+  it("does not restore a rejected command over a composer changed after it was cleared", async () => {
+    prepareMountedThread();
+    const draft = "/publish now";
+    let reject!: (error: unknown) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    void pending.catch(() => {});
+    const execute = vi.fn(() => pending);
+    sendCapture.text = "";
+    const toast = putThreadCommand("publish", execute);
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, { draftKey: "session-a" })));
+      publishComposerText(draft);
+      sendCapture.setTextCalls = 0;
+      const submit = sendCapture.handlers.at(-1);
+      expect(submit).toBeTypeOf("function");
+      await act(async () => submit?.({ preventDefault: () => {} }));
+      expect(sendCapture.text).toBe("");
+
+      // Another message was edited and cleared while the plugin command was pending.
+      publishComposerText("another message");
+      publishComposerText("");
+      await act(async () => {
+        reject(new Error("late rejection"));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(sendCapture.text).toBe("");
+      expect(sendCapture.setTextCalls).toBe(1);
+      expect(toast).toHaveBeenCalledWith("Could not run /publish. Check the browser console for redacted details.");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("native command reservations", () => {
-  it.each([
-    ["loading", [{ name: "welcome", description: "Welcome" }]],
-    ["failed", []],
-    ["ready", [{ name: "save", description: "Save" }]],
-  ] satisfies Array<[string, SlashCommand[]]>) (
-    "does not let a plugin claim /save while the native catalog is %s",
-    (_status, commands) => {
+  it.each(["loading", "unavailable", "fallback"] as const)(
+    "keeps plugin commands out of submit and the palette while the catalog is %s",
+    (commandCatalogStatus) => {
       const execute = vi.fn();
-      sendCapture.text = "/save";
-      putThreadCommand("save", execute);
+      sendCapture.text = "/exit";
+      putThreadCommand("exit", execute);
 
-      renderToStaticMarkup(createElement(ThreadHarness, { commands }));
+      renderToStaticMarkup(createElement(ThreadHarness, { commands: [], commandCatalogStatus }));
       const submit = sendCapture.handlers.at(-1);
       expect(submit).toBeTypeOf("function");
       let prevented = false;
       submit?.({ preventDefault: () => { prevented = true; } });
 
       expect(execute).not.toHaveBeenCalled();
-      expect(sendCapture.text).toBe("/save");
+      expect(sendCapture.text).toBe("/exit");
       expect(prevented).toBe(false);
+      expect(sendCapture.slashPaletteIds).not.toContain("exit");
     },
   );
+
+  it("reserves native aliases from the loaded catalog", () => {
+    const execute = vi.fn();
+    sendCapture.text = "/exit";
+    putThreadCommand("exit", execute);
+
+    renderToStaticMarkup(createElement(ThreadHarness, {
+      commands: [{ name: "quit", aliases: ["exit"], description: "Exit" }],
+      commandCatalogStatus: "ready",
+    }));
+    const submit = sendCapture.handlers.at(-1);
+    let prevented = false;
+    submit?.({ preventDefault: () => { prevented = true; } });
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(prevented).toBe(false);
+    expect(sendCapture.slashPaletteIds).not.toContain("exit");
+  });
+
+  it("queues a native-looking slash from the busy submit path until the catalog is ready", async () => {
+    prepareMountedThread();
+    let resolveRun!: (value: Awaited<ReturnType<ChatModelAdapter["run"]>>) => void;
+    const activeRun = new Promise<Awaited<ReturnType<ChatModelAdapter["run"]>>>((resolve) => { resolveRun = resolve; });
+    const runAdapter = vi.spyOn(threadAdapter, "run").mockReturnValue(activeRun);
+    const execute = vi.fn();
+    putThreadCommand("exit", execute);
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commands: [],
+        commandCatalogStatus: "loading",
+      })));
+      const runtime = sendCapture.runtime as {
+        thread: {
+          composer: { setText(text: string): void; send(): void };
+          getState(): { isRunning: boolean };
+        };
+      };
+      await act(async () => {
+        runtime.thread.composer.setText("start a turn");
+        runtime.thread.composer.send();
+        await Promise.resolve();
+      });
+      expect(runtime.thread.getState().isRunning).toBe(true);
+      expect(sendCapture.busySubmit).toBeTypeOf("function");
+
+      publishComposerText("/exit");
+      let prevented = false;
+      await act(async () => {
+        sendCapture.busySubmit?.({ preventDefault: () => { prevented = true; } });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(prevented).toBe(true);
+      expect(sendCapture.transportCommands).toContainEqual(expect.objectContaining({
+        type: "add-message",
+        message: { role: "user", parts: [{ type: "text", text: "/exit" }] },
+      }));
+    } finally {
+      resolveRun({ content: [] });
+      await act(async () => root.unmount());
+      host.remove();
+      runAdapter.mockRestore();
+    }
+  });
 });
 
 describe("slash catalog notice", () => {

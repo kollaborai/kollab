@@ -1,6 +1,8 @@
+// @vitest-environment jsdom
+import { act, type ComponentProps, type ComponentType, type ReactNode } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ComponentProps, ComponentType, ReactNode } from "react";
 import { vi } from "vitest";
 
 const primitiveText = vi.hoisted(() => ({ value: "" }));
@@ -65,8 +67,8 @@ function TagView({ tag }: PluginRendererProps) {
   return <span data-plugin-tag-view="">{tag?.content}</span>;
 }
 
-function addTagRenderer() {
-  const renderer: RendererSpec = { tag: "card", render: TagView };
+function addTagRenderer(render: RendererSpec["render"] = TagView) {
+  const renderer: RendererSpec = { tag: "card", render };
   const record: PluginRecord = {
     id: "renderer-test",
     name: "Renderer Test",
@@ -122,5 +124,29 @@ describe("plugin tag message markdown", () => {
     expect(html).toContain("data-plugin-tag-view");
     expect((html.match(/aui-code-header-root/g) ?? []).length).toBe(2);
     expect((html.match(/>Copy</g) ?? []).length).toBe(2);
+  });
+
+  it("contains a hostile non-Error throw through the real inline tag renderer", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const Throws = (() => { throw Object.create(null); }) as ComponentType<PluginRendererProps>;
+    const renderer = Throws as RendererSpec["render"];
+    primitiveText.value = "<card>x</card>";
+    addTagRenderer(renderer);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(<PluginTaggedText text="<card>x</card>" />));
+      expect(host.textContent).toContain("Renderer Test Failed to Render");
+      const viewError = [...host.querySelectorAll("button")].find((button) => button.textContent === "View Error");
+      expect(viewError).toBeDefined();
+      await act(async () => viewError?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      expect(host.textContent).toContain("inline tag renderer");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });

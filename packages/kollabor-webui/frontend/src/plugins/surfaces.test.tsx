@@ -42,6 +42,7 @@ const Body = ({ k, session }: { k: PluginApi; session?: { session_id: string; wo
     {session ? ` in ${session.workspace}` : ""}
   </p>
 );
+const Suspends = () => { throw new Promise<void>(() => {}); };
 
 function put(id: string, name: string, extra: Partial<PluginRecord> = {}, entry: Partial<PluginEntry> = {}) {
   const record: PluginRecord = {
@@ -317,6 +318,58 @@ describe("main-area views", () => {
     expect(html).toContain('<div data-plugin="hello"');
     expect(html).toContain("body of hello in /work");
   });
+
+  it("contains a suspended real chat view and names that surface in its failure panel", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    put("hello", "Hello", { contributions: contributions({ views: [{ id: "peek", label: "Peek", render: Suspends }] }) });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(
+        <PluginViewHost viewKey={pluginViewKey("hello", "peek")} session={{ session_id: "s1" }} />,
+      ));
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(host.textContent).toContain("Hello Failed to Render");
+      const viewError = [...host.querySelectorAll("button")].find((button) => button.textContent === "View Error");
+      await act(async () => viewError?.click());
+      expect(host.textContent).toContain("chat view renderer");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("contains a suspended real plugin page tab and names that surface in its failure panel", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    put("hello", "Hello", { contributions: contributions({
+      pages: [{ id: "main", title: "Main", tabs: [{ id: "board", label: "Board", render: Suspends }] }],
+    }) });
+    pluginRegistry.setListed(null);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(
+        <SidebarProvider><TooltipProvider><PluginPage pluginId="hello" pageId="main" onExit={() => {}} /></TooltipProvider></SidebarProvider>,
+      ));
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(host.textContent).toContain("Hello Failed to Render");
+      const viewError = [...host.querySelectorAll("button")].find((button) => button.textContent === "View Error");
+      await act(async () => viewError?.click());
+      expect(host.textContent).toContain("page tab renderer");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("modals", () => {
@@ -332,5 +385,30 @@ describe("modals", () => {
     expect(html).toContain("About Hello");
     expect(html).toContain('role="tablist"');
     expect(html).toContain('<div data-plugin="hello"');
+  });
+
+  it("contains a suspended real plugin modal tab and names that surface in its failure panel", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    put("hello", "Hello", { contributions: contributions({
+      modals: [{ id: "about", title: "About Hello", tabs: [{ id: "one", label: "One", render: Suspends }] }],
+    }) });
+    pluginRegistry.openModal("hello", "about");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<PluginModalHost />));
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(host.textContent).toContain("Hello Failed to Render");
+      const viewError = [...host.querySelectorAll("button")].find((button) => button.textContent === "View Error");
+      await act(async () => viewError?.click());
+      expect(host.textContent).toContain("modal tab renderer");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });

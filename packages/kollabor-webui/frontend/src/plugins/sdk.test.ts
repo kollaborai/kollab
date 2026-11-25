@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_CONTRIBUTIONS, type Contributions } from "./registry";
-import { createPluginApi, definePlugin, remoteView, type PluginApiDeps, type PluginEntry } from "./sdk";
+import { createPluginApi, definePlugin, remoteView, type PluginApiDeps, type PluginEntry, type RendererSpec } from "./sdk";
 
 const Tab = () => null;
 
@@ -57,6 +57,29 @@ describe("definePlugin", () => {
   it("returns the plugin function unchanged", () => {
     const setup = () => {};
     expect(definePlugin(setup)).toBe(setup);
+  });
+});
+
+describe("renderer declarations", () => {
+  it("accepts exactly one renderer kind at the type level", () => {
+    const tool: RendererSpec = { tool: "shell", render: Tab };
+    const tag: RendererSpec = { tag: "status", render: Tab };
+    // @ts-expect-error A renderer cannot claim both surfaces.
+    const both: RendererSpec = { tool: "shell", tag: "status", render: Tab };
+    // @ts-expect-error A renderer must claim one surface.
+    const neither: RendererSpec = { render: Tab };
+    expect([tool, tag, both, neither]).toHaveLength(4);
+  });
+
+  it("rejects ambiguous and missing renderer kinds at runtime", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["hello"], ["hello_tool"]);
+    k.renderer({ tool: "hello_tool", tag: "hello_tool", render: Tab } as RendererSpec);
+    k.renderer({ render: Tab } as RendererSpec);
+
+    expect(current().renderers).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("renderer ignored: provide exactly one of tool or tag"));
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 });
 

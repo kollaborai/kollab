@@ -49,12 +49,7 @@ describe("PluginMount", () => {
   it.each([
     ["tool renderer error", "tool:deploy", false, "tool-error"],
     ["tool renderer suspension", "tool:deploy", false, "tool-suspend"],
-    ["tag renderer suspension", "tag:deploy", true, "mount-suspend"],
-    ["view panel suspension", "view:peek", false, "mount-suspend"],
-    ["page panel suspension", "page-tab:board", false, "mount-suspend"],
-    ["modal panel suspension", "modal-tab:settings", false, "mount-suspend"],
-    ["settings panel suspension", "settings", false, "mount-suspend"],
-  ] as const)("shows a bounded Failed to Render state with Retry for a %s", async (_surface, renderer, inline, kind) => {
+  ] as const)("shows Failed to Render with Retry for a failing or suspended tool renderer", async (_surface, renderer, inline, kind) => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.useFakeTimers();
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -164,6 +159,29 @@ describe("PluginBoundary", () => {
     expect(html).not.toContain("bad render");
   });
 
+  it("contains a non-Error throw whose coercion or prototype access throws", () => {
+    const hostile = new Proxy(Object.create(null) as object, {
+      getPrototypeOf() { throw new Error("prototype trap"); },
+      get() { throw new Error("property trap"); },
+    });
+
+    expect(() => PluginBoundary.getDerivedStateFromError(Object.create(null))).not.toThrow();
+    expect(PluginBoundary.getDerivedStateFromError(Object.create(null)).error.message).toBe("Unprintable plugin error");
+    expect(PluginBoundary.getDerivedStateFromError(hostile).error.message).toBe("Unprintable plugin error");
+  });
+
+  it("describes renderer failures with the surface that actually failed", async () => {
+    const module = (await import("./plugin-errors")) as unknown as {
+      pluginRenderFailureMessage?: (renderer: string) => string;
+    };
+    expect(module.pluginRenderFailureMessage).toBeTypeOf("function");
+    if (!module.pluginRenderFailureMessage) return;
+
+    expect(module.pluginRenderFailureMessage("tool:deploy")).toContain("tool card renderer");
+    expect(module.pluginRenderFailureMessage("tag:status")).toContain("inline tag renderer");
+    expect(module.pluginRenderFailureMessage("view:peek")).toContain("chat view");
+  });
+
   it("Retry clears the error so the plugin draws again", () => {
     const boundary = new PluginBoundary({ name: "Hello", children: null });
     const setState = vi.spyOn(boundary, "setState").mockImplementation(() => {});
@@ -212,6 +230,7 @@ describe("PluginFailure", () => {
     expect(html).toContain('role="alert"');
     expect(html).toContain("Hello Failed to Load");
     expect(html).toMatch(/aria-expanded="true"[^>]*>View Error<\/button>/);
+    expect(html).not.toContain("Turn Off");
     expect(html).toContain("&quot;&gt;&lt;img src=x onerror=alert(1)&gt;");
     expect(html).not.toContain("<img");
   });

@@ -37,6 +37,19 @@ describe("touch size inside [data-plugin]", () => {
   });
 });
 
+describe("slash palette touch targets", () => {
+  it("keeps top-level and nested rows at least 44px tall on coarse pointers", async () => {
+    const module = (await import("../src/components/assistant-ui/composer-palette")) as unknown as {
+      paletteItemClassName?: (depth: number) => string;
+    };
+    expect(module.paletteItemClassName).toBeTypeOf("function");
+    if (!module.paletteItemClassName) return;
+
+    for (const depth of [0, 1, 2])
+      expect(module.paletteItemClassName(depth), `palette depth ${depth}`).toContain("any-pointer-coarse:min-h-11");
+  });
+});
+
 describe("plugin on/off switch hit area", () => {
   it("sits in a 44x44 wrapper at a coarse pointer, so the clickable box is touch sized while the track stays 32x18", () => {
     const wrapper = /<label[^>]*className="([^"]*)"[^>]*>\s*<Switch\b/.exec(settingsSource);
