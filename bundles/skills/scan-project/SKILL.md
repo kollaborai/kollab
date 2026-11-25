@@ -17,7 +17,13 @@ workflow phase 1: discovery and orientation
 tool calls to execute:
   - terminal(command="pwd")
   - terminal(command="ls -la")
-  - terminal(command="find . -maxdepth 2 -type f -name '*.json' -o -name '*.md' -o -name '*.txt' -o -name '*.yaml' -o -name '*.yml' | head -20")
+  - file_find(pattern="*.json")
+  - file_find(pattern="*.md")
+  - file_find(pattern="*.txt")
+  - file_find(pattern="*.yaml")
+  - file_find(pattern="*.yml")
+
+These searches cover the active workspace recursively; check each result's truncated flag.
 
 what to look for:
   - current working directory context

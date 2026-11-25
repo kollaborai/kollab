@@ -5,6 +5,10 @@ description: "Architecture Mapping skill - discover and document system architec
 
 architecture mapping mode: DISCOVER AND DOCUMENT, DO NOT MODIFY
 
+Use file-find for filename discovery across the active workspace. It searches
+recursively; check the truncated flag. Use terminal find when depth, excluded
+paths, directory-only results, metadata, or file-content operations matter.
+
 when this skill is active, you follow systematic architecture investigation.
 this is a comprehensive guide to mapping system architecture for documentation.
 
@@ -59,14 +63,19 @@ verify project access
 
   <terminal>ls -la</terminal>
 
-  <terminal>find . -maxdepth 2 -type f -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.java" | head -20</terminal>
+  <file-find><pattern>*.py</pattern></file-find>
+  <file-find><pattern>*.js</pattern></file-find>
+  <file-find><pattern>*.ts</pattern></file-find>
+  <file-find><pattern>*.java</pattern></file-find>
 
 
 check for existing documentation
 
   <terminal>ls -la docs/ 2>/dev/null || echo "no docs directory"</terminal>
 
-  <terminal>find . -maxdepth 3 -type f -name "*README*" -o -name "*ARCHITECTURE*" -o -name "*DESIGN*" 2>/dev/null</terminal>
+  <file-find><pattern>*README*</pattern></file-find>
+  <file-find><pattern>*ARCHITECTURE*</pattern></file-find>
+  <file-find><pattern>*DESIGN*</pattern></file-find>
 
 
 PHASE 1: IDENTIFYING SYSTEM BOUNDARIES
@@ -86,14 +95,18 @@ ask these questions:
 find entry points
 
 python projects:
-  <terminal>find . -maxdepth 3 -type f -name "main.py" -o -name "__main__.py" -o -name "app.py"</terminal>
+  <file-find><pattern>main.py</pattern></file-find>
+  <file-find><pattern>__main__.py</pattern></file-find>
+  <file-find><pattern>app.py</pattern></file-find>
 
   <terminal>find . -maxdepth 3 -type f -name "*.py" -exec grep -l "if __name__" {} \;</terminal>
 
   <terminal>grep -r "def main" . --include="*.py" | head -20</terminal>
 
 javascript/node projects:
-  <terminal>find . -maxdepth 3 -type f -name "index.js" -o -name "main.js" -o -name "server.js"</terminal>
+  <file-find><pattern>index.js</pattern></file-find>
+  <file-find><pattern>main.js</pattern></file-find>
+  <file-find><pattern>server.js</pattern></file-find>
 
   <terminal>cat package.json | grep -A5 '"main"'</terminal>
 

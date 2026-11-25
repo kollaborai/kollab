@@ -30,7 +30,11 @@ verify sqlalchemy:
 
 check database files
 
-  <terminal>find . -maxdepth 2 -type f \( -name "*.db" -o -name "*.sqlite" -o -name "*.sql" \) 2>/dev/null | head -10</terminal>
+  <file-find><pattern>*.db</pattern></file-find>
+  <file-find><pattern>*.sqlite</pattern></file-find>
+  <file-find><pattern>*.sql</pattern></file-find>
+
+Searches cover the active workspace recursively; check each result's truncated flag.
 
 list database sizes:
   <terminal>find . -maxdepth 2 -type f \( -name "*.db" -o -name "*.sqlite" \) -exec ls -lh {} \; 2>/dev/null</terminal>

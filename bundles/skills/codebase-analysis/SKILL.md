@@ -18,7 +18,16 @@ identify primary language
 
   <terminal>head -20 README.md 2>/dev/null || echo "no README found"</terminal>
 
-  <terminal>find . -maxdepth 2 -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.rs" -o -name "*.java" -o -name "*.rb" -o -name "*.php" | head -20</terminal>
+  <file-find><pattern>*.py</pattern></file-find>
+  <file-find><pattern>*.js</pattern></file-find>
+  <file-find><pattern>*.ts</pattern></file-find>
+  <file-find><pattern>*.go</pattern></file-find>
+  <file-find><pattern>*.rs</pattern></file-find>
+  <file-find><pattern>*.java</pattern></file-find>
+  <file-find><pattern>*.rb</pattern></file-find>
+  <file-find><pattern>*.php</pattern></file-find>
+
+Searches cover the active workspace recursively; check each result's truncated flag.
 
   <terminal>ls -la | grep -E "\.(py|js|ts|go|rs|java|rb|php)$"</terminal>
 
