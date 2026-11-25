@@ -66,6 +66,67 @@ async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
     await asyncio.gather(communication_task, return_exceptions=True)
 
 
+async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
+    """Transcribe with a direct whisper run where no child subreaper exists.
+
+    macOS and Windows cannot enumerate detached descendants, so this path kills
+    and reaps only the whisper process it starts. Audio and transcript live in a
+    private directory that is removed after that process has exited.
+    """
+    import shutil
+    import tempfile
+
+    run_dir = tempfile.mkdtemp(prefix="kollab-telegram-voice-")
+    try:
+        audio_path = Path(run_dir) / f"voice{suffix}"
+        audio_path.write_bytes(audio)
+        proc = await asyncio.create_subprocess_exec(
+            "whisper",
+            str(audio_path),
+            "--model",
+            "base",
+            "--language",
+            "en",
+            "--output_format",
+            "txt",
+            "--output_dir",
+            run_dir,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except BaseException:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            _, interrupted = await _await_shielded_task(asyncio.create_task(proc.wait()))
+            if interrupted:
+                raise asyncio.CancelledError
+            raise
+        if proc.returncode != 0:
+            logger.error("Voice transcription whisper failed (exit %s)", proc.returncode)
+            return "[voice message - transcription failed]"
+        transcript_path = audio_path.with_suffix(".txt")
+        transcription = ""
+        if transcript_path.exists():
+            transcript = transcript_path.read_text(encoding="utf-8", errors="replace")
+            transcription = transcript.strip()
+        if not transcription:
+            # Fallback: parse stdout, skip whisper debug lines
+            for line in stdout_bytes.decode("utf-8", errors="replace").split("\n"):
+                line = line.strip()
+                if line and not line.startswith(("Detecting", "[")):
+                    transcription = line
+                    break
+        logger.info("Telegram voice transcription completed")
+        return f"[voice] {transcription or '[voice message - whisper returned empty]'}"
+    finally:
+        shutil.rmtree(run_dir)
+
+
 # Seconds to back off after an inbound poll conflict (e.g. Telegram HTTP 409).
 # The poll inbox is a singleton per token; on conflict we yield hard rather
 # than hammering the API every poll_interval and flooding the log.
@@ -341,10 +402,6 @@ class TelegramBridge(MessagingBridge):
             return "[voice message - bridge not connected]"
 
         try:
-            if sys.platform != "linux":
-                logger.error("Voice transcription requires Linux child supervision")
-                return "[voice message - transcription failed]"
-
             # Get file path from telegram
             resp = await self._client.get(
                 f"{self._base_url}/getFile",
@@ -362,6 +419,11 @@ class TelegramBridge(MessagingBridge):
             # Download the audio file
             audio_resp = await self._client.get(download_url, timeout=30.0)
             audio_resp.raise_for_status()
+
+            if sys.platform != "linux":
+                return await _transcribe_unsupervised(
+                    audio_resp.content, Path(file_path).suffix or ".ogg"
+                )
 
             # One isolated process owns both the artifacts and every CLI child.
             # The stdlib interpreter is separate from Kollab's binary entrypoint.
