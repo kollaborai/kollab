@@ -259,10 +259,8 @@ export function pluginReviewOmissionSummary(job: Pick<Job, "manifest" | "omitted
 export function describeUses(value: unknown): { throughKollab: string[]; onItsOwn: string[]; other: string[] } {
   const uses = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
   const throughKollab = [
-    ...(uses.includes("agents") ? ["Can start agent runs through Kollab."] : []),
     ...(uses.includes("agents") || uses.includes("agents:unattended")
-      ? ["Agent-run limits are not enforced; unreported token use is not capped."] : []),
-    ...(uses.includes("agents:unattended") ? ["Can run agent tools without asking; those agents can do anything you can."] : []),
+      ? ["Agent runs are not available yet."] : []),
     ...uses.filter(item => item.startsWith("secret:")).map(item => `Can request the secret ${item.slice(7)} through Kollab.`),
   ];
   const onItsOwn = uses.flatMap(item => {
