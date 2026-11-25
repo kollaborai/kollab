@@ -72,7 +72,7 @@ describe("chat recorder analysis", () => {
         ? { identity: "same", daemon_pid: 42, workspace: "/chosen" }
         : { agents: [{ identity: "same", pid: 41, project: "/other", agent_id: "wrong" }, { identity: "same", pid: 42, project: "/chosen", agent_id: "right" }] },
       postFromClient: async (_route: string, payload: unknown) => { sent = payload; },
-      waitForStreamRowKind: async () => {}, settle: async () => {},
+      waitForStreamRowKind: async () => {}, waitForRenderedHubNote: async () => {}, settle: async () => {},
       agent: "same", session: "chosen-session", LABEL: "test", tag: "tag", U: () => "u", R: () => "r", tools: () => "tools", say: () => "say",
     });
     await flow();
@@ -91,7 +91,25 @@ describe("chat recorder analysis", () => {
       apiJson: async (route: string) => route.startsWith("/sessions/")
         ? { identity: "same", daemon_pid: 42 } : { agents: [{ identity: "same", pid: 42, agent_id: "right" }] },
       postFromClient: async () => { row.textContent = "mutated"; },
-      waitForStreamRowKind: async () => {}, settle: async () => {},
+      waitForStreamRowKind: async () => {}, waitForRenderedHubNote: async () => {}, settle: async () => {},
+      agent: "same", session: "session", LABEL: "test", tag: "tag", U: () => "u", R: () => "r", tools: () => "tools", say: () => "say",
+    });
+    await expect(flow()).rejects.toThrow(/user row/i);
+  });
+
+  it("rejects changes to non-rendered fields of an existing stream user row", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "hub-note"() {');
+    const body = source.slice(start, source.indexOf("\n  };", start));
+    let status = "started";
+    const rec = { net: [], snapshotUserRows: () => [{ id: 1, text: "unchanged" }], snapshotStreamUserRows: () => [{ id: "u", role: "user", status, parts: [{ type: "text", text: "unchanged" }] }] };
+    const flow = runInNewContext(`({${body}})["hub-note"]`, {
+      send: async () => {}, waitForRunning: async () => {}, sleep: async () => {},
+      page: { evaluate: async (fn: Function, arg: unknown) => fn(arg) },
+      document: { querySelector: () => ({}) }, window: { __rec: rec },
+      apiJson: async (route: string) => route.startsWith("/sessions/") ? { identity: "same", daemon_pid: 42 } : { agents: [{ identity: "same", pid: 42, agent_id: "right" }] },
+      postFromClient: async () => { status = "changed"; }, waitForStreamRowKind: async () => ({ row: "note-1" }),
+      waitForRenderedHubNote: async () => {}, settle: async () => {},
       agent: "same", session: "session", LABEL: "test", tag: "tag", U: () => "u", R: () => "r", tools: () => "tools", say: () => "say",
     });
     await expect(flow()).rejects.toThrow(/user row/i);
