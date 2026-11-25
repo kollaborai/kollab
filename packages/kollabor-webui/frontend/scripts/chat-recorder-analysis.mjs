@@ -85,7 +85,7 @@ export function classifyChatRuntime(session) {
   return "acp";
 }
 
-/** Check the compaction state or its final native transcript replacement. */
+/** Check the compaction state and the required transcript replacement. */
 export function isCompactionComplete({
   sawStart,
   status,
@@ -96,7 +96,7 @@ export function isCompactionComplete({
 }) {
   if (!sawStart) return false;
   if (phase === "transcript") return runtime === "native" && replaced;
-  if (runtime !== "native") return status === "idle";
+  if (runtime !== "native") return status === "idle" && replaced;
   const done = ["ready_to_retry", "applied"];
   return done.includes(status) || done.includes(latestEventStatus) ||
     (replaced && status !== "compacting");
