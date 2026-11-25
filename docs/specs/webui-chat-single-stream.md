@@ -36,7 +36,7 @@ The sync layer is written from scratch rather than patched: new files carry the 
 Non-goals:
 
 - How inputs reach the model. Several inputs may still reach the model in one step; the transcript keeps one row per input.
-- New chat design. Bubbles, labels and layout stay as they are, apart from the open question below.
+- New chat design. Bubbles, labels and layout stay as they are, apart from the open question below and one removal: the follow-up suggestion row and the new-chat suggestion chips go, because no agent kind produces suggestions (the new-chat composer sits about 7px lower). Edit and Reload stay hidden, as they are today: neither works on any agent kind, and edit and regenerate need their own spec.
 - Cross-device merging. The daemon is the only writer of its transcript.
 - The daemon-owned waiting queue itself, which is `docs/specs/webui-daemon-queue.md` (#1366). This spec relies on it for admission and adds ids, lifecycle events and the stream.
 
@@ -54,7 +54,7 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 
 **Ids.** A client picks the id of each input it sends; the web UI already does, as the `add-message` id. The daemon makes one when a sender has none (the TUI, hub messages, goals). That id is the row's id for the life of the row: queued, joined, saved, shown. No path creates a second id for an input. A resend with a known id is answered with the input's current state instead of making a second input.
 
-**Rows.** `{id, seq, kind, role, turn_id, status, parts, created_at}`. `kind` is one of `input`, `reply`, `tool`, `note` (hub notes, today glued into user text as `<agent_hud>`), `prompt`, or `marker` (compaction, errors shown in the thread).
+**Rows.** `{id, seq, kind, role, turn_id, status, parts, created_at}`. `kind` is one of `input`, `reply`, `tool`, `note` (hub notes, today glued into user text as `<agent_hud>`), `prompt`, or `marker` (compaction, errors shown in the thread). A hub message carries a `hub-note` part built from the daemon's structured hub fields (`from`, `to`, `text`, `observed`, optional `kind`, `thread_id`, `reply_to`, `is_direct`, `presence`), never parsed from text: a hub message that starts no turn is a `note` row with that part and no input lifecycle; one that starts a turn is an `input` row whose id is the hub message id, with the full input lifecycle and the part inside its parts.
 
 **Lifecycle.** Each input moves `queued`, then `started` or `joined`, then `ended`, with `ended.outcome` one of `completed`, `failed` or `cancelled`. `joined` names the turn it joined, and the input ends when that turn ends. Every input reaches `ended` exactly once.
 
