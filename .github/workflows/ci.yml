@@ -388,7 +388,8 @@ jobs:
       - name: Run web UI browser acceptance
         working-directory: packages/kollabor-webui/frontend
         env:
-          KOLLAB_BROWSER_WORKERS: "4"
+          # The core lane has seven suites; cap its concurrent Chromium load.
+          KOLLAB_BROWSER_WORKERS: ${{ matrix.lane == 'core' && '2' || '4' }}
           KOLLAB_BROWSER_SUITES: ${{ matrix.suites }}
           KOLLAB_BROWSER_RESULTS_DIR: ${{ runner.temp }}/kollab-browser-results
         run: |
