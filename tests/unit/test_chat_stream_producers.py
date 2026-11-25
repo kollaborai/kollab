@@ -381,3 +381,32 @@ def test_snapshot_translates_canonical_transcript_images_to_chat_parts():
         {"type": "text", "text": "look"},
         {"type": "image", "url": "https://example.test/image.png"},
     ]
+
+
+def test_retained_transcript_row_keeps_its_id_when_compaction_changes_its_index():
+    state = _State()
+    retained = ConversationMessage(role="assistant", content="kept reply")
+    state._llm_service.conversation_history = [
+        ConversationMessage(role="user", content="old input"),
+        retained,
+    ]
+    stream = ChatStreamService(state)
+
+    before = stream.subscribe({"after": None, "conversation_uid": None})[
+        "events"
+    ][0]
+    before_id = next(
+        row["id"]
+        for row in before["data"]["rows"]
+        if row["parts"] == [{"type": "text", "text": "kept reply"}]
+    )
+    state._llm_service.conversation_history = [retained]
+
+    replacement = stream.replace_transcript()
+
+    after_id = next(
+        row["id"]
+        for row in replacement["data"]["rows"]
+        if row["parts"] == [{"type": "text", "text": "kept reply"}]
+    )
+    assert after_id == before_id
