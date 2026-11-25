@@ -3,6 +3,7 @@ import {
   analyzeChatFrames,
   CHAT_RECORDER_FLOWS,
   classifyChatRuntime,
+  isCompactionComplete,
   parseRuntimeMatrix,
 } from "../scripts/chat-recorder-analysis.mjs";
 
@@ -28,6 +29,21 @@ function frame(overrides: Record<string, unknown> = {}) {
 }
 
 describe("chat recorder analysis", () => {
+  it("does not accept an idle compaction before the stream replacement arrives", () => {
+    expect(isCompactionComplete({
+      sawStart: true,
+      status: "idle",
+      latestEventStatus: "idle",
+      replaced: false,
+    })).toBe(false);
+    expect(isCompactionComplete({
+      sawStart: true,
+      status: "idle",
+      latestEventStatus: "idle",
+      replaced: true,
+    })).toBe(true);
+  });
+
   it("keeps the existing defect counters and detects their frame signatures", () => {
     const frames = [
       frame({ t: 0, anc: 100 }),
