@@ -79,6 +79,24 @@ describe("chat recorder analysis", () => {
     expect(sent.agent_id).toBe("right");
   });
 
+  it("fails the hub flow when an existing user row changes", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf('    async "hub-note"() {'), source.indexOf("\n  };", source.indexOf('    async "hub-note"() {')));
+    const row = { textContent: "original" };
+    const window = { __rec: { net: [], snapshotUserRows: () => [{ id: 1, text: row.textContent }] } };
+    const flow = runInNewContext(`({${body}})["hub-note"]`, {
+      send: async () => {}, waitForRunning: async () => {}, sleep: async () => {},
+      page: { evaluate: async (fn: Function, arg: unknown) => fn(arg) },
+      document: { querySelector: () => ({}) }, window,
+      apiJson: async (route: string) => route.startsWith("/sessions/")
+        ? { identity: "same", daemon_pid: 42 } : { agents: [{ identity: "same", pid: 42, agent_id: "right" }] },
+      postFromClient: async () => { row.textContent = "mutated"; },
+      waitForStreamRowKind: async () => {}, settle: async () => {},
+      agent: "same", session: "session", LABEL: "test", tag: "tag", U: () => "u", R: () => "r", tools: () => "tools", say: () => "say",
+    });
+    await expect(flow()).rejects.toThrow(/user row/i);
+  });
+
   it("requires the reloaded snapshot to retain the active turn and its running inputs", () => {
     const expectedTurn = { turn_id: "turn-1", input_ids: ["input-1"] };
     expect(hasRunningTurnWithInputs({
