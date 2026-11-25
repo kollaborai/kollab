@@ -3,6 +3,7 @@ import {
   analyzeChatFrames,
   CHAT_RECORDER_FLOWS,
   classifyChatRuntime,
+  findPromptStatusUpdate,
   hasRunningTurnWithInputs,
   isCompactionComplete,
   parseRuntimeMatrix,
@@ -30,6 +31,17 @@ function frame(overrides: Record<string, unknown> = {}) {
 }
 
 describe("chat recorder analysis", () => {
+  it("requires a later upsert for the same prompt row with a changed status", () => {
+    const events = [
+      { kind: "stream", ev: "row.upsert", row: "prompt-1", status: "pending" },
+      { kind: "stream", ev: "row.upsert", row: "prompt-2", status: "approved" },
+      { kind: "stream", ev: "row.upsert", row: "prompt-1", status: "approved" },
+    ];
+
+    expect(findPromptStatusUpdate(events, "prompt-1", "pending", 1)).toEqual(events[2]);
+    expect(findPromptStatusUpdate(events, "prompt-1", "pending", 2)).toBeNull();
+  });
+
   it("requires the reloaded snapshot to retain the active turn and its running inputs", () => {
     const expectedTurn = { turn_id: "turn-1", input_ids: ["input-1"] };
     expect(hasRunningTurnWithInputs({
