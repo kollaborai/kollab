@@ -107,9 +107,11 @@ try {
   }
 
   await createButton.click();
+  await page.waitForFunction(() => window.profileCopyCreateStarted);
   const savingButton = page.getByRole("button", { name: "Saving…", exact: true });
   await savingButton.waitFor({ state: "visible" });
   assert.equal(await savingButton.isDisabled(), true, "slow create must disable repeat submits");
+  await page.evaluate(() => window.profileCopyCreateRelease());
   await page.waitForFunction(() => window.profileCopyCreateResolved);
   const submitted = await page.evaluate(() => window.profileCopyLastCreate);
   assert.equal(submitted.copy_from, "demo-work");
