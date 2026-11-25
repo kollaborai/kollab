@@ -184,21 +184,98 @@ async def test_send_now_selects_one_input_from_a_shared_batch():
     from kollabor.state.web_message_queue import WebMessage
 
     server, state, runtime = _server_and_runtime()
-    await _call(server, "state.chat_stream.add_input", {"id": "web-seed", "text": "seed", "attachments": []})
+    await _call(
+        server,
+        "state.chat_stream.add_input",
+        {"id": "web-seed", "text": "seed", "attachments": []},
+    )
     scopes = await runtime.registry.known_scopes()
     async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
         await queue.enqueue_batch(
-            queue.new_operation_id(), queue.new_batch_id(),
-            tuple(WebMessage(f"web-{name}", ('{"text":"' + name + '"}').encode())
-                  for name in ("first", "selected", "last")),
+            queue.new_operation_id(),
+            queue.new_batch_id(),
+            tuple(
+                WebMessage(f"web-{name}", ('{"text":"' + name + '"}').encode())
+                for name in ("first", "selected", "last")
+            ),
         )
 
     sent = await _call(server, "state.chat_stream.send_now", {"id": "web-selected"})
 
-    assert [handoff.request_id for _, handoff, _ in state.dispatches] == ["web-selected"]
+    assert [handoff.request_id for _, handoff, _ in state.dispatches] == [
+        "web-selected"
+    ]
     assert sent["result"]["accepted"] is True
     async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
         snapshot = await queue.snapshot()
     assert [item.request_id for batch in snapshot.batches for item in batch.items] == [
-        "web-seed", "web-first", "web-last"
+        "web-seed",
+        "web-first",
+        "web-last",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["started", "joined", "ended"])
+@pytest.mark.parametrize("during_lookup", [False, True])
+async def test_send_now_retry_does_not_disclose_another_principals_input(
+    lifecycle, during_lookup, monkeypatch
+):
+    server, state, runtime = _server_and_runtime()
+    stream = state._event_bus.get_service("chat_stream")
+    await _call(
+        server,
+        "state.chat_stream.add_input",
+        {"id": "web-private", "text": "private", "attachments": []},
+    )
+    # Give the other principal a real queue in the same conversation.
+    request = {
+        "action": "rpc_request",
+        "request_id": "other-add",
+        "method": "state.chat_stream.add_input",
+        "params": {"id": "web-other", "text": "other", "attachments": []},
+    }
+    assert (
+        await server.handle_wire(
+            request, caller_context=RpcCallerContext.from_unix_peer(502)
+        )
+    )["error"] is None
+
+    def move():
+        stream._set_input_state(
+            "conversation-a",
+            "web-private",
+            lifecycle,
+            turn_id="turn-private",
+            outcome="completed" if lifecycle == "ended" else None,
+        )
+
+    if during_lookup:
+        original = type(runtime).send_now
+
+        async def move_during_lookup(self, params):
+            result = await original(self, params)
+            move()
+            return result
+
+        monkeypatch.setattr(type(runtime), "send_now", move_during_lookup)
+    else:
+        move()
+
+    retry = {
+        "action": "rpc_request",
+        "request_id": "other-retry",
+        "method": "state.chat_stream.send_now",
+        "params": {"id": "web-private"},
+    }
+    for caller in (None, RpcCallerContext.from_unix_peer(502)):
+        response = await server.handle_wire(retry, caller_context=caller)
+        assert response.get("result") in (None, {"found": False})
+
+    owner = await _call(server, "state.chat_stream.send_now", {"id": "web-private"})
+    assert owner["result"] == {
+        "found": True,
+        "accepted": False,
+        "state": lifecycle,
+        "turn_id": "turn-private",
+    }
