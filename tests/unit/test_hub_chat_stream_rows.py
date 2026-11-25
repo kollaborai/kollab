@@ -7,10 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from kollabor_events.chat_stream import sequence_problems
+from kollabor.llm.llm_coordinator import LLMService
 from kollabor.state.chat_stream import ChatStreamLog
-from kollabor_tui.display_tap import DisplayTap
 from kollabor_agent.runtime import AgentRuntime
+from kollabor_events.chat_stream import sequence_problems
+from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.models import HubMessage, MessageScope
 from plugins.hub.plugin import HubPlugin
 
@@ -21,6 +22,7 @@ def _script_stream(hub_events):
         "conversation-a",
         snapshot_provider=lambda: {"rows": [], "turns": [], "inputs": []},
     )
+    snapshot = log.read(after=None)[0]
     for index, event in enumerate(hub_events):
         note = event["hub_note"]
         assert note["type"] == "hub-note"
@@ -64,7 +66,6 @@ def _script_stream(hub_events):
             },
         )
 
-    snapshot = log.read(after=None)[0]
     replay = log.read(after=0, conversation_uid="conversation-a")
     return [snapshot, *replay]
 
@@ -156,6 +157,40 @@ async def test_native_turn_start_is_an_input_row_under_the_hub_message_id():
     events = _hub_events(tap)
     assert len(events) == 1
     _assert_valid_stream(events, row_kind="input", message_id=message.id)
+
+
+@pytest.mark.asyncio
+async def test_acp_admission_passes_hub_id_and_thread_into_steering():
+    acp = SimpleNamespace(steer=AsyncMock(return_value=True))
+    llm = object.__new__(LLMService)
+    llm._manual_relay_origin_authorized = lambda _origin: True
+    hub_note = {
+        "type": "hub-note",
+        "from": "peer",
+        "to": "koordinator",
+        "text": "Please inspect this change.",
+        "observed": False,
+        "thread_id": "thread-2",
+    }
+
+    result = await llm._admit_acp(
+        acp,
+        {
+            "message": hub_note["text"],
+            "request_id": "acp-steered-hub-1",
+            "thread_id": "thread-2",
+            "hub_message_id": "acp-steered-hub-1",
+            "hub_note": hub_note,
+        },
+        "hub_message",
+    )
+
+    assert result == {"status": "injected", "request_id": "acp-steered-hub-1"}
+    kwargs = acp.steer.await_args.kwargs
+    assert kwargs["request_id"] == "acp-steered-hub-1"
+    assert kwargs["thread_id"] == "thread-2"
+    assert kwargs["origin"]["hub_message_id"] == "acp-steered-hub-1"
+    assert kwargs["origin"]["hub_note"] == hub_note
 
 
 @pytest.mark.asyncio
@@ -306,6 +341,9 @@ async def test_acp_non_waking_human_and_direct_messages_are_note_rows(message):
     )
     plugin = _plugin(llm=llm, tap=tap, acp=acp)
     plugin._agent_dispatch_mode = lambda _llm: "acp"
+    plugin._decide_hub_wake = lambda *args, **kwargs: SimpleNamespace(
+        should_trigger=False, mode="observe", reason="scripted no-wake"
+    )
 
     await plugin._on_message_received(message)
 

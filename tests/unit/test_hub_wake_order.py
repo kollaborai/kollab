@@ -34,7 +34,7 @@ class FakeLLMService:
             subtype=subtype,
         )
 
-    def queue_agent_hud(self, section: str, label: str, content: str):
+    def queue_agent_hud(self, section: str, label: str, content: str, **metadata):
         entry = AgentHudEntry(section=section, label=label, content=content)
         self._pending_agent_hud.append(entry)
         return entry

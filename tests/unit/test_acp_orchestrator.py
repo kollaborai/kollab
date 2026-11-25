@@ -163,9 +163,12 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         # Replies and broadcasts that arrive during a turn share one bounded
         # model prompt. Each was already rendered by Hub on arrival.
         orchestrator.runner.is_processing = True
+        observation_ids = []
         for index in range(22):
+            message_id = f"peer-note-{index}"
+            observation_ids.append(message_id)
             orchestrator.observe_notification(HubMessage(
-                action="message", from_agent=f"peer-id-{index}",
+                id=message_id, action="message", from_agent=f"peer-id-{index}",
                 from_identity=f"peer-{index}", to="receiver" if index % 2 else "*",
                 content=f"PEER_NOTE_{index}\n\nDetails {index}",
                 thread_id=f"thread-{index}", reply_to=f"request-{index}" if index % 2 else "",
@@ -186,7 +189,7 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         context = next(
             update["text"]
             for update in orchestrator.runner._updates
-            if str(update["request_id"]).startswith("observations-")
+            if update["request_id"] == observation_ids[-1]
         )
         assert context.startswith("<agent_hud>\n") and context.endswith("\n</agent_hud>")
         assert "2 older observations omitted." in context
@@ -1165,9 +1168,13 @@ async def test_an_arrival_row_that_fails_is_written_at_the_flush(tmp_path, monke
 
         monkeypatch.setattr(orchestrator, "_record_user", flaky_record)
         orchestrator.runner.is_processing = True
-        for note in ("FIRST_NOTE", "SECOND_NOTE"):
+        for message_id, note in (
+            ("arrival-first", "FIRST_NOTE"),
+            ("arrival-second", "SECOND_NOTE"),
+        ):
             orchestrator.observe_notification(
                 HubMessage(
+                    id=message_id,
                     action="message",
                     from_agent="peer-id-1",
                     from_identity="peer-1",
@@ -1196,11 +1203,13 @@ async def test_an_arrival_row_that_fails_is_written_at_the_flush(tmp_path, monke
         assert sum("FIRST_NOTE" in m.content for m in rows) == 1
         assert sum("SECOND_NOTE" in m.content for m in rows) == 1
         batches = [
-            update["text"]
+            update
             for update in orchestrator.runner._updates
-            if str(update["request_id"]).startswith("observations-")
+            if update["request_id"] in {"arrival-first", "arrival-second"}
         ]
-        assert len(batches) == 1 and "FIRST_NOTE" in batches[0]
+        assert len(batches) == 1
+        assert batches[0]["request_id"] == "arrival-second"
+        assert "FIRST_NOTE" in batches[0]["text"]
     finally:
         await orchestrator.close()
 
@@ -1237,9 +1246,10 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
                 raise failures.pop()
             return real_record(*args, **kwargs)
 
-        def note(content):
+        def note(message_id, content):
             orchestrator.observe_notification(
                 HubMessage(
+                    id=message_id,
                     action="message",
                     from_agent="peer-id-1",
                     from_identity="peer-1",
@@ -1252,10 +1262,10 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
 
         monkeypatch.setattr(orchestrator, "_record_user", flaky_record)
         orchestrator.runner.is_processing = True
-        note("FIRST_NOTE")  # the arrival row fails
+        note("arrival-first", "FIRST_NOTE")  # the arrival row fails
         orchestrator.runner.is_processing = False
         orchestrator._flush_observations()  # the retry fails, the batch row lands
-        note("LATER_NOTE")  # idle: its own row, sent at once
+        note("arrival-later", "LATER_NOTE")  # idle: its own row, sent at once
         await asyncio.gather(*orchestrator._completion_tasks)
 
         rows = [
@@ -1265,12 +1275,12 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
         ]
         assert sum("FIRST_NOTE" in m.content for m in rows) == 1
         assert sum("LATER_NOTE" in m.content for m in rows) == 1
-        batches = [
-            update["text"]
-            for update in orchestrator.runner._updates
-            if str(update["request_id"]).startswith("observations-")
-        ]
-        assert len(batches) == 2 and "FIRST_NOTE" not in batches[1]
+        batches = orchestrator.runner._updates
+        assert len(batches) == 2
+        assert batches[0]["request_id"] == "arrival-first"
+        assert "FIRST_NOTE" in batches[0]["text"]
+        assert batches[1]["request_id"] == "arrival-later"
+        assert "FIRST_NOTE" not in batches[1]["text"]
     finally:
         await orchestrator.close()
 

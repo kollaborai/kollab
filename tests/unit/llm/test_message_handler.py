@@ -204,6 +204,40 @@ class TestMessageHandler(unittest.TestCase):
             "peer claim", pre_displayed=False, operator_source=None
         )
 
+    def test_hub_admission_keeps_structured_note_and_thread_identity(self):
+        hub_note = {
+            "type": "hub-note",
+            "from": "peer",
+            "to": "koordinator",
+            "text": "please run this",
+            "observed": False,
+        }
+        self.loop.run_until_complete(
+            self.handler.handle_user_input(
+                {
+                    "message": "please run this",
+                    "request_id": "hub-input-1",
+                    "thread_id": "hub-thread-1",
+                    "origin_context": {
+                        "operator": True,
+                        "hub_message_id": "hub-input-1",
+                        "hub_note": hub_note,
+                    },
+                },
+                MagicMock(source="hub_message"),
+            )
+        )
+
+        self.coordinator.process_user_input.assert_called_once_with(
+            "please run this",
+            pre_displayed=False,
+            request_id="hub-input-1",
+            thread_id="hub-thread-1",
+            hub_message_id="hub-input-1",
+            hub_note=hub_note,
+            operator_source="hub_message",
+        )
+
 
     def test_handle_user_input_empty(self):
         """Test user input handler with empty message."""

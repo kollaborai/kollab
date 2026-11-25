@@ -20,6 +20,8 @@ from kollabor_agent.queue_processor import (
 from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.message_content import content_to_text
 
+from .agent_hud import agent_hud_hub_metadata, format_agent_hud
+
 if TYPE_CHECKING:
     pass
 
@@ -231,6 +233,22 @@ class MessageHandler:
         request_id = data.get("request_id")
         if isinstance(request_id, str) and request_id:
             origin_kwargs["request_id"] = request_id  # the client follows the turn by it (#551)
+        thread_id = data.get("thread_id")
+        if isinstance(thread_id, str) and thread_id:
+            origin_kwargs["thread_id"] = thread_id
+        admission_origin = data.get("origin_context")
+        carries_hub_identity = source_value == "hub_message" or (
+            source_value == "agent"
+            and isinstance(admission_origin, dict)
+            and admission_origin.get("authenticated") is True
+        )
+        if carries_hub_identity and isinstance(admission_origin, dict):
+            hub_note = admission_origin.get("hub_note")
+            if isinstance(hub_note, dict):
+                origin_kwargs["hub_note"] = dict(hub_note)
+                hub_message_id = admission_origin.get("hub_message_id") or request_id
+                if isinstance(hub_message_id, str) and hub_message_id:
+                    origin_kwargs["hub_message_id"] = hub_message_id
         queue_handoff = data.get("queue_handoff")
         if queue_handoff is not None:
             from .queue_handoff import QueueHandoffContext
@@ -584,16 +602,38 @@ class MessageHandler:
                 # turn_completed=False keeps _continue_conversation from
                 # injecting it. Deliver it once, at chain start, or the turn it
                 # woke never sees it. (A direct wake already drained it: no-op.)
-                drain = getattr(coord, "drain_pending_agent_hud", None)
-                hud = drain() if callable(drain) else ""
+                pop_pending = getattr(coord, "pop_pending_agent_hud", None)
+                hud_entries = pop_pending() if callable(pop_pending) else None
+                if isinstance(hud_entries, (list, tuple)):
+                    hud = format_agent_hud(hud_entries)
+                    hud_metadata = agent_hud_hub_metadata(hud_entries)
+                else:
+                    drain = getattr(coord, "drain_pending_agent_hud", None)
+                    hud = drain() if callable(drain) else ""
+                    hud_metadata = {}
                 if isinstance(hud, str) and hud:
                     from kollabor_events.data_models import ConversationMessage
 
+                    hub_note = data.get("hub_note")
+                    hub_message_id = data.get("hub_message_id") or data.get("request_id")
+                    metadata = {
+                        "agent_hud": True,
+                        "agent_hud_sources": ["hub"],
+                        **hud_metadata,
+                    }
+                    if isinstance(hub_note, dict):
+                        metadata.update(
+                            {
+                                "hub_message_id": hub_message_id,
+                                "hub_note": dict(hub_note),
+                                "hub_admission": "input",
+                            }
+                        )
                     hud_uuid = coord._add_conversation_message(
                         ConversationMessage(
                             role="user",
                             content=hud,
-                            metadata={"agent_hud": True, "agent_hud_sources": ["hub"]},
+                            metadata=metadata,
                         ),
                         parent_uuid=coord.current_parent_uuid,
                     )

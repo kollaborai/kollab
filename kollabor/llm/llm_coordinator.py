@@ -64,6 +64,7 @@ from kollabor_tui.display_tap import publish_semantic
 from .acp_bridge import ACPError, ACPSteeringUnconfirmed
 from .agent_hud import (
     AgentHudEntry,
+    agent_hud_hub_metadata,
     format_agent_hud,
     merge_agent_hud_with_user_message,
     normalize_hud_label,
@@ -2666,6 +2667,9 @@ class LLMService:
             combined = combine_message_contents(
                 [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
+            # This is the model prompt payload. Admission rows were captured
+            # before this merge, so HUD wrappers stay context and never become
+            # the text part of a user's input row.
             combined = self.merge_pending_agent_hud(combined)
             if voice_inputs:
                 merged_input = QueuedInput(
@@ -2750,17 +2754,20 @@ class LLMService:
         if self._pending_agent_hud and getattr(
             self._queue_processor, "turn_completed", False
         ):
-            hud_content = self.drain_pending_agent_hud()
+            hud_entries = self.pop_pending_agent_hud()
+            hud_content = format_agent_hud(hud_entries)
             if hud_content:
                 from kollabor_events.data_models import ConversationMessage
 
+                hud_metadata = {
+                    "agent_hud": True,
+                    "agent_hud_sources": ["pending"],
+                    **agent_hud_hub_metadata(hud_entries),
+                }
                 hud_message = ConversationMessage(
                     role="user",
                     content=hud_content,
-                    metadata={
-                        "agent_hud": True,
-                        "agent_hud_sources": ["pending"],
-                    },
+                    metadata=hud_metadata,
                 )
                 image_scope = current_goal_image_scope()
                 if (
@@ -2813,8 +2820,12 @@ class LLMService:
         section: str,
         label: str,
         content: str,
+        *,
+        message_id: str | None = None,
+        hub_note: dict[str, Any] | None = None,
+        hub_admission: str | None = None,
     ) -> AgentHudEntry | None:
-        """Queue one changed HUD item for the next model-visible turn."""
+        """Queue model context, retaining structured identity for hub entries."""
         body = (content or "").strip()
         if not body:
             return None
@@ -2824,6 +2835,9 @@ class LLMService:
             section=normalize_hud_label(section, fallback="state"),
             label=normalize_hud_label(label, fallback="info"),
             content=body,
+            message_id=message_id,
+            hub_note=dict(hub_note) if hub_note is not None else None,
+            hub_admission=hub_admission,
         )
         self._pending_agent_hud.append(entry)
         return entry
@@ -2958,6 +2972,9 @@ class LLMService:
         may_answer: bool = False,
         native_only: bool = False,
         request_id: str | None = None,
+        thread_id: str | None = None,
+        hub_message_id: str | None = None,
+        hub_note: dict[str, Any] | None = None,
         operator_source: str | None = None,
         queue_handoff: Any = None,
         queue_handoff_batch: object | None = None,
@@ -2982,6 +2999,9 @@ class LLMService:
                 generation writes files); refused while ACP owns the chat.
             request_id: the client follows this turn by it (#551): its events
                 carry it in ``request_ids``, and the result echoes it.
+            thread_id: hub thread associated with this admission, when present.
+            hub_message_id: stable id of the structured hub message, when present.
+            hub_note: structured hub fields retained for the transcript row.
             operator_source: authenticated source of words spoken/written by the
                 human operator. Untrusted or absent sources are not preserved.
 
@@ -3085,6 +3105,10 @@ class LLMService:
                 acp,
                 {
                     "message": normalized_message,
+                    "request_id": request_id,
+                    "thread_id": thread_id,
+                    "hub_message_id": hub_message_id,
+                    "hub_note": hub_note,
                     "voice": voice,
                     "origin_context": origin_context,
                     "operator_inputs": operator_inputs,
@@ -3963,6 +3987,11 @@ class LLMService:
         if queue_handoff is not None and queue_handoff.force_send and queue_handoff_batch is None:
             return {"status": "rejected", "reason": "invalid_queue_batch"}
         origin = dict(data.get("origin_context") or {})
+        if isinstance(data.get("hub_note"), dict):
+            origin["hub_note"] = dict(data["hub_note"])
+            hub_message_id = data.get("hub_message_id") or request_id
+            if isinstance(hub_message_id, str) and hub_message_id:
+                origin["hub_message_id"] = hub_message_id
         origin.setdefault("operator", source != "agent")
         if not self._manual_relay_origin_authorized(origin):
             return {
@@ -4045,6 +4074,7 @@ class LLMService:
             try:
                 steered = await acp.steer(
                     message, origin=origin, thread_id=data.get("thread_id"),
+                    request_id=request_id,
                     **({"images": images} if images else {}),
                 )
             except ACPSteeringUnconfirmed:
