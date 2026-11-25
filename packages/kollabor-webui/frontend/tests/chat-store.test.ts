@@ -652,6 +652,35 @@ describe("LiveChatStore", () => {
     expect(store.olderStatus).toBe("idle");
   });
 
+  it("after a 409 answer, hasEarlier is false until a snapshot restores the cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(store.hasEarlier).toBe(false);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(snapshot(8, [row("r3", "three")], { older: "fresh" }));
+    expect(store.hasEarlier).toBe(true);
+  });
+
+  it("a second loadOlder after a 409 answer sends no request, so the reconnect stream stays open", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    // If the stale cursor were requested again, the daemon would answer 409 again.
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(streams).toHaveLength(2);
+    expect(streams[1].signal.aborted).toBe(false);
+  });
+
   it("a history page that finishes after a resync and a new snapshot is dropped: its rows and cursor do not join the new window", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
