@@ -56,13 +56,13 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 
 **Rows.** `{id, seq, kind, role, turn_id, status, parts, created_at}`. `kind` is one of `input`, `reply`, `tool`, `note` (hub notes, today glued into user text as `<agent_hud>`), `prompt`, or `marker` (compaction, errors shown in the thread). A hub message carries a `hub-note` part built from the daemon's structured hub fields (`from`, `to`, `text`, `observed`, optional `kind`, `thread_id`, `reply_to`, `is_direct`, `presence`), never parsed from text: a hub message that starts no turn is a `note` row with that part and no input lifecycle; one that starts a turn is an `input` row whose id is the hub message id, with the full input lifecycle and the part inside its parts.
 
-**Lifecycle.** Each input moves `queued`, then `started` or `joined`, then `ended`, with `ended.outcome` one of `completed`, `failed` or `cancelled`. `joined` names the turn it joined, and the input ends when that turn ends. Every input reaches `ended` exactly once.
+**Lifecycle.** Each input moves `queued`, then `started` or `joined`, then `ended`, with `ended.outcome` one of `completed`, `failed` or `cancelled`. `joined` names the turn it joined, and the input ends when that turn ends. A state never goes back, and an input that belongs to a turn ends only after that turn's `turn.state` `ended`, whatever its outcome. Every input reaches `ended` exactly once.
 
 **Stream.** `GET /sessions/{id}/stream?after=<seq>` (SSE). Every event is `{seq, conversation_uid, type, data}`, with `seq` strictly increasing per conversation:
 
 | type | data |
 |---|---|
-| `snapshot` | the latest window of rows, `next_seq`, and a cursor for older rows |
+| `snapshot` | the latest window of rows, `next_seq`, and `older`: the cursor for older rows, or `null` when there are none |
 | `row.upsert` | a whole row |
 | `row.append` | `{id, part, text}`: text streaming into a row |
 | `row.delete` | `{id}` |
@@ -102,7 +102,7 @@ AG-UI (MIT) defines the same ideas (`MESSAGES_SNAPSHOT`, `STATE_SNAPSHOT` and ru
 3. The engine restarts: clients reconnect with `after`. The daemon, not the engine, owns the events, so nothing is lost.
 4. A resend of a known id (a POST retried after a timeout): answered with the input's current state, with no second row.
 5. A harness crashes or a turn never ends: the daemon ends the turn `failed`, and every input that joined it `failed`, so no client stays in the working state.
-6. A snapshot is too large: it carries only the latest window; older rows come from `history?before=`.
+6. A snapshot is too large: it carries only the latest window; older rows come from `GET /sessions/{id}/rows?before=`.
 7. Two clients pick the same id for different text: the second POST is refused with 409. Ids carry a per-client prefix, so only a bug can cause this.
 
 ## Decisions

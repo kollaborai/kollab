@@ -53,6 +53,15 @@ def _is_id(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
 
 
+def _is_count(value: Any) -> bool:
+    """A non-negative integer; `True` is an int in Python, so it is ruled out."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+# How far along its lifecycle each input state is: a state only moves forward.
+_STAGE = {"queued": 0, "started": 1, "joined": 1, "ended": 2}
+
+
 def _row_problems(row: Any, where: str) -> list[str]:
     if not isinstance(row, dict):
         return [f"{where}: row is not an object"]
@@ -67,6 +76,27 @@ def _row_problems(row: Any, where: str) -> list[str]:
         problems.append(f"{where}: unknown role {row.get('role')!r}")
     if not isinstance(row.get("parts"), list):
         problems.append(f"{where}: parts must be a list")
+    if "seq" in row and not _is_count(row["seq"]):
+        problems.append(f"{where}: row seq must be a non-negative integer")
+    if "turn_id" in row and row["turn_id"] is not None and not _is_id(row["turn_id"]):
+        problems.append(f"{where}: row turn_id must be a string or null")
+    for key in ("status", "created_at"):
+        if key in row and not isinstance(row[key], str):
+            problems.append(f"{where}: row {key} must be a string")
+    return problems
+
+
+def _turn_problems(turn: Any, where: str) -> list[str]:
+    if not isinstance(turn, dict):
+        return [f"{where}: turn is not an object"]
+    problems = []
+    if not _is_id(turn.get("turn_id")):
+        problems.append(f"{where}: turn needs turn_id")
+    if turn.get("state") not in TURN_STATES:
+        problems.append(f"{where}: unknown turn state {turn.get('state')!r}")
+    input_ids = turn.get("input_ids")
+    if not isinstance(input_ids, list) or not all(_is_id(i) for i in input_ids):
+        problems.append(f"{where}: turn needs input_ids, a list of ids")
     return problems
 
 
@@ -77,7 +107,7 @@ def event_problems(event: Any) -> list[str]:
     seq = event.get("seq")
     where = f"seq {seq}"
     problems: list[str] = []
-    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+    if not _is_count(seq):
         problems.append(f"{where}: seq must be a non-negative integer")
     if not _is_id(event.get("conversation_uid")):
         problems.append(f"{where}: conversation_uid missing")
@@ -94,11 +124,18 @@ def event_problems(event: Any) -> list[str]:
             for index, row in enumerate(rows):
                 problems += _row_problems(row, f"{where} row {index}")
         if kind == "snapshot":
-            if not isinstance(data.get("next_seq"), int):
-                problems.append(f"{where}: snapshot needs next_seq")
-            for key in ("turns", "inputs"):
-                if not isinstance(data.get(key), list):
+            if not _is_count(data.get("next_seq")):
+                problems.append(f"{where}: snapshot needs next_seq, a non-negative integer")
+            older = data.get("older", 0)
+            if older is not None and not _is_id(older):
+                problems.append(f"{where}: snapshot needs older, a cursor string or null")
+            for key, check in (("turns", _turn_problems), ("inputs", _input_problems)):
+                entries = data.get(key)
+                if not isinstance(entries, list):
                     problems.append(f"{where}: snapshot needs {key}")
+                    continue
+                for index, entry in enumerate(entries):
+                    problems += check(entry, f"{where} {key[:-1]} {index}")
     elif kind == "row.upsert":
         problems += _row_problems(data, where)
     elif kind == "row.append":
@@ -114,12 +151,7 @@ def event_problems(event: Any) -> list[str]:
     elif kind == "input.state":
         problems += _input_problems(data, where)
     elif kind == "turn.state":
-        if not _is_id(data.get("turn_id")):
-            problems.append(f"{where}: turn.state needs turn_id")
-        if data.get("state") not in TURN_STATES:
-            problems.append(f"{where}: unknown turn state {data.get('state')!r}")
-        if not isinstance(data.get("input_ids"), list):
-            problems.append(f"{where}: turn.state needs input_ids")
+        problems += _turn_problems(data, where)
     return problems
 
 
@@ -144,9 +176,11 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
 
     Checks what every client relies on: a snapshot comes first, seq strictly
     increases, every input row has a lifecycle under the same id (a row under a
-    second id is how a sent message shows twice), an input ends once and never
-    changes after, and a completed input ends only after its turn. With
-    ``complete`` set, every input must also have ended by the last event.
+    second id is how a sent message shows twice), an input's state only moves
+    forward (queued, then started or joined, then ended), an input ends once
+    and never changes after, and an input bound to a turn ends only after that
+    turn ends, whatever its outcome. With ``complete`` set, every input must
+    also have ended by the last event.
     """
     events = list(events)
     problems: list[str] = []
@@ -162,6 +196,16 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
     turn_of: dict[str, str] = {}
     ended_turns: set[str] = set()
     last_seq = -1
+
+    def note_state(seq: Any, info: dict[str, Any]) -> None:
+        seen = states.setdefault(info["id"], [])
+        if seen and "ended" not in seen:
+            last, state = seen[-1], info["state"]
+            if state != last and _STAGE[state] <= _STAGE[last]:
+                problems.append(f"seq {seq}: input {info['id']} went from {last} to {state}")
+        seen.append(info["state"])
+        if info.get("turn_id"):
+            turn_of[info["id"]] = info["turn_id"]
 
     def note_rows(new_rows: list[dict[str, Any]]) -> None:
         rows.clear()
@@ -183,9 +227,7 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 if turn.get("state") == "ended":
                     ended_turns.add(turn.get("turn_id"))
             for info in data["inputs"]:
-                states.setdefault(info["id"], []).append(info["state"])
-                if info.get("turn_id"):
-                    turn_of[info["id"]] = info["turn_id"]
+                note_state(seq, info)
         elif kind == "replace":
             note_rows(data["rows"])
         elif kind == "row.upsert":
@@ -198,21 +240,14 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
             elif kind == "row.delete":
                 rows.discard(data["id"])
         elif kind == "input.state":
-            seen = states.setdefault(data["id"], [])
-            if "ended" in seen:
+            if "ended" in states.get(data["id"], []):
                 problems.append(f"seq {seq}: input {data['id']} changed after it ended")
-            seen.append(data["state"])
-            if data.get("turn_id"):
-                turn_of[data["id"]] = data["turn_id"]
+            note_state(seq, data)
             turn = turn_of.get(data["id"])
-            if (
-                data["state"] == "ended"
-                and data["outcome"] == "completed"
-                and turn
-                and turn not in ended_turns
-            ):
+            if data["state"] == "ended" and turn and turn not in ended_turns:
+                verb = "completed" if data["outcome"] == "completed" else "ended"
                 problems.append(
-                    f"seq {seq}: input {data['id']} completed before its turn {turn} ended"
+                    f"seq {seq}: input {data['id']} {verb} before its turn {turn} ended"
                 )
         elif kind == "turn.state" and data["state"] == "ended":
             ended_turns.add(data["turn_id"])
