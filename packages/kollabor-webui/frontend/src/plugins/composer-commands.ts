@@ -65,6 +65,7 @@ function resolvePluginCommands(
   const conflictKeys = new Set<string>();
   const ordered = pluginsByEnableOrder(plugins);
   for (const record of ordered) {
+    if (!record.entry.web?.entry) continue;
     for (const declared of declaredIds(record.entry.contributes?.slash)) {
       const key = declared.toLowerCase();
       if (!taken.has(key) && !owners.has(key)) owners.set(key, record);

@@ -157,7 +157,7 @@ export type PluginApi = {
   };
   /** A composer slash command. */
   command(spec: CommandSpec): void;
-  /** A chat card for a tool or a message tag it owns. */
+  /** A chat card for a declared tool or tag. Kollab always keeps its native `request_permission` renderer. */
   renderer(spec: RendererSpec): void;
   /** One NoticeBar line with at most one button; returns its dismissal. */
   notice(spec: NoticeSpec): () => void;

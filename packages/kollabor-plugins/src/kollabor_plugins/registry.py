@@ -31,6 +31,7 @@ from .packages import (
     _MAX_PLUGIN_USES,
     _SYMBOL,
     _has_single_contribution_identity,
+    _is_valid_renderer_declaration,
     _normalize_plugin_use,
     _read_registry,
     _within,
@@ -793,6 +794,13 @@ def _normalize_declared(value: object) -> str | dict | None:
     return result if any(key in result for key in ("id", "name", "tool", "tag")) else None
 
 
+def _normalize_renderer_declaration(value: object) -> dict | None:
+    if not _is_valid_renderer_declaration(value):
+        return None
+    normalized = _normalize_declared(value)
+    return normalized if isinstance(normalized, dict) else None
+
+
 def _normalize_contributes(value: object) -> tuple[dict, int]:
     kinds = ("menu", "views", "pages", "modals", "slash", "renderers")
     result = {kind: [] for kind in kinds}
@@ -809,7 +817,7 @@ def _normalize_contributes(value: object) -> tuple[dict, int]:
         omissions += max(0, len(items) - _MAX_PLUGIN_CONTRIBUTIONS)
         for item in items[:_MAX_PLUGIN_CONTRIBUTIONS]:
             if kind != "menu":
-                declared = _normalize_declared(item)
+                declared = _normalize_renderer_declaration(item) if kind == "renderers" else _normalize_declared(item)
                 if declared is not None:
                     result[kind].append(declared)
                 else:

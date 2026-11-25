@@ -123,17 +123,15 @@ export const PLUGIN_RENDER_TIMEOUT_MS = 5_000;
 
 function PluginSuspenseFallback({
   inline,
-  resetKey,
   onTimeout,
 }: {
   inline: boolean;
-  resetKey?: unknown;
   onTimeout: () => void;
 }) {
   useEffect(() => {
     const timer = setTimeout(onTimeout, PLUGIN_RENDER_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [onTimeout, resetKey]);
+  }, [onTimeout]);
   const Root = inline ? "span" : "div";
   return <Root role="status" className="text-muted-foreground text-sm">Rendering plugin view…</Root>;
 }
@@ -157,8 +155,10 @@ export function PluginRendererSurface({ renderer, children }: { renderer: string
   );
 }
 
-export class PluginBoundary extends Component<PluginBoundaryProps, { error: Error | null }> {
-  state: { error: Error | null } = { error: null };
+type PluginBoundaryState = { error: Error | null; timedOutSuspense?: boolean };
+
+export class PluginBoundary extends Component<PluginBoundaryProps, PluginBoundaryState> {
+  state: PluginBoundaryState = { error: null };
 
   static getDerivedStateFromError(error: unknown): { error: Error } {
     return { error: new Error(describePluginError(error)) };
@@ -169,17 +169,19 @@ export class PluginBoundary extends Component<PluginBoundaryProps, { error: Erro
   }
 
   componentDidUpdate(previousProps: Readonly<PluginBoundaryProps>) {
-    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error && !this.state.timedOutSuspense) {
       this.setState({ error: null });
     }
   }
 
-  retry = () => this.setState({ error: null });
+  retry = () => this.setState(
+    this.state.timedOutSuspense ? { error: null, timedOutSuspense: false } : { error: null },
+  );
 
   failSuspendedRender = () => {
     const error = new Error("Plugin rendering remained suspended past its limit.");
     logPluginFailure(this.props.name, "render timed out", error);
-    this.setState({ error });
+    this.setState({ error, timedOutSuspense: true });
   };
 
   render() {
@@ -189,7 +191,6 @@ export class PluginBoundary extends Component<PluginBoundaryProps, { error: Erro
           fallback={
             <PluginSuspenseFallback
               inline={Boolean(this.props.inline)}
-              resetKey={this.props.resetKey}
               onTimeout={this.failSuspendedRender}
             />
           }

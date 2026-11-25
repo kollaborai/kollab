@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useState, type ComponentType } from "react";
 import type { PanelField } from "@/api";
-import { declaredIds, isPluginDeclarationId } from "./plugin-declarations";
+import { declaredIds, declaredRendererIds, isPluginDeclarationId, isPluginRendererTagName } from "./plugin-declarations";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -193,7 +193,7 @@ export type PluginApi = {
   };
   /** A composer slash command. */
   command(spec: CommandSpec): void;
-  /** A chat card for a tool or a message tag it owns. */
+  /** A chat card for a declared tool or tag. Kollab always keeps its native `request_permission` renderer. */
   renderer(spec: RendererSpec): void;
   /** One NoticeBar line with at most one button; returns its dismissal. */
   notice(spec: NoticeSpec): () => void;
@@ -240,8 +240,6 @@ const TOAST_MS = 5_000;
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 const isLine = (value: unknown): value is string => isText(value) && !/[\r\n]/.test(value);
 const isSlashCommandName = isPluginDeclarationId;
-const isRendererTagName = (value: unknown): value is string =>
-  typeof value === "string" && /^[a-z][\w-]*$/i.test(value);
 const isComponent = (value: unknown) =>
   typeof value === "function" || (typeof value === "object" && value !== null && "$$typeof" in value);
 const isTabs = (tabs: unknown): tabs is PluginTab[] =>
@@ -489,10 +487,10 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
       const hasTag = spec?.tag !== undefined;
       if (hasTool === hasTag) return invalid("renderer", "provide exactly one of tool or tag");
       const name = hasTool ? spec.tool : spec.tag;
-      if (!bound("renderer", declaredIds(declared.renderers), name)) return;
-      if (spec?.tag !== undefined && !isRendererTagName(spec.tag)) {
+      if (spec?.tag !== undefined && !isPluginRendererTagName(spec.tag)) {
         return invalid("renderer", "tag name must start with a letter and use only letters, digits, _ or -");
       }
+      if (!bound("renderer", declaredRendererIds(declared.renderers, hasTool ? "tool" : "tag"), name)) return;
       if (!isComponent(spec.render)) return invalid("renderer", "render must be a component");
       const renderer: RendererSpec = hasTool
         ? { tool: spec.tool!, render: spec.render }

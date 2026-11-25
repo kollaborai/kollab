@@ -33,7 +33,11 @@ import {
   type PluginService,
 } from "./sdk";
 import { containsSensitiveText, describePluginError, logPluginFailure } from "./plugin-errors";
-import { hasSinglePluginDeclarationIdentity, isPluginDeclarationId } from "./plugin-declarations";
+import {
+  hasSinglePluginDeclarationIdentity,
+  isPluginDeclarationId,
+  pluginRendererDeclaration,
+} from "./plugin-declarations";
 
 export const LOAD_TIMEOUT_MS = 5_000;
 
@@ -207,6 +211,11 @@ function normalizePluginContributions(value: unknown, requireAllKinds = false): 
     omissions += excessItems(items, PLUGIN_INVENTORY_LIMITS.contributions);
     for (const item of items.slice(0, PLUGIN_INVENTORY_LIMITS.contributions)) {
       if (kind !== "menu") {
+        if (kind === "renderers" && !pluginRendererDeclaration(item)) {
+          malformed = true;
+          omissions += 1;
+          continue;
+        }
         const declared = normalizeDeclared(item);
         if (declared) result[kind].push(declared);
         else {

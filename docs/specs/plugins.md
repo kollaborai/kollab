@@ -261,7 +261,7 @@ as `kollab_plugin_pr_chain` and two packages never collide.
 | `engine` | `make_router(ctx: PluginContext) -> APIRouter`, mounted under `/plugins/{id}/api/` |
 | `services.<name>` | `<name>` matches `^[a-z0-9][a-z0-9-]{0,39}$`; `command` (run from the plugin folder); `autostart`; `restart` (`on-failure` default, `always`, `never`); `stop_timeout_s` (default 30); `heartbeat_s` (optional); both must be numbers above 0 and at most 86400 seconds; `secrets` (granted secrets the wrapper puts in its environment) |
 | `web` | the entry module and stylesheet, both inside `web/dist/` |
-| `contributes` | everything the plugin adds: `menu` rows, `views`, `pages`, `modals`, `slash` commands and chat `renderers`. Each row has exactly one identity field (`id`, `name`, `tool` or `tag`); menu rows use `id`. The sheet's Adds line and the app's rows come from here, so a row exists even when the bundle fails; the bundle's `k.*` calls bind to these ids, and an undeclared id is ignored with a warning |
+| `contributes` | everything the plugin adds: `menu` rows, `views`, `pages`, `modals`, `slash` commands and chat `renderers`. Each non-menu row has exactly one identity field (`id`, `name`, `tool` or `tag`); menu rows use `id`. Renderer rows must declare exactly one `{ "tool": "..." }` or `{ "tag": "..." }`; bare strings and `{ "id": ... }` or `{ "name": ... }` renderer rows are malformed and counted as omissions. Tag names use `[A-Za-z][A-Za-z0-9_-]*`. The sheet's Adds line and the app's rows come from here, so a row exists even when the bundle fails; the bundle's `k.*` calls bind to these ids, and an undeclared id is ignored with a warning |
 | `version`, `description` | strings |
 | `agents`, `skills`, `commands`, `hooks`, `mcp`, `settings` | paths inside the plugin, in the formats kollab already reads |
 | `uses` | see the next section |
@@ -530,7 +530,7 @@ Contribution points. Each is one existing component that also reads the plugin r
 | `k.modal({id, title, tabs})` | a dialog with tabs; full screen on a phone | `components/ui/dialog` |
 | `k.settings({render})` | Settings → Plugins → this plugin, under its generated form | `panel-model.ts`, `PanelHost.tsx` |
 | `k.command({name, description, run})` | the composer palette; submitting a matching draft without attachments calls `run(args)` locally | `composer-commands.ts`, `components/assistant-ui/thread.tsx` |
-| `k.renderer({tool or tag, render})` | a tool-call card or an inline card for a registered tag in assistant message text | `renderers.tsx`, `components/assistant-ui/thread.tsx` |
+| `k.renderer({tool or tag, render})` | a tool-call card or an inline card for a registered tag in assistant message text; the host always keeps its native `request_permission` renderer | `renderers.tsx`, `components/assistant-ui/thread.tsx` |
 | `k.notice({text, button})` | NoticeBar | `NoticeBar.tsx` |
 
 Tag renderer names use `[A-Za-z][A-Za-z0-9_-]*` and must match the tag's case. Assistant message

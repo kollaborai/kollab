@@ -4,7 +4,7 @@
  * With no plugin loaded each of them draws nothing, so the app looks exactly as it does without plugins.
  */
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
-import { Loader2, X } from "lucide-react";
+import { Loader2, Puzzle, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -262,6 +262,32 @@ export function PluginModalHost() {
 
 export type PluginViewTab = readonly [PluginViewKey, string, ComponentType<{ className?: string }>];
 
+function PluginViewIcon({
+  record,
+  viewId,
+  icon,
+  className,
+}: {
+  record: PluginRecord;
+  viewId: string;
+  icon: unknown;
+  className?: string;
+}) {
+  const Icon = pluginIcon(icon);
+  if (typeof icon !== "function") return <Icon className={className} />;
+  return (
+    <PluginMount
+      record={record}
+      renderer={`view-icon:${viewId}`}
+      resetKey={icon}
+      inline
+      errorFallback={<Puzzle className={className} aria-hidden="true" />}
+    >
+      <Icon className={className} />
+    </PluginMount>
+  );
+}
+
 /** The plugin tabs for the chat's view list; one that needs a folder hides for a chat with none. */
 export function pluginViews(snapshot: PluginsSnapshot, hasFolder: boolean): PluginViewTab[] {
   return snapshot.plugins.flatMap((record) =>
@@ -269,7 +295,11 @@ export function pluginViews(snapshot: PluginsSnapshot, hasFolder: boolean): Plug
       ? []
       : record.contributions.views
           .filter((view) => hasFolder || !view.needs_folder)
-          .map((view) => [pluginViewKey(record.id, view.id), view.label, pluginIcon(view.icon)] as const),
+          .map((view) => [
+            pluginViewKey(record.id, view.id),
+            view.label,
+            (props) => <PluginViewIcon record={record} viewId={view.id} icon={view.icon} {...props} />,
+          ] as const),
   );
 }
 
