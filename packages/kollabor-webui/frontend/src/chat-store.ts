@@ -512,8 +512,9 @@ export class LiveChatStore implements LiveStore {
       this.lastConversationUid = event.conversation_uid;
     }
     this.state = result.state;
-    // A snapshot or a replace brings a new window: an older page still in flight is dropped, and the paging state restarts from the cursor.
-    if (event.type === "snapshot" || event.type === "replace") {
+    // A new window or deletion invalidates an in-flight page, which may contain stale rows.
+    // Keep the current cursor so a fresh page can be requested.
+    if (event.type === "snapshot" || event.type === "replace" || event.type === "row.delete") {
       this.epoch += 1;
       this.paging = this.state.olderCursor === null ? "complete" : "idle";
     }
