@@ -12,21 +12,34 @@ from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_h
 class _QueueRuntime:
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
+        self.queued: set[str] = set()
 
     async def add_input(self, params):
         self.calls.append(("add", params))
+        self.queued.add(params["id"])
         return {"accepted": True, "id": params["id"], "state": "queued"}
 
     async def cancel_queued_input(self, params):
         self.calls.append(("cancel", params))
+        found = params["id"] in self.queued
+        if found:
+            self.queued.remove(params["id"])
         return {
-            "found": params["id"] == "web-a1",
-            "cancelled": params["id"] == "web-a1",
+            "found": found,
+            "cancelled": found,
         }
 
     async def send_now(self, params):
         self.calls.append(("send-now", params))
-        return {"found": True, "accepted": True, "state": "joined", "turn_id": "turn-1"}
+        found = params["id"] in self.queued
+        if found:
+            self.queued.remove(params["id"])
+        return {
+            "found": found,
+            "accepted": found,
+            "state": "joined",
+            "turn_id": "turn-1",
+        }
 
 
 class _Bus:
@@ -105,10 +118,6 @@ async def test_socket_actions_admit_cancel_and_send_one_input_by_client_id():
         == []
     )
 
-    sent = await _call(rpc, "state.chat_stream.send_now", {"id": "web-a1"})
-    assert sent == {"found": True, "state": "joined", "turn_id": "turn-1"}
-    assert state._queue_runtime.calls[-1] == ("send-now", {"id": "web-a1"})
-
     cancelled = await _call(
         rpc,
         "state.chat_stream.cancel_queued_input",
@@ -116,6 +125,16 @@ async def test_socket_actions_admit_cancel_and_send_one_input_by_client_id():
     )
     assert cancelled == {"found": True, "cancelled": True}
     assert state._queue_runtime.calls[-1] == ("cancel", {"id": "web-a1"})
+
+    added_for_send = await _call(
+        rpc,
+        "state.chat_stream.add_input",
+        {"id": "web-a2", "text": "send this now", "attachments": []},
+    )
+    assert added_for_send == {"id": "web-a2", "state": "queued"}
+    sent = await _call(rpc, "state.chat_stream.send_now", {"id": "web-a2"})
+    assert sent == {"found": True, "state": "joined", "turn_id": "turn-1"}
+    assert state._queue_runtime.calls[-1] == ("send-now", {"id": "web-a2"})
 
 
 @pytest.mark.asyncio
