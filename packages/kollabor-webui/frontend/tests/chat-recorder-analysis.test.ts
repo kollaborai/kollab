@@ -3,6 +3,7 @@ import {
   analyzeChatFrames,
   CHAT_RECORDER_FLOWS,
   classifyChatRuntime,
+  chatRecorderStreamSuffix,
   findPromptStatusUpdate,
   hasRunningTurnWithInputs,
   isCompactionComplete,
@@ -188,5 +189,13 @@ describe("chat recorder analysis", () => {
     expect(classifyChatRuntime({ provider: "acp", harness: "OpenAI Codex CLI" })).toBe("codex-cli");
     expect(classifyChatRuntime({ provider: "ACP", profile: "claude-code" })).toBe("claude-code");
     expect(classifyChatRuntime({ provider: "acp", harness: "unknown harness" })).toBe("acp");
+  });
+
+  it("builds a stream suffix scoped to the session under test", () => {
+    const suffix = chatRecorderStreamSuffix("session one");
+
+    expect(`/sessions/${encodeURIComponent("session one")}/stream`.endsWith(suffix)).toBe(true);
+    expect("/sessions/another-session/stream".endsWith(suffix)).toBe(false);
+    expect(`/sessions/${encodeURIComponent("session one")}/inputs`.endsWith(suffix)).toBe(false);
   });
 });
