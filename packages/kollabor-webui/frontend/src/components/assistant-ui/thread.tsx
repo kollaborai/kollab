@@ -58,7 +58,13 @@ import {
   usePendingPermissionCancellation,
   useSendWaitingNow,
 } from "@/runtime";
-import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
+import {
+  DEFAULT_SLASH_COMMANDS,
+  type AgentPoolEntry,
+  type MediaEntry,
+  type NetworkAgent,
+  type SlashCommand,
+} from "@/api";
 import {
   matchPluginCommand,
   pluginCommandConflicts,
@@ -71,6 +77,7 @@ import {
 import { PluginTaggedText, PluginToolPart } from "@/plugins/renderers";
 import { slashCatalogNotice } from "./slash-catalog-notice";
 import { usePlugins } from "@/plugins/registry";
+import { logPluginFailure } from "@/plugins/plugin-errors";
 import {
   panelCommandRequest,
   type PanelOpenRequest,
@@ -722,13 +729,17 @@ const Composer: FC<{
   };
 
   const { plugins } = usePlugins();
+  const reserved = useMemo(
+    () => reservedCommandKeys([...DEFAULT_SLASH_COMMANDS, ...commands]),
+    [commands],
+  );
   const pluginEntries = useMemo(
-    () => pluginCommandEntries(plugins, reservedCommandKeys(commands)),
-    [plugins, commands],
+    () => pluginCommandEntries(plugins, reserved),
+    [plugins, reserved],
   );
   const pluginConflicts = useMemo(
-    () => pluginCommandConflicts(plugins, reservedCommandKeys(commands)),
-    [plugins, commands],
+    () => pluginCommandConflicts(plugins, reserved),
+    [plugins, reserved],
   );
   const reportedPluginConflicts = useRef(new Set<string>());
   useEffect(() => {
@@ -757,11 +768,12 @@ const Composer: FC<{
     aui.composer.setText("");
     const fail = (error: unknown) => {
       if (!aui.composer.getState().text) aui.composer.setText(draft);
+      logPluginFailure(match.entry.pluginId, `command /${match.entry.name} failed`, error);
       match.entry.k.toast(pluginCommandFailure(match.entry.name, error));
     };
     try {
       const result = match.entry.run(match.args);
-      if (result instanceof Promise) result.catch(fail);
+      void Promise.resolve(result).catch(fail);
     } catch (error) {
       fail(error);
     }

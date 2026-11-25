@@ -14,6 +14,7 @@ import { PanelDialogSurface } from "@/components/panels/PanelDialogSurface";
 import { cn } from "@/lib/utils";
 import { openTarget, retryPlugin } from "./loader";
 import { PluginFailure, PluginMount, PluginTabs, pluginIcon } from "./mount";
+import { logPluginFailure, SAFE_PLUGIN_ACTION_ERROR } from "./plugin-errors";
 import {
   parsePluginViewKey,
   pluginRegistry,
@@ -204,10 +205,14 @@ function pressNotice(record: PluginRecord, notice: PluginNotice) {
   if (!button) return;
   dismissNotice(record.id, notice.key);
   if (button.open) return openTarget(record.id, button.open);
+  const fail = (error: unknown) => {
+    logPluginFailure(record.id, "notice action failed", error);
+    record.k?.toast(SAFE_PLUGIN_ACTION_ERROR);
+  };
   try {
-    void Promise.resolve(button.run?.()).catch((error: unknown) => console.error(`${record.name} notice action failed`, error));
+    void Promise.resolve(button.run?.()).catch(fail);
   } catch (error) {
-    console.error(`${record.name} notice action failed`, error);
+    fail(error);
   }
 }
 

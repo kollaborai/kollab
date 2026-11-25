@@ -140,7 +140,6 @@ export function pluginCommandItems(
 
 /** One-line toast text for a plugin command that threw or rejected. */
 export function pluginCommandFailure(name: string, error: unknown): string {
-  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  const detail = raw.replace(/\s+/g, " ").trim();
-  return detail ? `Could not run /${name}: ${detail}` : `Could not run /${name}.`;
+  void error;
+  return `Could not run /${name}. Check the browser console for redacted details.`;
 }

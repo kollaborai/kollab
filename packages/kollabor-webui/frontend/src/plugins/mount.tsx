@@ -3,7 +3,15 @@
  * `<span>`. Plugin CSS scopes to either mount and touch controls stay at least 44 px tall. An error boundary
  * keeps a plugin that throws while drawing from breaking the rest of the app.
  */
-import { Component, useState, type ComponentType, type ErrorInfo, type ReactNode } from "react";
+import {
+  Component,
+  Suspense,
+  useEffect,
+  useState,
+  type ComponentType,
+  type ErrorInfo,
+  type ReactNode,
+} from "react";
 import {
   Bell,
   Bot,
@@ -25,6 +33,7 @@ import { PluginPortalScopeContext } from "@/components/ui/plugin-portal-scope";
 import { cn } from "@/lib/utils";
 import type { PluginRecord } from "./registry";
 import type { PluginSession, PluginTab } from "./sdk";
+import { logPluginFailure, SAFE_PLUGIN_RENDER_ERROR } from "./plugin-errors";
 
 // ponytail: a short list of lucide names a manifest's `icon` can use; importing lucide's whole set by name
 // would ship every icon. Add names here as plugins need them.
@@ -108,8 +117,24 @@ export function PluginFailure({
   );
 }
 
-/** Catches an error a plugin throws while drawing; Retry draws it again. */
-const SAFE_PLUGIN_RENDER_ERROR = "This plugin's view failed to render. Check the browser console for details.";
+export const PLUGIN_RENDER_TIMEOUT_MS = 5_000;
+
+function PluginSuspenseFallback({
+  inline,
+  resetKey,
+  onTimeout,
+}: {
+  inline: boolean;
+  resetKey?: unknown;
+  onTimeout: () => void;
+}) {
+  useEffect(() => {
+    const timer = setTimeout(onTimeout, PLUGIN_RENDER_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [onTimeout, resetKey]);
+  const Root = inline ? "span" : "div";
+  return <Root role="status" className="text-muted-foreground text-sm">Rendering plugin view…</Root>;
+}
 
 type PluginBoundaryProps = {
   name: string;
@@ -127,7 +152,7 @@ export class PluginBoundary extends Component<PluginBoundaryProps, { error: Erro
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo) {
-    console.error(`${this.props.name} failed to render`, error, info.componentStack);
+    logPluginFailure(this.props.name, "failed to render", error, info.componentStack);
   }
 
   componentDidUpdate(previousProps: Readonly<PluginBoundaryProps>) {
@@ -138,8 +163,28 @@ export class PluginBoundary extends Component<PluginBoundaryProps, { error: Erro
 
   retry = () => this.setState({ error: null });
 
+  failSuspendedRender = () => {
+    const error = new Error("Plugin rendering remained suspended past its limit.");
+    logPluginFailure(this.props.name, "render timed out", error);
+    this.setState({ error });
+  };
+
   render() {
-    if (!this.state.error) return this.props.children;
+    if (!this.state.error) {
+      return (
+        <Suspense
+          fallback={
+            <PluginSuspenseFallback
+              inline={Boolean(this.props.inline)}
+              resetKey={this.props.resetKey}
+              onTimeout={this.failSuspendedRender}
+            />
+          }
+        >
+          {this.props.children}
+        </Suspense>
+      );
+    }
     if (this.props.errorFallback !== undefined) return this.props.errorFallback;
     return (
       <PluginFailure

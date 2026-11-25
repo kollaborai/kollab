@@ -161,15 +161,20 @@ control, with no ids or version numbers in the text: `A pull request is waiting 
 
 **Composer and chat.** Plugin slash commands appear in the composer palette. Submitting a matching
 command without attachments consumes the draft and calls the plugin's `run(args)` locally. A plugin
-can draw a card for its tool or an inline card for its registered tag in assistant message text.
+can draw a card for its tool or an inline card for its registered tag in assistant message text. Native
+command names and aliases remain reserved for native commands while the session command catalog loads
+or is unavailable.
 
 **Failures.** A plugin whose code fails while loading keeps its row as `PR Chain  Failed to Load`, and
 one that fails while drawing shows `Failed to Render`; both open a small kollab-drawn panel with Retry,
-View Error and Turn Off, and everything else keeps working. A plugin whose last boot never finished (the
-tab froze or closed during it) is skipped on the next load with the notice `PR Chain was skipped: it
-froze the page last time.  [Turn On Again]`. `?plugins=off` in the page URL loads the web UI with no plugin code and Settings →
-Plugins says `Plugins are off for this page`. The configured agent-run caps are intended settings; the
-current engine does not enforce them yet.
+View Error and Turn Off, and everything else keeps working. Every plugin view, tab, settings view, tool
+card and tag card has that render boundary and a Suspense fallback; a render still suspended after five
+seconds shows `Failed to Render` with Retry. Plugin callback failures show fixed safe text, with error
+details written only to the redacted browser log. A plugin whose last boot never finished (the tab froze
+or closed during it) is skipped on the next load with the notice `PR Chain was skipped: it froze the page
+last time.  [Turn On Again]`. `?plugins=off` in the page URL loads the web UI with no plugin code and
+Settings → Plugins says `Plugins are off for this page`. The configured agent-run caps are intended
+settings; the current engine does not enforce them yet.
 
 ### Terminal
 
@@ -876,9 +881,9 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 
 ## Failure modes
 
-1. **Web bundle throws or fails to render.** A per-plugin error boundary and a 5 s limit on the import
-   and the awaited function; the app boots without it. A synchronous hang freezes the tab; recovery is
-   a reload with `?plugins=off`.
+1. **Web bundle throws or fails to render.** A per-plugin error boundary, a 5 s limit on import and the
+   awaited function, and a 5 s limit on suspended rendering; the app boots without it. A synchronous
+   hang freezes the tab; recovery is a reload with `?plugins=off`.
 2. **Engine router or `python` entry fails while loading.** That part is skipped, the process keeps
    running, and `/plugins` reports `state: "error"` with the message.
 3. **Background process crash loop.** The wrapper's backoff and five-crash stop, a notice, the menu count

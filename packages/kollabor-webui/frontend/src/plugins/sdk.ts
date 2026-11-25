@@ -30,6 +30,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { FieldRenderer } from "@/components/panels/FieldRenderer";
 import { GemAvatar } from "@/components/gems/GemAvatar";
+import { logPluginFailure } from "./plugin-errors";
 import { copyText } from "@/phonelink/copy-link";
 import { nextNoticeKey, type Contributions } from "./registry";
 
@@ -403,9 +404,12 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
     if (typeof topic !== "string") return;
     for (const listener of [...(listeners.get(topic) ?? [])]) {
       try {
-        listener(data);
+        const result = listener(data);
+        void Promise.resolve(result).catch((error: unknown) => {
+          logPluginFailure(id, `event listener for ${topic} failed`, error);
+        });
       } catch (error) {
-        console.error(`${id}: event listener for ${topic} failed`, error);
+        logPluginFailure(id, `event listener for ${topic} failed`, error);
       }
     }
   };
