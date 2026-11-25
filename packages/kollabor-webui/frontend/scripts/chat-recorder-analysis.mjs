@@ -96,7 +96,7 @@ export function isCompactionComplete({
 }) {
   if (!sawStart) return false;
   if (phase === "transcript") return runtime === "native" && replaced;
-  if (runtime !== "native") return status === "idle" || latestEventStatus === "idle";
+  if (runtime !== "native") return status === "idle";
   const done = ["ready_to_retry", "applied"];
   return done.includes(status) || done.includes(latestEventStatus) ||
     (replaced && status !== "compacting");
