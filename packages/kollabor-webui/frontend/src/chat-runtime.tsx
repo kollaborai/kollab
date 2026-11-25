@@ -60,7 +60,7 @@ export function toThreadMessageLike(row: ChatRow, turns: Readonly<Record<string,
     role: row.role,
     createdAt: new Date(row.created_at),
     content: row.parts.map(toPart),
-    ...(row.role === "assistant" && row.status === "running" && row.turn_id !== null && turns[row.turn_id]?.state === "running"
+    ...(row.role === "assistant" && (row.status === "running" || row.status === "streaming") && row.turn_id !== null && turns[row.turn_id]?.state === "running"
       ? { status: { type: "running" as const } } : {}),
   };
 }
