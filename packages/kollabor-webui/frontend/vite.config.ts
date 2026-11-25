@@ -267,6 +267,7 @@ const mainConfig = defineConfig({
       "src/plugins/surfaces.test.tsx",
       "src/plugins/wiring.test.tsx",
       "src/plugins/hello-template.test.ts",
+      "tests/voice-mode-toggle.test.tsx",
     ],
     environment: "node",
   },
