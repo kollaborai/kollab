@@ -28,7 +28,17 @@ def _catalog_with_price(field: str, value) -> dict:
 
 
 @pytest.mark.parametrize("field", PRICE_FIELDS)
-@pytest.mark.parametrize("value", [-1, math.inf, math.nan, True, "0.25"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(-1, id="negative"),
+        pytest.param(-(10**400), id="large-negative"),
+        pytest.param(math.inf, id="infinite"),
+        pytest.param(math.nan, id="nan"),
+        pytest.param(True, id="bool"),
+        pytest.param("0.25", id="string"),
+    ],
+)
 def test_rejects_invalid_catalog_prices(field, value):
     errors = validator.validate(_catalog_with_price(field, value))
 
@@ -36,7 +46,10 @@ def test_rejects_invalid_catalog_prices(field, value):
 
 
 @pytest.mark.parametrize("field", PRICE_FIELDS)
-@pytest.mark.parametrize("value", [None, 0, 0.25])
+@pytest.mark.parametrize(
+    "value",
+    [None, 0, 0.25, pytest.param(10**400, id="large-positive-integer")],
+)
 def test_accepts_unknown_and_nonnegative_catalog_prices(field, value):
     errors = validator.validate(_catalog_with_price(field, value))
 

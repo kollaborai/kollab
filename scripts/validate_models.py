@@ -59,7 +59,7 @@ def validate(data: dict) -> list[str]:
             if price is not None and (
                 isinstance(price, bool)
                 or not isinstance(price, (int, float))
-                or not math.isfinite(price)
+                or (isinstance(price, float) and not math.isfinite(price))
                 or price < 0
             ):
                 errors.append(

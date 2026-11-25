@@ -85,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Web UI slash menu distinguishes loading, empty, and unavailable session command catalogs, with retry that preserves the draft (#922).
 - Telegram voice transcription remains local, with private artifact cleanup hardened across failures, timeouts, and cancellation (#931).
 - Model catalog pricing and limits are corrected: dynamic OpenRouter prices stay unknown instead of negative, a cached-input price is corrected, and four output caps persist across refreshes.
+- The web UI terminal sends keys that pile up behind a slow link to a remote agent as one input, instead of one round trip per key (#1431).
 - File saves now reject stale edits even when filesystem timestamps share a tick, preventing one save from silently replacing another (#1434).
 
 ### Security
