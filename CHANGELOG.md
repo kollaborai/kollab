@@ -21,11 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn at once: the agent reads it at its next step. A chat with an ACP harness (Claude Code, Codex) queues the
   message and has no Send Now yet (#1102).
 - Plugins: a service that will not stop now reports the failure and leaves its plugin off, a staged install or update can be cancelled, and the web UI serves an installed plugin's files only while they still match the hash approved at install (#1028).
+- Settings has a Plugins tab: see each plugin's state, turn installed and built-in plugins on or off, start, stop or restart installed and development plugin services, update or remove installed plugins, and add a plugin after reviewing what it adds. Over PhoneLink the list is read-only (#1028).
 - The bundled Hello plugin adds a web view, page, dialog and notice with a dev loop and generated SDK types; its menu row is labeled “Hello Page,” and touch targets grow in the session panel, notices and plugin surfaces (#1028).
 - The web UI loads plugins: an installed plugin can add a right-hand menu row that opens its own page, plus notices, chat tabs and dialogs. A plugin that fails shows Failed to Load while the rest keeps working, and `?plugins=off` in the page URL loads none (#1028).
 
 ### Changed
-- The enrollment issuer decision test is skipped while its CI flake is investigated (#1391).
 - The web UI logo is now a 3D glass K with the electric mist swirling behind it, seen through the glass; it tilts toward the pointer and flares on hover, and falls back to the flat mark without WebGL2 (#1246).
 
 ### Fixed
@@ -83,6 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web fetch extracts JSON-LD first, then omits script and code bodies from fallback text (#925).
 - web-fetch streams responses within byte limits, bounds its complete output, and keeps browser fallback input within the same cap (#924).
 - The Web UI slash menu distinguishes loading, empty, and unavailable session command catalogs, with retry that preserves the draft (#922).
+- Telegram voice transcription remains local, with private artifact cleanup hardened across failures, timeouts, and cancellation (#931).
+- Model catalog pricing and limits are corrected: dynamic OpenRouter prices stay unknown instead of negative, Solar Pro 4 Contributor's cached-input rate is updated, and four output caps persist across refreshes.
 
 ### Security
 - When a package plugin's Python entry fails while loading, Settings shows a fixed safe message and points to the process log for details; plugin-raised text is not copied into plugin error metadata (#1401).

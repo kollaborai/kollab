@@ -106,6 +106,68 @@ def test_map_openrouter_entry_to_kollab_schema():
     assert mapped["released"] == upd.unix_to_date(1789123456)
 
 
+def test_openrouter_unknown_prices_clear_stale_values_and_keep_free_prices():
+    dynamic_router = {
+        "id": "openrouter/auto",
+        "context_length": 100000,
+        "pricing": {"prompt": "-1", "completion": "-1"},
+    }
+    data = {
+        "models": {
+            "openrouter/auto": {
+                "provider": "openrouter",
+                "context_window": 100000,
+                "pricing_in": 25.0,
+                "pricing_out": 50.0,
+            }
+        }
+    }
+
+    changed, _ = upd.apply_merge(data, {}, {"data": [dynamic_router]}, today="2026-11-24")
+
+    assert changed is True
+    assert data["models"]["openrouter/auto"]["pricing_in"] is None
+    assert data["models"]["openrouter/auto"]["pricing_out"] is None
+    free = upd.map_openrouter_model(
+        {"pricing": {"prompt": "0", "completion": "0"}}
+    )
+    assert free["pricing_in"] == 0.0
+    assert free["pricing_out"] == 0.0
+
+
+def test_models_dev_invalid_price_becomes_unknown():
+    mapped = upd.map_models_dev_model(
+        "model",
+        {
+            "limit": {"context": 100},
+            "pricing": {"input": -1.0, "output": 0.0},
+        },
+        "openai",
+    )
+
+    assert mapped["pricing_in"] is None
+    assert mapped["pricing_out"] == 0.0
+
+
+def test_openrouter_model_output_caps_survive_catalog_refresh():
+    expected = {
+        "deepseek/deepseek-v4-flash-vision-exp": 262144,
+        "gryphe/mythomax-l2-13b": 4096,
+        "meta-llama/llama-3.1-8b-instruct": 16384,
+        "z-ai/glm-5.3-flash": 131072,
+    }
+
+    for model_id, limit in expected.items():
+        mapped = upd.map_openrouter_model(
+            {
+                "id": f"{model_id}:nitro",
+                "context_length": 100000,
+                "top_provider": {"max_completion_tokens": limit * 2},
+            }
+        )
+        assert mapped["max_output"] == limit
+
+
 def test_unknown_source_providers_are_skipped():
     additions, updates = upd.merge_sources(
         json.loads(REGISTRY.read_text()),

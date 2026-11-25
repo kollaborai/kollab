@@ -31,6 +31,7 @@ model-directory-refresh workflow open a PR with the diff.
 
 import argparse
 import json
+import math
 import sys
 import urllib.request
 from datetime import date, datetime, timezone
@@ -65,6 +66,16 @@ SOURCED_FIELDS = (
     "released",
 )
 
+# OpenRouter's top-provider cap can be larger than the model-level completion
+# limit. Keep these sourced values aligned with the public model FAQs so a
+# catalog refresh does not overwrite them with a provider-specific cap.
+OPENROUTER_MAX_OUTPUT_OVERRIDES = {
+    "deepseek/deepseek-v4-flash-vision-exp": 262144,  # openrouter.ai/deepseek/deepseek-v4-flash-vision-exp
+    "gryphe/mythomax-l2-13b": 4096,  # openrouter.ai/gryphe/mythomax-l2-13b/providers
+    "meta-llama/llama-3.1-8b-instruct": 16384,  # openrouter.ai/meta-llama/llama-3.1-8b-instruct/providers
+    "z-ai/glm-5.3-flash": 131072,  # openrouter.ai/z-ai/glm-5.3-flash
+}
+
 
 def fetch_json(url: str) -> dict:
     request = urllib.request.Request(
@@ -88,8 +99,20 @@ def openrouter_catalog_id(model_id: str) -> str:
     return model_id.rsplit(":", 1)[0] if ":" in model_id else model_id
 
 
-def _as_number(value) -> float:
-    return float(value) if not isinstance(value, bool) else 0.0
+def _catalog_price(value, *, multiplier: float = 1.0, precision: int = 6) -> float | None:
+    """Return a finite, non-negative catalog price, or None when unknown."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        price = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(price) or price < 0:
+        return None
+    scaled = price * multiplier
+    if not math.isfinite(scaled):
+        return None
+    return round(scaled, precision)
 
 
 def map_models_dev_model(name: str, entry: dict, provider_slug: str) -> dict:
@@ -119,12 +142,13 @@ def map_models_dev_model(name: str, entry: dict, provider_slug: str) -> dict:
     pricing = entry.get("pricing")
     if not isinstance(pricing, dict):
         pricing = {}
-    if isinstance(pricing.get("input"), (int, float)):
-        mapped["pricing_in"] = round(_as_number(pricing["input"]), 6)
-    if isinstance(pricing.get("output"), (int, float)):
-        mapped["pricing_out"] = round(_as_number(pricing["output"]), 6)
-    if isinstance(pricing.get("cache_read"), (int, float)):
-        mapped["pricing_cached_in"] = round(_as_number(pricing["cache_read"]), 6)
+    for source_field, target_field in (
+        ("input", "pricing_in"),
+        ("output", "pricing_out"),
+        ("cache_read", "pricing_cached_in"),
+    ):
+        if source_field in pricing:
+            mapped[target_field] = _catalog_price(pricing[source_field])
     return mapped
 
 
@@ -139,6 +163,11 @@ def map_openrouter_model(entry: dict) -> dict:
     max_completion = top_provider.get("max_completion_tokens")
     if isinstance(max_completion, int) and max_completion > 0:
         mapped["max_output"] = max_completion
+    model_id = entry.get("id")
+    if isinstance(model_id, str):
+        output_override = OPENROUTER_MAX_OUTPUT_OVERRIDES.get(openrouter_catalog_id(model_id))
+        if output_override is not None:
+            mapped["max_output"] = output_override
     architecture = entry.get("architecture")
     if not isinstance(architecture, dict):
         architecture = {}
@@ -155,13 +184,15 @@ def map_openrouter_model(entry: dict) -> dict:
     if not isinstance(pricing, dict):
         pricing = {}
     # OpenRouter prices are per-token strings; the directory is per-million.
-    if pricing.get("prompt") not in (None, ""):
-        mapped["pricing_in"] = round(_as_number(pricing["prompt"]) * 1_000_000, 4)
-    if pricing.get("completion") not in (None, ""):
-        mapped["pricing_out"] = round(_as_number(pricing["completion"]) * 1_000_000, 4)
-    cache_read = pricing.get("input_cache_read")
-    if cache_read not in (None, ""):
-        mapped["pricing_cached_in"] = round(_as_number(cache_read) * 1_000_000, 4)
+    for source_field, target_field in (
+        ("prompt", "pricing_in"),
+        ("completion", "pricing_out"),
+        ("input_cache_read", "pricing_cached_in"),
+    ):
+        if source_field in pricing:
+            mapped[target_field] = _catalog_price(
+                pricing[source_field], multiplier=1_000_000, precision=4
+            )
     if isinstance(entry.get("created"), int) and not isinstance(entry["created"], bool):
         mapped["released"] = unix_to_date(entry["created"])
     return mapped

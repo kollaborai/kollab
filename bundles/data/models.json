@@ -1595,7 +1595,7 @@
     "deepseek/deepseek-v4-flash-vision-exp": {
       "provider": "openrouter",
       "context_window": 1048576,
-      "max_output": 393216,
+      "max_output": 262144,
       "supports_vision": true,
       "supports_tools": true,
       "supports_thinking": true,
@@ -1603,7 +1603,7 @@
       "pricing_out": 1.32,
       "pricing_cached_in": 0.028,
       "released": "2026-08-21",
-      "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
+      "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them. max_output aligned to OpenRouter FAQ cap 262144; catalog API reported 393216."
     },
     "deepseek/deepseek-v4-pro": {
       "provider": "openrouter",
@@ -2640,14 +2640,14 @@
     "gryphe/mythomax-l2-13b": {
       "provider": "openrouter",
       "context_window": 8192,
-      "max_output": 7372,
+      "max_output": 4096,
       "supports_vision": false,
       "supports_tools": false,
       "supports_thinking": false,
       "pricing_in": 0.3,
       "pricing_out": 0.5,
       "released": "2023-07-02",
-      "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them.",
+      "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them. max_output aligned to OpenRouter FAQ cap 4096; catalog API reported 7372.",
       "pricing_cached_in": 0.2
     },
     "ibm-granite/granite-4.2-8b": {
@@ -2853,14 +2853,14 @@
     "meta-llama/llama-3.1-8b-instruct": {
       "provider": "openrouter",
       "context_window": 131072,
-      "max_output": 117964,
+      "max_output": 16384,
       "supports_vision": false,
       "supports_tools": true,
       "supports_thinking": false,
       "pricing_in": 0.05,
       "pricing_out": 0.08,
       "released": "2024-07-23",
-      "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them.",
+      "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them. max_output aligned to OpenRouter FAQ cap 16384; catalog API reported 117964.",
       "pricing_cached_in": 0.025
     },
     "meta-llama/llama-3.2-1b-instruct": {
@@ -3683,8 +3683,8 @@
       "supports_vision": false,
       "supports_tools": false,
       "supports_thinking": false,
-      "pricing_in": -1000000.0,
-      "pricing_out": -1000000.0,
+      "pricing_in": null,
+      "pricing_out": null,
       "released": "2026-09-21",
       "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
     },
@@ -4541,8 +4541,8 @@
       "supports_vision": true,
       "supports_tools": true,
       "supports_thinking": true,
-      "pricing_in": -1000000.0,
-      "pricing_out": -1000000.0,
+      "pricing_in": null,
+      "pricing_out": null,
       "released": "2026-11-05",
       "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
     },
@@ -4553,8 +4553,8 @@
       "supports_vision": true,
       "supports_tools": true,
       "supports_thinking": true,
-      "pricing_in": -1000000.0,
-      "pricing_out": -1000000.0,
+      "pricing_in": null,
+      "pricing_out": null,
       "released": "2026-07-17",
       "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
     },
@@ -4565,8 +4565,8 @@
       "supports_vision": true,
       "supports_tools": true,
       "supports_thinking": true,
-      "pricing_in": -1000000.0,
-      "pricing_out": -1000000.0,
+      "pricing_in": null,
+      "pricing_out": null,
       "released": "2026-11-05",
       "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
     },
@@ -4576,8 +4576,8 @@
       "supports_vision": false,
       "supports_tools": false,
       "supports_thinking": false,
-      "pricing_in": -1000000.0,
-      "pricing_out": -1000000.0,
+      "pricing_in": null,
+      "pricing_out": null,
       "released": "2025-12-05",
       "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
     },
@@ -4598,8 +4598,8 @@
       "supports_vision": false,
       "supports_tools": false,
       "supports_thinking": false,
-      "pricing_in": -1000000.0,
-      "pricing_out": -1000000.0,
+      "pricing_in": null,
+      "pricing_out": null,
       "released": "2026-06-13",
       "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
     },
@@ -4609,8 +4609,8 @@
       "supports_vision": false,
       "supports_tools": true,
       "supports_thinking": true,
-      "pricing_in": -1000000.0,
-      "pricing_out": -1000000.0,
+      "pricing_in": null,
+      "pricing_out": null,
       "released": "2026-04-21",
       "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
     },
@@ -5681,8 +5681,8 @@
       "supports_vision": true,
       "supports_tools": true,
       "supports_thinking": true,
-      "pricing_in": -1000000.0,
-      "pricing_out": -1000000.0,
+      "pricing_in": null,
+      "pricing_out": null,
       "released": "2026-09-25",
       "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
     },
@@ -6090,7 +6090,7 @@
     "z-ai/glm-5.3-flash": {
       "provider": "openrouter",
       "context_window": 1048576,
-      "max_output": 943718,
+      "max_output": 131072,
       "supports_vision": true,
       "supports_tools": true,
       "supports_thinking": true,
@@ -6098,7 +6098,7 @@
       "pricing_out": 0.38,
       "pricing_cached_in": 0.02,
       "released": "2026-08-26",
-      "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them."
+      "notes": "Auto-generated from OpenRouter on 2026-11-14; review capability and pricing before relying on them. max_output aligned to OpenRouter FAQ cap 131072; catalog API reported 943718."
     },
     "z-ai/glm-5.3-flashx": {
       "provider": "openrouter",
@@ -6583,7 +6583,7 @@
       "supports_thinking": true,
       "pricing_in": 0.09,
       "pricing_out": 0.36,
-      "pricing_cached_in": 0.009,
+      "pricing_cached_in": 0.018,
       "released": "2026-11-24",
       "notes": "Auto-generated from OpenRouter on 2026-11-24; review capability and pricing before relying on them."
     },

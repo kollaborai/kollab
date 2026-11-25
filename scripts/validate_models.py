@@ -13,6 +13,7 @@ entries, and bump ``_meta.updated`` to today.
 """
 
 import json
+import math
 import sys
 from datetime import date
 from pathlib import Path
@@ -28,6 +29,7 @@ BOOL_FIELDS = (
     "supports_sampling",
     "retired",
 )
+PRICE_FIELDS = ("pricing_in", "pricing_out", "pricing_cached_in")
 
 
 def validate(data: dict) -> list[str]:
@@ -52,6 +54,17 @@ def validate(data: dict) -> list[str]:
             errors.append(
                 f"{name}: max_output must be a positive int or null, got {out!r}"
             )
+        for field in PRICE_FIELDS:
+            price = info.get(field)
+            if price is not None and (
+                isinstance(price, bool)
+                or not isinstance(price, (int, float))
+                or not math.isfinite(price)
+                or price < 0
+            ):
+                errors.append(
+                    f"{name}: {field} must be a finite non-negative number or null, got {price!r}"
+                )
         for field in BOOL_FIELDS:
             if field in info and not isinstance(info[field], bool):
                 errors.append(f"{name}: {field} must be true/false")

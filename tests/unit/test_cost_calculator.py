@@ -137,6 +137,22 @@ class TestPricingRegistryLoad(unittest.TestCase):
                 reg.get_pricing(provider, model), f"{provider}/{model}"
             )
 
+    def test_dynamic_router_prices_remain_unknown(self):
+        reg = PricingRegistry()
+        reg.load_defaults()
+
+        for model in (
+            "nvidia/switchyard",
+            "openrouter/auto",
+            "openrouter/auto-beta",
+            "openrouter/auto-code",
+            "openrouter/bodybuilder",
+            "openrouter/fusion",
+            "openrouter/pareto-code",
+            "typesafe/jev-router",
+        ):
+            self.assertIsNone(reg.get_pricing("openrouter", model), model)
+
 
 class TestCostCalculator(unittest.TestCase):
     def setUp(self):
