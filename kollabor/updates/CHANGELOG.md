@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finishes its turn. Send Now under the message, or Cmd+Enter (Ctrl+Enter off a Mac), sends it into the running
   turn at once: the agent reads it at its next step. A chat with an ACP harness (Claude Code, Codex) queues the
   message and has no Send Now yet (#1102).
+- Busy WebUI chats now show daemon-owned queued messages, stage images for retry-safe admission, and offer FIFO Send Now with per-message removal (#1366).
 - Plugins: a service that will not stop now reports the failure and leaves its plugin off, a staged install or update can be cancelled, and the web UI serves an installed plugin's files only while they still match the hash approved at install (#1028).
 - Settings has a Plugins tab: see each plugin's state, turn installed and built-in plugins on or off, start, stop or restart installed and development plugin services, update or remove installed plugins, and add a plugin after reviewing what it adds. Over PhoneLink the list is read-only (#1028).
 - The bundled Hello plugin adds a web view, page, dialog and notice with a dev loop and generated SDK types; its menu row is labeled “Hello Page,” and touch targets grow in the session panel, notices and plugin surfaces (#1028).
