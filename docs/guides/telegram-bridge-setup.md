@@ -1,7 +1,7 @@
 ---
 title: "Telegram Bridge Setup"
 created: 2026-04-05
-modified: 2026-11-23
+modified: 2026-11-24
 status: active
 ---
 # Telegram Bridge Setup
@@ -93,8 +93,13 @@ transcription descendants before reading the transcript and removing the run's
 files. On timeout or cancellation it kills and reaps those processes before
 cleanup. Diagnostics do not contain transcript text or credentials.
 
-Install the Whisper CLI on the Linux machine running Kollab, with `/proc` mounted
-and `python3` available on `PATH`:
+On macOS and Windows the bridge runs `whisper` directly in a private temporary
+directory and removes that directory after the process exits. Those systems have
+no child subreaper, so processes that Whisper detaches cannot be tracked there; on
+timeout or cancellation only the Whisper process itself is killed and reaped.
+
+Install the Whisper CLI in the environment that runs Kollab. On Linux, `/proc`
+must be mounted and `python3` must be on `PATH`:
 
 ```bash
 pip install openai-whisper
@@ -172,20 +177,21 @@ the other instance.
 
 ### Voice Message Transcription Fails
 
-Local Telegram transcription requires Linux with `/proc` mounted, and `python3`
-and `whisper` on `PATH`. Install `openai-whisper` in the environment used by
-Kollab. An isolated child subreaper owns each private transcription directory;
-it waits for all CLI descendants, including detached writers, before reading the
-transcript. On cancellation or the 60-second deadline, it kills and reaps those
-processes before removing audio and partial output. Concurrent runs have separate
-directories. The bridge forwards a safe failure notice when transcription fails
-and continues processing text messages.
+Local Telegram transcription needs `whisper` on `PATH`; the log names it when it is
+missing. Install `openai-whisper` in the environment used by Kollab. On Linux,
+`python3` must also be on `PATH` and `/proc` must be mounted. An isolated child
+subreaper owns each private transcription directory; it waits for all CLI
+descendants, including detached writers, before reading the transcript. On
+cancellation or the 60-second deadline, it kills and reaps those processes before
+removing audio and partial output. Concurrent runs have separate directories. The
+bridge forwards a safe failure notice when transcription fails and continues
+processing text messages.
 
-Other platforms receive the failure notice for audio because this CLI path
-requires kernel-backed descendant ownership. If an operating-system error prevents
-the owner from proving all children have exited, it reports failure and retains
-the private run directory. Remove that directory only after verifying the run's
-processes have exited; the bridge never deletes files while a writer may remain.
+On Linux, if an operating-system error prevents the owner from proving all children
+have exited, it reports failure and retains the private run directory. Remove that
+directory only after verifying the run's processes have exited; the Linux owner
+never deletes files while a writer may remain. macOS and Windows cannot make that
+proof, so they remove the directory once the Whisper process has exited.
 
 ### Bridge Stops Working After Restart
 
