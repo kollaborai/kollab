@@ -126,6 +126,7 @@ function installRecorder(cfg) {
     flowSeq: Number.isInteger(restore?.flowSeq) ? restore.flowSeq : null,
     streamTurns: Array.isArray(restore?.streamTurns) ? restore.streamTurns : [],
     streamInputs: Array.isArray(restore?.streamInputs) ? restore.streamInputs : [],
+    streamRows: [],
     expectedActiveTurn: restore?.expectedActiveTurn ?? null,
     latestSnapshot: null,
     lastStreamSeq: null,
@@ -201,6 +202,17 @@ function installRecorder(cfg) {
     }
     if (kind === "stream") {
       const data = event.data ?? {};
+      if (type === "snapshot" || type === "replace") {
+        rec.streamRows = JSON.parse(JSON.stringify(data.rows ?? []));
+      } else if (type === "row.upsert") {
+        rec.streamRows = [...rec.streamRows.filter((row) => row.id !== data.id), JSON.parse(JSON.stringify(data))];
+      } else if (type === "row.delete") {
+        rec.streamRows = rec.streamRows.filter((row) => row.id !== data.id);
+      } else if (type === "row.append") {
+        const row = rec.streamRows.find((item) => item.id === data.id);
+        const part = row?.parts?.[data.part];
+        if (part && typeof part.text === "string") part.text += data.text;
+      }
       if (type === "snapshot") {
         rec.streamReady = true;
         rec.latestSnapshot = {
@@ -326,6 +338,7 @@ function installRecorder(cfg) {
   // The chat, sampled once per animation frame and stored when it changes.
   let nodeSeq = 0;
   const nodeId = (el) => (el.__recNode ??= ++nodeSeq);
+  rec.snapshotStreamUserRows = () => JSON.parse(JSON.stringify(rec.streamRows.filter((row) => row.role === "user")));
   rec.snapshotUserRows = () => [...document.querySelectorAll('[data-role="user"]')].map((el) => ({ id: nodeId(el), text: el.textContent ?? "" }));
   const hash = (text) => { let h = 2166136261; for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
   let viewport = null;
@@ -860,6 +873,7 @@ async function record(flow, session, browser, target) {
       const from = `chat-recorder-${LABEL}`;
       const text = `${tag} hub note arriving during the active turn. Acknowledge it briefly, then finish the current request.`;
       const beforeUsers = await page.evaluate(() => window.__rec.snapshotUserRows?.() ?? []);
+      const beforeStreamUsers = await page.evaluate(() => window.__rec.snapshotStreamUserRows?.() ?? []);
       const afterIndex = await page.evaluate(() => window.__rec.net.length);
       await postFromClient("/hub/messages", {
         target: agent,
@@ -868,8 +882,12 @@ async function record(flow, session, browser, target) {
         content: text,
       }, "HUB NOTE ARRIVES MID-TURN");
       await waitForStreamRowKind("note", { whileRunning: true, afterIndex, hubNote: { from, text } });
-      if (typeof waitForRenderedHubNote === "function") await waitForRenderedHubNote(from, text);
+      await waitForRenderedHubNote(from, text);
       const afterUsers = await page.evaluate(() => window.__rec.snapshotUserRows?.() ?? []);
+      const afterStreamUsers = await page.evaluate(() => window.__rec.snapshotStreamUserRows?.() ?? []);
+      if (beforeStreamUsers.some((before) => !afterStreamUsers.some((after) => after.id === before.id && JSON.stringify(after) === JSON.stringify(before)))) {
+        throw new Error("an existing stream user row changed after the hub note");
+      }
       if (beforeUsers.some((before) => !afterUsers.some((after) => after.id === before.id && after.text === before.text))) {
         throw new Error("an existing user row changed after the hub note");
       }
