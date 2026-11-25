@@ -37,7 +37,7 @@ from .acp_bridge import (
     ACPSteeringUnconfirmed,
 )
 from .acp_state import ACPBindingStore
-from .agent_hud import AgentHudEntry, format_agent_hud
+from .agent_hud import AgentHudEntry, build_hub_note, format_agent_hud
 
 logger = logging.getLogger(__name__)
 
@@ -794,6 +794,7 @@ class ACPOrchestrator:
                     turn_id=admission.turn_id,
                     history_key=admission.history_key,
                     generation=admission.generation,
+                    hub_note=(origin or {}).get("hub_note"),
                 )
             except Exception as exc:
                 # Admission is already owned. Remove this admission (by identity,
@@ -989,11 +990,14 @@ class ACPOrchestrator:
         entry = AgentHudEntry(
             section="hub", label=f"{message.from_identity}->{message.to}",
             content=f"[hub channel: {message.from_identity} -> {message.to}{thread}{reply}]\n{message.content}",
+            message_id=message.id,
+            hub_note=build_hub_note(message, observed=True),
+            hub_admission="note",
         )
         # Written as it arrives, like a native agent's hub message, so a watching
         # page reloads it now rather than when the running turn ends. The flush
         # hands the batch to the model without writing it again.
-        row_id = f"observations-{uuid.uuid4().hex}"
+        row_id = message.id
         try:
             self._record_user(
                 row_id,
@@ -1001,6 +1005,7 @@ class ACPOrchestrator:
                 "observation",
                 None,
                 track_completion=True,
+                hub_note=entry.hub_note,
             )
         except Exception as error:
             logger.warning(
@@ -1009,6 +1014,15 @@ class ACPOrchestrator:
             pending.append((row_id, entry))
         else:
             self._observation_rows.append(row_id)
+        publish_semantic(
+            self.event_bus,
+            "hub_message",
+            message_id=row_id,
+            request_id=row_id,
+            input_source="observation",
+            hub_note=entry.hub_note,
+            hub_admission="note",
+        )
         self._observations.append(entry)
         self._observation_count += 1
         if not self.is_processing:
@@ -1037,6 +1051,8 @@ class ACPOrchestrator:
                     None,
                     track_completion=True,
                     retry=True,
+                    hub_note=entry.hub_note,
+                    hub_admission=entry.hub_admission,
                 )
             except Exception as error:
                 logger.warning(
@@ -1070,13 +1086,63 @@ class ACPOrchestrator:
         # The turn takes the newest row's id, so its reply threads under that
         # row. The batch gets no row of its own: each message is persisted by
         # its own row, so a batch row would only duplicate them (#581).
-        request_id = rows[-1] if rows else f"observations-{uuid.uuid4().hex}"
+        request_id = next(
+            (
+                entry.message_id
+                for entry in reversed(entries)
+                if entry.message_id
+            ),
+            None,
+        ) or (rows[-1] if rows else f"observations-{uuid.uuid4().hex}")
         try:
             self.admit(text, request_id=request_id, source="observation", record=False)
         except Exception:
             self._observation_rows = rows + self._observation_rows
             return
-        for stale in rows[:-1]:
+        input_entry = next(
+            (
+                entry
+                for entry in reversed(entries)
+                if entry.message_id == request_id and entry.hub_note is not None
+            ),
+            None,
+        )
+        if input_entry is not None:
+            input_entry = replace(input_entry, hub_admission="input")
+            self._observations = deque(
+                (
+                    replace(entry, hub_admission="input")
+                    if entry.message_id == request_id
+                    else entry
+                    for entry in self._observations
+                ),
+                maxlen=self._observations.maxlen,
+            )
+            self._unwritten_observations = deque(
+                (
+                    (
+                        row_id,
+                        replace(entry, hub_admission="input")
+                        if entry.message_id == request_id
+                        else entry,
+                    )
+                    for row_id, entry in self._unwritten_observations
+                ),
+                maxlen=self._unwritten_observations.maxlen,
+            )
+            self._promote_hub_admission(request_id)
+            publish_semantic(
+                self.event_bus,
+                "hub_message",
+                message_id=request_id,
+                request_id=request_id,
+                input_source="observation",
+                hub_note=input_entry.hub_note,
+                hub_admission="input",
+            )
+        for stale in rows:
+            if stale == request_id:
+                continue
             self._parents.pop(stale, None)
             self._user_history_tasks.pop(stale, None)
         self._sent_observations[request_id] = (list(self._observations), self._observation_count)
@@ -1163,7 +1229,10 @@ class ACPOrchestrator:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
         for message in reversed(getattr(manager, "messages", None) or []):
-            if (message.get("metadata") or {}).get("request_id") == request_id:
+            if (
+                message.get("role") == "user"
+                and (message.get("metadata") or {}).get("request_id") == request_id
+            ):
                 return message.get("uuid")
         return None
 
@@ -1211,6 +1280,67 @@ class ACPOrchestrator:
             if display is not None:
                 display.display_system_message("Conversation history not saved for this message.")
 
+    def _promote_hub_admission(self, request_id: str) -> None:
+        """Update the observation's existing transcript row when it starts a turn."""
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        manager = getattr(llm, "conversation_manager", None)
+        row_uuid = None
+        for row in getattr(manager, "messages", ()) or ():
+            if not isinstance(row, dict):
+                continue
+            metadata = row.get("metadata")
+            if (
+                not isinstance(metadata, dict)
+                or metadata.get("provider") != "acp"
+                or metadata.get("source") != "observation"
+                or metadata.get("request_id") != request_id
+            ):
+                continue
+            metadata["hub_admission"] = "input"
+            candidate = row.get("uuid")
+            if isinstance(candidate, str) and candidate:
+                row_uuid = candidate
+        for message in getattr(llm, "conversation_history", ()) or ():
+            metadata = getattr(message, "metadata", None)
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("provider") == "acp"
+                and metadata.get("source") == "observation"
+                and metadata.get("request_id") == request_id
+            ):
+                metadata["hub_admission"] = "input"
+
+        logger_service = getattr(llm, "conversation_logger", None)
+        update = getattr(logger_service, "update_user_message_metadata", None)
+        if row_uuid and callable(update):
+
+            async def update_after_write() -> None:
+                history_task = self._user_history_tasks.get(request_id)
+                if history_task is not None:
+                    try:
+                        await history_task
+                    except Exception:
+                        return
+                await update(
+                    row_uuid,
+                    expected_metadata={
+                        "provider": "acp",
+                        "request_id": request_id,
+                        "source": "observation",
+                    },
+                    updates={"hub_admission": "input"},
+                )
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            task = loop.create_task(
+                update_after_write(), name=f"acp-hub-row-{request_id}"
+            )
+            self._history_tasks.add(task)
+            task.add_done_callback(self._history_task_done)
+
     def _record_user(
         self, request_id: str, text: str, source: str, thread_id: str | None,
         *,
@@ -1222,6 +1352,8 @@ class ACPOrchestrator:
         turn_id: int | None = None,
         history_key: str | None = None,
         generation: int | None = None,
+        hub_note: dict[str, Any] | None = None,
+        hub_admission: str | None = None,
     ) -> None:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
@@ -1231,6 +1363,16 @@ class ACPOrchestrator:
             "source": source,
             "thread_id": thread_id,
         }
+        if isinstance(hub_note, dict):
+            metadata.update(
+                {
+                    "hub_message": True,
+                    "hub_message_id": request_id,
+                    "hub_note": dict(hub_note),
+                    "hub_admission": hub_admission
+                    or ("note" if source == "observation" else "input"),
+                }
+            )
         if isinstance(turn_id, int) and not isinstance(turn_id, bool) and turn_id > 0:
             metadata["turn_id"] = turn_id
         if isinstance(history_key, str) and history_key:
@@ -1326,9 +1468,21 @@ class ACPOrchestrator:
         # turn_complete. The turn's own opening row stays quiet, like the
         # native user_message path -- its sender shows it locally and
         # turn_complete reloads everyone.
-        if source in {"agent", "observation", "steering"}:
+        if source in {"agent", "hub_message", "steering"}:
+            event_fields = {
+                "message_id": request_id,
+                "request_id": request_id,
+                "input_source": source,
+            }
+            if isinstance(hub_note, dict):
+                event_fields.update(
+                    {
+                        "hub_note": dict(hub_note),
+                        "hub_admission": "note" if source == "observation" else "input",
+                    }
+                )
             publish_semantic(
-                self.event_bus, "hub_message", message_id=request_id, input_source=source
+                self.event_bus, "hub_message", **event_fields
             )
         display = getattr(llm, "message_display_service", None)
         # Hub already drew incoming messages. The batched model context is
@@ -1373,7 +1527,13 @@ class ACPOrchestrator:
                 "ACP turn changed before steering was confirmed"
             )
         record_request_id = request_id or f"steering-{uuid.uuid4().hex}"
-        self._record_user(record_request_id, text, "steering", thread_id)
+        self._record_user(
+            record_request_id,
+            text,
+            "steering",
+            thread_id,
+            hub_note=(origin or {}).get("hub_note"),
+        )
         self._parents.pop(record_request_id, None)
         if request_id and owner_correlatable:
             return {
@@ -1995,12 +2155,17 @@ class ACPOrchestrator:
             publish_semantic(
                 self.event_bus,
                 kind,
-                **{k: v for k, v in update.items() if k not in {"kind", "request_id", "turn_id", "source", "thread_id"}},
+                **{
+                    k: v
+                    for k, v in update.items()
+                    if k not in {"kind", "request_id", "turn_id", "source", "thread_id"}
+                },
                 request_id=update.get("request_id"),
                 turn_id=update.get("turn_id"),
                 input_source=update.get("source", "acp"),
                 thread_id=update.get("thread_id"),
-                acp_passthrough=kind in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"},
+                acp_passthrough=kind
+                in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"},
             )
 
         if kind == "turn_start" and persist_dispatch is not None:
