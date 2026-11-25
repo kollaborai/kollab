@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   analyzeChatFrames,
   CHAT_RECORDER_FLOWS,
+  classifyChatRuntime,
   parseRuntimeMatrix,
 } from "../scripts/chat-recorder-analysis.mjs";
 
@@ -97,5 +98,12 @@ describe("chat recorder analysis", () => {
     ]) {
       expect(() => parseRuntimeMatrix(value)).toThrow();
     }
+  });
+
+  it("classifies native and ACP sessions from engine session metadata", () => {
+    expect(classifyChatRuntime({ provider: "anthropic" })).toBe("native");
+    expect(classifyChatRuntime({ provider: "acp", harness: "OpenAI Codex CLI" })).toBe("codex-cli");
+    expect(classifyChatRuntime({ provider: "ACP", profile: "claude-code" })).toBe("claude-code");
+    expect(classifyChatRuntime({ provider: "acp", harness: "unknown harness" })).toBe("acp");
   });
 });
