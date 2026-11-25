@@ -24,6 +24,11 @@ type Job = {
     omitted?: { services?: number; uses?: number; service_secrets?: number; contributions?: number };
     python?: unknown; engine?: unknown; web?: unknown; agents?: unknown; contributes?: unknown; hooks?: unknown; mcp?: unknown };
 };
+type NormalizedReviewManifest = NonNullable<Job["manifest"]> & {
+  omitted: { services: number; uses: number; service_secrets: number; contributions: number };
+  contributes: ReturnType<typeof normalizePluginContributes>;
+};
+type NormalizedJob = Omit<Job, "manifest"> & { manifest?: NormalizedReviewManifest };
 export const errorText = (error: unknown): string => {
   try {
     if (error instanceof ApiError) {
@@ -91,7 +96,7 @@ function safeOmissionCount(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-function normalizeReviewManifest(value: unknown, pluginId: string | undefined): Job["manifest"] | undefined {
+function normalizeReviewManifest(value: unknown, pluginId: string | undefined): NormalizedReviewManifest | undefined {
   const raw = objectRecord(value);
   if (!raw) return undefined;
   const services = objectRecord(raw.services);
@@ -158,7 +163,7 @@ function normalizeReviewManifest(value: unknown, pluginId: string | undefined): 
 }
 
 /** One safe shape for job responses before review text reaches the dialog. */
-export function normalizeReviewJob(value: unknown): Job | null {
+export function normalizeReviewJob(value: unknown): NormalizedJob | null {
   const raw = objectRecord(value);
   const jobId = safePluginText(raw?.job_id, 128);
   if (!raw || !jobId) return null;

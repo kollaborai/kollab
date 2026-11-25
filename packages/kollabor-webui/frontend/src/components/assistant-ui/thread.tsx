@@ -897,7 +897,16 @@ const Composer: FC<{
       match.entry.k.toast(pluginCommandFailure(match.entry.name, error));
     };
     const clearSavedDraft = () => {
-      if (commandSession && loadComposerDraft(commandSession) === draft) {
+      if (
+        commandSession &&
+        canRestorePluginCommandDraft(
+          composerRevisionRef.current,
+          clearedRevision,
+          currentDraftKeyRef.current,
+          commandSession,
+        ) &&
+        loadComposerDraft(commandSession) === draft
+      ) {
         saveComposerDraft(commandSession, "");
       }
     };

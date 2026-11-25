@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 _INVENTORY_TEXT_LIMIT = 4096
 _DECLARATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_PLUGIN_CONTRIBUTION_KINDS = ("menu", "views", "pages", "modals", "slash", "renderers")
 _INVENTORY_INVISIBLE_CONTROLS = re.compile(r"[\u00ad\u200b-\u200d\u202a-\u202e\u2060\u2066-\u2069\ufeff]")
 _PLUGIN_INVENTORY_STATES = {"ok", "error", "off", "stopping", "stop-failed", "changed-on-disk", "skipped"}
 _SERVICE_INVENTORY_STATES = {
@@ -675,7 +676,17 @@ def _bounded_inventory_text(
 
 def _bounded_inventory_identifier(value: object, limit: int = _INVENTORY_TEXT_LIMIT) -> str | None:
     clean = _bounded_inventory_text(value, limit, reject_sensitive=False)
-    return None if clean is None or contains_sensitive_text(clean) else clean
+    if clean is None:
+        return None
+    if contains_sensitive_text(clean):
+        namespace_value = clean.rsplit(":", 1)[-1]
+        if (
+            ":" not in clean
+            or not _DECLARATION_ID.fullmatch(clean)
+            or contains_sensitive_text(namespace_value)
+        ):
+            return None
+    return clean
 
 
 def _normalize_web_dist_path(value: object) -> str | None:
@@ -822,7 +833,7 @@ def _contribution_identity(kind: str, value: str | dict) -> str | None:
 
 
 def _normalize_contributes(value: object) -> tuple[dict, int]:
-    kinds = ("menu", "views", "pages", "modals", "slash", "renderers")
+    kinds = _PLUGIN_CONTRIBUTION_KINDS
     result = {kind: [] for kind in kinds}
     if not isinstance(value, dict):
         return result, 1
@@ -1080,7 +1091,14 @@ def _normalize_plugin_entry(value: object) -> dict | None:
             omitted_option_labels += max(0, len(labels) - _MAX_PLUGIN_OPTION_LABELS)
     raw_contributes = value.get("contributes", {})
     contributes, dropped_contributions = _normalize_contributes(raw_contributes)
-    omitted_contributions = _reported_omissions(value, "contributions") + dropped_contributions
+    missing_contributions = (
+        sum(kind not in raw_contributes for kind in _PLUGIN_CONTRIBUTION_KINDS)
+        if "contributes" in value and isinstance(raw_contributes, dict)
+        else 0
+    )
+    omitted_contributions = (
+        _reported_omissions(value, "contributions") + dropped_contributions + missing_contributions
+    )
     version = _bounded_inventory_text(value.get("version"), 256)
     source = _bounded_inventory_text(value.get("source"))
     raw_commit = value.get("commit")

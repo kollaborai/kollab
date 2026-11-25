@@ -249,8 +249,9 @@ function normalizePluginContributions(value: unknown, requireAllKinds = false): 
       const id = safeIdentifier(row?.id, 128);
       const label = safeText(row?.label, 256);
       const open = normalizeOpenTarget(row?.open);
-      const icon = row?.icon === undefined ? undefined : safeText(row.icon, 64);
-      if (id && isPluginDeclarationId(id) && label && open && (row?.icon === undefined || icon)) {
+      const iconAbsent = row?.icon === undefined || row?.icon === null;
+      const icon = iconAbsent ? undefined : safeText(row?.icon, 64);
+      if (id && isPluginDeclarationId(id) && label && open && (iconAbsent || icon)) {
         if (seen.has(id)) {
           malformed = true;
           omissions += 1;

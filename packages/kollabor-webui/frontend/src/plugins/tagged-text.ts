@@ -10,6 +10,7 @@ const FENCE_OPEN = / {0,3}(`{3,}|~{3,})/y;
 const FENCE_CLOSE = /^((?: {0,3}>)*) {0,3}(`{3,}|~{3,})\s*$/;
 const ATX_HEADING = / {0,3}#{1,6}(?:[ \t]|\r?\n|$)/y;
 const THEMATIC_BREAK = / {0,3}(?:\*(?:[ \t]*\*){2,}|-(?:[ \t]*-){2,}|_(?:[ \t]*_){2,})[ \t]*\r?(?:\n|$)/y;
+const SETEXT_HEADING = / {0,3}(?:=+|-+)[ \t]*\r?(?:\n|$)/y;
 const BLOCKQUOTE_PREFIX = /^(?: {0,3}>[ \t]?)+/;
 const BLANK_LINE = /\n(?:[ \t]*>)*[ \t\r]*\n/g;
 const INDENTED = /(?: {4}| {0,3}\t)/y;
@@ -171,6 +172,13 @@ function startsMarkdownBlock(text: string, index: number): boolean {
   if (ATX_HEADING.test(text)) return true;
   THEMATIC_BREAK.lastIndex = contentIndex;
   if (THEMATIC_BREAK.test(text)) return true;
+  SETEXT_HEADING.lastIndex = contentIndex;
+  if (index > 0 && SETEXT_HEADING.test(text)) {
+    const previousLineEnd = index - 1;
+    const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
+    const previousPrefix = BLOCKQUOTE_PREFIX.exec(text.slice(previousLineStart, previousLineEnd))?.[0] ?? "";
+    if (text.slice(previousLineStart + previousPrefix.length, previousLineEnd).trim()) return true;
+  }
   return false;
 }
 
@@ -213,13 +221,17 @@ function lineEnd(text: string, index: number): number {
 
 /** Whether this physical line begins a new indented code block or continues one. */
 function startsIndentedCode(text: string, index: number, previousIndentedCode: boolean): boolean {
-  INDENTED.lastIndex = index;
-  if (!INDENTED.test(text) || isBlankLineAt(text, index) || startsNestedListItem(text, index)) return false;
-  if (listContinuationIndent(text, index) > 0) return false;
-  if (previousIndentedCode || index === 0) return true;
+  const quotePrefix = BLOCKQUOTE_PREFIX.exec(text.slice(index, lineEnd(text, index)))?.[0] ?? "";
+  const contentIndex = index + quotePrefix.length;
+  INDENTED.lastIndex = contentIndex;
+  if (!INDENTED.test(text) || isBlankLineAt(text, contentIndex) || startsNestedListItem(text, contentIndex)) return false;
+  if (previousIndentedCode) return true;
+  if (listContinuationIndent(text, contentIndex) > 0) return false;
+  if (index === 0) return true;
   const previousLineEnd = index - 1;
   const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
-  return text.slice(previousLineStart, previousLineEnd).trim() === "";
+  const previousPrefix = BLOCKQUOTE_PREFIX.exec(text.slice(previousLineStart, previousLineEnd))?.[0] ?? "";
+  return text.slice(previousLineStart + previousPrefix.length, previousLineEnd).trim() === "";
 }
 
 /** Indentation occupied by the content of a surrounding list item, or zero. */

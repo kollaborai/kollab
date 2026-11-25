@@ -196,7 +196,9 @@ def _over_limit_inventory_entry(surface):
             if kind == "renderers"
             else [f"declaration-{index}" for index in range(257)]
         )
-    return {"id": "example-plugin", "contributes": {kind: items}}
+    contributes = {name: [] for name in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes[kind] = items
+    return {"id": "example-plugin", "contributes": contributes}
 
 
 @pytest.mark.parametrize(
@@ -346,12 +348,12 @@ def test_plugin_inventory_drops_duplicate_contribution_identities_per_kind():
 
 
 def test_plugin_inventory_normalizer_accepts_internal_underscores_in_renderer_names():
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [{"tool": "todo_write"}, {"tag": "status_card"}]
     entry = _normalize_plugin_entry(
         {
             "id": "example-plugin",
-            "contributes": {
-                "renderers": [{"tool": "todo_write"}, {"tag": "status_card"}],
-            },
+            "contributes": contributes,
         }
     )
 
@@ -365,20 +367,20 @@ def test_plugin_inventory_normalizer_accepts_internal_underscores_in_renderer_na
 
 def test_plugin_inventory_omits_untyped_and_unmatchable_renderer_declarations():
     """F1 F5: renderer declarations must be typed and SDK-matchable."""
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [
+        "shell",
+        {"id": "shell"},
+        {"name": "shell"},
+        {"tool": "shell", "tag": "status"},
+        {"tool": "shell"},
+        {"tag": "status-card"},
+        {"tag": "my.card"},
+    ]
     entry = _normalize_plugin_entry(
         {
             "id": "example-plugin",
-            "contributes": {
-                "renderers": [
-                    "shell",
-                    {"id": "shell"},
-                    {"name": "shell"},
-                    {"tool": "shell", "tag": "status"},
-                    {"tool": "shell"},
-                    {"tag": "status-card"},
-                    {"tag": "my.card"},
-                ],
-            },
+            "contributes": contributes,
         }
     )
 
@@ -396,7 +398,9 @@ def test_plugin_inventory_omits_untyped_and_unmatchable_renderer_declarations():
     ],
 )
 def test_plugin_inventory_drops_multiple_identity_declarations(surface, declaration):
-    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": {surface: [declaration]}})
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes[surface] = [declaration]
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
 
     assert entry is not None
     assert entry["contributes"][surface] == []
@@ -405,7 +409,9 @@ def test_plugin_inventory_drops_multiple_identity_declarations(surface, declarat
 
 @pytest.mark.parametrize("surface", ["menu", "views", "pages", "modals", "slash", "renderers"])
 def test_plugin_inventory_reports_malformed_contribution_rows(surface):
-    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": {surface: [None]}})
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes[surface] = [None]
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
 
     assert entry is not None
     assert entry["contributes"][surface] == []
@@ -413,7 +419,9 @@ def test_plugin_inventory_reports_malformed_contribution_rows(surface):
 
 
 def test_plugin_inventory_reports_malformed_contribution_kind():
-    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": {"slash": "publish"}})
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["slash"] = "publish"
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
 
     assert entry is not None
     assert entry["contributes"]["slash"] == []

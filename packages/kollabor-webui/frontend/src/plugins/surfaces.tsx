@@ -175,7 +175,7 @@ export function PluginPage({ pluginId, pageId, onExit }: { pluginId: string; pag
   else if (record.status === "failed")
     body = <PluginFailure title={`${name} Failed to Load`} error={record.error ?? ""} onRetry={() => retryPlugin(record.id)} />;
   else if (!page) body = <PageMessage onExit={onExit}>{`${name} has no page to show here.`}</PageMessage>;
-  else body = <PluginTabs record={record} tabs={page.tabs} rendererPrefix="page-tab" />;
+  else body = <PluginTabs record={record} tabs={page.tabs} rendererPrefix="page-tab" surfaceId={page.id} />;
 
   return (
     <main aria-label={title} className="bg-background flex h-full min-h-0 min-w-0 flex-col text-sm">
@@ -254,7 +254,7 @@ export function PluginModalHost() {
           <DialogTitle>{spec.title}</DialogTitle>
           <DialogDescription className="sr-only">{record.name}</DialogDescription>
         </DialogHeader>
-        <PluginTabs record={record} tabs={spec.tabs} rendererPrefix="modal-tab" />
+        <PluginTabs record={record} tabs={spec.tabs} rendererPrefix="modal-tab" surfaceId={spec.id} />
       </PanelDialogSurface>
     </Dialog>
   );

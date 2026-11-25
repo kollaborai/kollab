@@ -265,11 +265,13 @@ export function PluginTabs({
   tabs,
   session,
   rendererPrefix = "page-tab",
+  surfaceId,
 }: {
   record: PluginRecord;
   tabs: readonly PluginTab[];
   session?: PluginSession;
   rendererPrefix?: "page-tab" | "modal-tab";
+  surfaceId?: string;
 }) {
   const [active, setActive] = useState(tabs[0]?.id ?? "");
   const shown = tabs.some((tab) => tab.id === active) ? active : (tabs[0]?.id ?? "");
@@ -286,7 +288,7 @@ export function PluginTabs({
         <TabsContent key={tab.id} value={tab.id} className="flex min-h-0 flex-col overflow-y-auto px-4 py-3 sm:px-6">
           <PluginMount
             record={record}
-            renderer={`${rendererPrefix}:${tab.id}`}
+            renderer={`${rendererPrefix}:${encodeURIComponent(surfaceId ?? "")}:${encodeURIComponent(tab.id)}`}
             resetKey={session?.session_id}
           >
             {record.k ? <tab.render k={record.k} session={session} /> : null}
