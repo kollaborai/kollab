@@ -23,6 +23,8 @@ def test_fixtures_cover_good_and_bad_streams():
         "bad-reid",
         "bad-never-ends",
         "bad-seq",
+        "bad-regress",
+        "bad-gap",
     } <= names
 
 
@@ -147,3 +149,265 @@ def test_a_completed_input_must_wait_for_its_turn():
 def test_an_unfinished_stream_may_leave_inputs_open():
     events = json.loads((FIXTURES / "bad-never-ends.json").read_text())["events"]
     assert sequence_problems(events, complete=False) == []
+
+
+ROW = {
+    "id": "r1",
+    "seq": 1,
+    "kind": "input",
+    "role": "user",
+    "turn_id": None,
+    "status": "queued",
+    "parts": [],
+    "created_at": "2026-11-25T10:00:00Z",
+}
+SNAPSHOT = {"rows": [], "next_seq": 1, "older": None, "turns": [], "inputs": []}
+
+
+def _event(kind, data, seq=1):
+    return {"seq": seq, "conversation_uid": "c", "type": kind, "data": data}
+
+
+def _without(data, key):
+    return {k: v for k, v in data.items() if k != key}
+
+
+def test_a_valid_row_and_snapshot_have_no_problems():
+    assert event_problems(_event("row.upsert", ROW)) == []
+    assert event_problems(_event("snapshot", SNAPSHOT)) == []
+    assert event_problems(_event("snapshot", {**SNAPSHOT, "older": "cursor-1"})) == []
+
+
+@pytest.mark.parametrize(
+    "row, needle",
+    [
+        ({**ROW, "role": "alien"}, "unknown role"),
+        (_without(ROW, "created_at"), "missing created_at"),
+        ({**ROW, "seq": True}, "row seq"),
+        ({**ROW, "seq": 1.5}, "row seq"),
+        ({**ROW, "seq": -1}, "row seq"),
+        ({**ROW, "turn_id": 5}, "row turn_id"),
+        ({**ROW, "status": None}, "row status"),
+        ({**ROW, "created_at": 0}, "row created_at"),
+    ],
+)
+def test_row_problems_check_every_field(row, needle):
+    problems = event_problems(_event("row.upsert", row))
+    assert any(needle in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(
+    "data, needle",
+    [
+        ({**SNAPSHOT, "next_seq": True}, "next_seq"),
+        ({**SNAPSHOT, "next_seq": -1}, "next_seq"),
+        (_without(SNAPSHOT, "older"), "older"),
+        ({**SNAPSHOT, "older": 5}, "older"),
+        ({**SNAPSHOT, "turns": ["not a turn"]}, "turn 0"),
+        (
+            {
+                **SNAPSHOT,
+                "turns": [{"turn_id": "t1", "state": "paused", "input_ids": []}],
+            },
+            "unknown turn state",
+        ),
+        ({**SNAPSHOT, "turns": [{"turn_id": "t1", "state": "running"}]}, "input_ids"),
+        ({**SNAPSHOT, "inputs": [{}]}, "input 0"),
+    ],
+)
+def test_snapshot_problems_check_cursors_and_entries(data, needle):
+    problems = event_problems(_event("snapshot", data))
+    assert any(needle in problem for problem in problems), problems
+
+
+def _lifecycle(*states):
+    """A stream with one input row and the given input.state events, in order."""
+    events = [
+        _event("snapshot", {**SNAPSHOT, "next_seq": 2}),
+        _event("row.upsert", {**ROW, "id": "web-a1", "seq": 2}, seq=2),
+    ]
+    for offset, data in enumerate(states):
+        kind = "turn.state" if "input_ids" in data else "input.state"
+        events.append(_event(kind, data, seq=3 + offset))
+    return events
+
+
+def test_a_queued_input_may_end_without_starting():
+    events = _lifecycle(
+        {"id": "web-a1", "state": "queued", "turn_id": None},
+        {"id": "web-a1", "state": "ended", "turn_id": None, "outcome": "cancelled"},
+    )
+    assert sequence_problems(events) == []
+
+
+def test_a_joined_input_cannot_start_its_own_turn_after():
+    events = _lifecycle(
+        {"id": "web-a1", "state": "joined", "turn_id": "t1"},
+        {"id": "web-a1", "state": "started", "turn_id": "t2"},
+    )
+    problems = sequence_problems(events, complete=False)
+    assert any(
+        "went from joined to started" in problem for problem in problems
+    ), problems
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+def test_an_input_bound_to_a_turn_ends_after_that_turn_whatever_the_outcome(outcome):
+    events = _lifecycle(
+        {"id": "web-a1", "state": "started", "turn_id": "t1"},
+        {"turn_id": "t1", "state": "running", "input_ids": ["web-a1"]},
+        {"id": "web-a1", "state": "ended", "turn_id": "t1", "outcome": outcome},
+        {"turn_id": "t1", "state": "ended", "input_ids": ["web-a1"]},
+    )
+    problems = sequence_problems(events)
+    assert any(
+        "ended before its turn t1 ended" in problem for problem in problems
+    ), problems
+
+
+PARTS = [
+    {"type": "text", "text": "hi"},
+    {"type": "reasoning", "text": "thinking"},
+    {
+        "type": "tool-call",
+        "tool_call_id": "call-1",
+        "tool_name": "shell",
+        "args": {"cmd": "ls"},
+    },
+    {
+        "type": "tool-call",
+        "tool_call_id": "call-2",
+        "tool_name": "shell",
+        "args": None,
+        "result": "ok",
+        "is_error": False,
+    },
+    {"type": "image", "url": "data:image/png;base64,AAAA"},
+    {"type": "prompt", "prompt_id": "p1", "data": {"options": []}},
+    {"type": "hub-note", "from": "lapis", "to": "", "text": "done", "observed": True},
+    {
+        "type": "hub-note",
+        "from": "lapis",
+        "to": "me",
+        "text": "done",
+        "observed": False,
+        "kind": "reply",
+        "thread_id": "th-1",
+        "reply_to": "m-1",
+        "is_direct": True,
+        "presence": "online",
+    },
+]
+
+
+def test_a_row_may_carry_every_part_type():
+    assert event_problems(_event("row.upsert", {**ROW, "parts": PARTS})) == []
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        None,
+        "text",
+        {"type": "nope"},
+        {"type": "text"},
+        {"type": "text", "text": 5},
+        {"type": "reasoning"},
+        {"type": "tool-call", "tool_name": "shell", "args": {}},
+        {"type": "tool-call", "tool_call_id": "c", "args": {}},
+        {"type": "tool-call", "tool_call_id": "c", "tool_name": "shell"},
+        {
+            "type": "tool-call",
+            "tool_call_id": "c",
+            "tool_name": "shell",
+            "args": {},
+            "is_error": "no",
+        },
+        {"type": "image"},
+        {"type": "image", "url": ""},
+        {"type": "prompt", "data": {}},
+        {"type": "prompt", "prompt_id": "p1"},
+        {"type": "hub-note", "from": "lapis", "to": "", "text": "x"},
+        {"type": "hub-note", "from": "lapis", "to": "", "text": "x", "observed": "yes"},
+        {"type": "hub-note", "from": "lapis", "text": "x", "observed": True},
+        {
+            "type": "hub-note",
+            "from": "lapis",
+            "to": "",
+            "text": "x",
+            "observed": True,
+            "presence": "away",
+        },
+        {
+            "type": "hub-note",
+            "from": "lapis",
+            "to": "",
+            "text": "x",
+            "observed": True,
+            "is_direct": 1,
+        },
+    ],
+)
+def test_each_part_is_checked_against_its_type(part):
+    problems = event_problems(_event("row.upsert", {**ROW, "parts": [part]}))
+    assert any("part 0" in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(
+    "info, needle",
+    [
+        ({"id": "a", "state": "queued"}, "turn_id"),
+        ({"id": "a", "state": "queued", "turn_id": 5}, "turn_id"),
+        (
+            {"id": "a", "state": "ended", "turn_id": 5, "outcome": "completed"},
+            "turn_id",
+        ),
+        (
+            {"id": "a", "state": "queued", "turn_id": None, "outcome": "completed"},
+            "outcome",
+        ),
+        (
+            {"id": "a", "state": "started", "turn_id": "t1", "outcome": "nope"},
+            "outcome",
+        ),
+    ],
+)
+def test_input_info_checks_turn_id_and_outcome(info, needle):
+    for event in (
+        _event("input.state", info),
+        _event("snapshot", {**SNAPSHOT, "inputs": [info]}),
+    ):
+        problems = event_problems(event)
+        assert any(needle in problem for problem in problems), (event["type"], problems)
+
+
+@pytest.mark.parametrize("part", [-1, True, 1.0])
+def test_row_append_needs_a_part_index(part):
+    problems = event_problems(
+        _event("row.append", {"id": "r1", "part": part, "text": "x"})
+    )
+    assert any("part" in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _event("row.delete", {"id": "a"}) | {"type": []},
+        _event("row.upsert", {**ROW, "kind": []}),
+        _event("row.upsert", {**ROW, "role": {}}),
+        _event("input.state", {"id": "a", "state": [], "turn_id": None}),
+        _event(
+            "input.state", {"id": "a", "state": "ended", "turn_id": None, "outcome": []}
+        ),
+        _event("turn.state", {"turn_id": "t1", "state": [], "input_ids": []}),
+        _event("row.upsert", {**ROW, "parts": [{"type": []}]}),
+    ],
+)
+def test_values_of_the_wrong_type_are_problems_not_crashes(event):
+    assert event_problems(event)
+
+
+def test_a_missing_event_is_a_gap():
+    events = json.loads((FIXTURES / "bad-gap.json").read_text())["events"]
+    problems = sequence_problems(events, complete=False)
+    assert any("expected seq 3" in problem for problem in problems), problems

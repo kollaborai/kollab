@@ -8,11 +8,77 @@ const cases = readdirSync(dir)
   .filter((name) => name.endsWith(".json"))
   .map((name) => ({ name, events: JSON.parse(readFileSync(new URL(name, dir), "utf8")).events as unknown[] }));
 
+const ROW = { id: "r1", seq: 1, kind: "input", role: "user", turn_id: null, status: "queued", parts: [], created_at: "2026-11-25T10:00:00Z" };
+const SNAPSHOT = { rows: [], next_seq: 1, older: null, turns: [], inputs: [] };
+const PARTS = [
+  { type: "text", text: "hi" },
+  { type: "reasoning", text: "thinking" },
+  { type: "tool-call", tool_call_id: "call-1", tool_name: "shell", args: { cmd: "ls" } },
+  { type: "tool-call", tool_call_id: "call-2", tool_name: "shell", args: null, result: "ok", is_error: false },
+  { type: "image", url: "data:image/png;base64,AAAA" },
+  { type: "prompt", prompt_id: "p1", data: { options: [] } },
+  { type: "hub-note", from: "lapis", to: "", text: "done", observed: true },
+  { type: "hub-note", from: "lapis", to: "me", text: "done", observed: false, kind: "reply", thread_id: "th-1", reply_to: "m-1", is_direct: true, presence: "online" },
+];
+const without = (data: Record<string, unknown>, key: string) => Object.fromEntries(Object.entries(data).filter(([k]) => k !== key));
+const upsert = (data: unknown) => ({ seq: 1, conversation_uid: "c", type: "row.upsert", data });
+const snapshot = (data: unknown) => ({ seq: 1, conversation_uid: "c", type: "snapshot", data });
+
 describe("chat stream contract", () => {
-  it("reads all six fixtures", () => {
+  it("reads all eight fixtures", () => {
     expect(cases.map((c) => c.name).sort()).toEqual([
-      "bad-never-ends.json", "bad-reid.json", "bad-seq.json", "compaction.json", "reload-mid-turn.json", "steered-input.json",
+      "bad-gap.json", "bad-never-ends.json", "bad-regress.json", "bad-reid.json", "bad-seq.json", "compaction.json",
+      "reload-mid-turn.json", "steered-input.json",
     ]);
+  });
+
+  it("accepts a row that carries every part type", () => {
+    expect(isChatStreamEvent(upsert({ ...ROW, parts: PARTS }))).toBe(true);
+  });
+
+  it.each([
+    ["null", null],
+    ["a string", "text"],
+    ["an unknown type", { type: "nope" }],
+    ["text without text", { type: "text" }],
+    ["text with a number", { type: "text", text: 5 }],
+    ["reasoning without text", { type: "reasoning" }],
+    ["a tool call without tool_call_id", { type: "tool-call", tool_name: "shell", args: {} }],
+    ["a tool call without tool_name", { type: "tool-call", tool_call_id: "c", args: {} }],
+    ["a tool call without args", { type: "tool-call", tool_call_id: "c", tool_name: "shell" }],
+    ["a tool call with a string is_error", { type: "tool-call", tool_call_id: "c", tool_name: "shell", args: {}, is_error: "no" }],
+    ["an image without url", { type: "image" }],
+    ["an image with an empty url", { type: "image", url: "" }],
+    ["a prompt without prompt_id", { type: "prompt", data: {} }],
+    ["a prompt without data", { type: "prompt", prompt_id: "p1" }],
+    ["a hub note without observed", { type: "hub-note", from: "lapis", to: "", text: "x" }],
+    ["a hub note with a string observed", { type: "hub-note", from: "lapis", to: "", text: "x", observed: "yes" }],
+    ["a hub note without to", { type: "hub-note", from: "lapis", text: "x", observed: true }],
+    ["a hub note with an unknown presence", { type: "hub-note", from: "lapis", to: "", text: "x", observed: true, presence: "away" }],
+    ["a hub note with a numeric is_direct", { type: "hub-note", from: "lapis", to: "", text: "x", observed: true, is_direct: 1 }],
+  ])("rejects a row whose part is %s", (_label, part) => {
+    expect(isChatStreamEvent(upsert({ ...ROW, parts: [part] }))).toBe(false);
+  });
+
+  it.each([
+    ["a queued input without turn_id", { id: "a", state: "queued" }],
+    ["a queued input with a numeric turn_id", { id: "a", state: "queued", turn_id: 5 }],
+    ["an ended input with a numeric turn_id", { id: "a", state: "ended", turn_id: 5, outcome: "completed" }],
+    ["a queued input with an outcome", { id: "a", state: "queued", turn_id: null, outcome: "completed" }],
+    ["a started input with an unknown outcome", { id: "a", state: "started", turn_id: "t1", outcome: "nope" }],
+  ])("rejects %s, as an event and inside a snapshot", (_label, info) => {
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "input.state", data: info })).toBe(false);
+    expect(isChatStreamEvent(snapshot({ ...SNAPSHOT, inputs: [info] }))).toBe(false);
+  });
+
+  it.each([[-1], [true], [1.5]])("rejects a row.append whose part index is %s", (part) => {
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "row.append", data: { id: "r1", part, text: "x" } })).toBe(false);
+  });
+
+  it("accepts a full row and a snapshot whose older is a cursor or null", () => {
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "row.upsert", data: ROW })).toBe(true);
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "snapshot", data: SNAPSHOT })).toBe(true);
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "snapshot", data: { ...SNAPSHOT, older: "cursor-1" } })).toBe(true);
   });
 
   it("accepts every fixture event, since the bad fixtures break the sequence rules, not the shapes", () => {
@@ -32,6 +98,20 @@ describe("chat stream contract", () => {
     ["a snapshot without next_seq", { seq: 1, conversation_uid: "c", type: "snapshot", data: { rows: [], turns: [], inputs: [] } }],
     ["a row of an unknown kind", { seq: 1, conversation_uid: "c", type: "row.upsert", data: { id: "a", seq: 1, kind: "x", role: "user", parts: [] } }],
     ["data that is an array", { seq: 1, conversation_uid: "c", type: "row.delete", data: [] }],
+    ["a row with an unknown role", upsert({ ...ROW, role: "alien" })],
+    ["a row without created_at", upsert(without(ROW, "created_at"))],
+    ["a row without status", upsert(without(ROW, "status"))],
+    ["a row without turn_id", upsert(without(ROW, "turn_id"))],
+    ["a row with a fractional seq", upsert({ ...ROW, seq: 1.5 })],
+    ["a row with a negative seq", upsert({ ...ROW, seq: -1 })],
+    ["a row with a numeric turn_id", upsert({ ...ROW, turn_id: 5 })],
+    ["a row with a numeric created_at", upsert({ ...ROW, created_at: 0 })],
+    ["a snapshot without older", snapshot(without(SNAPSHOT, "older"))],
+    ["a snapshot with a numeric older", snapshot({ ...SNAPSHOT, older: 5 })],
+    ["a snapshot with a negative next_seq", snapshot({ ...SNAPSHOT, next_seq: -1 })],
+    ["a snapshot with a turn that is not an object", snapshot({ ...SNAPSHOT, turns: ["not a turn"] })],
+    ["a snapshot with a turn in an unknown state", snapshot({ ...SNAPSHOT, turns: [{ turn_id: "t1", state: "paused", input_ids: [] }] })],
+    ["a snapshot with a turn without input_ids", snapshot({ ...SNAPSHOT, turns: [{ turn_id: "t1", state: "running" }] })],
   ])("rejects %s", (_label, event) => {
     expect(isChatStreamEvent(event)).toBe(false);
   });
