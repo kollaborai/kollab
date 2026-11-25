@@ -100,6 +100,22 @@ def test_primary_writes_locally(tmp_path, monkeypatch):
     assert (tmp_path / "schedules.json").exists()
 
 
+def test_primary_binds_bare_agents_to_its_device_before_sync(tmp_path, monkeypatch):
+    sync = _Sync({"error": "is_primary"})
+    plugin = _plugin(tmp_path, monkeypatch, sync=sync)
+    plugin._relay_agent = type(
+        "Relay", (), {"config_sync": sync, "device_name": lambda _self: "home-server"}
+    )()
+
+    reply = asyncio.run(plugin._schedules_save([_row()]))
+
+    assert reply == {"ok": True, "via": "local"}
+    assert sync.sent[0]["agents"] == ["lapis@home-server"]
+    assert ScheduleStore(tmp_path / "schedules.json").load()[0].agents == [
+        "lapis@home-server"
+    ]
+
+
 def test_secondary_forwards_to_the_primary_and_leaves_the_file_alone(tmp_path, monkeypatch):
     sync = _Sync({"ok": True})
     plugin = _plugin(tmp_path, monkeypatch, sync=sync)
