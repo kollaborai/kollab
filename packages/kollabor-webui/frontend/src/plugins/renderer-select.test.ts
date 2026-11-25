@@ -130,6 +130,16 @@ describe("findTagRenderer and tagRendererNames", () => {
     ];
     expect(tagRendererNames(plugins)).toEqual(["status-card", "note"]);
   });
+
+  it("keeps same-name tool and tag ownership independent", () => {
+    const tool = record("alpha", [{ tool: "search", render: Render }], true, 1);
+    const tag = record("beta", [{ tag: "search", render: Render }], true, 2);
+    const plugins = [tool, tag];
+
+    expect(findToolRenderer(plugins, "search")?.record.id).toBe("alpha");
+    expect(findTagRenderer(plugins, "search")?.record.id).toBe("beta");
+    expect(tagRendererNames(plugins)).toEqual(["search"]);
+  });
 });
 
 describe("PluginToolPart", () => {

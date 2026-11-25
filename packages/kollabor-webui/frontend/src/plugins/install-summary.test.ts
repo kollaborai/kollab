@@ -51,7 +51,7 @@ describe("plugin review manifest boundary", () => {
     expect(manifest?.omitted?.contributions).toBe(2);
     expect(adds).not.toContain("1 slash command");
     expect(adds).not.toContain("1 chat renderer");
-    expect(adds).toContain("2 additional contribution omitted from this review");
+    expect(adds).toContain("2 additional contributions omitted from this review");
   });
   const cases = [
     ["manifest name", (value: Record<string, any>) => { value.manifest.name = canary; }],

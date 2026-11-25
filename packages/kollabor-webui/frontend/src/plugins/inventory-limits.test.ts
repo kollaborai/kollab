@@ -263,6 +263,7 @@ describe("plugin inventory collection bounds", () => {
   it("reports omissions in the installed inventory row", () => {
     const entry = normalizePluginEntry({
       id: "example-plugin",
+      contributes: { menu: [], views: [], pages: [], modals: [], slash: [], renderers: [] },
       services: [
         { name: "worker", secrets: Array.from({ length: 65 }, (_, index) => `ENV_${index}`) },
         ...Array.from({ length: 128 }, (_, index) => ({ name: `worker-${index}`, secrets: [] })),

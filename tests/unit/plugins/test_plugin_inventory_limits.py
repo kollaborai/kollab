@@ -292,6 +292,24 @@ def test_plugin_slash_command_inventory_uses_ascii_declaration_names():
     assert omitted == 2
 
 
+def test_plugin_inventory_normalizer_accepts_internal_underscores_in_renderer_names():
+    entry = _normalize_plugin_entry(
+        {
+            "id": "example-plugin",
+            "contributes": {
+                "renderers": [{"tool": "todo_write"}, {"tag": "status_card"}],
+            },
+        }
+    )
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == [
+        {"tool": "todo_write"},
+        {"tag": "status_card"},
+    ]
+    assert entry["omitted"]["contributions"] == 0
+
+
 @pytest.mark.parametrize(
     ("surface", "declaration"),
     [

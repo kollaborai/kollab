@@ -15,6 +15,7 @@ import {
 import { createPluginRegistry } from "./registry";
 import { pluginsByEnableOrder } from "./plugin-order";
 import { logPluginFailure } from "./plugin-errors";
+import * as pluginErrors from "./plugin-errors";
 import { declaredIds } from "./plugin-declarations";
 import type { PluginApi, PluginEntry } from "./sdk";
 
@@ -179,6 +180,55 @@ describe("plugin inventory text redaction", () => {
     expect(output).toContain("[redacted]");
     expect(output).not.toContain("private-secret");
   });
+
+  it("drops every URL query and fragment from logged errors and stacks", () => {
+    const messageUrl = "https://store.example/object?opaque=message-secret#private-fragment";
+    const stackUrl = "https://cdn.example/plugin.js?nonce=stack-secret#source-fragment";
+    const error = new Error(`request failed: ${messageUrl}`);
+    error.stack = `Error: request failed: ${messageUrl}\n    at render (${stackUrl})`;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    logPluginFailure("hello", "renderer failed", error, `    at App (${stackUrl})`);
+
+    const output = logged.mock.calls.flat().join(" ");
+    expect(output).toContain("https://store.example/object");
+    expect(output).toContain("https://cdn.example/plugin.js");
+    expect(output).not.toContain("opaque=");
+    expect(output).not.toContain("nonce=");
+    expect(output).not.toContain("message-secret");
+    expect(output).not.toContain("stack-secret");
+    expect(output).not.toContain("private-fragment");
+    expect(output).not.toContain("source-fragment");
+  });
+
+  it.each(["onCaughtError", "onUncaughtError", "onRecoverableError"] as const)(
+    "reports non-plugin %s errors through redacted logging",
+    (option) => {
+      type RootErrorHandler = (error: unknown, info: { componentStack: string }) => void;
+      const options = (pluginErrors as unknown as {
+        REDACTED_ROOT_ERROR_OPTIONS?: Record<string, RootErrorHandler>;
+      }).REDACTED_ROOT_ERROR_OPTIONS;
+      const handler = options?.[option];
+      expect(handler).toBeTypeOf("function");
+      if (!handler) return;
+
+      const error = new Error("unrelated failure https://app.example/path?private=value#fragment");
+      error.stack = "Error: unrelated failure https://app.example/path?stack=value#source";
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      handler(error, { componentStack: " at App (https://ui.example/view?tree=secret#component)" });
+
+      const output = logged.mock.calls.flat().join(" ");
+      expect(output).toContain("Kollab");
+      expect(output).toContain("unrelated failure");
+      expect(output).toContain("https://app.example/path");
+      expect(output).toContain("https://ui.example/view");
+      expect(output).not.toMatch(/[?#](?:private|stack|tree)=/);
+      expect(output).not.toContain("#fragment");
+      expect(output).not.toContain("#source");
+      expect(output).not.toContain("#component");
+    },
+  );
 });
 
 describe("loading", () => {
@@ -561,6 +611,40 @@ describe("plugins-changed", () => {
     expect(deps.importModule).toHaveBeenCalledTimes(1);
   });
 
+  it("retains last-good declarations when the backend reports omitted contribution rows", async () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [],
+      views: [],
+      pages: [],
+      modals: [],
+      slash: ["publish"],
+      renderers: [{ tool: "shell" }],
+    };
+    const declared = entry("hello", { contributes });
+    const partial = entry("hello", {
+      contributes: { ...contributes, renderers: [] },
+      omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 1 },
+    });
+    const { loader, plugin, deps } = harness(
+      [[declared], [partial]],
+      {
+        "/plugins/hello/web/index.js?v=abc": module((k) => {
+          k.command({ name: "publish", description: "Publish", run: () => {} });
+          k.renderer({ tool: "shell", render: Tab });
+        }),
+      },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    await loader.refresh();
+    await loader.idle();
+
+    expect(plugin("hello")?.entry.contributes).toEqual(contributes);
+    expect(plugin("hello")?.contributions.renderers.map(({ tool }) => tool)).toEqual(["shell"]);
+    expect(deps.importModule).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects contribution rows with multiple identity fields", () => {
     const normalized = normalizePluginEntry(entry("hello", {
       contributes: {
@@ -577,6 +661,28 @@ describe("plugins-changed", () => {
     expect(normalized?.contributes.renderers).toEqual([]);
     expect(normalized?.omitted.contributions).toBe(2);
     expect(declaredIds([{ id: "deploy", name: "review" }, { tool: "shell", tag: "card" }])).toEqual(new Set());
+  });
+
+  it("keeps documented underscores in renderer names through inventory normalization", () => {
+    const normalized = normalizePluginEntry(entry("hello", {
+      contributes: {
+        menu: [],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: [],
+        renderers: [{ tool: "todo_write" }, { tag: "status_card" }],
+      },
+    }));
+
+    expect(normalized?.contributes.renderers).toEqual([{ tool: "todo_write" }, { tag: "status_card" }]);
+    expect(normalized?.omitted.contributions).toBe(0);
+  });
+
+  it("marks an inventory row with no contributes field incomplete", () => {
+    const normalized = normalizePluginEntry({ id: "hello" });
+
+    expect(normalized?.omitted.contributions).toBeGreaterThan(0);
   });
 
   it("retains the last-good declarations when an inventory omits one contribution kind", () => {
