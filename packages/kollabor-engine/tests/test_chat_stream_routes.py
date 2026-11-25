@@ -249,6 +249,11 @@ class _LiveQueueRuntime:
         }
 
 
+def test_live_queue_runtime_supplies_conversation_scoped_identity():
+    scope = asyncio.run(_LiveQueueRuntime().input_scope("conv-1"))
+    assert scope == ("test-scope", "conv-1", "test-principal")
+
+
 class _LiveBus:
     def __init__(self):
         self.runtime = _LiveQueueRuntime()
