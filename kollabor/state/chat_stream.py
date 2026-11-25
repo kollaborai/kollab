@@ -210,6 +210,7 @@ class ChatStreamService:
         self._active_turns: dict[str, str] = {}
         self._reply_rows: dict[tuple[str, str], str] = {}
         self._reply_text: dict[tuple[str, str], str] = {}
+        self._reply_segment_offsets: dict[tuple[str, str], int] = {}
         self._turn_errors: dict[tuple[str, str], str] = {}
         self._display_tap: Any = None
         self._display_tap_listener: Any = None
@@ -419,6 +420,11 @@ class ChatStreamService:
             self._on_turn_start(uid, event)
         elif kind == "user_message":
             self._on_user_message(uid, event)
+        elif kind == "reply_segment_start":
+            turn_id = self._event_turn_id(event)
+            if turn_id is not None:
+                key = (uid, turn_id)
+                self._reply_segment_offsets[key] = len(self._reply_text.get(key, ""))
         elif kind in {"token", "response"}:
             self._on_reply_text(uid, event)
         elif kind in {"tool_start", "tool_result"}:
@@ -525,7 +531,7 @@ class ChatStreamService:
 
     def _on_reply_text(self, uid: str, event: dict[str, Any]) -> None:
         text = event.get("text")
-        if not isinstance(text, str) or not text:
+        if not isinstance(text, str) or (not text and event.get("type") != "response"):
             return
         turn_id = self._event_turn_id(event)
         input_ids = self._event_input_ids(event)
@@ -536,7 +542,10 @@ class ChatStreamService:
         if turn_id is None:
             return
         if event.get("type") == "response":
-            self._upsert_reply(uid, turn_id, text, status="streaming")
+            key = (uid, turn_id)
+            offset = self._reply_segment_offsets.get(key, 0)
+            prefix = self._reply_text.get(key, "")[:offset]
+            self._upsert_reply(uid, turn_id, prefix + text, status="streaming")
             return
         row_id = self._reply_rows.get((uid, turn_id))
         if row_id is None:
@@ -845,7 +854,7 @@ class ChatStreamService:
         if row is None:
             return
         current_text = self._reply_text.get((uid, turn_id), "")
-        if text and text != current_text:
+        if text != current_text:
             current_text = text
             self._reply_text[(uid, turn_id)] = text
         self._upsert(

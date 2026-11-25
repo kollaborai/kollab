@@ -24,10 +24,10 @@ from kollabor.goals.service import (
     TurnOutcome,
 )
 from kollabor.state.goal_store import GoalStoreError
-from kollabor_tui.display_tap import publish_semantic
-from kollabor_tui.turn_context import current_turn
 from kollabor_ai.goal_image_scope import goal_image_scope
 from kollabor_ai.message_content import MessageContentError, normalize_message_content
+from kollabor_tui.display_tap import publish_semantic
+from kollabor_tui.turn_context import current_turn
 
 logger = logging.getLogger(__name__)
 
@@ -546,6 +546,7 @@ class GoalTurnDriver:
                         }
                         turn_context_token = current_turn.set(fields)
                         publish_semantic(getattr(self.coord, "event_bus", None), "turn_start", **fields)
+                        publish_semantic(getattr(self.coord, "event_bus", None), "reply_segment_start", **fields)
                         await self.coord._continue_conversation()
                         chain_turns = 0
                         while not qp.turn_completed and not qp.cancel_processing:
@@ -572,6 +573,11 @@ class GoalTurnDriver:
                                 # the first has consumed its ticket.
                                 self.coord._continue_serial = (
                                     self.coord.claim_turn_serial()
+                                )
+                                publish_semantic(
+                                    getattr(self.coord, "event_bus", None),
+                                    "reply_segment_start",
+                                    **fields,
                                 )
                                 await self.coord._continue_conversation()
                             except Exception as exc:
