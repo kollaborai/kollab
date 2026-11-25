@@ -3206,6 +3206,7 @@ class LLMService:
                 admission_serial=turn_serial,
                 operator_inputs=operator_inputs,
                 history_row_uuid=history_row_uuid,
+                request_ids=(request_id,) if request_id else (),
             )
             if voice or trusted_origin_context
             else TaggedInput(
