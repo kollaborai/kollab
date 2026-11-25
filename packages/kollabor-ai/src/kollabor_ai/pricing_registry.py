@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
+from kollabor_ai.model_registry import parse_json_int
 from kollabor_config.config_utils import resolve_global_path
 
 logger = logging.getLogger(__name__)
@@ -173,7 +174,7 @@ class PricingRegistry:
     def load_from_file(self, path: Path) -> None:
         try:
             with open(path) as f:
-                data = json.load(f)
+                data = json.load(f, parse_int=parse_json_int)
         except (FileNotFoundError, json.JSONDecodeError) as e:
             logger.warning(f"Failed to load pricing from {path}: {e}")
             return
