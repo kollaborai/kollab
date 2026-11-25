@@ -4066,7 +4066,12 @@ class LLMService:
                     return {"status": "rejected", "reason": "This harness can't take images."}
                 raise
             if steered:
-                return {"status": "injected", "request_id": request_id}
+                result = {"status": "injected", "request_id": request_id}
+                if isinstance(steered, dict):
+                    for key in ("joined_request_id", "joined_turn_id"):
+                        if key in steered:
+                            result[key] = steered[key]
+                return result
         # `steer` above can await while a relay is revoked; re-check at the
         # actual queue-admission boundary before sending anything to ACP.
         if not self._manual_relay_origin_authorized(origin):
