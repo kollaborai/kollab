@@ -191,6 +191,7 @@ function installRecorder(cfg) {
       const entry = { id, kind, t: now(), ev: type, seq: event.seq };
       if (data.id) entry.row = data.id;
       if (data.kind) entry.rowKind = data.kind;
+      if (data.kind === "note" && Array.isArray(data.parts)) entry.parts = data.parts.filter((part) => part.type === "hub-note");
       if (data.state) entry.state = data.state;
       if (data.status !== undefined) entry.status = data.status;
       if (Array.isArray(data.rows)) entry.rows = data.rows.length;
@@ -478,14 +479,16 @@ async function record(flow, session, browser, target) {
     }
     throw new Error("the chat stream did not send its initial snapshot");
   };
-  const waitForStreamRowKind = async (kind, { timeout = 30000, whileRunning = false } = {}) => {
+  const waitForStreamRowKind = async (kind, { timeout = 30000, whileRunning = false, afterIndex = 0, hubNote = null } = {}) => {
     const started = Date.now();
     while (Date.now() - started < timeout) {
-      const state = await page.evaluate((rowKind) => ({
-        row: window.__rec.net.find((entry) =>
-          entry.kind === "stream" && entry.ev === "row.upsert" && entry.rowKind === rowKind),
+      const state = await page.evaluate(({ rowKind, offset, expected }) => ({
+        row: window.__rec.net.slice(offset).find((entry) =>
+          entry.kind === "stream" && entry.ev === "row.upsert" && entry.rowKind === rowKind &&
+          (!expected || entry.parts?.some((part) => part.type === "hub-note" &&
+            part.from === expected.from && part.text === expected.text))),
         running: !!document.querySelector('[aria-label="Stop generating"]'),
-      }), kind);
+      }), { rowKind: kind, offset: afterIndex, expected: hubNote });
       if (state.row) {
         if (whileRunning && !state.running) throw new Error(`the ${kind} row arrived after the turn ended`);
         return state.row;
@@ -763,12 +766,15 @@ async function record(flow, session, browser, target) {
       if (!await page.evaluate(() => !!document.querySelector('[aria-label="Stop generating"]'))) {
         throw new Error("the turn finished before the hub note could arrive");
       }
+      const from = `chat-recorder-${LABEL}`;
+      const text = `${tag} hub note arriving during the active turn. Acknowledge it briefly, then finish the current request.`;
+      const afterIndex = await page.evaluate(() => window.__rec.net.length);
       await postFromClient("/hub/messages", {
         target: agent,
-        from_identity: `chat-recorder-${LABEL}`,
-        content: `${tag} hub note arriving during the active turn. Acknowledge it briefly, then finish the current request.`,
+        from_identity: from,
+        content: text,
       }, "HUB NOTE ARRIVES MID-TURN");
-      await waitForStreamRowKind("note", { whileRunning: true });
+      await waitForStreamRowKind("note", { whileRunning: true, afterIndex, hubNote: { from, text } });
       await settle(R(1));
     },
   };
