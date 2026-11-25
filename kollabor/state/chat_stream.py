@@ -19,6 +19,8 @@ from kollabor_events.chat_stream import (
 )
 from kollabor_events.chat_stream_emit import emit_chat_event
 
+from .chat_stream_rows import ChatStreamRowPager, register_chat_stream_rows_handler
+
 logger = logging.getLogger(__name__)
 
 
@@ -329,6 +331,7 @@ class ChatStreamService:
         current = self._inputs.get(self._conversation_uid(), {}).get(input_id, {})
         return {
             "found": True,
+            "accepted": result.get("accepted") is True,
             "state": current.get("state", state or "queued"),
             **({"turn_id": current["turn_id"]} if current.get("turn_id") else {}),
         }
@@ -913,7 +916,32 @@ class ChatStreamService:
             )
         return self._logs[uid]
 
-    def _snapshot(self, uid: str) -> dict[str, Any]:
+    def row_pager(self, *, uid: str | None = None) -> ChatStreamRowPager:
+        """Build a pager over this conversation's transcript and live rows."""
+
+        def current_uid() -> str:
+            return uid if uid is not None else self._conversation_uid()
+
+        def current_compaction_seq() -> int:
+            log = self._logs.get(current_uid())
+            return log.last_replace_seq if log is not None else 0
+
+        return ChatStreamRowPager(
+            conversation_uid_provider=current_uid,
+            snapshot_rows_provider=lambda: self._snapshot_rows(current_uid()),
+            transcript_rows_provider=lambda: self._transcript_rows(current_uid()),
+            row_log_provider=lambda: list(self._rows.get(current_uid(), {}).values()),
+            compaction_seq_provider=current_compaction_seq,
+        )
+
+    def _snapshot_components(
+        self, uid: str
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        dict[str, Any],
+    ]:
         custom = getattr(self._state_service, "chat_stream_snapshot", None)
         state = custom() if callable(custom) and uid == self._conversation_uid() else {}
         if not isinstance(state, dict):
@@ -942,11 +970,24 @@ class ChatStreamService:
             if isinstance(item, dict) and item.get("id")
         }
         inputs.update(copy.deepcopy(self._inputs.get(uid, {})))
+        return (
+            list(rows_by_id.values())[-REPLAY_WINDOW:],
+            list(turns.values()),
+            list(inputs.values()),
+            state,
+        )
+
+    def _snapshot_rows(self, uid: str) -> list[dict[str, Any]]:
+        return self._snapshot_components(uid)[0]
+
+    def _snapshot(self, uid: str) -> dict[str, Any]:
+        rows, turns, inputs, state = self._snapshot_components(uid)
+        older = self.row_pager(uid=uid).snapshot_older_cursor()
         return {
-            "rows": list(rows_by_id.values())[-REPLAY_WINDOW:],
-            "turns": list(turns.values()),
-            "inputs": list(inputs.values()),
-            "older": state.get("older"),
+            "rows": rows,
+            "turns": turns,
+            "inputs": inputs,
+            "older": older if older is not None else state.get("older"),
         }
 
     def _transcript_rows(self, uid: str) -> list[dict[str, Any]]:
@@ -1227,7 +1268,7 @@ class ChatStreamService:
 def register_chat_stream_handlers(
     rpc_server: Any, stream_service: ChatStreamService
 ) -> None:
-    """Register the four daemon-side actions used by the engine routes."""
+    """Register the daemon-side actions used by the engine routes."""
     handlers = {
         "state.chat_stream.subscribe": stream_service.subscribe,
         "state.chat_stream.add_input": stream_service.add_input,
@@ -1239,3 +1280,9 @@ def register_chat_stream_handlers(
             rpc_server.register(method, handler)
         except ValueError:
             logger.debug("chat stream rpc handler %s already registered", method)
+    try:
+        register_chat_stream_rows_handler(rpc_server, stream_service.row_pager())
+    except ValueError:
+        logger.debug(
+            "chat stream rpc handler state.chat_stream.rows already registered"
+        )

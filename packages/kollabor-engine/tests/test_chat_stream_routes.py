@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from kollabor_engine import server
 from kollabor_engine.routes import stream
+
 from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
 from kollabor_rpc import RpcRequest, RpcServer
 

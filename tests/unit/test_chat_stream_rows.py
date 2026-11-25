@@ -12,6 +12,7 @@ from kollabor.state.chat_stream_rows import (
 )
 from kollabor.state.handlers import register_state_handlers
 from kollabor.state.local import LocalStateService
+from kollabor_events.chat_stream import REPLAY_WINDOW
 from kollabor_rpc import RpcRequest, RpcServer
 
 
@@ -125,11 +126,12 @@ async def test_state_startup_registers_the_rows_handler_for_local_chat_stream():
     llm.conversation_history = [
         {
             "role": "user",
-            "content": "hello",
-            "metadata": {},
+            "content": f"row {index}",
+            "metadata": {"request_id": f"input-{index}"},
             "timestamp": "2026-11-25T12:00:00Z",
-            "uuid": "input-1",
+            "uuid": f"input-{index}",
         }
+        for index in range(REPLAY_WINDOW + 3)
     ]
     llm.conversation_manager = type(
         "ConversationManager", (), {"conversation_uid": lambda self: "conv-1"}
@@ -138,13 +140,29 @@ async def test_state_startup_registers_the_rows_handler_for_local_chat_stream():
     rpc = RpcServer()
 
     register_state_handlers(rpc, state)
+    snapshot_response = await rpc.handle_request(
+        RpcRequest(
+            request_id="snapshot-at-startup",
+            method="state.chat_stream.subscribe",
+            params={"after": None, "conversation_uid": None},
+        )
+    )
+    assert snapshot_response.error is None
+    snapshot = snapshot_response.result["events"][0]["data"]
+    assert len(snapshot["rows"]) == REPLAY_WINDOW
+    assert isinstance(snapshot["older"], str)
+
     response = await rpc.handle_request(
         RpcRequest(
             request_id="rows-at-startup",
             method="state.chat_stream.rows",
-            params={"before": None, "limit": 10},
+            params={"before": snapshot["older"], "limit": 2},
         )
     )
 
     assert response.error is None
-    assert response.result == {"rows": [], "older": None}
+    assert [row["id"] for row in response.result["rows"]] == [
+        "input-1",
+        "input-2",
+    ]
+    assert isinstance(response.result["older"], str)

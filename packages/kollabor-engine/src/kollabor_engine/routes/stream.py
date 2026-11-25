@@ -260,6 +260,26 @@ async def chat_stream(
                 if event is None:
                     continue
                 seq = event["seq"]
+                event_uid = event["conversation_uid"]
+                if event_uid != last_uid:
+                    snapshot = await _read_events(
+                        session_id,
+                        after=None,
+                        conversation_uid=event_uid,
+                    )
+                    for current in snapshot:
+                        current_uid = current.get("conversation_uid")
+                        current_seq = current.get("seq")
+                        if (
+                            current.get("type") != "snapshot"
+                            or current_uid != event_uid
+                            or not isinstance(current_seq, int)
+                            or isinstance(current_seq, bool)
+                        ):
+                            continue
+                        last_seq = _cursor_after(current)
+                        last_uid = current_uid
+                        yield _sse_event(current)
                 if seq <= last_seq:
                     continue
                 if last_seq >= 0 and seq > last_seq + 1:

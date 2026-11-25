@@ -171,6 +171,61 @@ class ChatStreamRowPager:
             )
         return {"rows": page_rows, "older": older}
 
+    def snapshot_older_cursor(self) -> str | None:
+        """Return the cursor immediately before the current snapshot window."""
+        conversation_uid = self._conversation_uid_provider()
+        if not isinstance(conversation_uid, str) or not conversation_uid:
+            raise ValueError("conversation uid is unavailable")
+        compaction_seq = self._compaction_seq_provider()
+        if (
+            isinstance(compaction_seq, bool)
+            or not isinstance(compaction_seq, int)
+            or compaction_seq < 0
+        ):
+            raise ValueError("chat stream compaction sequence is invalid")
+
+        snapshot_rows = self._snapshot_rows_provider()
+        transcript_rows = self._transcript_rows_provider()
+        row_log_rows = self._row_log_provider()
+        if not all(
+            isinstance(rows, list)
+            for rows in (snapshot_rows, transcript_rows, row_log_rows)
+        ):
+            raise ValueError("chat stream row sources must be lists")
+        if not snapshot_rows:
+            return None
+
+        all_rows = _rows_by_id(transcript_rows, snapshot_rows, row_log_rows)
+        boundary = snapshot_rows[0]
+        boundary_index = next(
+            (
+                index
+                for index, row in enumerate(all_rows)
+                if row.get("id") == boundary.get("id")
+            ),
+            None,
+        )
+        if boundary_index is None:
+            raise StaleRowCursor("The snapshot boundary is no longer present.")
+        if boundary_index == 0:
+            return None
+
+        row = all_rows[boundary_index]
+        boundary_id = row.get("id")
+        boundary_seq = row.get("seq")
+        if (
+            not isinstance(boundary_id, str)
+            or isinstance(boundary_seq, bool)
+            or not isinstance(boundary_seq, int)
+        ):
+            raise StaleRowCursor("The snapshot boundary no longer has a valid cursor.")
+        return self._encode_cursor(
+            conversation_uid,
+            boundary_id,
+            boundary_seq,
+            compaction_seq,
+        )
+
     @staticmethod
     def _encode_cursor(
         conversation_uid: str,

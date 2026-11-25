@@ -136,7 +136,12 @@ async def test_socket_actions_admit_cancel_and_send_one_input_by_client_id():
     )
     assert added_for_send == {"id": "web-a2", "state": "queued"}
     sent = await _call(rpc, "state.chat_stream.send_now", {"id": "web-a2"})
-    assert sent == {"found": True, "state": "joined", "turn_id": "turn-1"}
+    assert sent == {
+        "found": True,
+        "accepted": True,
+        "state": "joined",
+        "turn_id": "turn-1",
+    }
     assert state._queue_runtime.calls[-1] == ("send-now", {"id": "web-a2"})
 
 
