@@ -12,6 +12,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
+import kollabor_agent.queue_processor as queue_processor_module
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 from kollabor.user_input_source import UserInputSource
@@ -65,6 +66,7 @@ async def test_native_admission_keeps_the_request_id_and_echoes_it():
             "hi",
             ("r1",),
             parent_uuid="parent-2",
+            history_row_uuid="parent-2",
             admission_serial=1,
             # The saved row names the send it carries, so a page tells its own
             # send from another sender's identical words (#1359).
@@ -81,6 +83,7 @@ async def test_native_admission_keeps_the_request_id_and_echoes_it():
             "typed here",
             (),
             parent_uuid="parent-2",
+            history_row_uuid="parent-2",
             admission_serial=2,
             operator_inputs=({"source": "user", "timestamp": ANY, "text": "typed here"},),
         )
@@ -241,6 +244,86 @@ async def test_a_stop_ends_a_queued_chat_message_and_keeps_typed_input():
     error, done = _drain(events)
     assert (error["type"], error["request_ids"]) == ("error", ["X"]) and "Stopped" in error["message"]
     assert (done["type"], done["request_ids"]) == ("turn_complete", ["X"])
+
+
+@pytest.mark.asyncio
+async def test_stop_retains_custodied_durable_queue_handoff_for_next_drain():
+    # A durable queue item that already crossed provider custody must not be
+    # treated like page-local typed input: Stop retains its exact identity and
+    # the worker can restart the same queued provider item once.
+    handoff_type = getattr(queue_processor_module, "QueueHandoffInput", None)
+    assert handoff_type is not None, "queue-handoff admission needs a typed QP item"
+
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = DisplayTap()
+    events = processor.renderer.subscribe("test")
+    processor._cancel_generation = 0
+    processor.processing_queue = asyncio.Queue(maxsize=10)
+    durable = handoff_type(
+        "durable B",
+        ("B",),
+        queue_request_id="B",
+        attempt_id="attempt-B",
+    )
+    ordinary = TaggedInput("ordinary D", ("D",))
+    processor.processing_queue.put_nowait(durable)
+    processor.processing_queue.put_nowait(ordinary)
+
+    processor.request_cancellation(origin="human")
+
+    retained = [
+        processor.processing_queue.get_nowait()
+        for _ in range(processor.processing_queue.qsize())
+    ]
+    assert retained == [durable]
+    ended = [event for event in _drain(events) if event["type"] == "turn_complete"]
+    assert [event["request_ids"] for event in ended] == [["D"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ("drop_oldest", "legacy_unknown"))
+async def test_overflow_never_discards_a_custodied_queue_handoff(strategy):
+    handoff_type = getattr(queue_processor_module, "QueueHandoffInput", None)
+    assert handoff_type is not None
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = DisplayTap()
+    events = processor.renderer.subscribe("overflow")
+    processor.mark_progress = lambda: None
+    processor.processing_queue = asyncio.Queue(maxsize=2)
+    processor.max_queue_size = 2
+    processor.dropped_messages = 0
+    processor._queue_metrics = {
+        "total_enqueue_attempts": 0,
+        "total_enqueue_successes": 0,
+        "drop_oldest_count": 0,
+    }
+    processor.task_config = SimpleNamespace(
+        queue=SimpleNamespace(
+            overflow_strategy=strategy,
+            log_queue_events=False,
+            block_timeout=0.01,
+        )
+    )
+    handoff = handoff_type(
+        "custodied B",
+        ("B",),
+        queue_request_id="B",
+        attempt_id="attempt-B",
+    )
+    ordinary = TaggedInput("ordinary D", ("D",))
+    processor.processing_queue.put_nowait(handoff)
+    processor.processing_queue.put_nowait(ordinary)
+
+    await processor.enqueue(TaggedInput("new E", ("E",)))
+
+    kept = [
+        processor.processing_queue.get_nowait()
+        for _ in range(processor.processing_queue.qsize())
+    ]
+    assert kept[0] is handoff
+    assert kept[1].request_ids == ("E",)
+    ended = [event for event in _drain(events) if event["type"] == "turn_complete"]
+    assert [event["request_ids"] for event in ended] == [["D"]]
 
 
 def _turn_processor():

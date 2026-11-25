@@ -60,7 +60,7 @@ these help monitor resource usage during profiling.
 check project structure
 
   <terminal>ls -la</terminal>
-  <terminal>find . -name "*.py" -type f | head -20</terminal>
+  <file-find><pattern>*.py</pattern></file-find>
   <terminal>grep -r "if __name__" --include="*.py" . 2>/dev/null | head -10</terminal>
 
 identify:
@@ -128,7 +128,9 @@ create reproducible workload
 for consistent profiling, you need consistent input.
 
 identify test data:
-  <terminal>find . -name "test*.json" -o -name "test*.csv" -o -name "fixtures*" 2>/dev/null | head -10</terminal>
+  <file-find><pattern>test*.json</pattern></file-find>
+  <file-find><pattern>test*.csv</pattern></file-find>
+  <file-find><pattern>fixtures*</pattern></file-find>
 
 use the same workload for all profiling runs.
 

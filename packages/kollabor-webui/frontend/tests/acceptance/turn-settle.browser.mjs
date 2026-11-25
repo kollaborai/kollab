@@ -75,6 +75,7 @@ try {
     const read = async () => ({
       assistant: await page.locator("#assistant").innerText(),
       users: await page.locator("#users").innerText(),
+      queued: await page.locator("#queued").innerText(),
       branches: await page.locator("#branches .branched").count(),
       remounts: await page.locator("#remounts").innerText(),
       errors: await page.locator("#errors").innerText(),
@@ -384,12 +385,9 @@ try {
     },
     // A shown row reads differently in the reloaded history: it changes where
     // it is, without the whole reload that blanked the chat (#1358).
-    // A message sent while the page's turn runs waits for the turn to end
-    // (the next scenario). Send Now on the waiting message sends it at once:
-    // the page lets its request go, without stopping the turn, and sends the
-    // message in a request of its own. The agent takes it in at its next
-    // step, and the reply goes on under the message (#1102, #1365).
-    async "hands a waiting message to the agent at once on Send Now"() {
+    // Send Now posts one next-turn request immediately. The engine must settle
+    // the active owner before accepting that message (#1102).
+    async "sends one waiting message as the next turn on Send Now"() {
       const t = await open("?chat");
       const done = { type: "complete", reason: "stop" };
       const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
@@ -412,19 +410,22 @@ try {
       await t.waitFor((s) => s.users === "hello|what", "the waiting message");
       await t.page.getByRole("button", { name: "Send Now" }).click();
       await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
-        .catch(() => assert.fail("Send Now left the message waiting behind the running turn"));
+        .catch(() => assert.fail("Send Now did not post its forced next-turn request"));
       const second = await t.page.evaluate(() => ({
         commands: window.transport.request.commands, sent: window.transport.request.state?.messages ?? [],
-        let: window.transports[0].aborted, cancels: window.cancels,
+        request: window.transport.request, let: window.transports[0].aborted,
+        cancels: window.cancels, order: window.order,
         running: document.getElementById("running")?.textContent,
       }));
       assert.equal(second.commands.length, 1);
       assert.equal(second.commands[0].message.parts[0].text, "what");
+      assert.equal(second.request.force_next_turn, true);
+      assert.deepEqual(second.request.force_after_request_ids, [first.id]);
       assert.equal(second.let, true, "the page let its first request go");
       assert.equal(await t.page.getByRole("button", { name: "Send Now" }).count(), 0, "a message on its way is not waiting");
-      assert.equal(second.cancels, 0, "the agent's turn was not stopped");
-      assert.equal(second.running, "running");
-      await t.holds((s) => s.errors === "0" && s.users === "hello|what" && said(s) === "Wor", "while the message is on its way", 200);
+      assert.equal(second.cancels, 0, "the engine fences the active owner in the batch request");
+      assert.deepEqual(second.order, ["post:hello", "post:what"]);
+      await t.holds((s) => s.errors === "0" && s.users === "hello|what" && said(s) === "Wor", "until the active turn settles", 200);
       // The message and the typing dots under it stay drawn through the
       // hand-over: a row taken down and drawn again blinks, and the chat
       // jumps for a frame.
@@ -432,12 +433,19 @@ try {
       assert.equal(drawn.at(-1)?.length, 4, `the turn, the message and the dots under it: ${JSON.stringify(drawn)}`);
       drawn.forEach((rows, n) => assert.ok(n === 0 || drawn[n - 1].every((id) => rows.includes(id)),
         `a row was taken down during the hand-over: ${JSON.stringify(drawn)}`));
-      // The engine admits it; the turn's reply goes on under it.
+      // The resumed engine reports the old terminal before the new reply.
       const at = second.sent.length;
-      await t.push(state([{ type: "set", path: ["messages"], value: [...second.sent,
+      const terminal = `data: ${JSON.stringify({
+        type: "turn_complete", request_id: first.id,
+        request_ids: [first.id], stop_reason: "cancelled",
+      })}\n\n`;
+      await t.page.evaluate(([endOldTurn, nextState]) => {
+        window.transport.push(endOldTurn);
+        window.transport.push(nextState);
+      }, [terminal, state([{ type: "set", path: ["messages"], value: [...second.sent,
         { id: `user-s1-${at}`, role: "user", content: "what", metadata: { custom: { requestId: second.commands[0].message.id } } },
         { id: `assistant-s1-${at + 1}`, role: "assistant", content: text("Sure") },
-      ] }]));
+      ] }])]);
       await t.waitFor((s) => s.users === "hello|what" && said(s) === "Wor|Sure", "the reply under the message");
       await t.end();
       await t.setHistory([
@@ -449,6 +457,69 @@ try {
       await t.waitFor((s) => said(s) === "Working|Sure", "the saved turn");
       await t.holds((s) => s.users === "hello|what" && said(s) === "Working|Sure" && s.remounts === "0" &&
         s.branches === 0 && s.errors === "0", "after the settle reload");
+      await t.page.close();
+    },
+    // Native Send Now has no live-steering path: stop the active turn, wait
+    // for its terminal event, then admit the full waiting batch exactly once
+    // as the next turn (#1102).
+    async "stops the native turn before admitting the complete Send Now batch"() {
+      const t = await open("?chat");
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: text("Working") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Working"), "the active native turn");
+      await t.page.locator("#send-what").click();
+      await t.page.locator("#send-later").click();
+      await t.waitFor((s) => s.users === "hello|what|later", "both waiting messages");
+      await t.page.getByRole("button", { name: "Send Now" }).first().click();
+
+      // The request reaches the daemon now; its owner-fenced batch operation
+      // must hold provider admission until the active stream's terminal.
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("native Send Now did not post the forced batch"));
+      const dispatched = await t.page.evaluate(() => ({
+        request: window.transports[1].request,
+        firstAborted: window.transports[0].aborted,
+        cancels: window.cancels,
+        order: window.order,
+      }));
+      assert.deepEqual(dispatched.request.commands.map((command) => command.message.parts[0].text), ["what", "later"]);
+      assert.equal(dispatched.request.force_next_turn, true);
+      assert.deepEqual(dispatched.request.force_after_request_ids, [first.id]);
+      assert.equal(dispatched.firstAborted, true, "the page hands its stream to the forced request");
+      assert.equal(dispatched.cancels, 0, "the server batch request owns the stop fence");
+      assert.deepEqual(dispatched.order, ["post:hello", "post:what|later"]);
+      await t.holds((s) => s.assistant.includes("Working") && s.users === "hello|what|later",
+        "without provider output before the old terminal", 150);
+
+      const terminal = `data: ${JSON.stringify({
+        type: "turn_complete", request_id: first.id, request_ids: [first.id], stop_reason: "cancelled",
+      })}\n\n`;
+      const at = dispatched.request.state.messages.length;
+      await t.page.evaluate(([endOldTurn, nextState, finish]) => {
+        const transport = window.transports[1];
+        transport.push(endOldTurn);
+        transport.push(nextState);
+        transport.push(finish);
+        transport.close();
+      }, [terminal, state([{ type: "set", path: ["messages"], value: [
+        ...dispatched.request.state.messages,
+        { id: `user-s1-${at}`, role: "user", content: "what", metadata: { custom: { requestId: dispatched.request.commands[0].message.id } } },
+        { id: `user-s1-${at + 1}`, role: "user", content: "later", metadata: { custom: { requestId: dispatched.request.commands[1].message.id } } },
+        { id: `assistant-s1-${at + 2}`, role: "assistant", content: text("Batch reply") },
+      ] }]), finishFrames]);
+      await t.waitFor((s) => s.assistant.includes("Batch reply") && s.users === "hello|what|later",
+        "the batch response after the prior terminal");
+      const orderAfterSettle = await t.page.evaluate(() => window.order);
+      assert.deepEqual(orderAfterSettle, [
+        "post:hello", "post:what|later", `terminal:${first.id}`,
+      ], "the batch request receives the prior terminal before any response state");
+      assert.equal(await t.page.evaluate(() => window.transports.length), 2,
+        "each queued message is sent once in the single batch request");
       await t.page.close();
     },
     // A message sent while the page's turn runs waits: the turn goes on as it
@@ -500,8 +571,7 @@ try {
       const box = t.page.getByLabel("Message input");
       await box.fill("what");
       await box.press("Control+Enter");
-      await t.waitFor((s) => s.users === "hello|what", "the message Ctrl+Enter sent");
-      await t.page.getByText("Queued", { exact: true }).waitFor();
+      await t.waitFor((s) => s.users === "hello" && s.queued === "Queued what", "the message Ctrl+Enter queued");
       assert.equal(await t.page.getByRole("button", { name: "Send Now" }).count(), 0, "no Send Now on a harness session");
       for (let n = 0; n < 8; n++) {
         assert.deepEqual(await t.page.evaluate(() => [window.transports.length, window.transports[0].aborted]),
@@ -555,9 +625,8 @@ try {
         `the message's row ${waiting} was taken down when it was sent: ${JSON.stringify(drawn)}`);
       await t.page.close();
     },
-    // Enter in the message box sends while the agent works, as the Send button
-    // does: the message waits for the turn to end. Ctrl+Enter (Cmd+Enter on a
-    // Mac) sends it, and every message waiting before it, at once. Shift+Enter
+    // Enter in the message box queues while the agent works. Ctrl+Enter
+    // (Cmd+Enter on a Mac) queues and requests Send Now for the batch. Shift+Enter
     // still starts a new line, and Enter on an open slash menu still picks
     // its row (#1102, #1365).
     async "sends on Enter while the agent works"() {
@@ -586,25 +655,20 @@ try {
       assert.equal(await requests(), 1, "picking a slash menu row sent nothing");
       await box.fill("what");
       await box.press("Enter");
-      await t.waitFor((s) => s.users === "hello|what" && s.errors === "0", "the message Enter sent")
-        .catch(() => assert.fail("Enter did not send the message"));
+      await t.waitFor((s) => s.users === "hello" && s.queued === "Queued what" && s.errors === "0", "the message Enter queued")
+        .catch(() => assert.fail("Enter did not queue the message"));
       assert.equal(await box.inputValue(), "", "the message box is empty after the send");
-      await t.page.getByText("Queued", { exact: true }).waitFor({ timeout: 3000 })
-        .catch(() => assert.fail("the message Enter sent does not say it is queued"));
       assert.equal(await requests(), 1, "a message sent with Enter waits for the turn to end");
       await box.fill("now");
       await box.press("Control+Enter");
-      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
-        .catch(() => assert.fail("Ctrl+Enter did not send the waiting messages at once"));
-      const second = await t.page.evaluate(() => ({
-        texts: window.transport.request.commands.map((command) => command.message.parts[0].text),
-        cancels: window.cancels, running: document.getElementById("running")?.textContent,
-      }));
-      assert.deepEqual(second.texts, ["what", "now"]);
-      assert.equal(second.cancels, 0, "the agent's turn was not stopped");
-      assert.equal(second.running, "running");
-      assert.equal(await box.inputValue(), "", "the message box is empty after the send");
-      await t.waitFor((s) => s.users === "hello|what|now" && s.errors === "0", "the sent messages");
+      await t.waitFor((s) => s.queued === "Queued what|now", "Ctrl+Enter queues the message and requests Send Now");
+      assert.equal(await requests(), 1, "busy composer messages do not start another assistant transport");
+      assert.equal(await box.inputValue(), "", "the message box is empty after the queue admission");
+      assert.deepEqual(await t.page.evaluate(() => window.queueAdmissions), [
+        { text: "what", sendNow: false },
+        { text: "now", sendNow: true },
+      ]);
+      assert.equal(await t.page.locator("#users").innerText(), "hello", "queued messages are separate from transcript history");
       await t.page.close();
     },
     // Stop still stops the agent's turn, and a message waiting behind it is not sent.

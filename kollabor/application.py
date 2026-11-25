@@ -1,6 +1,7 @@
 """Main application orchestrator for Kollab."""
 
 import asyncio
+import inspect
 import logging
 import math
 import os
@@ -58,6 +59,10 @@ class UnknownLLMError(ValueError):
             else " Run /llm to list them."
         )
         super().__init__(f"--llm {name!r} is not a profile or loadout.{hint}")
+
+
+class ApplicationCleanupIncompleteError(RuntimeError):
+    """The application could not confirm that its owned work has settled."""
 
 
 def merge_widget_state_snapshot(
@@ -1111,6 +1116,10 @@ class TerminalLLMChat:
         self._pending_skill_display: list[tuple[str, str, dict[str, Any]]] = []
         self._task_lock = asyncio.Lock()
 
+        # Hub self/remote stop must enter the application cleanup path so queue
+        # workers settle before provider and plugin teardown begins.
+        self.event_bus.register_service("app", self)
+
         logger.info("Kollab initialized")
 
     @staticmethod
@@ -1189,6 +1198,9 @@ class TerminalLLMChat:
 
         render_task = None
         input_task = None
+        deferred_startup_task = None
+        self._startup_exit_code = None
+        self._startup_exit_cleanup_error = None
         self._needs_terminal_cleanup = (
             False  # Track if we need terminal restore on exit
         )
@@ -1283,7 +1295,7 @@ class TerminalLLMChat:
                 await self.llm_service.register_hooks()
 
             # Launch deferred startup as background task
-            self.create_background_task(
+            deferred_startup_task = self.create_background_task(
                 self._deferred_startup(initial_message=initial_message),
                 "deferred_startup",
             )
@@ -1296,6 +1308,16 @@ class TerminalLLMChat:
                 if self.running:
                     raise
 
+            if self._startup_exit_code is not None and deferred_startup_task is not None:
+                exit_code = self._startup_exit_code
+                await deferred_startup_task
+                cleanup_error = self._startup_exit_cleanup_error
+                if cleanup_error is not None:
+                    if exit_code != 0:
+                        raise SystemExit(exit_code) from cleanup_error
+                    raise cleanup_error
+                raise SystemExit(exit_code)
+
         except KeyboardInterrupt:
             print("\r\n")
             logger.info("Application interrupted by user")
@@ -1305,7 +1327,23 @@ class TerminalLLMChat:
         finally:
             # Guaranteed cleanup - always runs regardless of how we exit
             logger.info("Executing guaranteed cleanup")
-            await self.cleanup()
+            pending_error = sys.exception()
+            try:
+                await self._cleanup_or_raise()
+            except BaseException as cleanup_error:
+                if pending_error is None or (
+                    isinstance(pending_error, SystemExit)
+                    and pending_error.code in (None, 0)
+                ):
+                    raise
+                pending_error.add_note(
+                    "Application cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+                logger.error(
+                    "Application cleanup failed while preserving %s",
+                    type(pending_error).__name__,
+                )
 
     async def _acp_permission_decider(self, request: Any) -> str | None:
         """Adapt ACP permission cards to the existing human confirmation owner.
@@ -1778,8 +1816,12 @@ class TerminalLLMChat:
 
                 if not should_stay:
                     logger.info(f"CLI command complete, exiting with code {exit_code}")
-                    await self.cleanup()
-                    sys.exit(exit_code)
+                    self._startup_exit_code = exit_code
+                    try:
+                        await self._cleanup_or_raise()
+                    except ApplicationCleanupIncompleteError as cleanup_error:
+                        self._startup_exit_cleanup_error = cleanup_error
+                    return
 
                 logger.info("CLI command complete, continuing to interactive mode")
 
@@ -1969,7 +2011,7 @@ class TerminalLLMChat:
                     print()
                     print("Use /setup to fix the configuration.")
                     # Clean up before exiting
-                    await self.cleanup()
+                    await self._cleanup_or_raise()
                     return
 
             # Initialize plugins (they should check self.pipe_mode if needed)
@@ -1990,8 +2032,7 @@ class TerminalLLMChat:
                 if command is None:
                     logger.warning("Pipe command failed to parse: %s", piped_input)
                     print(f"Unknown command: {piped_input.strip()}")
-                    await self.cleanup()
-                    sys.exit(2)
+                    await self._cleanup_then_exit(2)
                 result = await self.input_handler.command_executor.execute_command(
                     command, self.event_bus
                 )
@@ -2003,8 +2044,7 @@ class TerminalLLMChat:
                 ):
                     self._print_command_result(result)
                 exit_code = 0 if result and result.success else 1
-                await self.cleanup()
-                sys.exit(exit_code)
+                await self._cleanup_then_exit(exit_code)
 
             # Send input to LLM and wait for response
             # The LLM service will handle the response display
@@ -2074,7 +2114,23 @@ class TerminalLLMChat:
             # Cleanup
             self.running = False
             # Keep pipe_mode=True during cleanup so cancellation messages can be suppressed
-            await self.cleanup()
+            pending_error = sys.exception()
+            try:
+                await self._cleanup_or_raise()
+            except BaseException as cleanup_error:
+                if pending_error is None or (
+                    isinstance(pending_error, SystemExit)
+                    and pending_error.code in (None, 0)
+                ):
+                    raise
+                pending_error.add_note(
+                    "Pipe mode cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+                logger.error(
+                    "Pipe mode cleanup failed while preserving %s",
+                    type(pending_error).__name__,
+                )
             # DON'T reset pipe_mode here - let main.py's finally block check it to avoid double cleanup
 
     async def _display_banner(self) -> None:
@@ -4026,7 +4082,7 @@ class TerminalLLMChat:
         else:
             print(f"Error: {message}", file=sys.stderr)
 
-    async def cleanup(self) -> None:
+    async def cleanup(self) -> bool:
         """Run cleanup at most once, serializing concurrent callers."""
         lock = getattr(self, "_cleanup_lock", None)
         if lock is None:
@@ -4035,17 +4091,114 @@ class TerminalLLMChat:
         async with lock:
             if getattr(self, "_cleanup_complete", False):
                 logger.debug("Application cleanup already complete")
-                return
-            await self._cleanup_impl()
-            self._cleanup_complete = True
+                return True
+            completed = await self._cleanup_impl()
+            if completed:
+                self._cleanup_complete = True
+            else:
+                self._startup_complete = False
+            return completed
 
-    async def _cleanup_impl(self) -> None:
+    async def _cleanup_or_raise(self) -> None:
+        """Make incomplete cleanup visible to an exiting application caller."""
+        if not await self.cleanup():
+            self._startup_complete = False
+            raise ApplicationCleanupIncompleteError(
+                "Application cleanup did not complete; queue workers may still be active"
+            )
+
+    async def _cleanup_then_exit(self, exit_code: int) -> None:
+        """Keep the caller's intended CLI status pending through cleanup retries."""
+        try:
+            await self._cleanup_or_raise()
+        except ApplicationCleanupIncompleteError as cleanup_error:
+            raise SystemExit(exit_code) from cleanup_error
+        raise SystemExit(exit_code)
+
+    async def _stop_hub_message_intake(self) -> None:
+        """Stop accepting Hub messages once application teardown begins."""
+        if getattr(self, "_hub_message_intake_stopped", False):
+            return
+        hub_plugin = self._get_shutdown_service("hub_plugin")
+        stop_message_intake = getattr(hub_plugin, "stop_message_intake", None)
+        if callable(stop_message_intake):
+            await stop_message_intake()
+        self._hub_message_intake_stopped = True
+
+    def _get_shutdown_service(self, name: str) -> Any:
+        """Read the synchronous EventBus service registry during teardown."""
+        event_bus = getattr(self, "event_bus", None)
+        get_service = getattr(event_bus, "get_service", None)
+        if not callable(get_service):
+            return None
+        service = get_service(name)
+        if inspect.isawaitable(service):
+            # EventBus.get_service is synchronous. Treat an async mock or a
+            # miswired alternate bus as no registered service, and close its
+            # unused coroutine to avoid teardown warnings.
+            close = getattr(service, "close", None)
+            if callable(close):
+                close()
+            return None
+        return service
+
+    async def _close_web_message_queue_runtime_before_providers(self) -> bool:
+        """Keep provider teardown behind a confirmed queue-worker close."""
+        if getattr(self, "_web_message_queue_runtime_closed", False):
+            return True
+        if getattr(self, "event_bus", None) is None:
+            self._web_message_queue_runtime_closed = True
+            return True
+        try:
+            runtime = self._get_shutdown_service("web_message_queue_runtime")
+            if runtime is None:
+                hub_plugin = self._get_shutdown_service("hub_plugin")
+                runtime = getattr(hub_plugin, "_web_message_queue_runtime", None)
+        except Exception:
+            logger.warning(
+                "WebUI queue runtime lookup failed before provider shutdown",
+                exc_info=True,
+            )
+            return False
+        if runtime is None:
+            self._web_message_queue_runtime_closed = True
+            return True
+        close_queue_runtime = getattr(runtime, "close", None)
+        if not callable(close_queue_runtime):
+            logger.warning(
+                "WebUI queue runtime cannot confirm worker shutdown; providers remain open"
+            )
+            return False
+        try:
+            if await close_queue_runtime() is not True:
+                logger.warning(
+                    "WebUI queue worker did not confirm clean shutdown; providers remain open"
+                )
+                return False
+        except Exception:
+            logger.warning(
+                "WebUI queue worker shutdown failed; providers remain open",
+                exc_info=True,
+            )
+            return False
+        self._web_message_queue_runtime_closed = True
+        return True
+
+    async def _cleanup_impl(self) -> bool:
         """Clean up all resources and cancel background tasks.
 
         This method is guaranteed to run on all exit paths via finally block.
-        Ensures no orphaned tasks or resources remain.
+        A failed queue close leaves cleanup incomplete so it can be retried.
         """
         logger.info("Starting application cleanup...")
+        self.running = False
+        input_handler = getattr(self, "input_handler", None)
+        if input_handler is not None:
+            input_handler.running = False
+        await self._stop_hub_message_intake()
+        if not await self._close_web_message_queue_runtime_before_providers():
+            return False
+
         acp_orchestrator = getattr(self, "acp_orchestrator", None)
         client_turn_broker = self.event_bus.get_service("client_turn_broker") if self.event_bus else None
         if client_turn_broker is not None:
@@ -4073,10 +4226,6 @@ class TerminalLLMChat:
                         exc,
                     )
             self.acp_orchestrator = None
-        self.running = False
-        if hasattr(self, "input_handler"):
-            self.input_handler.running = False
-
         # Stop the WidgetStateRefresher background task if running
         # (phase 5 of daemon transparency refactor)
         refresher = getattr(self, "_widget_state_refresher", None)
@@ -4104,9 +4253,13 @@ class TerminalLLMChat:
             self._attach_writer = None  # type: ignore[assignment]
 
         # Cancel all tracked background tasks
-        if self._background_tasks:
-            logger.info(f"Cancelling {len(self._background_tasks)} background tasks")
-            for task in self._background_tasks[
+        current_task = asyncio.current_task()
+        background_tasks = [
+            task for task in self._background_tasks if task is not current_task
+        ]
+        if background_tasks:
+            logger.info(f"Cancelling {len(background_tasks)} background tasks")
+            for task in background_tasks[
                 :
             ]:  # Copy list to avoid modification during iteration
                 if not task.done():
@@ -4115,7 +4268,7 @@ class TerminalLLMChat:
             # Wait for cancelled tasks individually (asyncio.gather wrapping
             # cancelled tasks creates nested future chains that cause recursive
             # cancel() calls → RecursionError on deep task trees)
-            pending = [t for t in self._background_tasks if not t.done()]
+            pending = [t for t in background_tasks if not t.done()]
             if pending:
                 try:
                     done, still_pending = await asyncio.wait(pending, timeout=5.0)
@@ -4135,10 +4288,12 @@ class TerminalLLMChat:
         # Mark startup as incomplete
         self._startup_complete = False
 
-        # Call full shutdown to cleanup other resources
-        await self.shutdown()
+        # Call full shutdown to cleanup other resources.
+        if not await self.shutdown():
+            return False
 
         logger.info("Application cleanup complete")
+        return True
 
     def _apply_renderer_config(self) -> None:
         """Apply thinking effect and shimmer config to renderer.
@@ -4367,12 +4522,12 @@ class TerminalLLMChat:
             )
             return {"success": False, "error": str(e)}
 
-    async def shutdown(self) -> None:
-        """Shutdown the application gracefully."""
+    async def shutdown(self) -> bool:
+        """Shutdown gracefully, preserving providers if queue settlement fails."""
         # The attach client shuts down in the background, then cleanup() calls
         # this again. Run once; a shutdown cancelled midway still reruns.
         if getattr(self, "_shutdown_complete", False):
-            return
+            return True
         logger.info("Application shutting down")
         self.running = False
         permission_bridge = getattr(self, "_attach_permission_bridge", None)
@@ -4404,12 +4559,12 @@ class TerminalLLMChat:
 
         # Close hub intake before providers shut down. Late peer messages are
         # put back in the mailbox by HubPlugin for the next process start.
-        hub_plugin = (
-            self.event_bus.get_service("hub_plugin") if self.event_bus else None
-        )
-        stop_message_intake = getattr(hub_plugin, "stop_message_intake", None)
-        if callable(stop_message_intake):
-            await stop_message_intake()
+        await self._stop_hub_message_intake()
+
+        # Queue workers may still be admitting input through the active
+        # provider. Do not start provider teardown without confirmed settlement.
+        if not await self._close_web_message_queue_runtime_before_providers():
+            return False
 
         # Shutdown LLM core service
         await self.llm_service.shutdown()
@@ -4450,3 +4605,4 @@ class TerminalLLMChat:
 
         self._shutdown_complete = True
         logger.info("Application shutdown complete")
+        return True

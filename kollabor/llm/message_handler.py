@@ -231,6 +231,26 @@ class MessageHandler:
         request_id = data.get("request_id")
         if isinstance(request_id, str) and request_id:
             origin_kwargs["request_id"] = request_id  # the client follows the turn by it (#551)
+        queue_handoff = data.get("queue_handoff")
+        if queue_handoff is not None:
+            from .queue_handoff import QueueHandoffContext
+
+            if (
+                not isinstance(queue_handoff, QueueHandoffContext)
+                or request_id != queue_handoff.request_id
+            ):
+                return {"status": "rejected", "reason": "invalid_queue_capability"}
+            origin_kwargs["queue_handoff"] = queue_handoff
+        queue_handoff_batch = data.get("queue_handoff_batch")
+        if queue_handoff_batch is not None:
+            origin_kwargs["queue_handoff_batch"] = queue_handoff_batch
+        force_next_turn = data.get("force_next_turn", False)
+        if not isinstance(force_next_turn, bool):
+            return {"status": "rejected", "reason": "invalid_force_send"}
+        if force_next_turn:
+            origin_kwargs["force_next_turn"] = True
+            origin_kwargs["force_reservation"] = data.get("force_reservation")
+            origin_kwargs["force_gate_token"] = data.get("force_gate_token")
         result = await self._coordinator.process_user_input(
             message, pre_displayed=pre_displayed, **origin_kwargs
         )

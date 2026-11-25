@@ -1368,6 +1368,20 @@ class AgentSocketServer:
                         and peer_cred is not None
                         and peer_cred[1] == os.getuid()
                     )
+                rpc_caller_context = None
+                if local_operator:
+                    # This value is created only after the socket's local
+                    # operator check succeeds. RPC params never choose it.
+                    from kollabor_rpc import RpcCallerContext
+
+                    if os.name == "nt":
+                        rpc_caller_context = (
+                            RpcCallerContext.from_windows_local_ipc()
+                        )
+                    elif peer_cred is not None:
+                        rpc_caller_context = RpcCallerContext.from_unix_peer(
+                            peer_cred[1]
+                        )
                 remote_admin = require_auth and action not in (
                     ("peer_forward", "peer_secure")
                     if carrier_only
@@ -1722,6 +1736,7 @@ class AgentSocketServer:
                             sub_queue=sub_queue,
                             sender=(authenticated_as if require_auth else self._local_designation) or None,
                             operator=not require_auth,
+                            rpc_caller_context=rpc_caller_context,
                         )
                         return  # Connection ends when attacher detaches
 
@@ -1977,7 +1992,9 @@ class AgentSocketServer:
                         }
                     else:
                         try:
-                            resp = await self._rpc_server.handle_wire(msg_data)
+                            resp = await self._rpc_server.handle_wire(
+                                msg_data, caller_context=rpc_caller_context
+                            )
                         except Exception as exc:
                             logger.warning(
                                 "rpc handle_wire failed: %s", exc, exc_info=True
@@ -2155,6 +2172,7 @@ class AgentSocketServer:
         sub_queue: Any | None = None,
         sender: str | None = None,
         operator: bool = False,
+        rpc_caller_context: Any | None = None,
     ) -> None:
         """Persistent streaming loop for an attached client.
 
@@ -2252,7 +2270,9 @@ class AgentSocketServer:
                             # may wait on a turn: a talk-over's cut is queued
                             # on its turn instead (record_interrupted_voice_reply).
                             try:
-                                reply = await self._rpc_server.handle_wire(msg)
+                                reply = await self._rpc_server.handle_wire(
+                                    msg, caller_context=rpc_caller_context
+                                )
                             except Exception as exc:
                                 logger.warning(
                                     "rpc request failed on attached connection: %s",

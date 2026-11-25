@@ -53,7 +53,7 @@ check for clean bisect state:
 check project structure
 
   <terminal>ls -la</terminal>
-  <terminal>find . -name "*.py" -type f | head -20</terminal>
+  <file-find><pattern>*.py</pattern></file-find>
 
 identify entry points:
   <terminal>cat main.py 2>/dev/null | head -30</terminal>
@@ -72,7 +72,9 @@ check for existing error logs
   <terminal>tail -50 .kollab/logs/kollab.log 2>/dev/null || tail -50 logs/*.log 2>/dev/null || echo "no recent logs"</terminal>
 
 check for crash reports:
-  <terminal>find . -name "*.crash" -o -name "*.stackdump" -o -name "core.*" 2>/dev/null</terminal>
+  <file-find><pattern>*.crash</pattern></file-find>
+  <file-find><pattern>*.stackdump</pattern></file-find>
+  <file-find><pattern>core.*</pattern></file-find>
 
 
 verify strace/ltrace for system call tracing (linux)
