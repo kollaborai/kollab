@@ -135,7 +135,7 @@ function installRecorder(cfg) {
     rec.marks.push({ t: now(), name });
   };
   rec.noteToolRow = (row) => {
-    if (!row || row.kind !== "tool" || !Array.isArray(row.parts)) return;
+    if (!row || !Array.isArray(row.parts)) return;
     for (const part of row.parts) {
       if (part.type !== "tool-call" || !part.tool_call_id || rec.toolCalls.includes(part.tool_call_id)) continue;
       rec.toolCalls.push(part.tool_call_id);
