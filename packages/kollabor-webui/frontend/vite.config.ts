@@ -270,6 +270,7 @@ const mainConfig = defineConfig({
       "src/plugins/wiring.test.tsx",
       "src/plugins/hello-template.test.ts",
       "tests/permission-tool-outcome.test.tsx",
+      "tests/image-attachment.test.ts",
     ],
     environment: "node",
   },
