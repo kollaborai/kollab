@@ -1,7 +1,9 @@
 """Tests for pricing_registry and cost_calculator."""
 
+import json
 import math
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -127,6 +129,39 @@ class TestPricingRegistryLoad(unittest.TestCase):
                 ):
                     reg = PricingRegistry()
                     reg.load_from_model_registry()
+
+                valid = reg.get_pricing("openai", "valid-model")
+                self.assertIsNotNone(valid)
+                self.assertAlmostEqual(valid.prompt_per_token, 0.25 / 1_000_000)
+                self.assertAlmostEqual(valid.completion_per_token, 0.75 / 1_000_000)
+                self.assertAlmostEqual(valid.cache_discount, 0.2)
+                self.assertIsNone(reg.get_pricing("openai", "overflow-model"))
+
+    def test_F1_unrepresentable_pricing_file_fields_are_skipped(self):
+        valid_info = {
+            "prompt_per_million": 0.25,
+            "completion_per_million": 0.75,
+            "cache_read_per_million": 0.05,
+        }
+        for field in (
+            "prompt_per_million",
+            "completion_per_million",
+            "cache_read_per_million",
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                overflow_info = {**valid_info, field: 10**400}
+                data = {
+                    "openai": {
+                        "valid-model": valid_info,
+                        "overflow-model": overflow_info,
+                    }
+                }
+                path = Path(tmp) / "pricing.json"
+                path.write_text(json.dumps(data))
+
+                PricingRegistry.reset()
+                reg = PricingRegistry()
+                reg.load_from_file(path)
 
                 valid = reg.get_pricing("openai", "valid-model")
                 self.assertIsNotNone(valid)
