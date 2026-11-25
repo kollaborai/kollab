@@ -32,6 +32,20 @@ BOOL_FIELDS = (
 PRICE_FIELDS = ("pricing_in", "pricing_out", "pricing_cached_in")
 
 
+def _describe(value: object) -> str:
+    """Render a rejected value for an error message without raising.
+
+    repr() raises ValueError for an int past Python's int-to-str digit limit,
+    and a list or dict can hide one. So only None, bool, float, str and ints
+    under 10**300 are printed; any other value is named by its type.
+    """
+    if value is None or isinstance(value, (bool, float, str)):
+        return repr(value)
+    if isinstance(value, int) and abs(value) < 10**300:
+        return repr(value)
+    return f"<{type(value).__name__}>"
+
+
 def validate(data: dict) -> list[str]:
     errors: list[str] = []
     models = data.get("models", {})
@@ -48,11 +62,13 @@ def validate(data: dict) -> list[str]:
                 errors.append(f"{name}: missing required field '{field}'")
         cw = info.get("context_window")
         if not isinstance(cw, int) or cw <= 0:
-            errors.append(f"{name}: context_window must be a positive int, got {cw!r}")
+            errors.append(
+                f"{name}: context_window must be a positive int, got {_describe(cw)}"
+            )
         out = info.get("max_output")
         if out is not None and (not isinstance(out, int) or out <= 0):
             errors.append(
-                f"{name}: max_output must be a positive int or null, got {out!r}"
+                f"{name}: max_output must be a positive int or null, got {_describe(out)}"
             )
         for field in PRICE_FIELDS:
             price = info.get(field)
@@ -70,7 +86,7 @@ def validate(data: dict) -> list[str]:
                     valid_price = False
             if not valid_price:
                 errors.append(
-                    f"{name}: {field} must be a finite non-negative number or null, got {price!r}"
+                    f"{name}: {field} must be a finite non-negative number or null, got {_describe(price)}"
                 )
         for field in BOOL_FIELDS:
             if field in info and not isinstance(info[field], bool):
