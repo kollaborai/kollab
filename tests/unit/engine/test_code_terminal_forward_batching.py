@@ -7,8 +7,8 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from kollabor_engine.routes import code  # noqa: E402
 from kollabor.code_service import terminal  # noqa: E402
+from kollabor_engine.routes import code  # noqa: E402
 
 
 class _Ws:
