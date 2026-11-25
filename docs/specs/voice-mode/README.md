@@ -7,7 +7,7 @@ Whisper base, one shared device service, timestamped transcription, an AI consum
 a shared sentence playback queue, and visible operating state. It distinguishes
 the historical audit from the replacement contract. The user requested its
 implementation; [the evidence ledger](implementation-status.md) records what has
-been implemented and checked. [Usage](../../docs/features/voice-mode.md) describes
+been implemented and checked. [Usage](../../features/voice-mode.md) describes
 the current command and service behavior.
 
 The other files in this directory are historical proposals and contracts. Their
