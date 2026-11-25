@@ -1,6 +1,7 @@
 """Exercise the real CLI boundary with synthetic, escaping writer processes."""
 
 import asyncio
+import logging
 import os
 import sys
 import tempfile
@@ -227,3 +228,24 @@ async def test_nonzero_cli_discards_partial_transcript(tmp_path, monkeypatch, ca
     assert list(private.iterdir()) == []
     assert "private transcript" not in caplog.text
     assert "synthetic-secret" not in caplog.text
+
+
+async def test_missing_whisper_inside_supervisor_keeps_safe_executable_context(
+    tmp_path, monkeypatch, caplog
+):
+    # Only python3 is on PATH, so whisper is absent inside the supervised child.
+    private = tmp_path / "private"
+    private.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(private))
+    python_only = tmp_path / "bin"
+    python_only.mkdir()
+    (python_only / "python3").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", str(python_only))
+    caplog.set_level(logging.ERROR)
+
+    result = await _bridge()._transcribe_voice("synthetic-file-id")
+
+    assert result == "[voice message - transcription failed]"
+    assert "whisper" in caplog.text.lower()
+    assert "synthetic-secret" not in caplog.text
+    assert list(private.iterdir()) == []
