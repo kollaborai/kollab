@@ -9,7 +9,7 @@ import { K_POLYS } from "@/components/icons/kollab-logo";
 
 type Listener = (event: { preventDefault: () => void }) => void;
 
-function mockThree(renders: { count: number; ratio?: number; fail?: boolean }) {
+function mockThree(renders: { count: number; ratio?: number; fail?: boolean; shaderFail?: boolean }) {
   class Disposable {
     dispose() {}
   }
@@ -20,6 +20,7 @@ function mockThree(renders: { count: number; ratio?: number; fail?: boolean }) {
     setDrawRange() {}
   }
   class Renderer {
+    debug: { onShaderError?: () => void } = {};
     private size = { x: 0, y: 0 };
     setPixelRatio(ratio: number) {
       renders.ratio = ratio;
@@ -36,6 +37,7 @@ function mockThree(renders: { count: number; ratio?: number; fail?: boolean }) {
     render() {
       if (renders.fail) throw new Error("first render failed");
       renders.count += 1;
+      if (renders.shaderFail) this.debug.onShaderError?.();
     }
     dispose() {}
     forceContextLoss() {}
@@ -263,6 +265,31 @@ describe("glass K recovery", () => {
       expect(clearTimeout).not.toHaveBeenCalled();
     },
   );
+
+  it("treats a failed shader compile as a lost glass: no frame reported, flat mark stays", async () => {
+    vi.resetModules();
+    vi.stubGlobal("window", {
+      devicePixelRatio: 1,
+      matchMedia: () => ({ matches: true }),
+      addEventListener() {},
+      removeEventListener() {},
+      clearTimeout() {},
+    });
+    vi.stubGlobal("document", {
+      documentElement: { classList: { contains: () => true } },
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    mockThree({ count: 0, shaderFail: true });
+    const { startGlass } = await import("@/components/icons/kollab-logo-glass");
+    const { canvas, raw } = controllableCanvas();
+    raw.clientWidth = 40;
+    raw.clientHeight = 40;
+    const onFrame = vi.fn();
+    const onLost = vi.fn();
+    startGlass(canvas, K_POLYS, { onFrame, onLost });
+    expect(onFrame).not.toHaveBeenCalled();
+    expect(onLost).toHaveBeenCalledOnce();
+  });
 
   it("reports a lost WebGL context so the flat mark can come back", async () => {
     vi.resetModules();
