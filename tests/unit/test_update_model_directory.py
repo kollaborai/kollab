@@ -435,3 +435,71 @@ def test_refresh_clears_invalid_retained_prices_before_writing_strict_json(tmp_p
     assert models["vendor/valid-sibling"]["pricing_in"] == 0.5
     assert models["vendor/valid-sibling"]["pricing_out"] == 1.25
     assert models["vendor/valid-sibling"]["pricing_cached_in"] == 0.25
+
+
+def test_refresh_clears_invalid_retained_output_limits_before_writing_strict_json(
+    tmp_path,
+):
+    source = {"data": [{"id": "vendor/retained", "context_length": 2000}]}
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/retained": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": "OVERSIZED_OUTPUT",
+                },
+                "vendor/negative": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": -1,
+                },
+                "vendor/float": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": 1.5,
+                },
+                "vendor/valid-sibling": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": 4096,
+                },
+            }
+        }
+    ).replace('"OVERSIZED_OUTPUT"', "9" * 5000)
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
+
+    assert upd.main(argv) == 0
+
+    def reject_non_json_number(value):
+        raise AssertionError(f"non-standard JSON number written: {value}")
+
+    models = json.loads(registry.read_text(), parse_constant=reject_non_json_number)[
+        "models"
+    ]
+    for name in ("vendor/retained", "vendor/negative", "vendor/float"):
+        assert models[name]["max_output"] is None
+    assert models["vendor/retained"]["context_window"] == 2000
+    assert models["vendor/valid-sibling"]["max_output"] == 4096
+
+
+def test_refresh_refuses_to_write_unrepresentable_retained_context_window(tmp_path):
+    source = {"data": [{"id": "vendor/updated", "context_length": 2000}]}
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/unmapped": {
+                    "provider": "openrouter",
+                    "context_window": "OVERSIZED_CONTEXT",
+                },
+                "vendor/updated": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                },
+            }
+        }
+    ).replace('"OVERSIZED_CONTEXT"', "9" * 5000)
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
+
+    assert upd.main(argv) == 2
+    assert registry.read_text() == registry_text
