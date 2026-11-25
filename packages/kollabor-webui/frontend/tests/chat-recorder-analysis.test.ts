@@ -146,6 +146,21 @@ describe("chat recorder analysis", () => {
     expect(polls).toBe(3);
   });
 
+  it("requires a fresh idle after a new start even if an idle event follows it", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("  const waitForCompaction ="), source.indexOf("  const runtimeForSession ="));
+    let polls = 0;
+    const event = (status: string) => ({ kind: "events", ev: "context_compaction_status", status });
+    const wait = runInNewContext(`${body}; waitForCompaction`, {
+      Date, isCompactionComplete, activeRuntime: "codex-cli",
+      contextCompactionStatus: async () => { polls++; return polls === 1 ? "compacting" : "idle"; },
+      page: { evaluate: async () => polls === 1 ? [] : [event("compacting"), event("idle")] },
+      sleep: async () => {},
+    });
+    await wait(0);
+    expect(polls).toBe(3);
+  });
+
   it("lets a staged native compaction reach the request that applies it", () => {
     expect(isCompactionComplete({
       sawStart: true,
