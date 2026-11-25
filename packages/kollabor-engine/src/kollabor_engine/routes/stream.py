@@ -96,6 +96,20 @@ def _sse_event(event: dict[str, Any]) -> dict[str, str]:
     return {"data": json.dumps(event, ensure_ascii=False, separators=(",", ":"))}
 
 
+def _cursor_after(event: dict[str, Any]) -> int:
+    data = event.get("data")
+    if event.get("type") == "snapshot" and isinstance(data, dict):
+        next_seq = data.get("next_seq")
+        if (
+            isinstance(next_seq, int)
+            and not isinstance(next_seq, bool)
+            and next_seq >= 0
+        ):
+            return next_seq - 1
+    seq = event.get("seq")
+    return seq if isinstance(seq, int) and not isinstance(seq, bool) else -1
+
+
 async def _read_events(
     session_id: str,
     *,
@@ -158,7 +172,7 @@ async def chat_stream(
                     continue
                 if seq <= last_seq:
                     continue
-                last_seq, last_uid = seq, uid
+                last_seq, last_uid = _cursor_after(event), uid
                 yield _sse_event(event)
 
             while not await request.is_disconnected():
@@ -185,6 +199,12 @@ async def chat_stream(
                     for missed in replay:
                         missed_seq = missed.get("seq")
                         missed_uid = missed.get("conversation_uid")
+                        if missed.get("type") == "snapshot":
+                            if not isinstance(missed_uid, str):
+                                continue
+                            last_seq, last_uid = _cursor_after(missed), missed_uid
+                            yield _sse_event(missed)
+                            continue
                         if (
                             not isinstance(missed_seq, int)
                             or isinstance(missed_seq, bool)
@@ -196,7 +216,7 @@ async def chat_stream(
                         yield _sse_event(missed)
                     if seq <= last_seq:
                         continue
-                last_seq, last_uid = seq, event["conversation_uid"]
+                last_seq, last_uid = _cursor_after(event), event["conversation_uid"]
                 yield _sse_event(event)
         finally:
             session.unsubscribe(queue)
@@ -215,6 +235,13 @@ async def add_input(session_id: str, body: InputRequest):
             "attachments": [attachment.model_dump() for attachment in body.attachments],
         },
     )
+    if isinstance(result, dict) and result.get("error") == (
+        "input id is already bound to different content"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This input ID is already bound to different content.",
+        )
     if (
         not isinstance(result, dict)
         or result.get("id") != body.id

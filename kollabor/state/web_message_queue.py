@@ -37,6 +37,10 @@ DEFAULT_MAX_OPERATIONS = 4096
 DEFAULT_OPERATION_RETRY_LEASE_SECONDS = 900.0
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_CLIENT_ITEM_ID = re.compile(
+    r"([A-Za-z][A-Za-z0-9._:-]{0,63})-([A-Za-z0-9][A-Za-z0-9._:-]{0,63})\Z"
+)
+_RESERVED_ITEM_PREFIXES = frozenset({"item", "op", "batch"})
 
 
 class WebMessageQueueError(Exception):
@@ -319,6 +323,7 @@ class WebMessageQueue:
         self._item_attempt_states: dict[str, str] = {}
         self._batch_owners: dict[str, str] = {}
         self._item_owners: dict[str, str] = {}
+        self._item_owner_issued_at_ns: dict[str, int] = {}
         self._active_claim: str | None = None
         self._active_batch_id: str | None = None
         self._active_item_attempt_id: str | None = None
@@ -407,6 +412,22 @@ class WebMessageQueue:
             raise StaleIdentifier("entity ID creation lease has expired")
         return issued_at_ns
 
+    def _validate_new_item_id(self, value: str) -> int:
+        """Validate a daemon-minted ID or a client-prefixed chat input ID."""
+        if value.startswith("item-"):
+            return self._validate_new_entity_id(value, "item")
+        self._validate_identifier(value)
+        match = _CLIENT_ITEM_ID.fullmatch(value)
+        if match is None or match.group(1).lower() in _RESERVED_ITEM_PREFIXES:
+            raise InvalidIdentifier("invalid queue identifier")
+        return time.monotonic_ns()
+
+    def _existing_item_issue_time(self, request_id: str) -> int:
+        issued_at_ns = self._item_owner_issued_at_ns.get(request_id)
+        if issued_at_ns is not None:
+            return issued_at_ns
+        return self._token_issue_time(request_id, "item")
+
     @staticmethod
     def _payload_fingerprint(payload: bytes) -> str:
         return hashlib.sha256(payload).hexdigest()
@@ -458,12 +479,15 @@ class WebMessageQueue:
             ):
                 del self._batch_owners[batch_id]
         for request_id in tuple(self._item_owners):
-            issued_at_ns = self._token_issue_time(request_id, "item")
+            issued_at_ns = self._item_owner_issued_at_ns.get(request_id)
+            if issued_at_ns is None:
+                issued_at_ns = self._token_issue_time(request_id, "item")
             if (
                 request_id not in pending_items
                 and now_ns - issued_at_ns >= self._operation_retry_lease_ns
             ):
                 del self._item_owners[request_id]
+                self._item_owner_issued_at_ns.pop(request_id, None)
 
         for claim_id, reservation in tuple(self._claim_reservations.items()):
             if not self._is_operation_pinned(claim_id):
@@ -744,8 +768,10 @@ class WebMessageQueue:
             if replay is not None:
                 return replay
             self._validate_new_entity_id(batch_id, "batch")
-            for item in messages:
-                self._validate_new_entity_id(item.request_id, "item")
+            item_issue_times = {
+                item.request_id: self._validate_new_item_id(item.request_id)
+                for item in messages
+            }
             self._ensure_operation_capacity()
             if batch_id in self._batch_owners:
                 raise BatchConflict("batch ID is already in use")
@@ -774,6 +800,9 @@ class WebMessageQueue:
             self._batch_owners[batch_id] = operation_id
             for item in messages:
                 self._item_owners[item.request_id] = batch_id
+                self._item_owner_issued_at_ns[item.request_id] = item_issue_times[
+                    item.request_id
+                ]
             self._pending_items += len(messages)
             self._pending_bytes += batch_bytes
             self._revision += 1
@@ -837,8 +866,10 @@ class WebMessageQueue:
             if replay is not None:
                 return replay
             self._validate_new_entity_id(batch_id, "batch")
-            for item in messages:
-                self._validate_new_entity_id(item.request_id, "item")
+            item_issue_times = {
+                item.request_id: self._validate_new_item_id(item.request_id)
+                for item in messages
+            }
             self._ensure_operation_capacity()
             if batch_id in self._batch_owners:
                 raise BatchConflict("batch ID is already in use")
@@ -901,6 +932,9 @@ class WebMessageQueue:
                 self._batch_owners[batch_id] = operation_id
                 for item in messages:
                     self._item_owners[item.request_id] = batch_id
+                    self._item_owner_issued_at_ns[item.request_id] = item_issue_times[
+                        item.request_id
+                    ]
                 self._pending_items += len(messages)
                 self._pending_bytes += batch_bytes
                 self._revision = receipt.revision
@@ -1445,7 +1479,10 @@ class WebMessageQueue:
             replay = self._replay(operation_id, input_fingerprint)
             if replay is not None:
                 return replay
-            self._token_issue_time(request_id, "item")
+            if request_id in self._item_owners:
+                self._existing_item_issue_time(request_id)
+            else:
+                self._token_issue_time(request_id, "item")
             self._ensure_operation_capacity()
             owner = self._item_owners.get(request_id)
             if owner is None:
@@ -1498,7 +1535,10 @@ class WebMessageQueue:
             replay = self._replay(operation_id, input_fingerprint)
             if replay is not None:
                 return replay
-            self._token_issue_time(request_id, "item")
+            if request_id in self._item_owners:
+                self._existing_item_issue_time(request_id)
+            else:
+                self._token_issue_time(request_id, "item")
             self._ensure_operation_capacity()
             owner = self._item_owners.get(request_id)
             if owner is None:

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import inspect
+import json
 import logging
 import math
 from dataclasses import dataclass, field
@@ -15,6 +18,15 @@ from .web_message_attachments import (
     AttachmentAuthorizationError,
     AttachmentScopeBinding,
     WebMessageAttachmentRegistry,
+    verified_image_mime,
+)
+from .web_message_queue import (
+    BatchStatus,
+    ItemConflict,
+    ItemNotFound,
+    ItemNotQueued,
+    ItemStatus,
+    WebMessage,
 )
 from .web_message_queue_dispatch import WebMessageQueueDispatcher
 from .web_message_queue_rpc import (
@@ -107,7 +119,9 @@ class WebMessageQueueRuntime:
     )
     _worker_close_tasks: dict[
         WebMessageQueueWorker, asyncio.Task[bool]
-    ] = field(default_factory=dict, repr=False)
+    ] = field(
+        default_factory=dict, repr=False
+    )
     _supervisor_task: asyncio.Task[None] | None = field(default=None, repr=False)
     _turn_idle_retry_task: asyncio.Task[None] | None = field(default=None, repr=False)
     _turn_complete_generation: int = field(default=0, repr=False)
@@ -146,6 +160,11 @@ class WebMessageQueueRuntime:
             selected = getattr(llm, "_profile_selects_acp", None)
             selected_acp, unknown = selected() if callable(selected) else (False, True)
             active_acp = active() if callable(active) else None
+            if selected is None and active is None:
+                # Small native adapters may have no ACP selection surface at
+                # all. The real LLM service exposes both methods; if either is
+                # present but cannot resolve the provider, keep failing closed.
+                return True
             if unknown:
                 return False
             if selected_acp or active_acp is not None:
@@ -460,8 +479,245 @@ class WebMessageQueueRuntime:
         await self._resolve_trusted_scope(params)
         return {"dispatch_available": self._send_now_available()}
 
+    async def add_input(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Admit one client-identified input into its conversation queue."""
+        self._ensure_supervisor()
+        input_id = params.get("id")
+        text = params.get("text")
+        attachments = params.get("attachments", [])
+        if (
+            not isinstance(input_id, str)
+            or not input_id
+            or not isinstance(text, str)
+            or not isinstance(attachments, list)
+            or len(attachments) > 20
+        ):
+            return {"accepted": False, "reason": "invalid_input"}
+        if not text.strip() and not attachments:
+            return {"accepted": False, "reason": "empty_input"}
+
+        identity = await self._current_identity()
+        if identity is None:
+            return {"accepted": False, "reason": "conversation_unavailable"}
+        scoped_params = {"expected_conversation_uid": identity.uid}
+        binding = await self._resolve_trusted_scope(scoped_params)
+        caller = current_rpc_caller_context()
+        assert isinstance(caller, RpcCallerContext)
+        payload = json.dumps(
+            {"text": text}, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+
+        async with self.registry.acquire(
+            binding.scope_id,
+            principal_id=caller.principal_id,
+            conversation_uid=binding.conversation_uid,
+        ) as queue:
+            snapshot = await queue.snapshot()
+            existing = next(
+                (
+                    item
+                    for batch in snapshot.batches
+                    for item in batch.items
+                    if item.request_id == input_id
+                ),
+                None,
+            )
+            if existing is not None:
+                try:
+                    existing_payload = json.loads(existing.payload.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    existing_payload = None
+                if existing_payload != {"text": text} or len(
+                    existing.attachment_refs
+                ) != len(attachments):
+                    return {"accepted": False, "reason": "input_id_conflict"}
+                return {"accepted": True, "id": input_id, "state": "queued"}
+
+            attachment_refs: list[str] = []
+            if attachments:
+                attachment_scope = await self.attachments.bind_scope(
+                    scoped_params, caller
+                )
+                for attachment in attachments:
+                    if not isinstance(attachment, dict) or any(
+                        not isinstance(attachment.get(key), str) or not attachment[key]
+                        for key in ("name", "content_type", "data_url")
+                    ):
+                        return {"accepted": False, "reason": "invalid_attachment"}
+                    data_url = attachment["data_url"]
+                    header, separator, encoded = data_url.partition(",")
+                    prefix = "data:"
+                    marker = ";base64"
+                    if (
+                        not separator
+                        or not header.startswith(prefix)
+                        or not header.endswith(marker)
+                        or header[len(prefix) : -len(marker)].lower()
+                        != attachment["content_type"].lower()
+                    ):
+                        return {"accepted": False, "reason": "invalid_attachment"}
+                    try:
+                        image = base64.b64decode(encoded, validate=True)
+                        mime = verified_image_mime(attachment["content_type"], image)
+                        staged = await attachment_scope.stage(
+                            attachment_scope.new_operation_id(),
+                            mime,
+                            image,
+                            filename=attachment["name"],
+                        )
+                    except (
+                        AttachmentAuthorizationError,
+                        ValueError,
+                        binascii.Error,
+                    ):
+                        return {"accepted": False, "reason": "invalid_attachment"}
+                    attachment_refs.append(staged.ref)
+
+            batch_id = queue.new_batch_id()
+            operation_id = queue.new_operation_id()
+            message = WebMessage(input_id, payload, tuple(attachment_refs))
+            try:
+                if attachment_refs:
+                    receipt = await queue.enqueue_batch_with_attachments(
+                        operation_id,
+                        batch_id,
+                        (message,),
+                        attachment_scope=attachment_scope,
+                    )
+                else:
+                    receipt = await queue.enqueue_batch(
+                        operation_id, batch_id, (message,)
+                    )
+            except ItemConflict:
+                return {"accepted": False, "reason": "input_id_conflict"}
+
+        self.wake_all()
+        return {
+            "accepted": True,
+            "id": input_id,
+            "state": "queued",
+            "batch_id": receipt.batch_id,
+        }
+
+    async def cancel_queued_input(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Remove one queued input while preserving its item identity tombstone."""
+        self._ensure_supervisor()
+        input_id = params.get("id")
+        if not isinstance(input_id, str) or not input_id:
+            return {"found": False, "cancelled": False}
+        identity = await self._current_identity()
+        if identity is None:
+            return {"found": False, "cancelled": False}
+        scoped_params = {"expected_conversation_uid": identity.uid}
+        binding = await self._resolve_trusted_scope(scoped_params)
+        caller = current_rpc_caller_context()
+        if not isinstance(caller, RpcCallerContext):
+            return {"found": False, "cancelled": False}
+        scopes = await self.registry.known_scopes()
+        matches = [
+            scope
+            for scope in scopes
+            if scope.scope_id == binding.scope_id
+            and scope.conversation_uid == binding.conversation_uid
+            and scope.principal_id == caller.principal_id
+        ]
+        if len(matches) != 1:
+            return {"found": False, "cancelled": False}
+
+        async with self.registry.acquire_existing_scope(matches[0]) as queue:
+            if queue is None:
+                return {"found": False, "cancelled": False}
+            snapshot = await queue.snapshot()
+            located = next(
+                (
+                    (batch, item)
+                    for batch in snapshot.batches
+                    for item in batch.items
+                    if item.request_id == input_id
+                ),
+                None,
+            )
+            if located is None:
+                return {"found": False, "cancelled": False}
+            batch, item = located
+            if (
+                batch.status is not BatchStatus.QUEUED
+                or item.status is not ItemStatus.QUEUED
+            ):
+                return {"found": True, "cancelled": False}
+            operation_id = queue.new_operation_id()
+            try:
+                if item.attachment_refs:
+                    attachment_scope = await self.attachments.bind_scope(
+                        scoped_params, caller
+                    )
+                    receipt = await queue.remove_item_with_attachments(
+                        operation_id,
+                        input_id,
+                        attachment_scope=attachment_scope,
+                    )
+                else:
+                    receipt = await queue.remove_item(operation_id, input_id)
+            except (ItemNotFound, ItemNotQueued):
+                return {"found": True, "cancelled": False}
+        self.wake_all()
+        return {"found": True, "cancelled": receipt.status == "removed"}
+
     async def send_now(self, params: dict[str, Any]) -> dict[str, Any]:
         self._ensure_supervisor()
+        input_id = params.get("id")
+        if isinstance(input_id, str) and input_id:
+            identity = await self._current_identity()
+            if identity is None:
+                return {"found": False}
+            scoped_params = {"expected_conversation_uid": identity.uid}
+            binding = await self._resolve_trusted_scope(scoped_params)
+            caller = current_rpc_caller_context()
+            if not isinstance(caller, RpcCallerContext):
+                return {"found": False}
+            known = await self.registry.known_scopes()
+            matches = [
+                scope
+                for scope in known
+                if scope.scope_id == binding.scope_id
+                and scope.conversation_uid == binding.conversation_uid
+                and scope.principal_id == caller.principal_id
+            ]
+            if len(matches) != 1:
+                return {"found": False}
+            async with self.registry.acquire_existing_scope(matches[0]) as queue:
+                if queue is None:
+                    return {"found": False}
+                snapshot = await queue.snapshot()
+                batch = next(
+                    (
+                        batch
+                        for batch in snapshot.batches
+                        if batch.status is BatchStatus.QUEUED
+                        and input_id in batch.request_ids
+                    ),
+                    None,
+                )
+                if batch is None:
+                    found = any(
+                        input_id in batch.request_ids for batch in snapshot.batches
+                    )
+                    return {
+                        "found": found,
+                        "accepted": False,
+                        "state": "queued",
+                    }
+            if not self._send_now_available():
+                return {"found": True, "accepted": False, "state": "queued"}
+            result = await self._dispatch_scope(
+                matches[0], batch_id=batch.batch_id, send_now=True
+            )
+            return {
+                "found": result.get("status") != WorkerStatus.EMPTY.value,
+                "accepted": result.get("accepted") is True,
+                "state": "queued",
+            }
+
         binding = await self._resolve_trusted_scope(params)
         batch_id = params.get("batch_id")
         if not isinstance(batch_id, str) or not batch_id:

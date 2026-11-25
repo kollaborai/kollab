@@ -369,6 +369,9 @@ class LocalStateService(StateService):
         self._context_registry: ContextRegistry | None = context_registry
         self._context_identity = context_identity
         self._startup_status = startup_status
+        from .chat_stream import ChatStreamService
+
+        self.chat_stream = ChatStreamService(self)
 
     def _code_settings(self) -> Any:
         """The Code, Git and Terminal settings for this request: the active agent's ``agent.json`` ``code`` object,

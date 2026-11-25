@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import threading
+import uuid
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -83,12 +85,13 @@ class ChatStreamLog:
                     raise ValueError("; ".join(problems))
 
             self._record_locked(event)
-
-        if self._on_event is not None:
-            try:
-                self._on_event(copy.deepcopy(event))
-            except Exception:
-                logger.debug("chat stream live publish failed", exc_info=True)
+            # Serialize live delivery with sequence assignment. Otherwise a
+            # later producer thread can publish seq N+1 before this event.
+            if self._on_event is not None:
+                try:
+                    self._on_event(copy.deepcopy(event))
+                except Exception:
+                    logger.debug("chat stream live publish failed", exc_info=True)
         return copy.deepcopy(event)
 
     def read(
@@ -130,7 +133,9 @@ class ChatStreamLog:
         ):
             raise ValueError("chat snapshot rows, turns and inputs must be lists")
         event: Event = {
-            "seq": self._last_seq,
+            # A snapshot starts a new subscriber's sequence view. `next_seq`
+            # carries the shared log cursor to use for subsequent events.
+            "seq": 0,
             "conversation_uid": self.conversation_uid,
             "type": "snapshot",
             "data": {
@@ -174,3 +179,1001 @@ class ChatStreamLog:
         by_seq = {event["seq"]: event for event in self._events}
         by_seq.update(self._current_turn_events)
         return [by_seq[seq] for seq in sorted(by_seq)]
+
+
+class ChatStreamService:
+    """Connect the event log to daemon transcript, queue and socket events."""
+
+    def __init__(self, state_service: Any) -> None:
+        self._state_service = state_service
+        self._event_bus = getattr(state_service, "_event_bus", None)
+        self._logs: dict[str, ChatStreamLog] = {}
+        self._rows: dict[str, dict[str, dict[str, Any]]] = {}
+        self._inputs: dict[str, dict[str, dict[str, Any]]] = {}
+        self._turns: dict[str, dict[str, dict[str, Any]]] = {}
+        self._input_text: dict[tuple[str, str], str] = {}
+        self._input_attachments: dict[tuple[str, str], list[dict[str, str]]] = {}
+        self._input_lock = asyncio.Lock()
+        self._turn_inputs: dict[tuple[str, str], list[str]] = {}
+        self._input_turns: dict[tuple[str, str], str] = {}
+        self._active_turns: dict[str, str] = {}
+        self._reply_rows: dict[tuple[str, str], str] = {}
+        self._reply_text: dict[tuple[str, str], str] = {}
+        self._turn_errors: dict[tuple[str, str], str] = {}
+        self._display_tap: Any = None
+        self._display_tap_listener: Any = None
+        register_service = getattr(self._event_bus, "register_service", None)
+        if callable(register_service):
+            register_service("chat_stream", self)
+
+    def subscribe(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.attach_display_tap()
+        after = params.get("after")
+        conversation_uid = params.get("conversation_uid")
+        return {
+            "events": self._log().read(
+                after=after,
+                conversation_uid=conversation_uid,
+            )
+        }
+
+    async def add_input(self, params: dict[str, Any]) -> dict[str, Any]:
+        async with self._input_lock:
+            return await self._add_input(params)
+
+    async def _add_input(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.attach_display_tap()
+        input_id, text, attachments = self._validate_input(params)
+        uid = self._conversation_uid()
+        known = self._inputs.setdefault(uid, {}).get(input_id)
+        if known is not None:
+            previous_text = self._input_text.get((uid, input_id), text)
+            previous_attachments = self._input_attachments.get(
+                (uid, input_id), attachments
+            )
+            if previous_text != text or previous_attachments != attachments:
+                return {"error": "input id is already bound to different content"}
+            return {"id": input_id, "state": known["state"]}
+
+        runtime = self._queue_runtime()
+        result = await runtime.add_input(
+            {"id": input_id, "text": text, "attachments": attachments}
+        )
+        if not isinstance(result, dict) or result.get("accepted") is not True:
+            reason = result.get("reason") if isinstance(result, dict) else None
+            return {
+                "error": (
+                    "input id is already bound to different content"
+                    if reason == "input_id_conflict"
+                    else "input was not admitted"
+                )
+            }
+
+        state = result.get("state", "queued")
+        if state not in {"queued", "started", "joined"}:
+            return {"error": "daemon returned an invalid input state"}
+        turn_id = result.get("turn_id")
+        if state in {"started", "joined"} and not isinstance(turn_id, str):
+            return {"error": "daemon omitted the input turn"}
+
+        self._input_text[(uid, input_id)] = text
+        self._input_attachments[(uid, input_id)] = copy.deepcopy(attachments)
+        self._set_input_state(
+            uid,
+            input_id,
+            state,
+            turn_id=turn_id,
+        )
+        row = {
+            "id": input_id,
+            "seq": 0,
+            "kind": "input",
+            "role": "user",
+            "turn_id": turn_id,
+            "status": state,
+            "parts": self._input_parts(text, attachments),
+            "created_at": self._timestamp(),
+        }
+        self._upsert(uid, row)
+        return {"id": input_id, "state": state}
+
+    async def cancel_queued_input(self, params: dict[str, Any]) -> dict[str, Any]:
+        input_id = params.get("id")
+        if not isinstance(input_id, str) or not input_id:
+            return {"found": False, "cancelled": False}
+        uid = self._conversation_uid()
+        existing = self._inputs.setdefault(uid, {}).get(input_id)
+        if existing is not None and existing.get("state") != "queued":
+            return {"found": True, "cancelled": False}
+        result = await self._queue_runtime().cancel_queued_input({"id": input_id})
+        if not isinstance(result, dict) or result.get("found") is not True:
+            return {"found": False, "cancelled": False}
+        cancelled = result.get("cancelled") is True
+        existing = self._inputs.setdefault(uid, {}).get(input_id)
+        if cancelled and existing is not None and existing.get("state") == "queued":
+            self._set_input_state(
+                uid,
+                input_id,
+                "ended",
+                turn_id=None,
+                outcome="cancelled",
+            )
+            row = self._rows.setdefault(uid, {}).get(input_id)
+            if row is not None:
+                updated = {**row, "status": "cancelled"}
+                self._upsert(uid, updated)
+        return {"found": True, "cancelled": cancelled}
+
+    async def send_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        input_id = params.get("id")
+        if not isinstance(input_id, str) or not input_id:
+            return {"found": False}
+        result = await self._queue_runtime().send_now({"id": input_id})
+        if not isinstance(result, dict) or result.get("found") is not True:
+            return {"found": False}
+        state = result.get("state")
+        turn_id = result.get("turn_id")
+        if state in {"started", "joined"} and isinstance(turn_id, str):
+            uid = self._conversation_uid()
+            self._set_input_state(uid, input_id, state, turn_id=turn_id)
+            self._set_turn_state(uid, turn_id, "running", input_id=input_id)
+        current = self._inputs.get(self._conversation_uid(), {}).get(input_id, {})
+        return {
+            "found": True,
+            "state": current.get("state", state or "queued"),
+            **({"turn_id": current["turn_id"]} if current.get("turn_id") else {}),
+        }
+
+    def record_event(self, event_type: str, data: dict[str, Any]) -> Event:
+        """Record one producer event for the active daemon conversation."""
+        uid = self._conversation_uid()
+        if event_type == "row.upsert":
+            self._rows.setdefault(uid, {})[data["id"]] = copy.deepcopy(data)
+        elif event_type == "row.append":
+            row = self._rows.setdefault(uid, {}).get(data["id"])
+            if row is not None:
+                parts = row.setdefault("parts", [])
+                part_index = data["part"]
+                while len(parts) <= part_index:
+                    parts.append({"type": "text", "text": ""})
+                part = parts[part_index]
+                if not isinstance(part, dict) or part.get("type") != "text":
+                    part = {"type": "text", "text": ""}
+                    parts[part_index] = part
+                part["text"] = str(part.get("text") or "") + data["text"]
+        elif event_type == "replace":
+            rows = data.get("rows", [])
+            self._rows[uid] = {
+                row["id"]: copy.deepcopy(row)
+                for row in rows
+                if isinstance(row, dict) and isinstance(row.get("id"), str)
+            }
+        elif event_type == "turn.state":
+            turn_id = data.get("turn_id")
+            if isinstance(turn_id, str):
+                self._turns.setdefault(uid, {})[turn_id] = copy.deepcopy(data)
+        elif event_type == "input.state":
+            input_id = data.get("id")
+            if isinstance(input_id, str):
+                self._inputs.setdefault(uid, {})[input_id] = copy.deepcopy(data)
+        return self._log(uid).publish(event_type, data)
+
+    def attach_display_tap(self) -> None:
+        """Listen to daemon semantic events and translate turns into rows."""
+        get_service = getattr(self._event_bus, "get_service", None)
+        tap = get_service("display_tap") if callable(get_service) else None
+        if tap is self._display_tap and self._display_tap_listener is not None:
+            return
+        self.detach_display_tap()
+        add_listener = getattr(tap, "add_listener", None)
+        if not callable(add_listener):
+            return
+        add_listener(self._on_display_event)
+        self._display_tap = tap
+        self._display_tap_listener = self._on_display_event
+
+    def detach_display_tap(self) -> None:
+        tap = self._display_tap
+        listener = self._display_tap_listener
+        self._display_tap = None
+        self._display_tap_listener = None
+        remove_listener = getattr(tap, "remove_listener", None)
+        if callable(remove_listener) and listener is not None:
+            try:
+                remove_listener(listener)
+            except Exception:
+                logger.debug("chat stream DisplayTap unsubscribe failed", exc_info=True)
+
+    def _on_display_event(self, event: dict[str, Any]) -> None:
+        if not isinstance(event, dict):
+            return
+        uid = event.get("conversation_uid") or self._conversation_uid()
+        if not isinstance(uid, str) or not uid or uid != self._conversation_uid():
+            return
+        kind = event.get("type")
+        if kind == "turn_start":
+            self._on_turn_start(uid, event)
+        elif kind == "user_message":
+            self._on_user_message(uid, event)
+        elif kind in {"token", "response"}:
+            self._on_reply_text(uid, event)
+        elif kind in {"tool_start", "tool_result"}:
+            self._on_tool_event(uid, event)
+        elif kind == "turn_complete":
+            self._on_turn_complete(uid, event)
+        elif kind == "error":
+            self._on_turn_error(uid, event)
+        elif kind == "hub_message":
+            self._on_hub_message(uid, event)
+        elif kind == "hub_display":
+            self._on_hub_note(uid, event)
+        elif kind == "permission_request":
+            self._on_permission_prompt(uid, event)
+        elif kind in {
+            "permission_granted",
+            "permission_denied",
+            "permission_cancelled",
+        }:
+            self._on_permission_resolved(uid, event)
+
+    def _on_turn_start(self, uid: str, event: dict[str, Any]) -> None:
+        turn_id = self._event_turn_id(event)
+        if turn_id is None:
+            return
+        key = (uid, turn_id)
+        existing_turn = self._turns.setdefault(uid, {}).get(turn_id)
+        already_running = (
+            isinstance(existing_turn, dict) and existing_turn.get("state") == "running"
+        )
+        input_ids = self._event_input_ids(event)
+        for input_id in input_ids:
+            self._ensure_input_row(uid, input_id)
+            prior = self._inputs.setdefault(uid, {}).get(input_id, {})
+            if prior.get("state") == "ended":
+                continue
+            state = (
+                "joined"
+                if already_running and input_id not in self._turn_inputs.get(key, [])
+                else "started"
+            )
+            self._set_input_state(uid, input_id, state, turn_id=turn_id)
+            self._input_turns[(uid, input_id)] = turn_id
+            self._add_turn_input(uid, turn_id, input_id)
+            row = self._rows.setdefault(uid, {}).get(input_id)
+            if row is not None:
+                self._upsert(uid, {**row, "turn_id": turn_id, "status": state})
+        self._set_turn_state(uid, turn_id, "running")
+        self._active_turns[uid] = turn_id
+
+    def _on_user_message(self, uid: str, event: dict[str, Any]) -> None:
+        text = event.get("text")
+        if not isinstance(text, str):
+            return
+        input_id = event.get("request_id")
+        if not isinstance(input_id, str) or not input_id:
+            input_id = self._transcript_input_id(uid, text)
+        if input_id is None:
+            input_id = f"daemon-{uuid.uuid4().hex}"
+        turn_id = self._event_turn_id(event) or self._input_turns.get((uid, input_id))
+        if turn_id is None:
+            turn_id = self._active_turns.get(uid)
+        if turn_id is None:
+            turn_id = f"turn-{uuid.uuid4().hex}"
+        self._ensure_input_row(uid, input_id, text=text, turn_id=turn_id)
+        prior = self._inputs.setdefault(uid, {}).get(input_id, {})
+        if prior.get("state") == "ended":
+            return
+        current = self._turns.setdefault(uid, {}).get(turn_id, {})
+        joined = current.get(
+            "state"
+        ) == "running" and input_id not in self._turn_inputs.get((uid, turn_id), [])
+        state = "joined" if joined else "started"
+        if prior.get("state") != state or prior.get("turn_id") != turn_id:
+            self._set_input_state(uid, input_id, state, turn_id=turn_id)
+        self._input_turns[(uid, input_id)] = turn_id
+        self._add_turn_input(uid, turn_id, input_id)
+        row = self._rows.setdefault(uid, {}).get(input_id)
+        parts = self._input_parts(text)
+        if row is not None:
+            parts.extend(
+                copy.deepcopy(part)
+                for part in row.get("parts", [])
+                if isinstance(part, dict) and part.get("type") == "image"
+            )
+        if row is not None and (
+            row.get("status") != state or row.get("parts") != parts
+        ):
+            self._upsert(
+                uid,
+                {
+                    **row,
+                    "turn_id": turn_id,
+                    "status": state,
+                    "parts": parts,
+                },
+            )
+        if current.get("state") != "running":
+            self._set_turn_state(uid, turn_id, "running")
+        self._active_turns[uid] = turn_id
+
+    def _on_reply_text(self, uid: str, event: dict[str, Any]) -> None:
+        text = event.get("text")
+        if not isinstance(text, str) or not text:
+            return
+        turn_id = self._event_turn_id(event)
+        input_ids = self._event_input_ids(event)
+        if turn_id is None and input_ids:
+            turn_id = self._input_turns.get((uid, input_ids[0]))
+        if turn_id is None:
+            turn_id = self._active_turns.get(uid)
+        if turn_id is None:
+            return
+        if event.get("type") == "response":
+            self._upsert_reply(uid, turn_id, text, status="streaming")
+            return
+        row_id = self._reply_rows.get((uid, turn_id))
+        if row_id is None:
+            row_id = self._new_reply_row(uid, turn_id)
+        self._reply_text[(uid, turn_id)] = (
+            self._reply_text.get((uid, turn_id), "") + text
+        )
+        row = self._rows.setdefault(uid, {}).get(row_id)
+        part = 0
+        if row is None:
+            return
+        self.record_event("row.append", {"id": row_id, "part": part, "text": text})
+
+    def _on_turn_complete(self, uid: str, event: dict[str, Any]) -> None:
+        turn_id = self._event_turn_id(event)
+        input_ids = self._event_input_ids(event)
+        if turn_id is None and input_ids:
+            turn_id = self._input_turns.get((uid, input_ids[0]))
+        if turn_id is None:
+            turn_id = self._active_turns.get(uid)
+        if turn_id is None:
+            return
+        key = (uid, turn_id)
+        input_ids = list(dict.fromkeys((*self._turn_inputs.get(key, []), *input_ids)))
+        if not input_ids:
+            return
+        stop_reason = str(event.get("stop_reason") or "")
+        if stop_reason in {"cancelled", "canceled", "interrupted", "stop"}:
+            outcome = "cancelled"
+        elif (
+            stop_reason in {"error", "failed", "exception"} or key in self._turn_errors
+        ):
+            outcome = "failed"
+        else:
+            outcome = "completed"
+        self._upsert_reply(uid, turn_id, self._reply_text.get(key, ""), status=outcome)
+        self._set_turn_state(uid, turn_id, "ended")
+        for input_id in input_ids:
+            prior = self._inputs.setdefault(uid, {}).get(input_id, {})
+            if prior.get("state") == "ended":
+                continue
+            self._ensure_input_row(uid, input_id, turn_id=turn_id)
+            self._set_input_state(
+                uid,
+                input_id,
+                "ended",
+                turn_id=turn_id,
+                outcome=outcome,
+            )
+            row = self._rows.setdefault(uid, {}).get(input_id)
+            if row is not None:
+                self._upsert(uid, {**row, "turn_id": turn_id, "status": outcome})
+        if self._active_turns.get(uid) == turn_id:
+            self._active_turns.pop(uid, None)
+
+    def _on_turn_error(self, uid: str, event: dict[str, Any]) -> None:
+        message = event.get("message")
+        turn_id = self._event_turn_id(event) or self._active_turns.get(uid)
+        if not isinstance(message, str) or not message:
+            return
+        if turn_id:
+            self._turn_errors[(uid, turn_id)] = message
+            marker_key = f"{uid}:{turn_id}"
+        else:
+            marker_key = f"{uid}:{uuid.uuid4().hex}"
+        self._upsert(
+            uid,
+            {
+                "id": f"marker-error-{uuid.uuid5(uuid.NAMESPACE_URL, marker_key).hex}",
+                "seq": 0,
+                "kind": "marker",
+                "role": "system",
+                "turn_id": turn_id,
+                "status": "failed",
+                "parts": [{"type": "text", "text": message}],
+                "created_at": self._timestamp(),
+            },
+        )
+
+    def _on_hub_message(self, uid: str, event: dict[str, Any]) -> None:
+        if event.get("input_source") == "steering":
+            input_id = event.get("message_id")
+            turn_id = self._active_turns.get(uid)
+            if isinstance(input_id, str) and turn_id:
+                self._join_input(uid, input_id, turn_id)
+        elif isinstance(event.get("text"), str):
+            self._on_hub_note(uid, event)
+
+    def _on_hub_note(self, uid: str, event: dict[str, Any]) -> None:
+        text = event.get("text")
+        if not isinstance(text, str) or not text:
+            return
+        row_id = event.get("message_id")
+        if not isinstance(row_id, str) or not row_id:
+            row_id = f"note-{uuid.uuid4().hex}"
+        row = {
+            "id": row_id,
+            "seq": 0,
+            "kind": "note",
+            "role": "system",
+            "turn_id": self._event_turn_id(event),
+            "status": "done",
+            "parts": [{"type": "text", "text": text}],
+            "created_at": self._timestamp(),
+        }
+        self._upsert(uid, row)
+
+    def _on_tool_event(self, uid: str, event: dict[str, Any]) -> None:
+        tool_id = event.get("tool_id")
+        if not isinstance(tool_id, str) or not tool_id:
+            tool_id = uuid.uuid4().hex
+        turn_id = self._event_turn_id(event) or self._active_turns.get(uid)
+        row_id = (
+            f"tool-{uuid.uuid5(uuid.NAMESPACE_URL, f'{turn_id or ""}:{tool_id}').hex}"
+        )
+        name = event.get("tool_name")
+        name = name if isinstance(name, str) and name else "Tool"
+        if event.get("type") == "tool_start":
+            status = "running"
+            detail = name
+        else:
+            status = "completed" if event.get("success") is True else "failed"
+            output = event.get("output")
+            detail = (
+                name
+                if not isinstance(output, str) or not output
+                else f"{name}: {output}"
+            )
+        self._upsert(
+            uid,
+            {
+                "id": row_id,
+                "seq": 0,
+                "kind": "tool",
+                "role": "assistant",
+                "turn_id": turn_id,
+                "status": status,
+                "parts": [{"type": "text", "text": detail}],
+                "created_at": self._timestamp(),
+            },
+        )
+
+    def _on_permission_prompt(self, uid: str, event: dict[str, Any]) -> None:
+        details = event.get("details")
+        details = details if isinstance(details, dict) else {}
+        prompt_id = details.get("permission_id") or event.get("tool_id")
+        if not isinstance(prompt_id, str) or not prompt_id:
+            prompt_id = uuid.uuid4().hex
+        title = (
+            details.get("title") or details.get("tool_name") or "Permission requested"
+        )
+        self._upsert(
+            uid,
+            {
+                "id": f"prompt-{prompt_id}",
+                "seq": 0,
+                "kind": "prompt",
+                "role": "system",
+                "turn_id": self._event_turn_id(event),
+                "status": "open",
+                "parts": [{"type": "text", "text": str(title)}],
+                "created_at": self._timestamp(),
+            },
+        )
+
+    def _on_permission_resolved(self, uid: str, event: dict[str, Any]) -> None:
+        prompt_id = event.get("permission_id") or event.get("tool_id")
+        if not isinstance(prompt_id, str) or not prompt_id:
+            return
+        row_id = f"prompt-{prompt_id}"
+        row = self._rows.setdefault(uid, {}).get(row_id)
+        if row is not None:
+            status = str(event.get("type")).removeprefix("permission_")
+            self._upsert(uid, {**row, "status": status})
+
+    def _join_input(self, uid: str, input_id: str, turn_id: str) -> None:
+        self._ensure_input_row(uid, input_id)
+        prior = self._inputs.setdefault(uid, {}).get(input_id, {})
+        if prior.get("state") == "ended":
+            return
+        self._set_input_state(uid, input_id, "joined", turn_id=turn_id)
+        self._input_turns[(uid, input_id)] = turn_id
+        self._add_turn_input(uid, turn_id, input_id)
+        row = self._rows.setdefault(uid, {}).get(input_id)
+        if row is not None:
+            self._upsert(uid, {**row, "turn_id": turn_id, "status": "joined"})
+        self._set_turn_state(uid, turn_id, "running")
+
+    def _ensure_input_row(
+        self,
+        uid: str,
+        input_id: str,
+        *,
+        text: str = "",
+        turn_id: str | None = None,
+    ) -> None:
+        if input_id in self._rows.setdefault(uid, {}):
+            return
+        transcript_row = next(
+            (row for row in self._transcript_rows(uid) if row.get("id") == input_id),
+            None,
+        )
+        row = transcript_row or {
+            "id": input_id,
+            "seq": 0,
+            "kind": "input",
+            "role": "user",
+            "turn_id": turn_id,
+            "status": "queued",
+            "parts": [{"type": "text", "text": text}],
+            "created_at": self._timestamp(),
+        }
+        self._upsert(uid, row)
+
+    def _transcript_input_id(self, uid: str, text: str) -> str | None:
+        for row in reversed(self._transcript_rows(uid)):
+            if row.get("kind") != "input":
+                continue
+            parts = row.get("parts") or []
+            if parts and isinstance(parts[0], dict) and parts[0].get("text") == text:
+                return row["id"]
+        return None
+
+    def _add_turn_input(self, uid: str, turn_id: str, input_id: str) -> None:
+        values = self._turn_inputs.setdefault((uid, turn_id), [])
+        if input_id not in values:
+            values.append(input_id)
+
+    def _new_reply_row(self, uid: str, turn_id: str) -> str:
+        row_id = f"reply-{uuid.uuid5(uuid.NAMESPACE_URL, turn_id).hex}"
+        self._reply_rows[(uid, turn_id)] = row_id
+        self._reply_text[(uid, turn_id)] = ""
+        self._upsert(
+            uid,
+            {
+                "id": row_id,
+                "seq": 0,
+                "kind": "reply",
+                "role": "assistant",
+                "turn_id": turn_id,
+                "status": "streaming",
+                "parts": [{"type": "text", "text": ""}],
+                "created_at": self._timestamp(),
+            },
+        )
+        return row_id
+
+    def _upsert_reply(self, uid: str, turn_id: str, text: str, *, status: str) -> None:
+        row_id = self._reply_rows.get((uid, turn_id))
+        if row_id is None:
+            row_id = self._new_reply_row(uid, turn_id)
+        row = self._rows.setdefault(uid, {}).get(row_id)
+        if row is None:
+            return
+        current_text = self._reply_text.get((uid, turn_id), "")
+        if text and text != current_text:
+            current_text = text
+            self._reply_text[(uid, turn_id)] = text
+        self._upsert(
+            uid,
+            {
+                **row,
+                "status": status,
+                "parts": [{"type": "text", "text": current_text}],
+            },
+        )
+
+    @staticmethod
+    def _event_input_ids(event: dict[str, Any]) -> list[str]:
+        ids = event.get("request_ids")
+        values = (
+            [value for value in ids if isinstance(value, str) and value]
+            if isinstance(ids, list)
+            else []
+        )
+        request_id = event.get("request_id")
+        if isinstance(request_id, str) and request_id and request_id not in values:
+            values.append(request_id)
+        return values
+
+    @staticmethod
+    def _event_turn_id(event: dict[str, Any]) -> str | None:
+        value = event.get("turn_id")
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (str, int)) and str(value):
+            return str(value)
+        return None
+
+    def replace_transcript(self) -> Event:
+        """Replace the row window after a daemon transcript compaction."""
+        uid = self._conversation_uid()
+        custom = getattr(self._state_service, "chat_stream_snapshot", None)
+        state = custom() if callable(custom) else {}
+        rows_by_id = {
+            row["id"]: copy.deepcopy(row) for row in self._transcript_rows(uid)
+        }
+        state_rows = state.get("rows") if isinstance(state, dict) else None
+        if isinstance(state_rows, list):
+            rows_by_id.update(
+                {
+                    row["id"]: copy.deepcopy(row)
+                    for row in state_rows
+                    if isinstance(row, dict) and isinstance(row.get("id"), str)
+                }
+            )
+        active_turn = self._active_turns.get(uid)
+        for row in self._rows.get(uid, {}).values():
+            row_id = row.get("id")
+            input_info = self._inputs.get(uid, {}).get(row_id, {})
+            if row.get("turn_id") == active_turn or input_info.get("state") in {
+                "queued",
+                "started",
+                "joined",
+            }:
+                rows_by_id[row_id] = copy.deepcopy(row)
+        marker = {
+            "id": f"marker-{uuid.uuid4().hex}",
+            "seq": self._log(uid).next_seq,
+            "kind": "marker",
+            "role": "system",
+            "turn_id": active_turn,
+            "status": "done",
+            "parts": [{"type": "text", "text": "Earlier messages compacted"}],
+            "created_at": self._timestamp(),
+        }
+        replacement_rows = [marker, *rows_by_id.values()][-REPLAY_WINDOW:]
+        event = self._log(uid).publish("replace", {"rows": replacement_rows})
+        self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in replacement_rows}
+        return event
+
+    def _log(self, uid: str | None = None) -> ChatStreamLog:
+        uid = uid or self._conversation_uid()
+        if uid not in self._logs:
+            self._logs[uid] = ChatStreamLog(
+                uid,
+                snapshot_provider=lambda uid=uid: self._snapshot(uid),
+                on_event=self._publish_live,
+            )
+        return self._logs[uid]
+
+    def _snapshot(self, uid: str) -> dict[str, Any]:
+        custom = getattr(self._state_service, "chat_stream_snapshot", None)
+        state = custom() if callable(custom) and uid == self._conversation_uid() else {}
+        if not isinstance(state, dict):
+            state = {}
+        rows = self._transcript_rows(uid)
+        rows_by_id = {row["id"]: row for row in rows}
+        rows_by_id.update(copy.deepcopy(self._rows.get(uid, {})))
+        state_rows = state.get("rows")
+        if isinstance(state_rows, list):
+            rows_by_id.update(
+                {
+                    row["id"]: row
+                    for row in state_rows
+                    if isinstance(row, dict) and row.get("id")
+                }
+            )
+        turns = {
+            turn["turn_id"]: turn
+            for turn in state.get("turns", [])
+            if isinstance(turn, dict) and turn.get("turn_id")
+        }
+        turns.update(copy.deepcopy(self._turns.get(uid, {})))
+        inputs = {
+            item["id"]: item
+            for item in state.get("inputs", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        inputs.update(copy.deepcopy(self._inputs.get(uid, {})))
+        return {
+            "rows": list(rows_by_id.values())[-REPLAY_WINDOW:],
+            "turns": list(turns.values()),
+            "inputs": list(inputs.values()),
+            "older": state.get("older"),
+        }
+
+    def _transcript_rows(self, uid: str) -> list[dict[str, Any]]:
+        if uid != self._conversation_uid():
+            return []
+        llm_service = getattr(self._state_service, "_llm_service", None)
+        manager = getattr(llm_service, "conversation_manager", None)
+        manager_messages = getattr(manager, "messages", None)
+        messages = getattr(llm_service, "conversation_history", None)
+        if not isinstance(messages, list):
+            messages = manager_messages
+        if not isinstance(messages, list):
+            return []
+
+        def field(message: Any, name: str, default: Any = None) -> Any:
+            if isinstance(message, dict):
+                return message.get(name, default)
+            return getattr(message, name, default)
+
+        rows = []
+        for index, message in enumerate(messages):
+            role = field(message, "role")
+            if not isinstance(role, str):
+                continue
+            metadata = field(message, "metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            source_role = role
+            role = (
+                source_role
+                if source_role in {"user", "assistant", "system"}
+                else "system"
+            )
+            kind = metadata.get("kind")
+            handoff = metadata.get("queue_handoff")
+            if isinstance(handoff, dict) and not metadata.get("request_id"):
+                metadata = {**metadata, "request_id": handoff.get("request_id")}
+            if metadata.get("context_compaction") or metadata.get("compaction_summary"):
+                kind, role = "marker", "system"
+            elif (
+                metadata.get("agent_hud")
+                or metadata.get("hub_message")
+                or metadata.get("hub_message_id")
+            ):
+                kind, role = "note", "system"
+            elif source_role == "tool":
+                kind, role = "tool", "assistant"
+            if kind not in {"input", "reply", "tool", "note", "prompt", "marker"}:
+                kind = (
+                    "input"
+                    if source_role == "user"
+                    else (
+                        "tool"
+                        if source_role == "tool"
+                        else "reply" if source_role == "assistant" else "note"
+                    )
+                )
+            content = field(message, "content", "")
+            image_store = getattr(llm_service, "_image_store", None)
+            resolve_image = getattr(image_store, "resolve", None)
+            parts = self._transcript_parts(content, resolve_image)
+            timestamp = field(message, "timestamp")
+            if hasattr(timestamp, "isoformat"):
+                timestamp = timestamp.isoformat()
+            if not isinstance(timestamp, str):
+                timestamp = self._timestamp()
+            manager_uuid = None
+            if isinstance(manager_messages, list) and index < len(manager_messages):
+                candidate = manager_messages[index]
+                candidate_metadata = field(candidate, "metadata", {})
+                candidate_content = field(candidate, "content", None)
+                candidate_role = field(candidate, "role")
+                if (
+                    isinstance(candidate_metadata, dict)
+                    and candidate_metadata == metadata
+                    and candidate_role == source_role
+                    and candidate_content == content
+                ):
+                    manager_uuid = field(candidate, "uuid")
+            fallback_identity = f"{uid}:{source_role}:{timestamp}:{content!r}"
+            rows.append(
+                {
+                    "id": str(
+                        metadata.get("request_id")
+                        or metadata.get("input_id")
+                        or metadata.get("hub_message_id")
+                        or metadata.get("tool_id")
+                        or field(message, "uuid")
+                        or manager_uuid
+                        or f"transcript-{uuid.uuid5(uuid.NAMESPACE_URL, fallback_identity).hex}"
+                    ),
+                    "seq": index,
+                    "kind": kind,
+                    "role": role,
+                    "turn_id": metadata.get("turn_id"),
+                    "status": str(metadata.get("status") or "done"),
+                    "parts": parts,
+                    "created_at": timestamp,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _transcript_parts(
+        content: Any,
+        resolve_image: Callable[[str], str | None] | None,
+    ) -> list[dict[str, Any]]:
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content else []
+        if not isinstance(content, list):
+            return [{"type": "text", "text": str(content)}]
+
+        parts: list[dict[str, Any]] = []
+        supported = {"text", "reasoning", "tool-call", "prompt"}
+        for raw_part in content:
+            if not isinstance(raw_part, dict):
+                parts.append({"type": "text", "text": str(raw_part)})
+                continue
+            part_type = raw_part.get("type")
+            if part_type in supported:
+                parts.append(copy.deepcopy(raw_part))
+                continue
+            if part_type == "image":
+                source = raw_part.get("source")
+                url = raw_part.get("url")
+                if isinstance(source, dict):
+                    if source.get("kind") == "url":
+                        url = source.get("url")
+                    elif source.get("kind") == "managed_upload":
+                        media_id = source.get("media_id")
+                        if isinstance(media_id, str) and callable(resolve_image):
+                            url = resolve_image(media_id)
+                if not isinstance(url, str):
+                    url = raw_part.get("image")
+                if isinstance(url, str) and url:
+                    parts.append({"type": "image", "url": url})
+                continue
+            if part_type == "image_url":
+                image_url = raw_part.get("image_url")
+                url = image_url.get("url") if isinstance(image_url, dict) else image_url
+                if isinstance(url, str) and url:
+                    parts.append({"type": "image", "url": url})
+                continue
+            if part_type in {"tool_use", "tool_call"}:
+                tool_id = raw_part.get("id") or raw_part.get("tool_call_id")
+                tool_name = raw_part.get("name") or raw_part.get("tool_name")
+                if isinstance(tool_id, str) and isinstance(tool_name, str):
+                    parts.append(
+                        {
+                            "type": "tool-call",
+                            "tool_call_id": tool_id,
+                            "tool_name": tool_name,
+                            "args": raw_part.get("input", raw_part.get("args")),
+                        }
+                    )
+                continue
+            text = raw_part.get("text")
+            if isinstance(text, str):
+                parts.append({"type": "text", "text": text})
+        return parts
+
+    def _set_input_state(
+        self,
+        uid: str,
+        input_id: str,
+        state: str,
+        *,
+        turn_id: str | None,
+        outcome: str | None = None,
+    ) -> None:
+        data: dict[str, Any] = {"id": input_id, "state": state, "turn_id": turn_id}
+        if outcome is not None:
+            data["outcome"] = outcome
+        self._inputs.setdefault(uid, {})[input_id] = data
+        self._log(uid).publish("input.state", data)
+
+    def _set_turn_state(
+        self,
+        uid: str,
+        turn_id: str,
+        state: str,
+        *,
+        input_id: str | None = None,
+    ) -> None:
+        previous = self._turns.setdefault(uid, {}).get(turn_id, {})
+        input_ids = list(
+            dict.fromkeys(
+                (
+                    *previous.get("input_ids", []),
+                    *self._turn_inputs.get((uid, turn_id), []),
+                )
+            )
+        )
+        if input_id and input_id not in input_ids:
+            input_ids.append(input_id)
+        data = {
+            "turn_id": turn_id,
+            "state": state,
+            "input_ids": input_ids,
+        }
+        self._turns[uid][turn_id] = data
+        self._log(uid).publish("turn.state", data)
+
+    def _upsert(self, uid: str, row: dict[str, Any]) -> None:
+        event = self._log(uid).publish("row.upsert", row)
+        self._rows.setdefault(uid, {})[row["id"]] = copy.deepcopy(event["data"])
+
+    def _publish_live(self, event: Event) -> None:
+        get_service = getattr(self._event_bus, "get_service", None)
+        tap = get_service("display_tap") if callable(get_service) else None
+        publish = getattr(tap, "publish", None)
+        if callable(publish):
+            publish({"type": "chat_stream", "event": event})
+
+    def _queue_runtime(self) -> Any:
+        get_service = getattr(self._event_bus, "get_service", None)
+        runtime = (
+            get_service("web_message_queue_runtime") if callable(get_service) else None
+        )
+        if runtime is None:
+            raise RuntimeError("daemon input queue is unavailable")
+        return runtime
+
+    def _conversation_uid(self) -> str:
+        getter = getattr(self._state_service, "get_conversation_uid", None)
+        uid = getter() if callable(getter) else None
+        if not isinstance(uid, str) or not uid:
+            raise RuntimeError("conversation identity is unavailable")
+        return uid
+
+    @staticmethod
+    def _validate_input(params: Any) -> tuple[str, str, list[dict[str, Any]]]:
+        if not isinstance(params, dict):
+            raise ValueError("input must be an object")
+        input_id, text, attachments = (
+            params.get("id"),
+            params.get("text"),
+            params.get("attachments", []),
+        )
+        if not isinstance(input_id, str) or not input_id or len(input_id) > 256:
+            raise ValueError("input id is required")
+        if not isinstance(text, str):
+            raise ValueError("input text must be a string")
+        if not isinstance(attachments, list) or len(attachments) > 20:
+            raise ValueError("input attachments must be a bounded list")
+        copied = []
+        for attachment in attachments:
+            if not isinstance(attachment, dict) or any(
+                not isinstance(attachment.get(key), str) or not attachment[key]
+                for key in ("name", "content_type", "data_url")
+            ):
+                raise ValueError("invalid input attachment")
+            copied.append(
+                {key: attachment[key] for key in ("name", "content_type", "data_url")}
+            )
+        if not text.strip() and not copied:
+            raise ValueError("input text or an attachment is required")
+        return input_id, text, copied
+
+    @staticmethod
+    def _input_parts(
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, str]]:
+        parts = [{"type": "text", "text": text}] if text else []
+        for attachment in attachments or []:
+            data_url = attachment.get("data_url")
+            if isinstance(data_url, str) and data_url:
+                parts.append({"type": "image", "url": data_url})
+        return parts
+
+    @staticmethod
+    def _timestamp() -> str:
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def register_chat_stream_handlers(
+    rpc_server: Any, stream_service: ChatStreamService
+) -> None:
+    """Register the four daemon-side actions used by the engine routes."""
+    handlers = {
+        "state.chat_stream.subscribe": stream_service.subscribe,
+        "state.chat_stream.add_input": stream_service.add_input,
+        "state.chat_stream.cancel_queued_input": stream_service.cancel_queued_input,
+        "state.chat_stream.send_now": stream_service.send_now,
+    }
+    for method, handler in handlers.items():
+        try:
+            rpc_server.register(method, handler)
+        except ValueError:
+            logger.debug("chat stream rpc handler %s already registered", method)

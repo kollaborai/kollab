@@ -18,6 +18,7 @@ import logging
 import re
 from typing import Any
 
+from .chat_stream import register_chat_stream_handlers
 from .interface import ProfileActivationError, enrollment_result, offer_failure
 from .local import LocalStateService
 
@@ -940,3 +941,10 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         logger.info("registered state rpc handlers: %s", ", ".join(registered))
     else:
         logger.debug("all state rpc handlers already registered, no-op")
+
+    chat_stream = getattr(state_service, "chat_stream", None)
+    if chat_stream is not None:
+        attach_display_tap = getattr(chat_stream, "attach_display_tap", None)
+        if callable(attach_display_tap):
+            attach_display_tap()
+        register_chat_stream_handlers(rpc_server, chat_stream)

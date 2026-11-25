@@ -318,10 +318,9 @@ class WebMessageQueueRegistry:
         if queue is None or queue.incarnation != incarnation:
             return False
         try:
-            queue._token_issue_time(request_id, "item")
             if request_id in queue._item_owners:
                 return True
-            queue._validate_new_entity_id(request_id, "item")
+            queue._validate_new_item_id(request_id)
             return True
         except Exception:
             return False
