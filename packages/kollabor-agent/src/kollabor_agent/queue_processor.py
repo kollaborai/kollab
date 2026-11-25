@@ -133,7 +133,7 @@ class QueueHandoffInput(TaggedInput):
 
 def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
     """The request ids a batch answers (#551)."""
-    return tuple(i for m in messages if isinstance(m, TaggedInput) for i in m.request_ids)
+    return tuple(i for m in messages if isinstance(m, (TaggedInput, QueuedInput)) for i in m.request_ids)
 
 
 @dataclass
@@ -158,6 +158,7 @@ class QueuedInput:
     # Exact durable user row created for this queued input, when admission
     # persisted one. Kept distinct from parent_uuid, which is also a chain link.
     history_row_uuid: str | None = field(default=None, kw_only=True)
+    request_ids: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 _UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")
