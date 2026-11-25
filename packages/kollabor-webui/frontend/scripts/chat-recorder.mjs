@@ -544,9 +544,9 @@ async function record(flow, session, browser, target) {
     const state = await apiJson(`/sessions/${session}/state`);
     return state.context_compaction?.compaction_status ?? "unknown";
   };
-  const waitForCompaction = async (previousNetCount) => {
+  const waitForCompaction = async (previousNetCount, phase = "staged") => {
     const started = Date.now();
-    let sawStart = false;
+    let sawStart = phase === "transcript";
     while (Date.now() - started < 240000) {
       const status = await contextCompactionStatus();
       const updates = await page.evaluate((offset) => window.__rec.net.slice(offset), previousNetCount);
@@ -560,10 +560,19 @@ async function record(flow, session, browser, target) {
           ["failed", "paused", "warning", "rolled_over"].includes(latestEventStatus)) {
         throw new Error(`compaction ended with status ${status === "compacting" ? latestEventStatus : status}`);
       }
-      if (isCompactionComplete({ sawStart, status, latestEventStatus, replaced, runtime: activeRuntime })) return;
+      if (isCompactionComplete({
+        sawStart,
+        status,
+        latestEventStatus,
+        replaced,
+        runtime: activeRuntime,
+        phase,
+      })) return;
       await sleep(1000);
     }
-    throw new Error("the compaction did not finish within 240 seconds");
+    throw new Error(phase === "transcript"
+      ? "the native transcript replacement did not arrive within 240 seconds"
+      : "the compaction did not finish within 240 seconds");
   };
   const runtimeForSession = async () => {
     const details = await apiJson(`/sessions/${session}`);
@@ -706,8 +715,13 @@ async function record(flow, session, browser, target) {
       if (before === "unknown") throw new Error("the engine did not report context compaction status for this session");
       await command("/compact now", "PAGE COMMAND /compact now");
       await waitForCompaction(priorEvents);
-      await mark("COMPACTION COMPLETE");
+      if (activeRuntime === "native") await mark("COMPACTION STAGED");
+      else await mark("COMPACTION COMPLETE");
       await send(`${U(1)}: ${say(1)}`, "U1");
+      if (activeRuntime === "native") {
+        await waitForCompaction(priorEvents, "transcript");
+        await mark("COMPACTION COMPLETE");
+      }
       await settle(R(1));
     },
     // Reload while a saved native goal is running; ACP uses the same goal-shaped chat prompt.
