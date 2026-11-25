@@ -285,9 +285,8 @@ async def test_stop_retains_custodied_durable_queue_handoff_for_next_drain():
         processor.processing_queue.get_nowait()
         for _ in range(processor.processing_queue.qsize())
     ]
-    assert retained == [durable]
-    ended = [event for event in _drain(events) if event["type"] == "turn_complete"]
-    assert [event["request_ids"] for event in ended] == [["D"]]
+    assert retained == [durable, ordinary]
+    assert _drain(events) == []
 
 
 @pytest.mark.asyncio
