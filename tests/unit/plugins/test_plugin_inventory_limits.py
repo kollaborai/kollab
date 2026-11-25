@@ -296,6 +296,32 @@ def test_plugin_slash_command_inventory_uses_ascii_declaration_names():
     assert omitted == 2
 
 
+def test_plugin_inventory_drops_duplicate_contribution_identities_per_kind():
+    from kollabor_plugins.registry import _normalize_contributes
+
+    normalized, omitted = _normalize_contributes(
+        {
+            "menu": [
+                {"id": "home", "label": "Home", "open": {"view": "home"}},
+                {"id": "home", "label": "Home again", "open": {"view": "home"}},
+            ],
+            "views": [{"id": "peek"}, {"id": "peek"}],
+            "pages": [{"id": "main"}, {"id": "main"}],
+            "modals": [{"id": "confirm"}, {"id": "confirm"}],
+            "slash": ["deploy", {"name": "DEPLOY"}],
+            "renderers": [{"tool": "shell"}, {"tool": "shell"}, {"tag": "shell"}],
+        }
+    )
+
+    assert normalized["menu"] == [{"id": "home", "label": "Home", "open": {"view": "home"}}]
+    assert normalized["views"] == [{"id": "peek"}]
+    assert normalized["pages"] == [{"id": "main"}]
+    assert normalized["modals"] == [{"id": "confirm"}]
+    assert normalized["slash"] == ["deploy"]
+    assert normalized["renderers"] == [{"tool": "shell"}, {"tag": "shell"}]
+    assert omitted == 6
+
+
 def test_plugin_inventory_normalizer_accepts_internal_underscores_in_renderer_names():
     entry = _normalize_plugin_entry(
         {

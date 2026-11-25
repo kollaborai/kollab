@@ -37,6 +37,7 @@ if (typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.scrollTo 
 
 const sendCapture = vi.hoisted(() => ({
   handlers: [] as Array<(event: { preventDefault: () => void }) => void>,
+  submitHandlers: [] as Array<(event: { preventDefault: () => void; defaultPrevented?: boolean }) => void>,
   text: "",
   attachments: [] as unknown[],
   composerState: null as { text: string; attachments: unknown[] } | null,
@@ -93,6 +94,16 @@ vi.mock("@assistant-ui/react", async (importOriginal) => {
     },
     ComposerPrimitive: {
       ...actual.ComposerPrimitive,
+      Root: (props: Record<string, unknown>) => {
+        const onSubmit = props.onSubmit as
+          | ((event: { preventDefault: () => void; defaultPrevented?: boolean }) => void)
+          | undefined;
+        if (onSubmit) sendCapture.submitHandlers.push(onSubmit);
+        return React.createElement(
+          actual.ComposerPrimitive.Root as unknown as React.ComponentType<Record<string, unknown>>,
+          props,
+        );
+      },
       Send: ({
         onClick,
         children,
@@ -463,6 +474,22 @@ function putThreadCommand(name: string, run = () => {}, toast = vi.fn()) {
   return toast;
 }
 
+function putLoadingThreadCommand(name: string, status: PluginRecord["status"] = "loading") {
+  pluginRegistry.put({
+    id: "punctuation",
+    name: "Punctuation",
+    entry: {
+      web: { entry: "web/dist/index.js", style: null, hash: "test" },
+      contributes: { slash: [name] },
+    } as PluginEntry,
+    status,
+    error: null,
+    retries: 0,
+    k: null,
+    contributions: EMPTY_CONTRIBUTIONS,
+  });
+}
+
 function LocalThreadHarness({
   commands,
   commandCatalogStatus,
@@ -505,6 +532,7 @@ afterEach(() => pluginRegistry.reset());
 afterEach(() => {
   vi.unstubAllGlobals();
   sendCapture.handlers.length = 0;
+  sendCapture.submitHandlers.length = 0;
   sendCapture.composerListeners.clear();
   sendCapture.text = "";
   sendCapture.attachments.length = 0;
@@ -723,6 +751,128 @@ describe("native command reservations", () => {
       host.remove();
       runAdapter.mockRestore();
     }
+  });
+});
+
+describe("early plugin command submission", () => {
+  const invokeFormSubmit = () => {
+    const submit = sendCapture.submitHandlers.at(-1);
+    expect(submit).toBeTypeOf("function");
+    let prevented = false;
+    submit?.({
+      preventDefault: () => { prevented = true; },
+      get defaultPrevented() { return prevented; },
+    });
+    return prevented;
+  };
+
+  it("keeps a declared plugin slash out of submit while the session catalog is loading", () => {
+    sendCapture.text = "/probe";
+    pluginRegistry.setListed(null);
+    putLoadingThreadCommand("probe");
+
+    renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus: "loading" }));
+
+    expect(invokeFormSubmit()).toBe(true);
+    expect(sendCapture.text).toBe("/probe");
+  });
+
+  it("keeps an unknown slash draft while the initial plugin inventory has not been read", () => {
+    sendCapture.text = "/probe";
+
+    renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus: "ready" }));
+
+    expect(invokeFormSubmit()).toBe(true);
+    expect(sendCapture.text).toBe("/probe");
+  });
+
+  it("keeps a declared plugin slash while its web module is importing", () => {
+    sendCapture.text = "/probe";
+    pluginRegistry.setListed(null);
+    putLoadingThreadCommand("probe");
+
+    renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus: "ready" }));
+
+    expect(invokeFormSubmit()).toBe(true);
+    expect(sendCapture.text).toBe("/probe");
+  });
+
+  it("blocks the Send button before the form can submit a still-loading plugin command", () => {
+    sendCapture.text = "/probe";
+    pluginRegistry.setListed(null);
+    putLoadingThreadCommand("probe");
+    renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus: "ready" }));
+    const click = sendCapture.handlers.at(-1);
+    expect(click).toBeTypeOf("function");
+    let prevented = false;
+
+    click?.({ preventDefault: () => { prevented = true; } });
+
+    expect(prevented).toBe(true);
+    expect(sendCapture.text).toBe("/probe");
+  });
+
+  it("does not add a still-loading plugin command to the busy-turn queue", async () => {
+    prepareMountedThread();
+    let resolveRun!: (value: ChatModelRunResult) => void;
+    const activeRun = new Promise<ChatModelRunResult>((resolve) => { resolveRun = resolve; });
+    const runAdapter = vi.spyOn(threadAdapter, "run").mockReturnValue(activeRun);
+    pluginRegistry.setListed(null);
+    putLoadingThreadCommand("probe");
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, { commandCatalogStatus: "ready" })));
+      const runtime = sendCapture.runtime as {
+        thread: { composer: { setText(text: string): void; send(): void }; getState(): { isRunning: boolean } };
+      };
+      await act(async () => {
+        runtime.thread.composer.setText("start a turn");
+        runtime.thread.composer.send();
+        await Promise.resolve();
+      });
+      expect(runtime.thread.getState().isRunning).toBe(true);
+
+      publishComposerText("/probe");
+      let prevented = false;
+      await act(async () => {
+        sendCapture.busySubmit?.({
+          preventDefault: () => { prevented = true; },
+          get defaultPrevented() { return prevented; },
+        });
+        await Promise.resolve();
+      });
+
+      expect(prevented).toBe(true);
+      expect(sendCapture.text).toBe("/probe");
+      expect(sendCapture.transportCommands).not.toContainEqual(expect.objectContaining({
+        type: "add-message",
+        message: { role: "user", parts: [{ type: "text", text: "/probe" }] },
+      }));
+      expect(runAdapter).toHaveBeenCalledTimes(1);
+    } finally {
+      resolveRun({ content: [] });
+      await act(async () => root.unmount());
+      host.remove();
+      runAdapter.mockRestore();
+    }
+  });
+
+  it.each([
+    ["inventory listing failure", "unavailable" as const, "inventory" as const],
+    ["plugin import failure", "ready" as const, "plugin" as const],
+  ])("releases the slash gate after %s", (_label, commandCatalogStatus, failure) => {
+    sendCapture.text = "/probe";
+    if (failure === "inventory") pluginRegistry.setListed("Plugin inventory is unavailable.");
+    else {
+      pluginRegistry.setListed(null);
+      putLoadingThreadCommand("probe", "failed");
+    }
+    renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus }));
+
+    expect(invokeFormSubmit()).toBe(false);
   });
 });
 

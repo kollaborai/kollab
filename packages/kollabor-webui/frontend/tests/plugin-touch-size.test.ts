@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 const settingsSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/plugins/settings.tsx"), "utf8");
 const installSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/plugins/install.tsx"), "utf8");
+const threadSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/components/assistant-ui/thread.tsx"), "utf8");
 
 // The rule that makes plugin controls touch-sized (docs/specs/plugins.md, "Right-hand menu").
 const css = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/styles.css"), "utf8");
@@ -68,6 +69,15 @@ describe("Add Plugin touch targets", () => {
     expect(inputs).toHaveLength(2);
     for (const input of inputs)
       expect(input).toContain("pointer-coarse:min-h-11");
+  });
+});
+
+describe("command catalog retry touch target", () => {
+  it("keeps Try Again at least 44px high on coarse pointers", () => {
+    const button = /<Button type="button" size="sm" variant="outline" onClick=\{onRetryCommands\} className="([^"]*)">\s*Try Again/.exec(threadSource);
+
+    expect(button, "the command catalog retry button with a coarse-pointer minimum").not.toBeNull();
+    expect(button?.[1]).toContain("pointer-coarse:min-h-11");
   });
 });
 

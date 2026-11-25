@@ -14,7 +14,7 @@ import {
 } from "./loader";
 import { createPluginRegistry } from "./registry";
 import { pluginsByEnableOrder } from "./plugin-order";
-import { logPluginFailure } from "./plugin-errors";
+import { logPluginFailure, redactPluginError } from "./plugin-errors";
 import * as pluginErrors from "./plugin-errors";
 import { declaredIds } from "./plugin-declarations";
 import type { PluginApi, PluginEntry } from "./sdk";
@@ -199,6 +199,34 @@ describe("plugin inventory text redaction", () => {
     expect(output).not.toContain("stack-secret");
     expect(output).not.toContain("private-fragment");
     expect(output).not.toContain("source-fragment");
+  });
+
+  it.each([
+    ["POSIX", "/Users/marco/.ssh/config"],
+    ["Windows", "C:\\Users\\marco\\AppData\\Roaming\\config.json"],
+  ])("redacts absolute %s filesystem paths without changing relative or URL paths", (_platform, path) => {
+    const error = redactPluginError(`Cannot read ${path}; also src/plugins/renderer.js and https://cdn.example/plugins/renderer.js?token=canary`);
+
+    expect(error).not.toContain(path);
+    expect(error).toContain("[path]");
+    expect(error).toContain("src/plugins/renderer.js");
+    expect(error).toContain("https://cdn.example/plugins/renderer.js");
+    expect(error).not.toContain("canary");
+  });
+
+  it("redacts plugin and action text in the log prefix", () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    logPluginFailure(
+      "hello token=plugin-prefix-canary",
+      "listener https://service.example/events?token=action-prefix-canary",
+      new Error("safe failure"),
+    );
+
+    const output = logged.mock.calls.flat().join(" ");
+    expect(output).not.toContain("plugin-prefix-canary");
+    expect(output).not.toContain("action-prefix-canary");
+    expect(output).toContain("https://service.example/events");
   });
 
   it.each(["onCaughtError", "onUncaughtError", "onRecoverableError"] as const)(
@@ -661,6 +689,29 @@ describe("plugins-changed", () => {
     expect(normalized?.contributes.renderers).toEqual([]);
     expect(normalized?.omitted.contributions).toBe(2);
     expect(declaredIds([{ id: "deploy", name: "review" }, { tool: "shell", tag: "card" }])).toEqual(new Set());
+  });
+
+  it("drops duplicate contribution identities and counts them as omissions", () => {
+    const contributes = {
+      menu: [
+        { id: "home", label: "Home", open: { page: "main" } },
+        { id: "home", label: "Home again", open: { page: "main" } },
+      ],
+      views: [{ id: "peek" }, { id: "peek" }],
+      pages: [{ id: "main" }, { id: "main" }],
+      modals: [{ id: "confirm" }, { id: "confirm" }],
+      slash: ["deploy", { name: "DEPLOY" }],
+      renderers: [{ tool: "shell" }, { tool: "shell" }, { tag: "shell" }],
+    } as PluginEntry["contributes"];
+    const normalized = normalizePluginEntry(entry("hello", { contributes }));
+
+    expect(normalized?.contributes.menu).toHaveLength(1);
+    expect(normalized?.contributes.views).toHaveLength(1);
+    expect(normalized?.contributes.pages).toHaveLength(1);
+    expect(normalized?.contributes.modals).toHaveLength(1);
+    expect(normalized?.contributes.slash).toEqual(["deploy"]);
+    expect(normalized?.contributes.renderers).toEqual([{ tool: "shell" }, { tag: "shell" }]);
+    expect(normalized?.omitted.contributions).toBe(6);
   });
 
   it("keeps documented underscores in renderer names through inventory normalization", () => {
