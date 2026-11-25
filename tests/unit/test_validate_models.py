@@ -55,6 +55,28 @@ def test_F1_rejects_unrepresentable_integer_catalog_prices(field):
 @pytest.mark.parametrize("field", PRICE_FIELDS)
 @pytest.mark.parametrize(
     "value",
+    [
+        pytest.param(10**10000, id="huge"),
+        pytest.param(-(10**10000), id="huge-negative"),
+        pytest.param([10**10000], id="huge-in-list"),
+    ],
+)
+def test_oversized_integer_catalog_prices_report_field_error(field, value):
+    errors = validator.validate(_catalog_with_price(field, value))
+
+    assert any(f"model-0: {field} must be" in error for error in errors)
+
+
+@pytest.mark.parametrize("field", ["context_window", "max_output"])
+def test_oversized_negative_limits_report_field_error(field):
+    errors = validator.validate(_catalog_with_price(field, -(10**10000)))
+
+    assert any(f"model-0: {field} must be" in error for error in errors)
+
+
+@pytest.mark.parametrize("field", PRICE_FIELDS)
+@pytest.mark.parametrize(
+    "value",
     [None, 0, 0.25, pytest.param(10**308, id="large-representable-integer")],
 )
 def test_accepts_unknown_and_nonnegative_catalog_prices(field, value):
