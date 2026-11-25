@@ -1,6 +1,7 @@
 """Focused validation tests for bundled model catalog prices."""
 
 import importlib.util
+import json
 import math
 from datetime import date
 from pathlib import Path
@@ -83,3 +84,25 @@ def test_accepts_unknown_and_nonnegative_catalog_prices(field, value):
     errors = validator.validate(_catalog_with_price(field, value))
 
     assert not errors
+
+
+@pytest.mark.parametrize("field", PRICE_FIELDS)
+@pytest.mark.parametrize(
+    "literal",
+    [
+        pytest.param("9" * 5000, id="huge"),
+        pytest.param("-" + "9" * 5000, id="huge-negative"),
+    ],
+)
+def test_F1_json_oversized_integer_price_reports_field_error(
+    field, literal, tmp_path, monkeypatch, capsys
+):
+    # json.loads raises ValueError for a literal past Python's int-from-str
+    # digit limit, before validate() sees the field. main() must report it.
+    text = json.dumps(_catalog_with_price(field, "PLACEHOLDER"))
+    registry = tmp_path / "models.json"
+    registry.write_text(text.replace('"PLACEHOLDER"', literal))
+    monkeypatch.setattr(validator, "REGISTRY", registry)
+
+    assert validator.main() == 1
+    assert f"FAIL: model-0: {field} must be" in capsys.readouterr().out
