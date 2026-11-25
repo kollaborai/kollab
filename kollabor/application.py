@@ -1568,7 +1568,7 @@ class TerminalLLMChat:
             busy = bool(getattr(self.llm_service, "is_processing", False))
             if busy:
                 started = True
-            elif started:
+            elif started or bool(getattr(self.llm_service, "turn_completed", False)):
                 logger.info(
                     "initial turn settled; exiting (schedule run instance)"
                 )
