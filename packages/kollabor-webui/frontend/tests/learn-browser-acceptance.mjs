@@ -384,6 +384,45 @@ export async function until(check, message, timeoutMs = 60_000) {
   throw new Error(message);
 }
 
+export async function waitForSessionReady(page, {
+  sidebarTitleIncludes,
+  sessionHeading,
+  sessionName,
+  historyPath,
+  composerPlaceholder,
+  clickTarget,
+  timeout = 15_000,
+}) {
+  const historyResponse = historyPath
+    ? page.waitForResponse((response) =>
+      response.request().method() === "GET" && new URL(response.url()).pathname === historyPath,
+    { timeout })
+    : null;
+  if (clickTarget) await clickTarget.click({ timeout });
+  if (historyResponse) {
+    const response = await historyResponse;
+    await response.finished();
+  }
+  await page.waitForFunction(({ title, placeholder, headingText, nameText }) => {
+    const activeRow = [...document.querySelectorAll('[data-sidebar="sidebar"] button')].some((button) =>
+      button.getAttribute("title")?.includes(title)
+      && button.getAttribute("data-active") === "true");
+    const composer = document.querySelector(".aui-composer-input");
+    const panelHeading = document.querySelector('aside[aria-label="Session Controls"] h2');
+    const panelName = panelHeading?.nextElementSibling;
+    return activeRow
+      && (!placeholder || composer?.getAttribute("placeholder") === placeholder)
+      && panelHeading?.textContent?.trim() === headingText
+      && panelName?.textContent?.trim() === nameText
+      && panelHeading.getClientRects().length > 0;
+  }, {
+    title: sidebarTitleIncludes,
+    placeholder: composerPlaceholder,
+    headingText: sessionHeading,
+    nameText: sessionName,
+  }, { timeout });
+}
+
 export async function waitForLesson(page, title) {
   await page.getByRole("heading", { level: 1, name: title, exact: true }).waitFor({ state: "visible" });
 }
@@ -571,18 +610,25 @@ async function main() {
     // createRequest signals POST arrival before its response and the session history load finish.
     // Wait for the launched chat before starting remote selection, so the flows cannot overlap.
     const sessionControls = shell.page.getByRole("complementary", { name: "Session Controls", exact: true });
-    await sessionControls.getByText("Learn regression session", { exact: true }).waitFor({
-      state: "visible",
+    await waitForSessionReady(shell.page, {
+      sidebarTitleIncludes: "Learn regression session",
+      sessionHeading: "Local Coder",
+      sessionName: "Learn regression session",
       timeout: 60_000,
     });
 
     // A live mocked peer demonstrates the existing Hub-to-remote-session selection path.
     const remoteAgentButton = shell.page.getByRole("button", { name: "Remote Coder Idle", exact: true });
-    await remoteAgentButton.click();
-    // The session panel is populated only after the remote session and its history load.
-    const remoteSessionName = sessionControls.getByText("Remote coder session", { exact: true });
     try {
-      await remoteSessionName.waitFor({ state: "visible", timeout: 60_000 });
+      await waitForSessionReady(shell.page, {
+        sidebarTitleIncludes: "Open Remote Coder on remote-build",
+        sessionHeading: "Remote Coder",
+        sessionName: "Remote coder session",
+        historyPath: "/sessions/remote-session-1/history",
+        composerPlaceholder: "Message Remote Coder…",
+        clickTarget: remoteAgentButton,
+        timeout: 60_000,
+      });
     } catch (reason) {
       const diagnostic = {
         remoteButtonActive: await remoteAgentButton.getAttribute("data-active"),
