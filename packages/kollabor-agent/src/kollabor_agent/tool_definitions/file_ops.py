@@ -513,6 +513,32 @@ file_grep = ToolDefinition(
 )
 
 
+file_find = ToolDefinition(
+    name="file-find",
+    description="Find files and directories by basename glob inside the active workspace, without running a shell.",
+    category="file_ops",
+    risk_level="low",
+    requires_permission=False,
+    xml_form="nested",
+    parameters=[ToolParameter(
+        name="pattern", type="string", required=True,
+        description="Basename glob such as *.py or marker.txt; no directory separators.",
+    )],
+    examples=["<file-find><pattern>*.py</pattern></file-find>"],
+    result_format="JSON with workspace-relative matches and a truncated flag.",
+    notes=(
+        "Use this for filename discovery instead of terminal find. The only root is the active workspace. "
+        "No shell expansion or symlink traversal is performed. A symlink's own name may match. "
+        "Results and traversal are capped; truncated=true means the result is incomplete. "
+        "Safe descriptor traversal is required; unsupported platforms return an error."
+    ),
+    key_rules=[
+        "use file-find for filename discovery; do not start terminal searches at home, /Users, / or a parent folder",
+        "ask before searching another folder; use workspace-set only after the user grants that folder",
+    ],
+)
+
+
 def register_all():
     """Register all file_ops tool definitions."""
     registry = get_registry()
@@ -530,6 +556,7 @@ def register_all():
     registry.register(directory_create)
     registry.register(directory_remove)
     registry.register(file_grep)
+    registry.register(file_find)
 
 
 # Auto-register on import

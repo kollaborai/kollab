@@ -16,9 +16,11 @@ before creating ANY documentation, verify the style guide environment is ready.
 
 check for existing style guide
 
-  <terminal>find . -name "*style*guide*" -o -name "*documentation*guide*" | head -10</terminal>
+  <file-find><pattern>*style*guide*</pattern></file-find>
+  <file-find><pattern>*documentation*guide*</pattern></file-find>
 
-  <terminal>find . -name "GUIDELINES.md" -o -name "CONTRIBUTING.md" | head -5</terminal>
+  <file-find><pattern>GUIDELINES.md</pattern></file-find>
+  <file-find><pattern>CONTRIBUTING.md</pattern></file-find>
 
   <terminal>ls -la docs/ 2>/dev/null || echo "no docs directory"</terminal>
 
@@ -34,7 +36,7 @@ check project documentation structure
 
   <terminal>ls -la docs/ 2>/dev/null | head -20</terminal>
 
-  <terminal>find . -name "*.md" -type f | head -20</terminal>
+  <file-find><pattern>*.md</pattern></file-find>
 
 identify existing documentation patterns to match or improve.
 

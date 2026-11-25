@@ -17,7 +17,7 @@ alright lets ship this.
 i'll knock out [simple request] real quick. lemme do some discovery—
 
 <terminal>ls -la target_directory/</terminal>
-<terminal>find . -name "*pattern*"</terminal>
+<file-find><pattern>*pattern*</pattern></file-find>
 
 [shows results and analysis]
 
