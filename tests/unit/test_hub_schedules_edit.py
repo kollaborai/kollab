@@ -314,3 +314,23 @@ def test_no_live_agent_writes_the_file_directly(client, monkeypatch, tmp_path):
     assert res.status_code == 200, res.text
     assert res.json()["via"] == "file"
     assert [r.prompt for r in ScheduleStore(tmp_path / "schedules.json").load()] == ["x"]
+
+
+def test_one_coordinator_saving_wins_over_another_one_failing(client, monkeypatch):
+    # Each project folder has its own coordinator and timer over the one
+    # schedules.json; all of them are asked (so all wake), and one success
+    # is a saved change even when another coordinator failed.
+    bridge = _Bridge(
+        agents=[
+            {"agent_id": "koord-a", "identity": "koordinator"},
+            {"agent_id": "koord-b", "identity": "koordinator"},
+        ],
+        replies={
+            "koord-a": {"type": "schedules_save", "error": "save failed (OSError)"},
+            "koord-b": {"type": "schedules_save", "ok": True, "via": "local"},
+        },
+    )
+    _install(monkeypatch, bridge)
+    res = client.post("/hub/schedules", json={"agents": ["lapis"], "prompt": "x", "interval_seconds": 60})
+    assert res.status_code == 200, res.text
+    assert set(bridge.sent) == {"koord-a", "koord-b"}
