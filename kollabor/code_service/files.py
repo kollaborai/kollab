@@ -25,7 +25,6 @@ import shutil
 import stat
 import sys
 import threading
-import weakref
 from collections.abc import Iterator
 from typing import Any
 
@@ -455,18 +454,7 @@ class _StaleWrite(Exception):
     """The file's version, content snapshot or modification time is stale."""
 
 
-_WRITE_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
-_WRITE_LOCKS_GUARD = threading.Lock()
-
-
-def _write_lock(path: str) -> threading.Lock:
-    key = os.path.normcase(os.path.realpath(path))
-    with _WRITE_LOCKS_GUARD:
-        lock = _WRITE_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _WRITE_LOCKS[key] = lock
-        return lock
+_WRITE_LOCK = threading.Lock()
 
 
 def _checked_write(
@@ -477,8 +465,8 @@ def _checked_write(
     observed: bytes | None,
     limit: int,
 ) -> tuple[int, str]:
-    """Serialize saves to one path and compare its current state with the request's snapshot before replacing it."""
-    with _write_lock(path):
+    """Serialize saves and compare the current state with the request's snapshot before replacing it."""
+    with _WRITE_LOCK:
         if expected is not None or version is not None:
             if observed is None:
                 raise _StaleWrite
