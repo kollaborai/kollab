@@ -11,6 +11,7 @@ from kollabor_agent.shell_executor import ShellResult
 from kollabor_agent.tool_call_contract import normalize_native_tool_call
 from kollabor_agent.tool_executor import ToolExecutor
 from kollabor_agent.tool_registry import get_registry
+from kollabor_ai.response_parser import ResponseParser
 
 
 @pytest.fixture
@@ -159,6 +160,23 @@ async def test_native_search_uses_the_active_workspace_and_normal_tool_hooks(pro
     assert bus.emit_with_hooks.await_count >= 2
     executor.shell_executor.run.assert_not_awaited()
     executor.shell_executor.run_argv.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_xml_search_reaches_the_active_workspace_executor(project):
+    parser = ResponseParser()
+    tools = parser.get_all_tools(
+        parser.parse_response("<file-find><pattern>marker.txt</pattern></file-find>")
+    )
+    assert len(tools) == 1
+    assert tools[0]["type"] == "file_find"
+
+    executor = ToolExecutor(
+        mcp_integration=MagicMock(), event_bus=MagicMock(), workspace=project
+    )
+    result = await executor.execute_tool(tools[0])
+    assert result.success, result.error
+    assert json.loads(result.output)["matches"] == ["src/marker.txt"]
 
 
 def test_registered_search_has_no_command_root_or_session_capability():
