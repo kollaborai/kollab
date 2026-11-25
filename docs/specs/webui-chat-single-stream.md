@@ -50,7 +50,7 @@ Non-goals:
 
 ## Contract
 
-Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` (`_admit_acp` and the native path) and `kollabor/llm/acp_orchestrator.py` (the steering record); the stream in `packages/kollabor-engine/src/kollabor_engine/routes/`; the mirror in `packages/kollabor-webui/frontend/src/`. The shared shapes live in two new files written first (lane 0): `kollabor/chat_stream.py` and `packages/kollabor-webui/frontend/src/chat-stream.ts`, with JSON fixtures both sides test against.
+Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` (`_admit_acp` and the native path) and `kollabor/llm/acp_orchestrator.py` (the steering record); the stream in `packages/kollabor-engine/src/kollabor_engine/routes/`; the mirror in `packages/kollabor-webui/frontend/src/`. The shared shapes live in two new files written first (lane 0): `packages/kollabor-events/src/kollabor_events/chat_stream.py` (the daemon and the engine both depend on `kollabor-events`) and `packages/kollabor-webui/frontend/src/chat-stream.ts`, with JSON fixtures both sides test against in `packages/kollabor-webui/frontend/tests/fixtures/chat-stream/`.
 
 **Ids.** A client picks the id of each input it sends; the web UI already does, as the `add-message` id. The daemon makes one when a sender has none (the TUI, hub messages, goals). That id is the row's id for the life of the row: queued, joined, saved, shown. No path creates a second id for an input. A resend with a known id is answered with the input's current state instead of making a second input.
 
@@ -121,7 +121,7 @@ Times are one agent's working time. Lanes 1 to 5 run at the same time once lane 
 
 | lane | work | files | needs | time |
 |---|---|---|---|---|
-| 0 | Contract: event and route shapes, JSON fixtures, the store's hook interface | new `kollabor/chat_stream.py`, new `frontend/src/chat-stream.ts`, fixtures | none | 30 min |
+| 0 | Contract: event and route shapes, JSON fixtures, the store's hook interface | new `kollabor_events/chat_stream.py`, new `frontend/src/chat-stream.ts`, fixtures | none | 30 min |
 | 1 | Ids and lifecycle: the sender's id through queue, steer and save for native and ACP; one row per input; `input.state` and `turn.state`; hub notes as rows. Fixes #1371 on its own | `kollabor/llm/acp_orchestrator.py`, `kollabor/llm/llm_coordinator.py`, the native admission path | 0 | 60-90 min |
 | 2 | Stream: the daemon's event log with `seq` and its window; engine `stream`, `inputs` and cancel routes | daemon socket actions, new `kollabor_engine/routes/stream.py` | 0 | 90-120 min |
 | 3 | Web store: apply events, the `messageRepository` adapter, send and cancel through `inputs`, `isRunning` | new `frontend/src/chat-store.ts`, new `frontend/src/chat-runtime.tsx` | 0 | 60-90 min |
