@@ -52,6 +52,25 @@ function ErrorAlerts({ errors }: { errors: [string, string][] }) {
   );
 }
 
+/**
+ * Long free text (target, message, error) shows two lines; a click shows the
+ * rest and a second click folds it again. The title gives desktop a hover peek.
+ */
+function ClampText({ text, className = "" }: { text: string; className?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <button
+      type="button"
+      className={`w-full cursor-pointer rounded-sm text-left wrap-anywhere outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 ${open ? "" : "line-clamp-2"} ${className}`}
+      title={text}
+      aria-expanded={open}
+      onClick={() => setOpen((v) => !v)}
+    >
+      {text}
+    </button>
+  );
+}
+
 /** Read-only schedule table (desktop) and cards (narrow screens). */
 export function CronJobsBody({ view }: { view: HubCronJobsView }) {
   const errorAgents = Object.entries(view.agents_errors || {});
@@ -105,16 +124,18 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
                 <td className="py-2 pr-3 align-top whitespace-nowrap">
                   {job.interval}
                 </td>
-                <td className="py-2 pr-3 align-top break-words">{job.target}</td>
-                <td className="max-w-56 py-2 pr-3 align-top break-words">
-                  {job.message}
+                <td className="max-w-56 min-w-32 py-2 pr-3 align-top">
+                  <ClampText text={job.target} />
+                </td>
+                <td className="max-w-80 min-w-48 py-2 pr-3 align-top">
+                  <ClampText text={job.message} />
                 </td>
                 <td className="py-2 pr-3 align-top whitespace-nowrap">
                   {inSeconds(job.next_in_seconds)}
                 </td>
-                <td className="py-2 align-top break-words">
+                <td className="max-w-64 min-w-32 py-2 align-top">
                   {job.last_error ? (
-                    <span className="text-destructive">{job.last_error}</span>
+                    <ClampText text={job.last_error} className="text-destructive" />
                   ) : null}
                 </td>
               </tr>
@@ -138,15 +159,21 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
               <dt className="text-muted-foreground">Schedule</dt>
               <dd>{job.interval}</dd>
               <dt className="text-muted-foreground">Target</dt>
-              <dd className="min-w-0 wrap-anywhere">{job.target}</dd>
+              <dd className="min-w-0">
+                <ClampText text={job.target} />
+              </dd>
               <dt className="text-muted-foreground">Message</dt>
-              <dd className="min-w-0 wrap-anywhere">{job.message}</dd>
+              <dd className="min-w-0">
+                <ClampText text={job.message} />
+              </dd>
               <dt className="text-muted-foreground">Next fire</dt>
               <dd>{inSeconds(job.next_in_seconds)}</dd>
               {job.last_error ? (
                 <>
                   <dt className="text-destructive">Error</dt>
-                  <dd className="text-destructive min-w-0 wrap-anywhere">{job.last_error}</dd>
+                  <dd className="min-w-0">
+                    <ClampText text={job.last_error} className="text-destructive" />
+                  </dd>
                 </>
               ) : null}
             </dl>
