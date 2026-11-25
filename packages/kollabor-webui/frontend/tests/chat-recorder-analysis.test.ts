@@ -362,6 +362,27 @@ describe("chat recorder analysis", () => {
     expect(restored.toolsStarted).toBe(1);
   });
 
+  it("associates a previously turnless call with its measured turn on recovery", () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    const window = { fetch: async () => new Response() };
+    const install = runInNewContext(`(${body})`, {
+      window, Request, Response, ReadableStream, TextDecoder, URL, performance,
+      location: { href: "http://localhost/" },
+      sessionStorage: { getItem: () => null, removeItem: () => {} }, requestAnimationFrame: () => {},
+    });
+    install({ wall0: Date.now(), sessionStreamSuffix: "/sessions/target/stream", user: ["marker"], reply: [] });
+    const rec = (window as any).__rec;
+    rec.mark("PAGE SEND U1");
+    rec.noteToolRow({ kind: "input", id: "u", turn_id: "t", parts: [{ type: "text", text: "marker" }] });
+    const row = (turn_id: string | null) => ({ kind: "tool", turn_id, parts: [{ type: "tool-call", tool_call_id: "c" }] });
+    rec.noteToolRow(row(null));
+    expect(rec.toolsStarted).toBe(0);
+    rec.noteToolRow(row("t"));
+    expect(rec.toolsStarted).toBe(1);
+    expect(analyzeChatFrames([frame({ toolsDrawn: 1, toolsStarted: rec.toolsStarted })], ready).defects.dupTools ?? 0).toBe(0);
+  });
+
   it("counts tool-call parts on every row kind", () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
