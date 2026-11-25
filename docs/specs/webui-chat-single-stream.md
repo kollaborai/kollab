@@ -58,6 +58,8 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 
 **Lifecycle.** Each input moves `queued`, then `started` or `joined`, then `ended`, with `ended.outcome` one of `completed`, `failed` or `cancelled`. `joined` names the turn it joined, and the input ends when that turn ends. A state never goes back, and an input that belongs to a turn ends only after that turn's `turn.state` `ended`, whatever its outcome. Every input reaches `ended` exactly once.
 
+**Goal origin.** An admitted native goal attempt owns one stream turn across its continuation calls. Its optional immutable `origin` is `{kind: "goal", goal_id, attempt_id}`, with both full persisted identifiers. The driver binds the attempt to the turn after admission and before publishing `running`; yielded attempts have no turn. Every later state, replay and snapshot retains that origin, including when human input joins, and the turn ends on success, error or cancellation. No synthetic user input is created. A browser reload snapshot proves continuity only while the daemon remains alive. ACP goal execution remains unsupported by the capability guard.
+
 **Stream.** `GET /sessions/{id}/stream?after=<seq>` (SSE). Every event is `{seq, conversation_uid, type, data}`, with `seq` strictly increasing per conversation:
 
 | type | data |
@@ -68,7 +70,7 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 | `row.delete` | `{id}` |
 | `replace` | rows that replace the window (compaction, a new conversation) |
 | `input.state` | `{id, state, turn_id, outcome}` |
-| `turn.state` | `{turn_id, state, input_ids}` |
+| `turn.state` | `{turn_id, state, input_ids, origin?}` |
 
 A client connects without `after` and gets a `snapshot`. It reconnects with the last `seq` it applied and gets every later event. It gets a new `snapshot` instead when that `seq` is older than the daemon keeps (default: the current turn and the last 2,000 events) or when `conversation_uid` changed. Older rows load through `GET /sessions/{id}/rows?before=<cursor>&limit=<n>`, which answers `{rows, older}` in the same row shape, oldest first; `older` is the next older cursor or `null`, and a `409` means the cursor belongs to another conversation, so the client resyncs. The legacy `/history` route keeps its old envelope until cutover.
 

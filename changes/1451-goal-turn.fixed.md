@@ -1,0 +1,1 @@
+- Keep native goal attempts associated with their running chat turns across a web page reload (#1451).
