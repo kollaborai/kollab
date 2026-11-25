@@ -255,7 +255,7 @@ later, and cancelled playback is stopped. Speech interrupted by a service restar
 is recorded as cancelled and is never automatically replayed.
 
 Implementation and measured platform/acceptance coverage are recorded in
-[`implementation-status.md`](../../specs/voice-mode/implementation-status.md).
+[`implementation-status.md`](../specs/voice-mode/implementation-status.md).
 
 
 ## Select a transcription engine

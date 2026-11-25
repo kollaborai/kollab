@@ -5,8 +5,10 @@ refused observation would make a lost message look delivered.
 """
 
 import asyncio
+import builtins
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -104,7 +106,7 @@ async def test_a_refused_message_replayed_from_the_mailbox_stays_queued(tmp_path
 
         def tick():
             return messenger_module.AgentMessenger.read_mailboxes(
-                ["agent-1", "receiver"]
+                ["agent-1", "receiver"], consume=False
             )
 
         await plugin._deliver_inbox_batch(tick())
@@ -113,8 +115,299 @@ async def test_a_refused_message_replayed_from_the_mailbox_stays_queued(tmp_path
         refuse[0] = False
         replayed = tick()
         assert [m.id for m in replayed] == [message.id]
-        await plugin._deliver_inbox_batch(replayed)
+        acknowledged = await plugin._deliver_inbox_batch(replayed)
+        messenger_module.AgentMessenger.acknowledge_mailboxes(
+            ["agent-1", "receiver"], acknowledged
+        )
         assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_mailbox_batch_exposes_completed_deliveries(tmp_path):
+    messages = [
+        HubMessage(
+            action="message", from_agent="peer-id-1", from_identity="peer-1",
+            to="*", content=f"batch-{index}",
+        )
+        for index in range(2)
+    ]
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+    delivered = []
+
+    async def cancel_second(message):
+        if message.id == messages[1].id:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            await asyncio.sleep(0)
+        delivered.append(message.id)
+
+    plugin._on_message_received = cancel_second
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        for message in messages:
+            await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await plugin._deliver_inbox_batch(batch)
+
+    assert delivered == [messages[0].id]
+    assert getattr(cancelled.value, "acknowledged_message_ids", set()) == {
+        messages[0].id
+    }
+
+
+@pytest.mark.asyncio
+async def test_receiver_cancellation_after_effect_keeps_message_available(tmp_path):
+    message = HubMessage(
+        action="message",
+        from_agent="peer-id-1",
+        from_identity="peer-1",
+        to="receiver",
+        content="effect before cancellation",
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def interrupted_delivery(msg):
+        effects.append(msg.id)
+        raise asyncio.CancelledError
+
+    plugin._on_message_received = interrupted_delivery
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._deliver_inbox_batch(batch)
+
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+
+    assert effects == [message.id]
+    assert [item.id for item in replay] == [message.id]
+
+
+@pytest.mark.asyncio
+async def test_receiver_cancellation_after_effect_is_not_retried_automatically(
+    tmp_path,
+):
+    message = HubMessage(
+        action="message",
+        from_agent="peer-id-1",
+        from_identity="peer-1",
+        to="receiver",
+        content="effect before cancellation",
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def interrupted_delivery(msg):
+        effects.append(msg.id)
+        raise asyncio.CancelledError
+
+    plugin._on_message_received = interrupted_delivery
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        first = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._deliver_inbox_batch(first)
+
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        await plugin._deliver_inbox_batch(replay)
+
+    assert effects == [message.id]
+
+
+@pytest.mark.asyncio
+async def test_receiver_cancel_before_effect_is_held_for_inspection(tmp_path):
+    message = HubMessage(
+        action="message",
+        from_agent="peer-id-1",
+        from_identity="peer-1",
+        to="receiver",
+        content="effect has not started",
+    )
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def cancel_before_effect(_msg):
+        raise asyncio.CancelledError
+
+    plugin._on_message_received = cancel_before_effect
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._deliver_inbox_batch(batch)
+
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+
+    assert [item.id for item in replay] == [message.id]
+    assert replay[0].metadata["_mailbox_delivery_uncertain"] is True
+    assert await plugin._deliver_inbox_batch(replay) == set()
+
+
+@pytest.mark.asyncio
+async def test_task_cancel_after_receiver_effect_finishes_and_acknowledges(tmp_path):
+    message = HubMessage(
+        action="message",
+        from_agent="peer-id-1",
+        from_identity="peer-1",
+        to="receiver",
+        content="effect before task cancellation",
+    )
+    effects = []
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def receive(msg):
+        effects.append(msg.id)
+        entered.set()
+        await finish.wait()
+
+    plugin._on_message_received = receive
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        task = asyncio.create_task(plugin._deliver_inbox_batch(batch))
+        await entered.wait()
+        task.cancel()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+
+    assert effects == [message.id]
+    assert replay == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_coalesced_replay_effect_does_not_redeliver(tmp_path):
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def inject(block, subtype=""):
+        effects.append(block)
+        if len(effects) == 1:
+            raise asyncio.CancelledError
+
+    async def receive(message):
+        effects.append(message.content)
+
+    llm = SimpleNamespace(inject_system_message=inject)
+    plugin.event_bus = SimpleNamespace(get_service=lambda _name: llm)
+    plugin._on_message_received = receive
+
+    with patch.object(HubPlugin, "_agent_dispatch_mode", return_value="native"):
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            for index in range(2):
+                await messenger_module.AgentMessenger.send_to_file(
+                    "receiver",
+                    HubMessage(
+                        action="message",
+                        from_identity="peer",
+                        to="receiver",
+                        content=f"message-{index}",
+                    ),
+                )
+            batch = messenger_module.AgentMessenger.read_mailboxes(
+                ["receiver"], max_replay=1, consume=False
+            )
+            with pytest.raises(asyncio.CancelledError):
+                await plugin._deliver_inbox_batch(batch)
+
+            replay = messenger_module.AgentMessenger.read_mailboxes(
+                ["receiver"], max_replay=1, consume=False
+            )
+            await plugin._deliver_inbox_batch(replay)
+
+    assert len(effects) == 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_failure_is_held_for_inspection_after_restart(
+    tmp_path, caplog
+):
+    message = HubMessage(
+        action="message", from_agent="peer-id-1", from_identity="peer-1",
+        to="*", content="RETRY_AFTER_DELIVERY_FAILURE",
+    )
+    failed_plugin = HubPlugin.__new__(HubPlugin)
+    failed_plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def fail_delivery(_message):
+        raise RuntimeError("simulated delivery failure")
+
+    failed_plugin._on_message_received = fail_delivery
+    restarted_plugin = HubPlugin.__new__(HubPlugin)
+    restarted_plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+    restarted_plugin._on_message_received = AsyncMock(return_value=None)
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        assert await failed_plugin._deliver_inbox_batch(batch) == set()
+        assert "Mailbox delivery failed" in caplog.text
+        assert "RETRY_AFTER_DELIVERY_FAILURE" not in caplog.text
+
+        replayed = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        assert [item.id for item in replayed] == [message.id]
+        assert replayed[0].metadata["_mailbox_delivery_uncertain"] is True
+        acknowledged = await restarted_plugin._deliver_inbox_batch(replayed)
+        messenger_module.AgentMessenger.acknowledge_mailboxes(
+            ["receiver"], acknowledged
+        )
+        assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 1
+
+
+@pytest.mark.asyncio
+async def test_accepted_delivery_is_acknowledged_before_batch_returns(tmp_path):
+    message = HubMessage(
+        action="message", from_agent="peer-id-1", from_identity="peer-1",
+        to="receiver", content="accepted once",
+    )
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="agent-1", identity="receiver")
+    plugin._on_message_received = AsyncMock(return_value=None)
+
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["agent-1", "receiver"], consume=False
+        )
+        acknowledged = await plugin._deliver_inbox_batch(batch)
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["agent-1", "receiver"], consume=False
+        )
+
+    assert acknowledged == {message.id}
+    assert replay == []
 
 
 class _RefusingController:
@@ -347,7 +640,7 @@ async def test_a_long_outage_poll_offers_every_refused_message_again(
 @pytest.mark.asyncio
 async def test_a_refused_message_in_a_summarised_replay_stays_queued(tmp_path):
     # A replay that carries a summary (pre-restart drops) with no way to inject
-    # falls back to per-message delivery; that loop ignored the refusal.
+    # falls back to per-message delivery; refusal must leave the source file.
     refusals = []
     plugin = _mailbox_plugin(refusals)
     message = HubMessage(
@@ -360,7 +653,231 @@ async def test_a_refused_message_in_a_summarised_replay_stays_queued(tmp_path):
     )
     plugin.event_bus = SimpleNamespace(get_service=lambda name: None)
     with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
-        await plugin._deliver_inbox_batch([summary, message])
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        acknowledged = await plugin._deliver_inbox_batch([summary, message])
 
         assert refusals == [message.id]
+        assert acknowledged == set()
         assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 1
+
+
+@pytest.mark.asyncio
+async def test_accepted_delivery_is_not_replayed_when_unlink_fails(tmp_path):
+    from pathlib import Path
+
+    from plugins.hub.plugin import HubPlugin
+
+    message = HubMessage(
+        action="message", from_identity="peer", to="receiver", content="effect"
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="agent", identity="receiver")
+
+    async def receive(msg):
+        effects.append(msg.id)
+
+    plugin._on_message_received = receive
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        path = next((tmp_path / "receiver").glob("*.json"))
+        original_unlink = Path.unlink
+
+        def fail_ack(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError("simulated ack unlink failure")
+            return original_unlink(self, *args, **kwargs)
+
+        with patch.object(Path, "unlink", new=fail_ack):
+            first = messenger_module.AgentMessenger.read_mailboxes(
+                ["receiver"], consume=False
+            )
+            assert await plugin._deliver_inbox_batch(first) == {message.id}
+            replay = messenger_module.AgentMessenger.read_mailboxes(
+                ["receiver"], consume=False
+            )
+
+    assert effects == [message.id]
+    assert replay == []
+
+
+@pytest.mark.asyncio
+async def test_replace_failure_blocks_delivery_until_marker_can_be_persisted(tmp_path):
+    message = HubMessage(
+        action="message", from_identity="peer", to="receiver", content="effect"
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def cancel_after_effect(msg):
+        effects.append(msg.id)
+        raise asyncio.CancelledError
+
+    plugin._on_message_received = cancel_after_effect
+    original_replace = messenger_module.os.replace
+
+    def fail_replace(source, target):
+        if str(source).endswith(".tmp"):
+            raise PermissionError("simulated atomic marker replacement failure")
+        return original_replace(source, target)
+
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        with patch("plugins.hub.messenger.os.replace", side_effect=fail_replace):
+            first = messenger_module.AgentMessenger.read_mailboxes(
+                ["receiver"], consume=False
+            )
+            assert await plugin._deliver_inbox_batch(first) == set()
+            assert effects == []
+
+        second = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._deliver_inbox_batch(second)
+        third = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        await plugin._deliver_inbox_batch(third)
+
+    assert effects == [message.id]
+
+
+@pytest.mark.asyncio
+async def test_receiver_is_not_run_when_delivery_marker_cannot_be_persisted(tmp_path):
+    message = HubMessage(
+        action="message", from_identity="peer", to="receiver", content="effect"
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    failing_window = [True]
+
+    async def receive(msg):
+        effects.append(msg.id)
+        if failing_window[0]:
+            raise asyncio.CancelledError
+
+    plugin._on_message_received = receive
+    original_open = builtins.open
+    original_replace = messenger_module.os.replace
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        record = next((tmp_path / "receiver").glob("*.json"))
+
+        def fail_open(file, mode="r", *args, **kwargs):
+            if Path(file) == record and mode == "w":
+                raise PermissionError("marker persistence denied")
+            return original_open(file, mode, *args, **kwargs)
+
+        def fail_replace(source, target):
+            if str(source).endswith(".tmp") and Path(target) == record:
+                raise PermissionError("atomic marker replacement denied")
+            return original_replace(source, target)
+
+        first = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with patch("builtins.open", side_effect=fail_open), patch(
+            "plugins.hub.messenger.os.replace", side_effect=fail_replace
+        ):
+            try:
+                await plugin._deliver_inbox_batch(first)
+            except asyncio.CancelledError:
+                pass
+        failing_window[0] = False
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        await plugin._deliver_inbox_batch(replay)
+
+    assert effects == [message.id]
+
+
+@pytest.mark.asyncio
+async def test_accepted_effect_is_not_replayed_when_ack_receipt_cannot_persist(
+    tmp_path,
+):
+    from pathlib import Path
+
+    message = HubMessage(
+        action="message", from_identity="peer", to="receiver", content="effect"
+    )
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def receive(msg):
+        effects.append(msg.id)
+
+    plugin._on_message_received = receive
+    original_open = builtins.open
+    original_unlink = Path.unlink
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        record = next((tmp_path / "receiver").glob("*.json"))
+
+        def fail_ack_unlink(path, *args, **kwargs):
+            if path == record:
+                raise PermissionError("ack unlink denied")
+            return original_unlink(path, *args, **kwargs)
+
+        def fail_receipt(file, mode="r", *args, **kwargs):
+            if Path(file) == record and mode == "w":
+                raise PermissionError("ack receipt persistence denied")
+            return original_open(file, mode, *args, **kwargs)
+
+        first = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with patch.object(Path, "unlink", new=fail_ack_unlink), patch(
+            "builtins.open", side_effect=fail_receipt
+        ):
+            await plugin._deliver_inbox_batch(first)
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        await plugin._deliver_inbox_batch(replay)
+
+    assert effects == [message.id]
+
+
+@pytest.mark.asyncio
+async def test_failed_coalesced_replay_is_not_delivered_again_individually(tmp_path):
+    message = HubMessage(
+        action="message", from_identity="peer", to="receiver", content="effect"
+    )
+    summary = HubMessage(
+        action="inbox_summary",
+        from_identity="hub",
+        to="receiver",
+        content="offline replay",
+    )
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+    injected = []
+    individually_delivered = []
+
+    async def inject(block, subtype=None):
+        injected.append(block)
+        raise RuntimeError("injection outcome is ambiguous")
+
+    llm = SimpleNamespace(inject_system_message=inject)
+    plugin.event_bus = SimpleNamespace(get_service=lambda _name: llm)
+
+    async def receive(msg):
+        individually_delivered.append(msg.id)
+
+    plugin._on_message_received = receive
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        await plugin._deliver_inbox_batch([summary, message])
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+
+    assert len(injected) == 1
+    assert individually_delivered == []
+    assert replay[0].metadata["_mailbox_delivery_uncertain"] is True

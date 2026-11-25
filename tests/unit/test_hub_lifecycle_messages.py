@@ -516,7 +516,7 @@ def test_startup_status_shows_stop_all_only_to_callers_that_started_agents(monke
     plugin._display_startup_status(renderer, "coordinator", [])
 
     displayed = renderer.message_coordinator.display_message_sequence.call_args.args[0]
-    assert "To stop all agents you started, submit: /hub stop all" in displayed[1][1]
+    assert "To stop every agent in this folder, submit: /hub stop all" in displayed[1][1]
 
 
 def test_startup_message_catalog_has_50_tips_and_rotates_by_seed():

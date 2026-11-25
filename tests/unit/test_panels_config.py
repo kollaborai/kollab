@@ -129,12 +129,64 @@ def test_describe_has_the_wire_shape(home):
     )
 
 
+def test_settings_configuration_excludes_plugin_fields(home, monkeypatch):
+    from kollabor_tui.config_widgets import ConfigWidgetDefinitions
+
+    monkeypatch.setattr(
+        ConfigWidgetDefinitions,
+        "get_config_modal_definition",
+        lambda: {
+            "sections": [
+                {
+                    "title": "General",
+                    "widgets": [
+                        {
+                            "type": "checkbox",
+                            "label": "Keep history",
+                            "config_path": "terminal.keep_history",
+                            "default": True,
+                        }
+                    ],
+                },
+                {
+                    "title": "Plugin Settings",
+                    "widgets": [
+                        {
+                            "type": "checkbox",
+                            "label": "Built In",
+                            "config_path": "plugins.builtin.enabled",
+                        },
+                        {
+                            "type": "checkbox",
+                            "label": "Installed",
+                            "config_path": "plugin-registry.installed.enabled",
+                        },
+                    ],
+                },
+                {
+                    "title": "Installed Plugin",
+                    "widgets": [
+                        {
+                            "type": "text_input",
+                            "label": "Greeting",
+                            "config_path": "plugin-values.installed.greeting",
+                        }
+                    ],
+                },
+            ]
+        },
+    )
+
+    fields = fields_of(describe(FakeConfig()))
+
+    assert set(fields) == {"terminal.keep_history"}
+
+
 def test_a_secret_never_leaves_describe(home):
     config = FakeConfig({"plugins": {"hub": {"bridge_token": SECRET}}})
     view = describe(config)
 
-    field = fields_of(view)["plugins.hub.bridge_token"]
-    assert (field["value"], field["secret"], field["is_set"]) == (None, True, True)
+    assert "plugins.hub.bridge_token" not in fields_of(view)
     assert SECRET not in json.dumps(view)
 
 
@@ -162,79 +214,73 @@ def test_save_writes_each_key_notifies_and_returns_the_fresh_panel(home):
     assert "to ~/.kollab/config.json" in out["message"]
 
 
-def test_hub_arrival_wake_is_a_dropdown_that_saves_to_the_folder(home):
+def test_hub_arrival_wake_is_only_in_plugins_settings(home):
     config = FakeConfig({"plugins": {"hub": {"arrival_wake": "none"}}})
+    path = "plugins.hub.arrival_wake"
 
-    field = fields_of(describe(config))["plugins.hub.arrival_wake"]
-    assert (field["type"], field["label"], field["value"]) == (
-        "dropdown",
-        "Wake on Agent Arrival",
-        "none",
-    )
-    assert field["options"] == ["all", "koordinator", "none"] and field["editable"]
+    assert path not in fields_of(describe(config))
 
-    refused = save(config, {"plugins.hub.arrival_wake": "sometimes"}, "local")
-    assert refused["errors"] == {"plugins.hub.arrival_wake": "not one of the options"}
+    refused = save(config, {path: "koordinator"}, "local")
+    assert not refused["ok"]
+    assert refused["errors"] == {path: "unknown setting"}
+    assert config.saved == []
 
-    saved = save(config, {"plugins.hub.arrival_wake": "koordinator"}, "local")
-    assert saved["ok"]
-    assert config.saved == [("plugins.hub.arrival_wake", "koordinator", "local")]
-
-
-def test_hub_dropdowns_name_their_options_for_people_and_save_the_ids(home):
+def test_hub_plugin_fields_are_not_duplicated_in_configuration(home):
     config = FakeConfig({"plugins": {"hub": {"roster": "marketing-crew"}}})
     fields = fields_of(describe(config))
 
-    roster = fields["plugins.hub.roster"]
-    assert roster["options"] == [
-        "data-crew",
-        "finance-crew",
-        "gems",
-        "legal-crew",
-        "marketing-crew",
-        "oss-crew",
-        "people-crew",
-        "personal-crew",
-        "product-crew",
-        "research-crew",
-        "sales-crew",
-        "security-crew",
-        "social-crew",
-        "store-crew",
-        "support-crew",
-    ]
-    assert roster["option_labels"] == {
-        "data-crew": "Data Crew",
-        "finance-crew": "Finance Crew",
-        "gems": "Gems",
-        "legal-crew": "Legal Crew",
-        "marketing-crew": "Marketing Crew",
-        "oss-crew": "Open Source Crew",
-        "people-crew": "People Crew",
-        "personal-crew": "Personal Crew",
-        "product-crew": "Product Crew",
-        "research-crew": "Research Crew",
-        "sales-crew": "Sales Crew",
-        "security-crew": "Security Crew",
-        "social-crew": "Social Crew",
-        "store-crew": "Store Crew",
-        "support-crew": "Support Crew",
-    }
-    assert roster["value"] == "marketing-crew"  # the saved id, not its label
-    assert fields["plugins.hub.arrival_wake"]["option_labels"] == {
-        "all": "All",
-        "koordinator": "Koordinator",
-        "none": "None",
-    }
-    assert fields["plugins.hub.bridge_platform"]["option_labels"] == {
-        "telegram": "Telegram"
-    }
+    assert not any(path.startswith("plugins.hub.") for path in fields)
 
-    refused = save(config, {"plugins.hub.arrival_wake": "None"}, "local")
-    assert refused["errors"] == {"plugins.hub.arrival_wake": "not one of the options"}
-    save(config, {"plugins.hub.arrival_wake": "none", "plugins.hub.roster": "gems"})
-    assert ("plugins.hub.arrival_wake", "none", "global") in config.saved
-    assert ("plugins.hub.roster", "gems", "global") in config.saved
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        ("plugins.voice.mode", "quiet"),
+        ("plugins.voice.enabled", False),
+    ],
+)
+def test_builtin_config_changes_preserve_kind_when_installed_plugin_id_collides(
+    tmp_path, monkeypatch, path, value,
+):
+    from kollabor_plugins import registry, services, settings
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    registry_path = home / "plugins.json"
+    registry_path.write_text(
+        json.dumps({"plugins": {"voice": {"enabled": True}}, "dev": {}}),
+        encoding="utf-8",
+    )
+    builtin = {
+        "id": "voice",
+        "kind": "built-in",
+        "settings": [
+            {"path": "plugins.voice.enabled", "type": "checkbox", "editable": True},
+            {"path": "plugins.voice.mode", "type": "text_input", "editable": True},
+        ],
+    }
+    builtin_writes = []
+    package_writes = []
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [builtin])
+    monkeypatch.setattr(settings, "_builtin", lambda plugin_id: builtin if plugin_id == "voice" else None)
+    monkeypatch.setattr(
+        settings,
+        "_save_builtin",
+        lambda entry, values, **kwargs: builtin_writes.append((entry["id"], values)),
+    )
+    monkeypatch.setattr(
+        settings,
+        "_save_locked",
+        lambda plugin_id, values: package_writes.append((plugin_id, values)),
+    )
+    monkeypatch.setattr(services, "stop_services", lambda _plugin_id: [])
+
+    assert apply_config_changes(FakeConfig(), {path: value}, "global")
+
+    assert builtin_writes == [("voice", {path: value})]
+    assert package_writes == []
+    assert json.loads(registry_path.read_text(encoding="utf-8"))["plugins"]["voice"]["enabled"] is True
 
 
 def test_option_labels_only_name_options_and_only_dropdowns_carry_them(home):

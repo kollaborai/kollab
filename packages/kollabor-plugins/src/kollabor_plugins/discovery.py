@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Type
 from kollabor_events.error_utils import safe_execute
 
 from .plugin_utils import get_plugin_config_safely, has_method
+from .redaction import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +159,7 @@ class PluginDiscovery:
             return False
 
         except Exception as e:
-            logger.error(f"Error verifying plugin location: {e}")
+            logger.error("Error verifying plugin location: %s", redact_sensitive_text(str(e)))
             return False
 
     def _verify_loaded_module(self, module, module_path: str) -> bool:
@@ -196,7 +197,11 @@ class PluginDiscovery:
             return True
 
         except Exception as e:
-            logger.error(f"Error verifying loaded module {module_path}: {e}")
+            logger.error(
+                "Error verifying loaded module %s: %s",
+                module_path,
+                redact_sensitive_text(str(e)),
+            )
             return False
 
     def _module_is_from_plugins_dir(self, module) -> bool:
@@ -215,7 +220,7 @@ class PluginDiscovery:
                 ):
                     return True
         except Exception as e:
-            logger.debug(f"Could not verify plugin module root: {e}")
+            logger.debug("Could not verify plugin module root: %s", redact_sensitive_text(str(e)))
 
         return False
 
@@ -280,7 +285,7 @@ class PluginDiscovery:
                 self._drop_stale_module_cache(module_path)
             importlib.invalidate_caches()
         except Exception as e:
-            logger.debug(f"Could not prepare plugin import root: {e}")
+            logger.debug("Could not prepare plugin import root: %s", redact_sensitive_text(str(e)))
 
     def scan_plugin_files(self) -> List[str]:
         """Scan the plugins directory recursively for plugin files with security validation.
@@ -305,7 +310,7 @@ class PluginDiscovery:
                     return discovered
 
         except Exception as e:
-            logger.error(f"Error resolving plugins directory: {e}")
+            logger.error("Error resolving plugins directory: %s", redact_sensitive_text(str(e)))
             return discovered
 
         # Recursively scan for *_plugin.py files
@@ -348,7 +353,11 @@ class PluginDiscovery:
                 logger.debug(f"Discovered valid plugin file: {module_path}")
 
             except Exception as e:
-                logger.error(f"Error processing plugin file {plugin_file}: {e}")
+                logger.error(
+                    "Error processing plugin file %s: %s",
+                    plugin_file,
+                    redact_sensitive_text(str(e)),
+                )
                 continue
 
         # Recursively scan for directory-based plugins (packages with __init__.py)
@@ -396,7 +405,11 @@ class PluginDiscovery:
                 logger.debug(f"Discovered valid plugin package: {module_path}")
 
             except Exception as e:
-                logger.error(f"Error processing plugin directory {plugin_dir}: {e}")
+                logger.error(
+                    "Error processing plugin directory %s: %s",
+                    plugin_dir,
+                    redact_sensitive_text(str(e)),
+                )
                 continue
 
         self.discovered_modules = discovered
@@ -438,11 +451,17 @@ class PluginDiscovery:
                 self._prepare_plugins_import_root(module_path)
                 module = importlib.import_module(full_module_path)
             except ImportError as e:
-                logger.error(f"Failed to import plugin module {module_path}: {e}")
+                logger.error(
+                    "Failed to import plugin module %s: %s",
+                    module_path,
+                    redact_sensitive_text(str(e)),
+                )
                 raise
             except Exception as e:
                 logger.error(
-                    f"Unexpected error importing plugin module {module_path}: {e}"
+                    "Unexpected error importing plugin module %s: %s",
+                    module_path,
+                    redact_sensitive_text(str(e)),
                 )
                 raise
 
@@ -552,7 +571,9 @@ class PluginDiscovery:
                             plugin_classes.append(class_obj)
             except Exception as e:
                 logger.warning(
-                    f"Failed to load plugin {module_name} for CLI arg discovery: {e}"
+                    "Failed to load plugin %s for CLI arg discovery: %s",
+                    module_name,
+                    redact_sensitive_text(str(e)),
                 )
 
         logger.info(f"CLI arg discovery: {len(plugin_classes)} plugin classes found")
@@ -656,5 +677,10 @@ class PluginDiscovery:
                 logger.debug(f"Plugin {plugin_name} has no method: {method_name}")
                 return None
         except Exception as e:
-            logger.error(f"Failed to call {plugin_name}.{method_name}: {e}")
+            logger.error(
+                "Failed to call %s.%s: %s",
+                plugin_name,
+                method_name,
+                redact_sensitive_text(str(e)),
+            )
             return None

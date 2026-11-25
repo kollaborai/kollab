@@ -199,10 +199,12 @@ def apply_config_changes(
             for plugin_id, values in builtin_values.items():
                 save(
                     plugin_id, values, allow_secrets=True,
-                    config_service=config_service, save_target=target,
+                    config_service=config_service, save_target=target, kind="built-in",
                 )
             for plugin_id, value in enabled.items():
-                set_enabled(plugin_id, value, config_service=config_service, save_target=target)
+                set_enabled(
+                    plugin_id, value, config_service=config_service, save_target=target, kind="built-in",
+                )
     except Exception as exc:
         logger.error("plugin settings save failed: %s", exc)
         return False
@@ -367,6 +369,20 @@ class ConfigPanel:
         service = _config_service(ctx)
         managed, global_settings = read_managed_state()
         sections = build_config_sections(service, managed, global_settings)
+        plugin_paths = ("plugins.", "plugin-values.", "plugin-registry.", "plugin-service.")
+        sections = [
+            {
+                **section,
+                "widgets": [
+                    row
+                    for row in section["widgets"]
+                    if not str(row.get("config_path", "")).startswith(plugin_paths)
+                ],
+            }
+            for section in sections
+            if section.get("title") != "Plugin Settings"
+        ]
+        sections = [section for section in sections if section["widgets"]]
         return {
             "panel": self.name,
             "kind": self.kind,

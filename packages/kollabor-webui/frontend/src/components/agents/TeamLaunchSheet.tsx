@@ -96,7 +96,7 @@ export function TeamLaunchSheet({
 
   return (
     <>
-      <div className="flex shrink-0 items-center gap-2 px-5 pt-4">
+      <div className="flex shrink-0 items-center gap-2 px-5 pt-4 pointer-coarse:pr-12">
         <Button type="button" variant="ghost" size="sm" onClick={onBack}>
           <ArrowLeft className="size-4" />
           Teams

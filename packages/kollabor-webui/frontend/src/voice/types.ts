@@ -1,4 +1,4 @@
-// Wire shapes from specs/voice-mode/livekit-web/contracts/shared-types.md.
+// Wire shapes from docs/specs/voice-mode/livekit-web/contracts/shared-types.md.
 
 export type VoiceSessionState =
   | "idle"

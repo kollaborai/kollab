@@ -1,4 +1,4 @@
-"""Voice settings and voice prompt overlay (specs/voice-mode/livekit-web/contracts/config-prompt.md).
+"""Voice settings and voice prompt overlay (docs/specs/voice-mode/livekit-web/contracts/config-prompt.md).
 
 No second store: settings are global config keys under ``voice.livekit.*``
 (``ConfigService.save_key``), the API key is a protected keyring entry

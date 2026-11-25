@@ -341,7 +341,52 @@ there are TWO separate dedup systems:
     path: ~/.kollab/hub/messages/<agent_id>/
     atomic file write (timestamp-uuid.json)
     polled every 5 seconds by _mailbox_loop
-    consumed (deleted) after read
+    one validated record reader is shared by admission, pruning and replay
+    only recognized ordinary records authorize automatic eviction or consumption
+    unreadable records, non-object JSON, malformed JSON, invalid timestamps and
+    invalid message fields are reported without message content and preserved;
+    they consume retained capacity until repaired or explicitly resolved
+    even a consuming read leaves durable controls counted until receive
+    classification and acknowledgment; only ordinary records can be consumed
+    reads, writes/pruning, claims, acknowledgment and refusal release share
+    one cross-process file lock for the mailbox root; no lock spans a callback
+    before calling a receiver, exclusively transition every source record from
+    queued to held by persisting an uncertainty marker; an absent, incomplete,
+    already held or acknowledged source cannot authorize an effect, even when
+    a poller still has a previously parsed batch
+    if claim persistence fails, skip delivery; a partially persisted batch
+    retains its marked records for inspection and never starts the callback
+    accepted delivery is acknowledged by removing the record or writing a
+    complete receipt using atomic replacement; if acknowledgment persistence
+    fails, the original claimed payload survives and the marker prevents replay
+    explicit refusal clears the marker and leaves the record available to retry
+    cancellation or an ambiguous receiver failure keeps the marker and payload,
+    suppressing automatic replay until an operator inspects it; coalesced
+    injection has the same rule and cancellation never proves acceptance
+    clear the marker to retry only after confirming no effect, or remove the
+    record after confirming its effect; generic async callbacks cannot provide
+    transactional exactly-once delivery, so uncertain outcomes require inspection
+    TTL-expired, restart-stale ordinary messages, and replay-cap drops are
+    intentionally discarded; durable task controls retain their existing
+    classification path
+    the orphan sweep removes empty directories with rmdir only; it never
+    recursively deletes a populated mailbox based on a directory snapshot
+
+  mailbox admission:
+    ordinary messages are bounded independently by INBOX_MAX_SIZE; oldest
+    ordinary messages may be evicted when that limit is exceeded
+    durable task assignments and task-cron controls are bounded by
+    INBOX_MAX_CONTROLS and are never evicted before receive classification
+    unreadable or unclassifiable records are preserved as unknown controls and
+    consume control capacity until they can be recovered or classified
+    when that control cap is full, the new write is rejected with explicit
+    backpressure; the sender may retry after the receiver drains its mailbox
+    admission shares the mailbox root delivery lock; retrying an existing message
+    ID with identical content is idempotent across route evidence and delivery
+    claim transitions; changed content under that ID is a sender-visible rejection
+    storage errors are returned as delivery failures
+    explicit refusal permits retry; uncertain effects remain held for inspection
+    without an exactly-once effect guarantee
 
   off-box endpoint (optional, plugins.hub.endpoint_enabled):
     remote agent dials wss://host:port (or ws://) instead of a unix socket
