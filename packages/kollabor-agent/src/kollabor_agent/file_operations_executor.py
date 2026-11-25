@@ -767,7 +767,8 @@ class FileOperationsExecutor:
         """Match basenames beneath a pinned directory, without shell execution.
 
         Directory descriptors and O_NOFOLLOW keep every descent attached to its
-        parent even if workspace entries are renamed or replaced during a scan.
+        parent. Ancestry and directory metadata checks reject entries renamed
+        during a scan, including a move out and back before traversal completes.
         There is deliberately no path, shell program or symlink-follow option.
         """
         pattern = operation.get("pattern")
@@ -825,37 +826,51 @@ class FileOperationsExecutor:
             directory_fd: int, prefix: str, depth: int, workspace_fd: int
         ) -> None:
             nonlocal scanned, output_chars, truncated
-            with os.scandir(directory_fd) as entries:
-                for entry in entries:
-                    if scanned >= 10000 or len(matches) >= 200 or output_chars >= 12000:
-                        truncated = True
-                        return
-                    scanned += 1
-                    relative = f"{prefix}{entry.name}"
-                    if fnmatch.fnmatchcase(entry.name, pattern):
-                        encoded_size = len(json.dumps(relative)) + 2
-                        if output_chars + encoded_size > 12000:
+            # Renames update the containing directory's timestamps, so this
+            # catches an out-and-back child move that final ancestry misses.
+            before = os.fstat(directory_fd)
+            try:
+                with os.scandir(directory_fd) as entries:
+                    for entry in entries:
+                        if scanned >= 10000 or len(matches) >= 200 or output_chars >= 12000:
                             truncated = True
                             return
-                        matches.append(relative)
-                        output_chars += encoded_size
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
-                    if depth >= 64:
-                        truncated = True
-                        continue
-                    # Never open a symlink, including one swapped in after the
-                    # is_dir check. A race or a permission error fails visibly.
-                    child_fd = os.open(entry.name, flags, dir_fd=directory_fd)
-                    try:
-                        visit(child_fd, relative + "/", depth + 1, workspace_fd)
-                        if not is_beneath_workspace(child_fd, workspace_fd):
-                            raise OSError(
-                                errno.EXDEV,
-                                "Directory moved outside the active workspace during search",
-                            )
-                    finally:
-                        os.close(child_fd)
+                        scanned += 1
+                        relative = f"{prefix}{entry.name}"
+                        if fnmatch.fnmatchcase(entry.name, pattern):
+                            encoded_size = len(json.dumps(relative)) + 2
+                            if output_chars + encoded_size > 12000:
+                                truncated = True
+                                return
+                            matches.append(relative)
+                            output_chars += encoded_size
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        if depth >= 64:
+                            truncated = True
+                            continue
+                        # Never open a symlink, including one swapped in after the
+                        # is_dir check. A race or a permission error fails visibly.
+                        child_fd = os.open(entry.name, flags, dir_fd=directory_fd)
+                        try:
+                            visit(child_fd, relative + "/", depth + 1, workspace_fd)
+                            if not is_beneath_workspace(child_fd, workspace_fd):
+                                raise OSError(
+                                    errno.EXDEV,
+                                    "Directory moved outside the active workspace during search",
+                                )
+                        finally:
+                            os.close(child_fd)
+            finally:
+                after = os.fstat(directory_fd)
+                if (after.st_mtime_ns, after.st_ctime_ns) != (
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                ):
+                    raise OSError(
+                        errno.EXDEV,
+                        "Directory changed during active workspace search",
+                    )
 
         # Open every ancestor without following links, then hold the workspace
         # descriptor for the complete scan. A path swap cannot redirect a child
