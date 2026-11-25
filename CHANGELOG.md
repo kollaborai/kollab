@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-11-24
+
+### Added
+- When CI fails on main, a new workflow opens one priority issue naming the failed jobs, the merged PR and the revert command (#1428).
+- A new workflow posts a ci/base-fresh status on every open pull request, shadow only: it is not a required check (#1425).
+- A weekly workflow runs the PR throughput report and uploads its JSON and Markdown as an artifact (#1424).
+- Nightly builds: CI publishes the single-file binaries from `main` every night as a prerelease tagged
+  `nightly-<version>`. Setting `kollabor.updates.include_prereleases` to true now makes updates follow them; until
+  now the setting had no effect (#1349).
+- In the web UI, a message you send while the agent is working shows as Queued and is sent when the agent
+  finishes its turn. Send Now under the message, or Cmd+Enter (Ctrl+Enter off a Mac), sends it into the running
+  turn at once: the agent reads it at its next step. A chat with an ACP harness (Claude Code, Codex) queues the
+  message and has no Send Now yet (#1102).
+- Plugins: a service that will not stop now reports the failure and leaves its plugin off, a staged install or update can be cancelled, and the web UI serves an installed plugin's files only while they still match the hash approved at install (#1028).
+- The bundled Hello plugin adds a web view, page, dialog and notice with a dev loop and generated SDK types; its menu row is labeled “Hello Page,” and touch targets grow in the session panel, notices and plugin surfaces (#1028).
+- The web UI loads plugins: an installed plugin can add a right-hand menu row that opens its own page, plus notices, chat tabs and dialogs. A plugin that fails shows Failed to Load while the rest keeps working, and `?plugins=off` in the page URL loads none (#1028).
+
+### Changed
+- The enrollment issuer decision test is skipped while its CI flake is investigated (#1391).
+- The web UI logo is now a 3D glass K with the electric mist swirling behind it, seen through the glass; it tilts toward the pointer and flares on hover, and falls back to the flat mark without WebGL2 (#1246).
+
+### Fixed
+- `/hub stop all` typed in a session now stops every agent in that session's folder, and both it and `kollab --hub stop all` / `kollab --hub status` name live agents in other folders instead of reporting none; `kollab --hub stop all --everywhere` stops those too. The agent `hub_stop` tool still stops only agents its caller started (#1408).
+- Send Now stops displaying events from the previous request after a queued message takes over (#1377).
+- Plugin staging and apply jobs publish terminal statuses only after cleanup finishes; failed cleanup paths are retained and reported as warnings. (#1373)
+- ACP steering now rejects a receipt if its target turn changes before confirmation (#1371).
+- Assistant transport waits for every admitted message turn and keeps separate-turn replies in separate rows (#1368).
+- Assistant streams preserve a completed reply when cancellation races with event delivery, preventing it from disappearing on reconnect (#1368).
+- After Send Now, the chat keeps drawing the finishing step and pending permission prompts while the next request runs, binds each response to its exact prompt owner even when tool IDs are reused, scopes Stop to the parent request, and keeps parked or sibling prompts isolated (#1367).
+- In the web UI, pressing Enter while the agent is working now sends your message like the Send button does,
+  instead of starting a new line (#1365).
+- In the web UI, the chat no longer scrolls you away from what you are reading when another message arrives while
+  the agent works on yours (#1364).
+- A message you send in the web UI while the agent is busy now shows once, next to any message someone else sent at the
+  same time, even with the same words or a picture, and the chat settles to the saved conversation when the turn
+  ends instead of keeping a stale copy until you reload (#1359).
+- In the web UI, a reply that starts with a tool call no longer fades out and back in, jumps the chat or shows a
+  "2 / 2" switcher when its turn is reloaded, a message waiting to be sent keeps its place while other messages
+  arrive, and the red "Couldn't load older messages" line no longer blinks each time you scroll up or shows in a
+  chat that already has its first message on screen (#1359).
+- In the web UI, a chat whose connection to a reply dropped no longer shows your messages and the reply twice,
+  hides the next message you send, or leaves an empty error box: it takes the saved conversation where it stands,
+  without reloading. A chat that only watches a turn no longer shows each tool call twice or loses the reply for
+  a moment when the turn ends, a saved message that changes now updates in place instead of blanking the chat,
+  and the "2 / 2" switcher that did nothing is gone (#1359).
+- When a reply finishes in the web UI, the chat no longer goes blank for a moment and jumps its scroll position,
+  and a reply that arrived while your message waited no longer flickers away or shows a "2 / 2" switcher (#1358).
+- A message sent from the web UI while the agent is busy shows once in the chat, not again at the bottom
+  after the agent's later replies (#1356).
+- Slash commands preserve backslashes in unquoted Windows paths (#1293).
+- Malformed pending-reply entries are sanitized so one corrupt timestamp cannot block the remaining replies (#1279).
+- The welcome guide no longer has its own "Choose a provider" card. "Get Started" opens Settings > Setup, the one provider screen, until a provider is chosen, and the built-in profiles no longer count as one (#1217). While provider facts are pending or unavailable, an explicit "Open provider setup" action keeps that screen reachable without an automatic handoff.
+- The Web UI setup wizard supports ChatGPT sign-in and activates the shared OAuth profile (#1210).
+- Restored Web UI image drafts keep one token per attached image and remove orphaned tokens (#1176).
+- Completed Hub tool rows use readable labels and show recipients instead of internal thread ids (#1175).
+- Web UI: image thumbnails always open the matching attachment when session media is stale or unavailable (#1170).
+- Terminal spawn checks allow quoted literal substitution examples while checking executable substitutions (#1163).
+- Connect explains whether a local session or the relay refused authorization to create a device join code and gives a safe next step. (#1146)
+- Terminal, Code and Git show the correct recovery action for outdated agents, including before engine-version metadata loads; long stop commands wrap without splitting `--hub`, and Terminal hides Retry until the agent is current. (#1141)
+- The Prompts settings tab hides role controls when prompt libraries fail to load and offers a retry (#1110).
+- Long drafts stay clear of the Web UI composer’s send and stop controls while a turn is running (#1109).
+- Long assistant and user messages are restored in full when reopening a Web UI conversation (#1105).
+- Git-only agent bundles can run permitted read-only Git commands without granting general terminal access (#1036).
+- Saved-session branches now switch through the state service and keep the active conversation, log, and API session aligned (#1032).
+- Web UI chat now shows actionable session and branch-point rows for /branch, /fork, /resume, /resume search, /fork search, and filtered /resume lists (#1031).
+- Sidebar footer buttons meet the 44px touch target on phone and tablet layouts (#1010).
+- Deleting a session clears its in-memory composer text without affecting other chats' drafts (#981).
+- New sessions prefer the profile's last completed model and effort after the default loadout, skipping models marked unsupported until the provider lists them again (#962)
+- Pause saves and automatic config rewrites when a layer is unreadable or malformed, with explicit backup, repair, and conflict handling (#947)
+- The Web UI distinguishes failed update checks from current installs and bounds repeated release lookups (#944).
+- The installer verifies the executable and version produced by its selected method, resolves Windows user Scripts from the selected pip interpreter, and reports PATH conflicts clearly (#940).
+- Hub rejects new durable task controls when an offline mailbox is full and preserves unreadable or invalid-JSON records from pruning (#936).
+- Mailbox replay validates timestamps, keeps valid messages until delivery is acknowledged, and holds ambiguous receiver cancellations without automatic replay (#935).
+- Web fetch extracts JSON-LD first, then omits script and code bodies from fallback text (#925).
+- web-fetch streams responses within byte limits, bounds its complete output, and keeps browser fallback input within the same cap (#924).
+- The Web UI slash menu distinguishes loading, empty, and unavailable session command catalogs, with retry that preserves the draft (#922).
+
+### Security
+- When a package plugin's Python entry fails while loading, Settings shows a fixed safe message and points to the process log for details; plugin-raised text is not copied into plugin error metadata (#1401).
+- Patched vulnerable Python and frontend dependencies in the application, discovery, relay, and web UI dependency locks (#1072).
+- Git-only bundle grants now allow read-only Git inspection without shell, pager, hook, credential, or external transport execution (#1070).
+
 ## [0.23.0] - 2026-11-20
 
 ### Added
