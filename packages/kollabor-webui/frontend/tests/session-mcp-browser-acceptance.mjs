@@ -110,6 +110,12 @@ try {
   assert.equal(await dialog.getByText("configured by agent", { exact: true }).count(), 0);
   assert.equal(await dialog.getByRole("button", { name: "Edit session-only" }).isDisabled(), true);
   assert.equal(await dialog.getByRole("button", { name: "Delete session-only" }).isDisabled(), true);
+  // Phone-width rows use plain text: one tool reads "1 tool", tool names sit
+  // beside the count, and no row renders a pill badge.
+  const rowText = await dialog.innerText();
+  assert.ok(!rowText.includes("1 tools"), 'a single tool must read "1 tool"');
+  assert.ok(rowText.includes("1 tool · search"), "tool names must read as plain text beside the count");
+  assert.equal(await dialog.locator('[data-slot="badge"]').count(), 0, "MCP rows must not render pill badges");
   await page.screenshot({ path: path.join(screenshotDir, "session-mcp-global-failure.png"), fullPage: true });
 
   // Retry recovers the failed source, exposes known ownership, and leaves valid
