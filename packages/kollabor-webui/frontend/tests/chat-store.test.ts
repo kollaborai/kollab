@@ -544,4 +544,96 @@ describe("LiveChatStore", () => {
     await vi.waitFor(() => expect(streams).toHaveLength(2));
     expect(streams[1].path).toBe("/sessions/s1/stream");
   });
+
+  it("sendNow POSTs an empty JSON body to /sessions/s1/inputs/<encoded input id>/send-now and changes no rows or inputs", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    const queued: InputInfo = { id: "web/a 1", state: "queued", turn_id: null };
+    first.emit(snapshot(5, [row("r1", "one")], { inputs: [queued] }));
+    const rows = store.rows;
+    const inputs = store.inputs;
+    const listener = vi.fn();
+    store.subscribe(listener);
+    await store.sendNow("web/a 1");
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/inputs/web%2Fa%201/send-now", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(store.rows).toBe(rows);
+    expect(store.inputs).toBe(inputs);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("sendNow throws when the POST answers 500", async () => {
+    const { store, request } = make();
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.sendNow("web-a1")).rejects.toThrow("send-now failed: 500");
+  });
+
+  it("olderStatus is idle before any snapshot, and complete when the snapshot has no older cursor", async () => {
+    const { store, streams } = make();
+    expect(store.olderStatus).toBe("idle");
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    expect(store.olderStatus).toBe("complete");
+  });
+
+  it("olderStatus moves idle, loading, complete on a last page, and each change calls the listeners", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    expect(store.olderStatus).toBe("idle");
+    const seen: string[] = [];
+    store.subscribe(() => seen.push(store.olderStatus));
+    let answer!: (response: Response) => void;
+    request.mockImplementationOnce(() => new Promise<Response>((resolve) => {
+      answer = resolve;
+    }));
+    const loading = store.loadOlder();
+    expect(store.olderStatus).toBe("loading");
+    answer(new Response(JSON.stringify({ rows: [row("r0", "zero")], older: null }), { status: 200 }));
+    await loading;
+    expect(store.olderStatus).toBe("complete");
+    expect(seen).toEqual(["loading", "complete"]);
+  });
+
+  it("olderStatus moves idle, loading, failed on an error, then loading, idle on a retry that returns more rows", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const seen: string[] = [];
+    store.subscribe(() => seen.push(store.olderStatus));
+    request.mockRejectedValueOnce(new Error("network down"));
+    const failed = store.loadOlder();
+    expect(store.olderStatus).toBe("loading");
+    await expect(failed).rejects.toThrow("network down");
+    expect(store.olderStatus).toBe("failed");
+    request.mockResolvedValueOnce(
+      new Response(JSON.stringify({ rows: [row("r0", "zero")], older: "c0" }), { status: 200 }),
+    );
+    const retry = store.loadOlder();
+    expect(store.olderStatus).toBe("loading");
+    await retry;
+    expect(store.olderStatus).toBe("idle");
+    expect(store.rows.map((r) => r.id)).toEqual(["r0", "r1"]);
+    expect(seen).toEqual(["loading", "failed", "loading", "idle"]);
+  });
+
+  it("olderStatus is failed after a history answer that is not ok", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "c1" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.loadOlder()).rejects.toThrow("history failed: 500");
+    expect(store.olderStatus).toBe("failed");
+  });
+
+  it("olderStatus is idle after a 409 answer, which resyncs and leaves the status to the next snapshot", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(store.olderStatus).toBe("idle");
+  });
 });

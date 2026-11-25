@@ -61,7 +61,11 @@ export interface ChatStore {
   readonly rows: readonly ChatRow[];
   readonly inputs: Readonly<Record<string, InputInfo>>;
   readonly running: boolean;
+  /** History paging: loading while loadOlder runs, failed after it fails, complete when nothing is older. */
+  readonly olderStatus: "idle" | "loading" | "failed" | "complete";
   send(input: InputRequest): Promise<void>;
+  /** Asks the daemon to start a queued input now. Local rows and inputs change only on the stream's input.state events. */
+  sendNow(inputId: string): Promise<void>;
   cancel(inputId: string): Promise<void>;
   stop(): Promise<void>;
   loadOlder(): Promise<void>;

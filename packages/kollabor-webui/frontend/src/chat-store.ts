@@ -18,6 +18,8 @@ import {
 
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "failed";
 
+export type OlderStatus = ChatStore["olderStatus"];
+
 export type ApplyOutcome =
   | { kind: "applied" }
   | { kind: "duplicate" }
@@ -145,6 +147,7 @@ export type ChatSnapshot = {
   readonly running: boolean;
   readonly connection: ConnectionState;
   readonly hasEarlier: boolean;
+  readonly olderStatus: OlderStatus;
 };
 
 /** The store the chat renders from. LiveChatStore is the implementation. */
@@ -179,6 +182,8 @@ export class LiveChatStore implements LiveStore {
   private state: StreamState = initialStreamState;
   // Not named `connection`: that name is the public getter below.
   private connectionState: ConnectionState = "connecting";
+  // Not named `olderStatus`: that name is the public getter below.
+  private paging: OlderStatus = "idle";
   private attempts = 0;
   private started = false;
   private disposed = false;
@@ -234,6 +239,10 @@ export class LiveChatStore implements LiveStore {
     return this.snapshot.hasEarlier;
   }
 
+  get olderStatus(): OlderStatus {
+    return this.snapshot.olderStatus;
+  }
+
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
@@ -266,6 +275,13 @@ export class LiveChatStore implements LiveStore {
     if (!response.ok) throw new Error(`send failed: ${response.status}`);
   }
 
+  /** Starts a queued input now. Nothing local changes: the daemon answers with input.state on the stream. */
+  async sendNow(inputId: string): Promise<void> {
+    const path = `/sessions/${this.enc}/inputs/${encodeURIComponent(inputId)}/send-now`;
+    const response = await this.transport.request(path, { method: "POST", body: JSON.stringify({}) });
+    if (!response.ok) throw new Error(`send-now failed: ${response.status}`);
+  }
+
   async cancel(inputId: string): Promise<void> {
     const path = `/sessions/${this.enc}/inputs/${encodeURIComponent(inputId)}/cancel`;
     const response = await this.transport.request(path, { method: "POST" });
@@ -280,27 +296,43 @@ export class LiveChatStore implements LiveStore {
   async loadOlder(): Promise<void> {
     const cursor = this.state.olderCursor;
     if (cursor === null) return;
+    this.setPaging("loading");
     const path = `/sessions/${this.enc}/history?before=${encodeURIComponent(cursor)}`;
+    let page: HistoryPage;
+    try {
+      const response = await this.requestHistory(path);
+      if (response === null) {
+        // A stale cursor: resync, and the next snapshot brings a fresh one.
+        this.setPaging("idle");
+        this.resync();
+        return;
+      }
+      page = (await response.json()) as HistoryPage;
+      if (!Array.isArray(page.rows)) throw new Error("history failed: unexpected page");
+    } catch (error) {
+      this.setPaging("failed");
+      throw error;
+    }
+    const held = new Set(this.state.rows.map((row) => row.id));
+    const older = page.rows.filter((row) => !held.has(row.id));
+    this.state = { ...this.state, rows: [...older, ...this.state.rows], olderCursor: page.older ?? null };
+    this.paging = this.state.olderCursor === null ? "complete" : "idle";
+    this.publish();
+  }
+
+  /** The history answer, or null when the cursor is stale (409). Any other failure throws. */
+  private async requestHistory(path: string): Promise<Response | null> {
     let response: Response;
     try {
       response = await this.transport.request(path);
     } catch (error) {
       // EngineApi.request throws ApiError on any non-2xx answer, so a 409 can arrive here.
-      if (errorStatus(error) !== 409) throw error;
-      this.resync();
-      return;
+      if (errorStatus(error) === 409) return null;
+      throw error;
     }
-    if (response.status === 409) {
-      this.resync();
-      return;
-    }
+    if (response.status === 409) return null;
     if (!response.ok) throw new Error(`history failed: ${response.status}`);
-    const page = (await response.json()) as HistoryPage;
-    if (!Array.isArray(page.rows)) throw new Error("history failed: unexpected page");
-    const held = new Set(this.state.rows.map((row) => row.id));
-    const older = page.rows.filter((row) => !held.has(row.id));
-    this.state = { ...this.state, rows: [...older, ...this.state.rows], olderCursor: page.older ?? null };
-    this.publish();
+    return response;
   }
 
   private snapshotOf(): ChatSnapshot {
@@ -310,6 +342,7 @@ export class LiveChatStore implements LiveStore {
       running: turnsRunning(this.state.turns),
       connection: this.connectionState,
       hasEarlier: this.state.olderCursor !== null,
+      olderStatus: this.paging,
     };
   }
 
@@ -317,6 +350,13 @@ export class LiveChatStore implements LiveStore {
   private publish(): void {
     this.snapshot = this.snapshotOf();
     for (const listener of [...this.listeners]) listener();
+  }
+
+  /** Sets the paging state and tells the listeners, unless the state is unchanged. */
+  private setPaging(status: OlderStatus): void {
+    if (this.paging === status) return;
+    this.paging = status;
+    this.publish();
   }
 
   /** Connects, applies events, and reconnects after a drop until the attempts run out. */
@@ -368,6 +408,8 @@ export class LiveChatStore implements LiveStore {
     }
     if (result.outcome.kind === "duplicate") return;
     this.state = result.state;
+    // A snapshot brings a new window with its own cursor, so the paging state follows it.
+    if (event.type === "snapshot") this.paging = this.state.olderCursor === null ? "complete" : "idle";
     this.attempts = 0;
     this.publish();
   }
