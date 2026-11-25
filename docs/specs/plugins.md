@@ -170,8 +170,9 @@ one that fails while drawing shows `Failed to Render`; both open a small kollab-
 and View Error, and everything else keeps working. Every plugin view, tab, settings view, tool card and
 tag card has that render boundary and a Suspense fallback. Its five-second timeout covers suspended
 renders only, after React commits the fallback. Plugin code runs on the page's main thread; a synchronous
-loop freezes the tab and cannot be interrupted by the timeout. Plugin callback failures show fixed safe
-text, with error details written only to the redacted browser log. A plugin whose last boot never finished (the tab froze
+loop freezes the tab and cannot be interrupted by the timeout. Plugin render and action failures show fixed safe
+text, with error details written only to the redacted browser log. Event listener throws and rejections are caught and
+logged with redaction; they do not produce a UI message. A plugin whose last boot never finished (the tab froze
 or closed during it) is skipped on the next load with the notice `PR Chain was skipped: it froze the page
 last time.  [Turn On Again]`. `?plugins=off` in the page URL loads the web UI with no plugin code and
 Settings → Plugins says `Plugins are off for this page`. The configured agent-run caps are intended

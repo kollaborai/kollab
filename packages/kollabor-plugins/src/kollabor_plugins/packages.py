@@ -205,7 +205,11 @@ def _has_single_contribution_identity(value: object, *, required: str | None = N
     if not isinstance(value, dict):
         return False
     identities = [field for field in _CONTRIBUTION_IDENTITY_FIELDS if field in value]
-    return len(identities) == 1 and (required is None or identities[0] == required)
+    return (
+        len(identities) == 1
+        and isinstance(value[identities[0]], str)
+        and (required is None or identities[0] == required)
+    )
 
 
 def _is_valid_renderer_declaration(value: object) -> bool:

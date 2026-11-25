@@ -117,6 +117,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useLayoutEffect,
   useRef,
@@ -126,6 +127,9 @@ import {
   type KeyboardEvent,
   type PropsWithChildren,
 } from "react";
+
+const PLUGIN_COMMAND_SUBMISSION_WAIT_MS = 2_000;
+type PendingPluginSubmission = { text: string; session: string | null; timer: number };
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 
@@ -591,7 +595,7 @@ const Composer: FC<{
   } | null>(null);
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
   const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
-  const skipEmptyDraftPersist = useRef(false);
+  const skipEmptyDraftPersist = useRef<{ key: string } | null>(null);
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
@@ -607,7 +611,6 @@ const Composer: FC<{
     const restored = stripImageTokens(draftText);
     setDraftRestoreSnapshot({ key, text: draftText });
     restoredDraft.current = { key, text: restored.text };
-    skipEmptyDraftPersist.current = false;
     if (aui.composer.getState().text !== restored.text) {
       aui.composer.setText(restored.text);
     }
@@ -698,13 +701,15 @@ const Composer: FC<{
       restoredDraft.current = null;
     }
     if (!key) return;
-    if (composerText.length === 0 && skipEmptyDraftPersist.current) {
+    if (composerText.length === 0 && skipEmptyDraftPersist.current?.key === key) {
       // assistant-ui clears the input as soon as submit starts. Keep the
       // durable copy until the transport confirms that add-message succeeded.
-      skipEmptyDraftPersist.current = false;
+      skipEmptyDraftPersist.current = null;
       return;
     }
-    if (composerText.length > 0) skipEmptyDraftPersist.current = false;
+    if (composerText.length > 0 && skipEmptyDraftPersist.current?.key === key) {
+      skipEmptyDraftPersist.current = null;
+    }
     saveComposerDraft(key, composerText);
   }, [composerText, draftKey]);
 
@@ -716,6 +721,32 @@ const Composer: FC<{
   }
   const currentDraftKeyRef = useRef(draftKey ?? null);
   currentDraftKeyRef.current = draftKey ?? null;
+  const composerFormId = useId();
+  const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const pendingPluginSubmitRef = useRef<PendingPluginSubmission | null>(null);
+  const normalPluginFallbackRef = useRef<{ text: string; session: string | null } | null>(null);
+  const cancelPendingPluginSubmit = () => {
+    const pending = pendingPluginSubmitRef.current;
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    pendingPluginSubmitRef.current = null;
+  };
+  const replayPendingPluginSubmit = (normalFallback: boolean) => {
+    const pending = pendingPluginSubmitRef.current;
+    if (!pending) return;
+    cancelPendingPluginSubmit();
+    if (
+      currentDraftKeyRef.current !== pending.session ||
+      aui.composer.getState().text !== pending.text
+    ) return;
+    if (normalFallback) normalPluginFallbackRef.current = pending;
+    try {
+      const form = composerFormRef.current ?? document.getElementById(composerFormId);
+      if (form instanceof HTMLFormElement) form.requestSubmit();
+    } finally {
+      if (normalFallback) normalPluginFallbackRef.current = null;
+    }
+  };
   const composerWithOptionalSubscribe = aui.composer as typeof aui.composer & {
     subscribe?: (listener: () => void) => () => void;
   };
@@ -799,20 +830,39 @@ const Composer: FC<{
   // A loaded plugin's /command typed in the composer runs here instead of
   // going to the agent. Returns true when it handled the submit.
   const runPluginCommand = (event: { preventDefault: () => void }) => {
-    if (aui.composer.getState().attachments.length > 0) return false;
-    const draft = aui.composer.getState().text;
+    const state = aui.composer.getState();
+    if (state.attachments.length > 0) return false;
+    const draft = state.text;
+    const commandSession = draftKey ?? null;
+    const normalFallback = normalPluginFallbackRef.current;
+    if (normalFallback?.session === commandSession && normalFallback.text === draft) return false;
+    if (normalFallback) normalPluginFallbackRef.current = null;
+    const pending = pendingPluginSubmitRef.current;
+    if (pending && (pending.session !== commandSession || pending.text !== draft)) {
+      cancelPendingPluginSubmit();
+    }
     if (pluginCommandSubmissionPending(draft, commandCatalogStatus, pluginSnapshot, reserved)) {
       event.preventDefault();
+      if (!pendingPluginSubmitRef.current) {
+        const timer = window.setTimeout(
+          () => replayPendingPluginSubmit(true),
+          PLUGIN_COMMAND_SUBMISSION_WAIT_MS,
+        );
+        pendingPluginSubmitRef.current = { text: draft, session: commandSession, timer };
+      }
       return true;
     }
+    cancelPendingPluginSubmit();
     const match = matchPluginCommand(draft, pluginEntries);
     if (!match) return false;
-    const commandSession = draftKey ?? null;
     event.preventDefault();
-    const stateBeforeClear = aui.composer.getState();
+    if (commandSession) {
+      saveComposerDraft(commandSession, draft);
+      skipEmptyDraftPersist.current = { key: commandSession };
+    }
     aui.composer.setText("");
     composerRevisionRef.current += 1;
-    observedComposerRevisionKeyRef.current = composerRevisionSignature("", stateBeforeClear.attachments);
+    observedComposerRevisionKeyRef.current = composerRevisionSignature("", state.attachments);
     const clearedRevision = composerRevisionRef.current;
     const fail = (error: unknown) => {
       const current = pluginRegistry.getSnapshot().plugins.find((record) => record.id === match.entry.pluginId);
@@ -831,14 +881,37 @@ const Composer: FC<{
       logPluginFailure(match.entry.pluginId, `command /${match.entry.name} failed`, error);
       match.entry.k.toast(pluginCommandFailure(match.entry.name, error));
     };
+    const clearSavedDraft = () => {
+      if (commandSession && loadComposerDraft(commandSession) === draft) {
+        saveComposerDraft(commandSession, "");
+      }
+    };
     try {
       const result = match.entry.run(match.args);
-      void Promise.resolve(result).catch(fail);
+      void Promise.resolve(result).then(clearSavedDraft, fail);
     } catch (error) {
       fail(error);
     }
     return true;
   };
+
+  useEffect(() => {
+    const pending = pendingPluginSubmitRef.current;
+    if (!pending) return;
+    const state = aui.composer.getState();
+    if (pending.session !== (draftKey ?? null) || pending.text !== state.text) {
+      cancelPendingPluginSubmit();
+      return;
+    }
+    if (!pluginCommandSubmissionPending(pending.text, commandCatalogStatus, pluginSnapshot, reserved)) {
+      replayPendingPluginSubmit(false);
+    }
+  }, [aui, commandCatalogStatus, composerText, draftKey, pluginSnapshot, reserved]);
+
+  useEffect(() => () => {
+    const pending = pendingPluginSubmitRef.current;
+    if (pending) window.clearTimeout(pending.timer);
+  }, []);
 
   // Picking a panel command in the slash menu (Enter or click) opens its tab
   // instead of leaving "/config" in the box for a second Enter.
@@ -899,7 +972,7 @@ const Composer: FC<{
       }
       if (parts.length === 0) throw new Error("Message has no sendable content");
       queueComposerDraftSubmission(draftKey, state.text);
-      if (state.text.length > 0) skipEmptyDraftPersist.current = true;
+      if (state.text.length > 0 && draftKey) skipEmptyDraftPersist.current = { key: draftKey };
       // The message waits for the turn to end, as a queued message (#1102).
       sendTransportCommand({
         type: "add-message",
@@ -954,7 +1027,7 @@ const Composer: FC<{
     const text = aui.composer.getState().text;
     if (text.length > 0) {
       queueComposerDraftSubmission(draftKey, text);
-      skipEmptyDraftPersist.current = true;
+      if (draftKey) skipEmptyDraftPersist.current = { key: draftKey };
     }
   };
 
@@ -1255,6 +1328,8 @@ const Composer: FC<{
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
       <ComposerPrimitive.Root
+        id={composerFormId}
+        ref={composerFormRef}
         className="aui-composer-root group/composer relative flex min-w-0 flex-1 flex-col"
         data-mode={slotMode}
         onSubmit={handleComposerSubmit}

@@ -10,13 +10,16 @@ const FENCE_OPEN = / {0,3}(`{3,}|~{3,})/y;
 const FENCE_CLOSE = /^((?: {0,3}>)*) {0,3}(`{3,}|~{3,})\s*$/;
 const ATX_HEADING = / {0,3}#{1,6}(?:[ \t]|\r?\n|$)/y;
 const THEMATIC_BREAK = / {0,3}(?:\*(?:[ \t]*\*){2,}|-(?:[ \t]*-){2,}|_(?:[ \t]*_){2,})[ \t]*\r?(?:\n|$)/y;
-const BLOCKQUOTE = / {0,3}>[ \t]?/y;
+const BLOCKQUOTE_PREFIX = /^(?: {0,3}>[ \t]?)+/;
 const BLANK_LINE = /\n(?:[ \t]*>)*[ \t\r]*\n/g;
 const INDENTED = /(?: {4}| {0,3}\t)/y;
 
 /** Split only registered, complete tags. Tag content is returned raw; code spans, fences, indented blocks and escaped `<` stay text. */
 export function splitPluginTags(text: string, names: readonly string[]): TaggedTextPart[] {
   const allowed = new Set(names.filter((name) => /^[a-z][\w-]*$/i.test(name)));
+  if (![...allowed].some((name) => text.includes(`<${name}>`))) {
+    return [{ type: "text", text }];
+  }
   const opens = pairTags(text, allowed, maskedRanges(text));
   const parts: TaggedTextPart[] = [];
   let cursor = 0;
@@ -152,12 +155,21 @@ function indexCodeSpanClosers(text: string): ReadonlyMap<number, number> {
 
 /** Block markers end the paragraph, so an unmatched inline-code opener cannot hide later tags. */
 function startsMarkdownBlock(text: string, index: number): boolean {
-  ATX_HEADING.lastIndex = index;
+  const quotePrefix = BLOCKQUOTE_PREFIX.exec(text.slice(index, lineEnd(text, index)))?.[0] ?? "";
+  const currentQuoteDepth = quoteDepth(quotePrefix);
+  if (currentQuoteDepth > 0) {
+    if (index === 0) return true;
+    const previousLineEnd = index - 1;
+    const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
+    const previousPrefix = BLOCKQUOTE_PREFIX.exec(text.slice(previousLineStart, previousLineEnd))?.[0] ?? "";
+    if (quoteDepth(previousPrefix) !== currentQuoteDepth) return true;
+  }
+  const contentIndex = index + quotePrefix.length;
+  ATX_HEADING.lastIndex = contentIndex;
   if (ATX_HEADING.test(text)) return true;
-  THEMATIC_BREAK.lastIndex = index;
+  THEMATIC_BREAK.lastIndex = contentIndex;
   if (THEMATIC_BREAK.test(text)) return true;
-  BLOCKQUOTE.lastIndex = index;
-  return BLOCKQUOTE.test(text);
+  return false;
 }
 
 /** Index just past the code span that opens at this backtick run. The closer is a run of exactly the same length in the same paragraph; with none, the opening run is literal text. */

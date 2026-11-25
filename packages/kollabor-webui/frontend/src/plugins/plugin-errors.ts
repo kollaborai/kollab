@@ -4,11 +4,12 @@ export const SAFE_PLUGIN_ACTION_ERROR = "The plugin action failed. Check the bro
 export const SAFE_PLUGIN_SETTINGS_ERROR = "Could not complete this plugin settings action. Check the browser console for redacted details.";
 
 const URL_CREDENTIALS = /\b(https?:\/\/)[^/@\s]+@/gi;
+const FILE_URL = /\bfile:\/\/[^\s"'<>]*/gi;
 const URL_QUERY_OR_FRAGMENT = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>?#]+)(?:[?#][^\s"'<>]*)?/gi;
 const ABSOLUTE_FILESYSTEM_PATH = /(?:(['"])(?:~|\/(?!\/)|[A-Za-z]:[\\/])[^'"]*\1|(?<![A-Za-z0-9._~:/-])(?:~|\/(?!\/)|[A-Za-z]:[\\/])[^\s'"]*)/g;
 const AUTH_SCHEME = /\b(?:bearer|basic)\s+([^\s,;]+)/gi;
 const AUTH_SCHEME_ASSIGNMENT = /\b(?:proxy-authorization|authorization|token)\b\s*[:=]\s*(?:bearer|basic)\s+[^\s,;]+/i;
-const SENSITIVE_ASSIGNMENT = /((?:^|[^A-Za-z0-9])(?:api[_-]?key|(?:private|signing|encryption|ssh|secret|access|master|client)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)(?![A-Za-z0-9_])\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("[^"]*"|'[^']*'|[^\s,;]+)/gi;
+const SENSITIVE_ASSIGNMENT = /((?:^|[^A-Za-z0-9])(?:"(?:api[_-]?key|(?:private|signing|encryption|ssh|secret|access|master|client)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)"|(?:api[_-]?key|(?:private|signing|encryption|ssh|secret|access|master|client)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)(?![A-Za-z0-9_]))\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi;
 const SECRET_VALUE = /\b(?:secret[-_]token[-_][A-Za-z0-9_-]+|sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]*/gi;
 const SAFE_TEXT_VALUES = new Set(["budget", "length", "required"]);
 
@@ -23,7 +24,7 @@ export function containsSensitiveText(value: string, allowSafeValues = false): b
     if (isAuthCredential(match[1] ?? "")) return true;
   }
   for (const match of value.matchAll(SENSITIVE_ASSIGNMENT)) {
-    const assigned = (match[2] ?? "").replace(/[.!?]+$/, "").toLowerCase();
+    const assigned = (match[2] ?? "").replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, "$1$2").replace(/[.!?]+$/, "").toLowerCase();
     if (allowSafeValues && SAFE_TEXT_VALUES.has(assigned)) continue;
     return true;
   }
@@ -76,6 +77,7 @@ export function pluginRenderFailureMessage(renderer: string): string {
 export function redactPluginError(error: unknown): string {
   return describePluginError(error, true)
     .replace(URL_CREDENTIALS, "$1[redacted]@")
+    .replace(FILE_URL, "[path]")
     .replace(URL_QUERY_OR_FRAGMENT, "$1")
     .replace(SENSITIVE_ASSIGNMENT, "$1[redacted]")
     .replace(AUTH_SCHEME, "[redacted]")

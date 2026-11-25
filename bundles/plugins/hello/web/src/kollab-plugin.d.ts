@@ -99,8 +99,8 @@ export type PluginEntry = {
 
 /** `GET /plugins` response. `server_time` is Unix time in seconds. */
 export type PluginInventoryResponse = {
-  plugins?: unknown;
-  server_time?: unknown;
+  plugins?: unknown[];
+  server_time?: number;
 };
 
 /** The open chat, as a plugin view receives it. */
@@ -127,7 +127,7 @@ export type CommandSpec = { name: string; description: string; run: (args: strin
 /** What a chat renderer receives: `k` and its props, never a session. */
 export type PluginRendererProps = {
   k: PluginApi;
-  toolCall?: { name: string; args: unknown; result: unknown; status: unknown };
+  toolCall?: { name: string; args: unknown; result?: unknown; status?: unknown };
   tag?: { name: string; content: string };
 };
 export type RendererSpec =
