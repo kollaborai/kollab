@@ -85,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Web UI slash menu distinguishes loading, empty, and unavailable session command catalogs, with retry that preserves the draft (#922).
 - Telegram voice transcription remains local, with private artifact cleanup hardened across failures, timeouts, and cancellation (#931).
 - Model catalog pricing and limits are corrected: dynamic OpenRouter prices stay unknown instead of negative, a cached-input price is corrected, and four output caps persist across refreshes.
+- File saves now reject stale edits even when filesystem timestamps share a tick, preventing one save from silently replacing another (#1434).
 
 ### Security
 - When a package plugin's Python entry fails while loading, Settings shows a fixed safe message and points to the process log for details; plugin-raised text is not copied into plugin error metadata (#1401).
