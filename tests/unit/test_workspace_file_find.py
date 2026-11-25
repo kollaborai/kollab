@@ -212,3 +212,23 @@ async def test_general_terminals_preserve_harmless_programs_outside_search_scope
         })
         assert result.success, result.error
         executor.shell_executor.run.assert_awaited_once()
+
+
+def test_search_refuses_a_directory_moved_out_of_workspace_during_scan(project):
+    real_open = os.open
+    moved = False
+
+    def move_after_open(path, flags, *args, **kwargs):
+        nonlocal moved
+        fd = real_open(path, flags, *args, **kwargs)
+        if path == "src" and kwargs.get("dir_fd") is not None and not moved:
+            moved = True
+            (project / "src").rename(project.parent / "outside-moved")
+        return fd
+
+    with patch("os.open", side_effect=move_after_open):
+        result = search(project)
+
+    assert moved
+    assert not result["success"]
+    assert "workspace" in result["error"].lower()
