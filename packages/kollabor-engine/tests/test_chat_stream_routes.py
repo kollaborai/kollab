@@ -15,6 +15,12 @@ from kollabor_engine.routes import stream
 class _Rpc:
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
+        self.send_now_result = {
+            "found": True,
+            "accepted": True,
+            "state": "started",
+            "turn_id": "turn-1",
+        }
 
     async def call(self, method: str, params: dict, *, timeout: float | None = None):
         self.calls.append((method, params))
@@ -40,7 +46,7 @@ class _Rpc:
         if method == "state.chat_stream.cancel_queued_input":
             return {"found": False, "cancelled": False}
         if method == "state.chat_stream.send_now":
-            return {"found": True, "accepted": True, "state": "started"}
+            return self.send_now_result
         raise AssertionError(f"unexpected daemon method: {method}")
 
 
@@ -138,11 +144,57 @@ def test_cancel_route_returns_404_for_an_unknown_input(monkeypatch):
     ]
 
 
-def test_send_now_route_forwards_one_input_id(monkeypatch):
+def test_send_now_route_returns_202_with_the_started_turn(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
 
     response = client.post("/sessions/s1/inputs/web-a1/send-now")
 
-    assert response.status_code == 200
-    assert response.json() == {"id": "web-a1", "state": "started"}
+    assert response.status_code == 202
+    assert response.json() == {
+        "id": "web-a1",
+        "state": "started",
+        "turn_id": "turn-1",
+    }
     assert session.rpc.calls == [("state.chat_stream.send_now", {"id": "web-a1"})]
+
+
+def test_send_now_route_returns_current_state_when_input_already_moved(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.send_now_result = {
+        "found": True,
+        "accepted": False,
+        "state": "joined",
+        "turn_id": "turn-7",
+    }
+
+    response = client.post("/sessions/s1/inputs/web-a1/send-now")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": "web-a1",
+        "state": "joined",
+        "turn_id": "turn-7",
+    }
+
+
+def test_send_now_route_returns_404_for_an_unknown_input(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.send_now_result = {"found": False, "accepted": False}
+
+    response = client.post("/sessions/s1/inputs/missing/send-now")
+
+    assert response.status_code == 404
+
+
+def test_send_now_route_returns_409_when_input_is_not_queued(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.send_now_result = {
+        "found": True,
+        "accepted": False,
+        "state": "queued",
+        "turn_id": None,
+    }
+
+    response = client.post("/sessions/s1/inputs/web-a1/send-now")
+
+    assert response.status_code == 409
