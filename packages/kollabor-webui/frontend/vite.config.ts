@@ -254,6 +254,8 @@ const mainConfig = defineConfig({
       "tests/settings-tabs-width.test.ts",
       "tests/plugins-settings-tab.test.ts",
       "tests/chat-stream-contract.test.ts",
+      "tests/chat-store.test.ts",
+      "tests/chat-runtime.test.ts",
       "src/plugins/registry.test.ts",
       "src/plugins/sdk.test.ts",
       "src/plugins/loader.test.ts",
