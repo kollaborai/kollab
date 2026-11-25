@@ -283,14 +283,62 @@ def _data(answer: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+MAX_BATCH_INPUT = 32 * 1024  # under the daemon's 64 KiB input cap
+
+
+def _coalesce(raws: list[str]) -> list[str]:
+    """Merge neighbouring ``input`` messages into one, so keys that queued behind a slow call cost one call.
+
+    Order is kept: any other message (resize, close, open) ends the run.
+    """
+    out: list[str] = []
+    merged: dict[str, Any] | None = None
+    for raw in raws:
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            msg = None
+        is_input = isinstance(msg, dict) and msg.get("type") == "input" and isinstance(msg.get("data"), str)
+        if is_input and merged is not None and len(merged["data"]) + len(msg["data"]) <= MAX_BATCH_INPUT:
+            merged["data"] += msg["data"]
+            out[-1] = json.dumps(merged)
+            continue
+        merged = msg if is_input else None
+        out.append(raw)
+    return out
+
+
+async def _read(ws: WebSocket, queue: asyncio.Queue[str | Exception]) -> None:
+    """Client messages into the queue as they arrive, so a slow daemon call never holds up the socket."""
+    try:
+        while True:
+            queue.put_nowait(await ws.receive_text())
+    except Exception as exc:  # WebSocketDisconnect once the client has gone
+        queue.put_nowait(exc)
+
+
 async def _forward(ws: WebSocket, session: EngineSession, link: str, wake: asyncio.Event) -> None:
-    """Client messages to the daemon, one at a time and in order; its immediate answers back to the client."""
-    while True:
-        raw = await ws.receive_text()  # raises WebSocketDisconnect once the client has gone
-        data = await _ask(session, "terminal.message", {"link": link, "raw": raw})
-        wake.set()  # the shell is about to answer: look for output now
-        for message in data.get("messages", []):
-            await ws.send_json(message)
+    """Client messages to the daemon in order, typed keys batched; its immediate answers back to the client."""
+    queue: asyncio.Queue[str | Exception] = asyncio.Queue()
+    reader = asyncio.ensure_future(_read(ws, queue))
+    try:
+        while True:
+            batch = [await queue.get()]
+            while not queue.empty():
+                batch.append(queue.get_nowait())
+            failure = next((item for item in batch if isinstance(item, Exception)), None)
+            raws = [item for item in batch if isinstance(item, str)]
+            if failure is not None:  # whatever arrived before the disconnect is still sent first
+                raws = raws[: batch.index(failure)]
+            for raw in _coalesce(raws):
+                data = await _ask(session, "terminal.message", {"link": link, "raw": raw})
+                wake.set()  # the shell is about to answer: look for output now
+                for message in data.get("messages", []):
+                    await ws.send_json(message)
+            if failure is not None:
+                raise failure
+    finally:
+        reader.cancel()
 
 
 async def _pump(ws: WebSocket, session: EngineSession, link: str, wake: asyncio.Event) -> None:
