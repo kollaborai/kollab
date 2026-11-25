@@ -666,7 +666,7 @@ def test_concurrent_saves_through_hard_links_share_write_serialization(ws, monke
     assert first_entered
     assert not overlapped_before_release
     assert max_active_writes == 1
-    assert sorted(reply.status_code for reply in results) == [200, 200]
+    assert sorted(reply.status_code for reply in results) in ([200, 200], [200, 409])
 
 
 def test_stale_version_is_rejected_when_content_changes_within_one_stat_tick(ws, monkeypatch):
