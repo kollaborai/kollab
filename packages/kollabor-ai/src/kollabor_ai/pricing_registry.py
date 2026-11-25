@@ -7,6 +7,7 @@ Cost calculator reads from it without touching provider internals.
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -16,6 +17,24 @@ from kollabor_config.config_utils import resolve_global_path
 logger = logging.getLogger(__name__)
 
 BUNDLED_PRICING_PATH = Path(__file__).parent / "default_pricing.json"
+
+
+def _coerce_finite_nonnegative_rate(
+    value: object, *, allow_numeric_string: bool = False
+) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)) and not (
+        allow_numeric_string and isinstance(value, str)
+    ):
+        return None
+    try:
+        rate = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(rate) or rate < 0:
+        return None
+    return rate
 
 
 @dataclass(frozen=True)
@@ -170,29 +189,41 @@ class PricingRegistry:
             for model_id, pricing_data in models.items():
                 if not isinstance(pricing_data, dict):
                     continue
-                try:
-                    prompt_rate = float(pricing_data["prompt_per_million"])
-                    completion_rate = float(pricing_data["completion_per_million"])
-                    # cache_read defaults to 10% of prompt if unspecified
-                    cache_rate = float(
-                        pricing_data.get("cache_read_per_million", prompt_rate * 0.1)
-                    )
-                    cache_discount = (
-                        cache_rate / prompt_rate if prompt_rate > 0 else 0.5
-                    )
-                    self.register_provider_pricing(
-                        provider_type,
-                        model_id,
-                        ModelPricing(
-                            prompt_per_token=prompt_rate / 1_000_000,
-                            completion_per_token=completion_rate / 1_000_000,
-                            cache_discount=cache_discount,
-                        ),
-                    )
-                except (KeyError, ValueError, TypeError):
+                prompt_rate = _coerce_finite_nonnegative_rate(
+                    pricing_data.get("prompt_per_million"), allow_numeric_string=True
+                )
+                completion_rate = _coerce_finite_nonnegative_rate(
+                    pricing_data.get("completion_per_million"),
+                    allow_numeric_string=True,
+                )
+                # cache_read defaults to 10% of prompt if unspecified
+                cache_value = pricing_data.get(
+                    "cache_read_per_million",
+                    prompt_rate * 0.1 if prompt_rate is not None else None,
+                )
+                cache_rate = _coerce_finite_nonnegative_rate(
+                    cache_value, allow_numeric_string=True
+                )
+                if prompt_rate is None or completion_rate is None or cache_rate is None:
                     logger.debug(
                         f"Skipping invalid pricing for {provider_type}/{model_id}"
                     )
+                    continue
+                cache_discount = cache_rate / prompt_rate if prompt_rate > 0 else 0.5
+                if not math.isfinite(cache_discount):
+                    logger.debug(
+                        f"Skipping invalid pricing for {provider_type}/{model_id}"
+                    )
+                    continue
+                self.register_provider_pricing(
+                    provider_type,
+                    model_id,
+                    ModelPricing(
+                        prompt_per_token=prompt_rate / 1_000_000,
+                        completion_per_token=completion_rate / 1_000_000,
+                        cache_discount=cache_discount,
+                    ),
+                )
 
     def load_from_model_registry(self) -> None:
         """Seed pricing from ``bundles/data/models.json``.
@@ -216,24 +247,28 @@ class PricingRegistry:
         for model_id, info in get_model_registry().get("models", {}).items():
             if not isinstance(info, dict):
                 continue
-            prompt_rate = info.get("pricing_in")
-            completion_rate = info.get("pricing_out")
+            prompt_rate = _coerce_finite_nonnegative_rate(info.get("pricing_in"))
+            completion_rate = _coerce_finite_nonnegative_rate(info.get("pricing_out"))
             if prompt_rate is None or completion_rate is None:
                 continue
             provider = str(info.get("provider") or "").lower()
             if not provider:
                 continue
             cached = info.get("pricing_cached_in")
-            try:
-                prompt_rate = float(prompt_rate)
-                completion_rate = float(completion_rate)
-                cache_rate = float(cached) if cached is not None else prompt_rate * 0.1
-            except (TypeError, ValueError):
+            cache_rate = (
+                prompt_rate * 0.1
+                if cached is None
+                else _coerce_finite_nonnegative_rate(cached)
+            )
+            if cache_rate is None:
+                continue
+            cache_discount = cache_rate / prompt_rate if prompt_rate > 0 else 0.5
+            if not math.isfinite(cache_discount):
                 continue
             pricing = ModelPricing(
                 prompt_per_token=prompt_rate / 1_000_000,
                 completion_per_token=completion_rate / 1_000_000,
-                cache_discount=(cache_rate / prompt_rate if prompt_rate > 0 else 0.5),
+                cache_discount=cache_discount,
             )
             for provider_type in (provider, *aliases.get(provider, ())):
                 self.register_provider_pricing(provider_type, model_id, pricing)

@@ -56,12 +56,19 @@ def validate(data: dict) -> list[str]:
             )
         for field in PRICE_FIELDS:
             price = info.get(field)
-            if price is not None and (
-                isinstance(price, bool)
-                or not isinstance(price, (int, float))
-                or (isinstance(price, float) and not math.isfinite(price))
-                or price < 0
-            ):
+            if price is None:
+                continue
+            valid_price = (
+                not isinstance(price, bool)
+                and isinstance(price, (int, float))
+                and price >= 0
+            )
+            if valid_price:
+                try:
+                    valid_price = math.isfinite(float(price))
+                except (OverflowError, TypeError, ValueError):
+                    valid_price = False
+            if not valid_price:
                 errors.append(
                     f"{name}: {field} must be a finite non-negative number or null, got {price!r}"
                 )
