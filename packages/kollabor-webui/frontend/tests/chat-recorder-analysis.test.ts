@@ -313,6 +313,33 @@ describe("chat recorder analysis", () => {
     expect(restored.toolsStarted).toBe(1);
   });
 
+  it("counts newly observed calls independently of row sequences through recovery", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    let event: any;
+    const window = { fetch: async () => new Response(`data: ${JSON.stringify(event)}\n\n`) };
+    const install = runInNewContext(`(${body})`, {
+      window, Request, Response, ReadableStream, TextDecoder, URL, performance,
+      location: { href: "http://localhost/" },
+      sessionStorage: { getItem: () => null, removeItem: () => {} },
+      requestAnimationFrame: () => {},
+    });
+    install({ wall0: Date.now(), sessionStreamSuffix: "/sessions/target/stream", user: [], reply: [] });
+    const rec = (window as any).__rec;
+    const row = (id: string, call: string, seq: number) => ({ id, seq, kind: "tool", parts: [{ type: "tool-call", tool_call_id: call }] });
+    // Use the actual intercepted session URL for every stream event.
+    const send = async (type: string, data: any, seq: number) => {
+      event = { type, data, seq };
+      await (await (window.fetch as any)("http://localhost/sessions/target/stream")).text();
+    };
+    await send("snapshot", { rows: [row("old", "old-call", 3)], next_seq: 41 }, 1);
+    rec.flowSeq = rec.lastStreamSeq + 1;
+    await send("row.upsert", row("new", "new-call", 6), 41);
+    await send("snapshot", { rows: [row("old-again", "old-call", 3), row("recovered", "recovered-call", 7)], next_seq: 44 }, 43);
+    await send("replace", { rows: [row("replacement", "replacement-call", 8), row("duplicate", "recovered-call", 7)] }, 44);
+    expect(rec.toolsStarted).toBe(3);
+  });
+
   it("records event streams only for the selected session", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
