@@ -279,3 +279,67 @@ async def test_send_now_retry_does_not_disclose_another_principals_input(
         "state": lifecycle,
         "turn_id": "turn-private",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_dispatch", [False, True])
+async def test_queue_batch_send_now_retains_owner_for_lifecycle_retry(during_dispatch):
+    from kollabor.state.web_message_queue import WebMessage
+
+    server, state, runtime = _server_and_runtime()
+    stream = state._event_bus.get_service("chat_stream")
+    await _call(
+        server,
+        "state.chat_stream.add_input",
+        {"id": "web-seed", "text": "web-seed", "attachments": []},
+    )
+    scope = (await runtime.registry.known_scopes())[0]
+    async with runtime.registry.acquire_existing_scope(scope) as queue:
+        await queue.enqueue_batch(
+            queue.new_operation_id(),
+            queue.new_batch_id(),
+            (
+                WebMessage("web-sibling", b'{"text":"web-sibling"}'),
+                WebMessage("web-selected", b'{"text":"web-selected"}'),
+            ),
+        )
+
+    def started():
+        stream._set_input_state(
+            "conversation-a", "web-selected", "started", turn_id="turn-selected"
+        )
+
+    original = state.submit_queue_message
+
+    async def dispatch(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        if during_dispatch:
+            started()
+        return result
+
+    state.submit_queue_message = dispatch
+    sent = await _call(server, "state.chat_stream.send_now", {"id": "web-selected"})
+    assert sent["result"]["found"] is True
+    assert sent["result"]["accepted"] is True
+    if not during_dispatch:
+        started()
+    retry = await _call(server, "state.chat_stream.send_now", {"id": "web-selected"})
+    assert retry["result"] == {
+        "found": True,
+        "accepted": False,
+        "state": "started",
+        "turn_id": "turn-selected",
+    }
+    other = await server.handle_wire(
+        {
+            "action": "rpc_request",
+            "request_id": "other",
+            "method": "state.chat_stream.send_now",
+            "params": {"id": "web-selected"},
+        },
+        caller_context=RpcCallerContext.from_unix_peer(502),
+    )
+    assert other.get("result") in (None, {"found": False})
+    assert [handoff.request_id for _, handoff, _ in state.dispatches] == [
+        "web-selected"
+    ]
