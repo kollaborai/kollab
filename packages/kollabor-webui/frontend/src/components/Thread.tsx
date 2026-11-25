@@ -244,8 +244,8 @@ const PresenceChip: FC<{ note: HubNote }> = ({ note }) => {
   );
 };
 
-// Another agent's hub message (runtime.tsx turns the daemon's agent HUD into
-// these). One this agent only saw go by is dimmed, like the terminal's ◇.
+// Another agent's hub message comes from the ordered stream. One this agent
+// only saw go by is dimmed, like the terminal's ◇.
 /** The hub-note part a note row carries, or undefined for any other row (decision s, #1451). */
 export function hubNoteOf(row: ChatRow): Extract<ChatPart, { type: "hub-note" }> | undefined {
   return row.parts.find((part): part is Extract<ChatPart, { type: "hub-note" }> => part.type === "hub-note");
@@ -258,10 +258,10 @@ function noteOf(part: Extract<ChatPart, { type: "hub-note" }>): HubNote {
     to: part.to,
     text: part.text,
     observed: part.observed,
-    threadId: part.thread_id,
-    replyTo: part.reply_to,
-    isDirect: part.is_direct,
-    presence: part.presence,
+    threadId: part.thread_id ?? undefined,
+    replyTo: part.reply_to ?? undefined,
+    isDirect: part.is_direct ?? undefined,
+    presence: part.presence ?? undefined,
   };
 }
 

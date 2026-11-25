@@ -3,7 +3,7 @@ import { expect, test } from "vitest";
 
 // App.tsx is not unit-tested, so this reads its source. The chat renders from the
 // chat store (#1451, lane 4): the old reconciliation, history paging, remount and
-// runtime pieces are gone from App, and the batch send stays (decision d).
+// runtime pieces are gone from App, and the queue panel reads store state.
 
 const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 
@@ -46,6 +46,8 @@ test("the agent's todo list is read from the chat store's rows", () => {
   expect(app).toMatch(/latestTodoBlock\((store\.)?rows\)/);
 });
 
-test("the batch send stays in App (decision d)", () => {
-  expect(app).toContain("submitBusyWebMessage");
+test("the queue panel is mounted from the chat store", () => {
+  expect(app).toContain("queuePanel={<WebQueuePanelMount />}");
+  expect(app).not.toContain("submitBusyWebMessage");
+  expect(app).not.toContain("onQueueBusyMessage");
 });

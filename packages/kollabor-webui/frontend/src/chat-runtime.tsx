@@ -15,6 +15,7 @@ import {
 } from "@assistant-ui/react";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import { newInputId, type ChatPart, type ChatRow, type ChatStore, type TurnInfo } from "./chat-stream";
+import { imageAttachmentAdapter } from "./image-attachment";
 import type { ChatSnapshot, LiveStore } from "./chat-store";
 
 /** The client prefix for the input ids the web UI picks: newInputId(WEB_INPUT_PREFIX). */
@@ -97,6 +98,7 @@ export function buildAdapter(
     hasEarlier: flags.hasEarlier,
     onLoadEarlier: () => store.loadOlder(),
     onCancel: () => store.stop(),
+    adapters: { attachments: imageAttachmentAdapter },
     onNew: async (message) => {
       const text = messageText(message);
       if (text.trim() === "") return;
