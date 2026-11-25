@@ -272,6 +272,7 @@ const mainConfig = defineConfig({
       "tests/permission-tool-outcome.test.tsx",
       "tests/image-attachment.test.ts",
       "tests/queue-state.test.ts",
+      "tests/voice-mode-toggle.test.tsx",
     ],
     environment: "node",
   },
