@@ -28,6 +28,14 @@ export function chatRecorderStreamSuffix(session) {
   return `/sessions/${encodeURIComponent(session)}/stream`;
 }
 
+/** Reject permission state that cannot be restored exactly by prompt-other. */
+export function requireRecorderApprovalMode(mode) {
+  if (!["confirm_all", "default", "auto_approve_edits", "trust_all"].includes(mode)) {
+    throw new Error("the engine does not know this agent's approval mode; open the agent and retry");
+  }
+  return mode;
+}
+
 /** Parse --runtime-matrix runtime=identity,... into its fixed runtime order. */
 export function parseRuntimeMatrix(value) {
   if (typeof value !== "string" || !value.trim()) {

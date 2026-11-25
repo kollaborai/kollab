@@ -52,6 +52,7 @@ import {
   hasRunningTurnWithInputs,
   isCompactionComplete,
   parseRuntimeMatrix,
+  requireRecorderApprovalMode,
 } from "./chat-recorder-analysis.mjs";
 
 const require = createRequire(import.meta.url);
@@ -678,7 +679,7 @@ async function record(flow, session, browser, target) {
       const initial = await apiJson(`/sessions/${session}/permissions`);
       const pending = initial.pending_prompts ?? [];
       if (pending.length) throw new Error("clear existing permission prompts before recording prompt-other");
-      const originalMode = initial.approval_mode || "default";
+      const originalMode = requireRecorderApprovalMode(initial.approval_mode);
       if (originalMode !== "confirm_all") {
         await postFromClient(`/sessions/${session}/permissions/mode`, { mode: "confirm_all" }, "SET APPROVAL MODE confirm_all");
       }
