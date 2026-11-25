@@ -75,6 +75,14 @@ def test_a_new_conversation_uid_gets_a_fresh_snapshot():
     assert result[0]["conversation_uid"] == "conv-2"
 
 
+def test_latest_transcript_replacement_sequence_is_available_for_row_cursors():
+    log = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+
+    replacement = log.publish("replace", {"rows": [_row("kept-row")]})
+
+    assert log.last_replace_seq == replacement["seq"]
+
+
 def test_the_current_turn_stays_replayable_past_the_regular_window():
     log = ChatStreamLog("conv-1", snapshot_provider=_snapshot, replay_window=2)
     log.publish(
