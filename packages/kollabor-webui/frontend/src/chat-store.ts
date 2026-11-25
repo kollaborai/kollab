@@ -199,7 +199,7 @@ export class LiveChatStore implements LiveStore {
   private epoch = 0;
   // A later history request supersedes an older one, even while both use the same window.
   private pageRequestId = 0;
-  // Sends the stream has not delivered yet, by input id. Each row sits in `state.rows` until the stream's row replaces it.
+  // Sends the stream has not delivered yet, kept separately from authoritative rows.
   private readonly sends = new Map<string, LocalSend>();
   private attempts = 0;
   private started = false;
@@ -321,7 +321,6 @@ export class LiveChatStore implements LiveStore {
       created_at: new Date().toISOString(),
     };
     this.sends.set(input.id, { row, posts: 1 });
-    this.state = { ...this.state, rows: [...this.state.rows, row] };
     this.publish();
   }
 
@@ -335,10 +334,6 @@ export class LiveChatStore implements LiveStore {
 
   private replaceLocalRow(send: LocalSend, row: ChatRow): void {
     send.row = row;
-    this.state = {
-      ...this.state,
-      rows: this.state.rows.map((candidate) => (candidate.id === row.id ? row : candidate)),
-    };
     this.publish();
   }
 
@@ -424,7 +419,7 @@ export class LiveChatStore implements LiveStore {
 
   private snapshotOf(): ChatSnapshot {
     return {
-      rows: this.state.rows,
+      rows: this.sends.size === 0 ? this.state.rows : [...this.state.rows, ...Array.from(this.sends.values(), (send) => send.row)],
       inputs: this.state.inputs,
       running: turnsRunning(this.state.turns),
       connection: this.connectionState,
@@ -522,12 +517,9 @@ export class LiveChatStore implements LiveStore {
    */
   private keepUndelivered(): void {
     const inWindow = new Set(this.state.rows.map((row) => row.id));
-    const kept: ChatRow[] = [];
-    for (const [id, send] of this.sends) {
-      if (!inWindow.has(id)) kept.push(send.row);
-      else this.sends.delete(id);
+    for (const id of this.sends.keys()) {
+      if (inWindow.has(id)) this.sends.delete(id);
     }
-    if (kept.length > 0) this.state = { ...this.state, rows: [...this.state.rows, ...kept] };
   }
 
   /** Keeps rows on screen, forgets the cursor, and ends the connection so the loop reconnects without `after`. */
