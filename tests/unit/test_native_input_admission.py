@@ -179,3 +179,35 @@ async def test_drop_newest_refusal_is_not_reported_as_accepted():
     assert result["accepted"] is False, result
     assert processor.processing_queue.get_nowait() == TaggedInput("original", ("first",))
     assert _ended(events, "queue-probe") == [("error", None), ("turn_complete", "error")]
+
+
+@pytest.mark.asyncio
+async def test_reserved_provider_slot_cannot_be_stolen_by_normal_input():
+    processor = _queue("drop_newest")
+    reservation = processor.reserve_admission_slot()
+    assert reservation is not None
+
+    with pytest.raises(RuntimeError, match="Queue is full"):
+        await processor.enqueue(TaggedInput("ordinary", ("ordinary",)))
+
+    assert processor.processing_queue.empty()
+    assert processor.commit_admission_slot(
+        reservation, TaggedInput("reserved", ("reserved",))
+    )
+    assert processor.processing_queue.get_nowait() == TaggedInput(
+        "reserved", ("reserved",)
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_invalidates_a_reserved_provider_slot():
+    processor = _queue("drop_newest")
+    reservation = processor.reserve_admission_slot()
+    assert reservation is not None
+
+    processor.request_cancellation(origin="human")
+
+    assert not processor.commit_admission_slot(
+        reservation, TaggedInput("reserved", ("reserved",))
+    )
+    assert processor.processing_queue.empty()
