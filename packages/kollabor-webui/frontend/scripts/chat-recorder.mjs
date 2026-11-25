@@ -539,6 +539,20 @@ async function record(flow, session, browser, target) {
     }
     throw new Error(`the chat stream did not deliver a ${kind} row within ${timeout / 1000} seconds`);
   };
+  const waitForRenderedHubNote = async (from, text, timeout = 30000) => {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const state = await page.evaluate(({ from, text }) => ({
+        rendered: [...document.querySelectorAll('[data-slot="kollab_hub-message"]')]
+          .some((el) => (el.textContent ?? "").includes(from) && (el.textContent ?? "").includes(text)),
+        running: !!document.querySelector('[aria-label="Stop generating"]'),
+      }), { from, text });
+      if (!state.running) throw new Error("the turn ended before the hub note rendered");
+      if (state.rendered) return;
+      await sleep(250);
+    }
+    throw new Error("the injected hub note did not render");
+  };
   const waitForPromptStatusUpdate = async (rowId, initialStatus, afterIndex, timeout = 30000) => {
     const started = Date.now();
     while (Date.now() - started < timeout) {
@@ -854,6 +868,7 @@ async function record(flow, session, browser, target) {
         content: text,
       }, "HUB NOTE ARRIVES MID-TURN");
       await waitForStreamRowKind("note", { whileRunning: true, afterIndex, hubNote: { from, text } });
+      if (typeof waitForRenderedHubNote === "function") await waitForRenderedHubNote(from, text);
       const afterUsers = await page.evaluate(() => window.__rec.snapshotUserRows?.() ?? []);
       if (beforeUsers.some((before) => !afterUsers.some((after) => after.id === before.id && after.text === before.text))) {
         throw new Error("an existing user row changed after the hub note");
