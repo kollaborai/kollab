@@ -6,12 +6,13 @@ import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from kollabor.llm.streaming_handler import StreamingHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import (
     QueuedInput,
+    QueueHandoffInput,
     QueueProcessor,
     TaggedInput,
     _tool_results_requiring_followup,
@@ -1126,6 +1127,100 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertFalse(self.processor.is_processing)
         # turn_completed set to True in setUp to prevent infinite loops
         self.assertFalse(self.processor.cancel_processing)
+
+    def test_full_queue_ends_a_refused_voice_request(self):
+        self.processor.max_queue_size = 1
+        self.processor.processing_queue = asyncio.Queue(maxsize=1)
+        self.processor.processing_queue.put_nowait("already queued")
+        voice = QueuedInput("Check the tests", {}, request_ids=("voice-overflow",))
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            with self.assertRaises(asyncio.QueueFull):
+                self.loop.run_until_complete(self.processor.enqueue(voice))
+
+        self.assertEqual(
+            publish.call_args_list,
+            [
+                call(
+                    self.renderer,
+                    "error",
+                    request_ids=["voice-overflow"],
+                    message=(
+                        "The agent's queue was full, so this message was dropped. "
+                        "Send it again."
+                    ),
+                ),
+                call(
+                    self.renderer,
+                    "turn_complete",
+                    stop_reason="error",
+                    request_ids=["voice-overflow"],
+                ),
+            ],
+        )
+        self.assertEqual(
+            list(self.processor.processing_queue._queue), ["already queued"]
+        )
+
+    def test_stop_ends_a_queued_voice_request(self):
+        voice = QueuedInput("Check the tests", {}, request_ids=("voice-stop",))
+        self.processor.processing_queue.put_nowait(voice)
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            self.processor.request_cancellation(origin="human")
+
+        self.assertTrue(self.processor.processing_queue.empty())
+        self.assertEqual(
+            publish.call_args_list,
+            [
+                call(
+                    self.renderer,
+                    "error",
+                    request_ids=["voice-stop"],
+                    message="Stopped before this message ran. Send it again.",
+                ),
+                call(
+                    self.renderer,
+                    "turn_complete",
+                    stop_reason="error",
+                    request_ids=["voice-stop"],
+                ),
+            ],
+        )
+
+    def test_stop_ends_local_voice_input_and_restores_protected_handoff(self):
+        voice = QueuedInput("Check the tests", {}, request_ids=("voice-stop",))
+        handoff = QueueHandoffInput(
+            content="Run the queued job",
+            request_ids=("handoff-id",),
+            queue_request_id="handoff-id",
+            attempt_id="attempt-1",
+        )
+        self.processor._drained_batch_messages = (voice, handoff)
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            self.processor.request_cancellation(origin="human")
+
+        self.assertEqual(list(self.processor.processing_queue._queue), [handoff])
+        self.assertIs(self.processor.processing_queue._queue[0], handoff)
+        self.assertEqual(self.processor._drained_batch_messages, ())
+        self.assertEqual(
+            publish.call_args_list,
+            [
+                call(
+                    self.renderer,
+                    "error",
+                    request_ids=["voice-stop"],
+                    message="Stopped before this message ran. Send it again.",
+                ),
+                call(
+                    self.renderer,
+                    "turn_complete",
+                    stop_reason="error",
+                    request_ids=["voice-stop"],
+                ),
+            ],
+        )
 
     def test_remote_cancellation_requires_idle_matching_generation(self):
         self.processor.is_processing = True
