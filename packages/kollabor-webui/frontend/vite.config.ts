@@ -185,6 +185,7 @@ const mainConfig = defineConfig({
   },
   test: {
     // Vitest suites; Node's built-in test runner remains for older tests.
+    maxWorkers: 4,
     include: [
       "tests/media-tokens.test.ts",
       "tests/media-thumb.test.tsx",
