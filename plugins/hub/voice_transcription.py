@@ -77,12 +77,19 @@ def main():
         # CLI descendants never inherit the app-facing pipes. Their stdout is
         # private run data too, and cannot hold communicate() open indefinitely.
         with tempfile.TemporaryFile(dir=run_dir) as output:
-            proc = subprocess.Popen(
-                ["whisper", str(audio_path), "--model", "base", "--language", "en",
-                 "--output_format", "txt", "--output_dir", run_dir],
-                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            try:
+                proc = subprocess.Popen(
+                    ["whisper", str(audio_path), "--model", "base", "--language", "en",
+                     "--output_format", "txt", "--output_dir", run_dir],
+                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except FileNotFoundError as error:
+                if error.filename != "whisper":
+                    raise
+                # 127 is the shell's "command not found" status. The bridge names
+                # whisper from this status alone; no exception text leaves the child.
+                return 127
             root_pid = proc.pid
             drain(children_file, deadline)
             proc.returncode = root_status

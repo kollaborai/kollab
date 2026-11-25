@@ -467,6 +467,9 @@ class TelegramBridge(MessagingBridge):
                 raise
             if proc.returncode == 124:
                 raise asyncio.TimeoutError
+            if proc.returncode == 127:
+                logger.error("Voice transcription failed (whisper executable not found)")
+                return "[voice message - transcription failed]"
             if proc.returncode != 0:
                 logger.error("Voice transcription owner failed (exit %s)", proc.returncode)
                 return "[voice message - transcription failed]"
