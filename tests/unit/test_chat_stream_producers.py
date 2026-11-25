@@ -152,6 +152,67 @@ async def test_acp_steered_input_joins_the_current_turn_and_both_inputs_end_once
 
 
 @pytest.mark.asyncio
+async def test_acp_steering_admission_identity_recovers_a_missed_turn_start():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    await _add(stream, "client-root-input", "start")
+    await _add(stream, "client-steer-input", "steer")
+
+    # A reconnect can miss turn_start. Admission still identifies the exact
+    # active turn and input that this client-chosen steering ID joined.
+    _publish(
+        state,
+        "hub_message",
+        message_id="client-steer-input",
+        request_id="client-steer-input",
+        input_source="steering",
+        joined_request_id="client-root-input",
+        joined_turn_id=41,
+    )
+    _publish(
+        state,
+        "token",
+        request_id="client-root-input",
+        turn_id=41,
+        text="combined reply",
+    )
+    _publish(
+        state,
+        "turn_complete",
+        request_id="client-root-input",
+        turn_id=41,
+        stop_reason="end_turn",
+    )
+
+    events = _events(stream, initial)
+    assert sequence_problems(events) == []
+    input_states = [
+        event["data"]
+        for event in events
+        if event["type"] == "input.state"
+    ]
+    assert [
+        (item["id"], item["state"], item["turn_id"], item.get("outcome"))
+        for item in input_states
+    ] == [
+        ("client-root-input", "queued", None, None),
+        ("client-steer-input", "queued", None, None),
+        ("client-root-input", "started", "41", None),
+        ("client-steer-input", "joined", "41", None),
+        ("client-root-input", "ended", "41", "completed"),
+        ("client-steer-input", "ended", "41", "completed"),
+    ]
+    input_rows = {
+        event["data"]["id"]
+        for event in events
+        if event["type"] == "row.upsert" and event["data"]["kind"] == "input"
+    }
+    assert input_rows == {"client-root-input", "client-steer-input"}
+
+
+@pytest.mark.asyncio
 async def test_reload_mid_turn_replays_terminal_events_from_the_snapshot_cursor():
     state = _State()
     stream = ChatStreamService(state)

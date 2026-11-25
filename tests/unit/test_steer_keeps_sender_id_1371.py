@@ -118,3 +118,64 @@ async def test_orchestrator_steer_records_sender_id():
 
     assert result
     assert [args[0] for args in recorded] == ["client-req-A"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_steer_passes_join_identity_to_user_record():
+    extension = FakeExtension({})
+    orchestrator, _, _, recorded = busy_admission(extension)
+    recorded_kwargs = []
+    orchestrator._record_user = lambda *args, **kwargs: (
+        recorded.append(args),
+        recorded_kwargs.append(kwargs),
+    )
+
+    result = await orchestrator.steer(
+        "please also run the tests",
+        origin={"operator": True},
+        request_id="client-req-A",
+        record_request_id="client-req-A",
+    )
+
+    assert result == {
+        "joined_request_id": "active-req",
+        "joined_turn_id": 1,
+        "joined_generation": 1,
+    }
+    assert [args[0] for args in recorded] == ["client-req-A"]
+    assert recorded_kwargs == [
+        {
+            "hub_note": None,
+            "joined_request_id": "active-req",
+            "joined_turn_id": 1,
+        }
+    ]
+
+
+def test_record_user_publishes_join_identity_with_the_recorded_input_id():
+    events = []
+    tap = SimpleNamespace(publish=events.append)
+    orchestrator = object.__new__(ACPOrchestrator)
+    orchestrator.event_bus = SimpleNamespace(
+        get_service=lambda name: tap if name == "display_tap" else None
+    )
+
+    orchestrator._record_user(
+        "client-req-A",
+        "please also run the tests",
+        "steering",
+        None,
+        joined_request_id="active-req",
+        joined_turn_id=1,
+    )
+
+    assert events == [
+        {
+            "type": "hub_message",
+            "message_id": "client-req-A",
+            "request_id": "client-req-A",
+            "input_source": "steering",
+            "joined_request_id": "active-req",
+            "joined_turn_id": 1,
+        }
+    ]
