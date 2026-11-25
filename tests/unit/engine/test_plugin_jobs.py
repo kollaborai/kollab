@@ -270,6 +270,26 @@ def test_cancel_staging_job_stops_worker_and_cleans_stage(client, monkeypatch):
     assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "cancelled"
 
 
+def test_windows_staging_stop_uses_process_tree_helper(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from kollabor_engine import plugin_jobs
+
+    from kollabor_config import proc_ctl
+
+    monkeypatch.delattr(plugin_jobs.os, "killpg", raising=False)
+    killed = []
+    monkeypatch.setattr(proc_ctl, "kill_tree", lambda pid, sig: killed.append((pid, sig)))
+    process = SimpleNamespace(pid=4321, returncode=None, communicate=AsyncMock(return_value=(b"", b"")))
+
+    asyncio.run(plugin_jobs.PluginJobs._stop_staging_process(process))
+
+    assert killed == [(4321, proc_ctl.HARD)]
+    process.communicate.assert_awaited_once()
+
+
 def test_job_management_is_local_even_with_user_token(client):
     response = client.post("/plugins/install", headers={"x-kollab-plugin-remote": "1"},
                            json={"source": "https://example.invalid/repo"})
