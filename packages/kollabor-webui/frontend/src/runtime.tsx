@@ -1438,7 +1438,7 @@ export function EngineRuntimeProvider({
     toolCallId: string,
     args: PermissionArgs,
     result: PermissionResult,
-  ): Promise<"answered" | "stale" | "transport"> => {
+  ): Promise<"answered" | "stale"> => {
     const findPrompt = () => runtime.thread.getState().messages.flatMap((message) => {
       if (!Array.isArray(message.content)) return [];
       const part = message.content.find((content) => content.type === "tool-call" &&
@@ -1449,7 +1449,11 @@ export function EngineRuntimeProvider({
     const initial = findPrompt();
     if (!initial) return "stale";
     if (initial.message.metadata?.custom?.pendingPermission !== true) {
-      return permissionResponseOwner(args) ? "transport" : "stale";
+      if (!permissionResponseOwner(args)) return "stale";
+      // Not a daemon-pending row: the answer is the tool call's own result, sent
+      // through the transport as the card's addResult used to send it.
+      runtime.thread.getMessageById(initial.message.id).getMessagePartByToolCallId(toolCallId).addToolResult(result);
+      return "answered";
     }
     if (initial.message.status?.type !== "requires-action") return "stale";
     const expected = permissionResponseOwner(initial.part.args);
