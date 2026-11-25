@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import shutil
-import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
+
+from kollabor_config import proc_ctl
 
 logger = logging.getLogger(__name__)
 _MAX_JOBS = 32
@@ -230,10 +232,10 @@ class PluginJobs:
     async def _stop_staging_process(process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
             return
-        # Kill this job's private process group together. Waiting for the worker
-        # alone after SIGTERM could leave a Git/SSH child that ignores SIGTERM.
+        # Stop this job's private process tree so a Git/SSH child cannot outlive
+        # the worker and race staging-directory cleanup.
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            await asyncio.to_thread(proc_ctl.kill_tree, process.pid, proc_ctl.HARD)
         except ProcessLookupError:
             pass
         await process.communicate()
@@ -247,10 +249,15 @@ class PluginJobs:
             raise ValueError("Plugin staging request is too large")
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
+        process_group = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            if os.name == "nt"
+            else {"start_new_session": True}
+        )
         creation = asyncio.create_task(asyncio.create_subprocess_exec(
             sys.executable, "-m", "kollabor_engine.plugin_stage",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, start_new_session=True, env=env,
+            stderr=asyncio.subprocess.DEVNULL, env=env, **process_group,
         ))
         try:
             process = await asyncio.shield(creation)

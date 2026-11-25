@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 import psutil
 
+from kollabor_config import proc_ctl
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file, try_lock, unlock
 
@@ -59,6 +60,14 @@ def _engine_url(value: str | None = None) -> str:
     except (TypeError, ValueError) as exc:
         raise ValueError("Invalid local engine URL") from exc
     return value.rstrip("/")
+
+
+def _signal_service_tree(pid: int, sig: int) -> None:
+    """Signal a service's isolated process tree on POSIX or Windows."""
+    if os.name == "nt":
+        proc_ctl.kill_tree(pid, sig)
+    else:
+        os.killpg(pid, sig)
 
 
 def redact_log(
@@ -375,8 +384,8 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             env["KOLLAB_PLUGIN_TOKEN"] = token
             env.update(secret_values)
             try:
-                child = subprocess.Popen(
-                    command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
+                child = proc_ctl.start_child(
+                    command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
                 )
             except OSError as exc:
                 _record_start_failure(
@@ -392,9 +401,10 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                 return 1
             assert child.stdout is not None
             try:
+                pgid = child.pid if os.name == "nt" else os.getpgid(child.pid)
                 identity["child"] = {
                     "pid": child.pid,
-                    "pgid": os.getpgid(child.pid),
+                    "pgid": pgid,
                     "start_time": _process_start(child.pid),
                 }
             except psutil.Error, ProcessLookupError:
@@ -423,14 +433,14 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                                 redact_sensitive_text(str(exc)),
                             )
                         try:
-                            os.killpg(child.pid, signal.SIGTERM)
+                            _signal_service_tree(child.pid, proc_ctl.SOFT)
                         except ProcessLookupError:
                             pass
                         term_sent = True
                         deadline = time.monotonic() + grace
                     if deadline is not None and time.monotonic() >= deadline:
                         try:
-                            os.killpg(child.pid, signal.SIGKILL)
+                            _signal_service_tree(child.pid, proc_ctl.HARD)
                         except ProcessLookupError:
                             pass
                         deadline = None
@@ -445,7 +455,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                             if filtered:
                                 _write_log(log_path, filtered)
                             selector.unregister(key.fileobj)
-            if term_sent and deadline is not None:
+            if term_sent and deadline is not None and os.name != "nt":
                 # The leader may exit before descendants that ignored SIGTERM.
                 # Keep the wrapper alive until the group is gone or its grace expires.
                 while time.monotonic() < deadline:
@@ -456,7 +466,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                 else:
                     try:
-                        os.killpg(child.pid, signal.SIGKILL)
+                        _signal_service_tree(child.pid, proc_ctl.HARD)
                     except ProcessLookupError:
                         pass
             code = child.wait()
@@ -484,7 +494,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
     finally:
         if child is not None and child.poll() is None:
             try:
-                os.killpg(child.pid, signal.SIGKILL)
+                _signal_service_tree(child.pid, proc_ctl.HARD)
             except ProcessLookupError:
                 pass
             child.wait()
@@ -612,12 +622,11 @@ def supervisor_tick(*, engine_url: str | None = None) -> None:
                     if _recorded_process_alive(run_dir / f"{service_name}.pid"):
                         continue
                     nonce = secrets.token_hex(16)
-                    subprocess.Popen(
+                    proc_ctl.start_child(
                         [*kollab_argv(), "plugin", "run-service", plugin_id, service_name, nonce],
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
-                        start_new_session=True,
                         close_fds=True,
                         env=wrapper_env,
                     )

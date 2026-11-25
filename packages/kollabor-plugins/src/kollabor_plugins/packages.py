@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from kollabor_config import proc_ctl
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
 
@@ -337,7 +338,7 @@ def _git(*args: str) -> bytes:
 
 def _write_bounded_git_archive(clone: Path, commit: str, archive: BinaryIO) -> None:
     """Stream a Git archive to bounded storage, stopping once its byte limit is crossed."""
-    process = subprocess.Popen(
+    process = proc_ctl.start_child(
         ["git", "-C", str(clone), "archive", "--format=tar", commit],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -364,7 +365,7 @@ def _write_bounded_git_archive(clone: Path, commit: str, archive: BinaryIO) -> N
             if archive_size + len(chunk) > _MAX_PLUGIN_ARCHIVE_BYTES:
                 oversized = True
                 try:
-                    process.kill()
+                    proc_ctl.kill_tree(process.pid, proc_ctl.HARD)
                 except OSError:
                     pass
                 break
@@ -373,7 +374,7 @@ def _write_bounded_git_archive(clone: Path, commit: str, archive: BinaryIO) -> N
             archive_size += len(chunk)
     except BaseException:
         try:
-            process.kill()
+            proc_ctl.kill_tree(process.pid, proc_ctl.HARD)
         except OSError:
             pass
         raise
