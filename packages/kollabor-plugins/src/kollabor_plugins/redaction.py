@@ -4,8 +4,8 @@ import re
 from collections.abc import Iterable
 
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?<![A-Za-z0-9])(?P<key>api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
-    r"password|credential|authorization|bearer)(?![A-Za-z0-9])\s*[:=]\s*"
+    r"(?<![A-Za-z0-9])(?P<key>api[_-]?key|(?:private|signing|encryption|ssh|secret|access|master|client)[ _-]?key|"
+    r"access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)(?![A-Za-z0-9_])\s*[:=]\s*"
     r"(?P<value>(?!(?:bearer|basic)\s)[^\s,;]+)",
     re.IGNORECASE,
 )

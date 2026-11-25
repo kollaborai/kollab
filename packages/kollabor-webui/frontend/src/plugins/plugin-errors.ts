@@ -2,9 +2,29 @@ export const SAFE_PLUGIN_ACTION_ERROR = "The plugin action failed. Check the bro
 export const SAFE_PLUGIN_SETTINGS_ERROR = "Could not complete this plugin settings action. Check the browser console for redacted details.";
 
 const URL_CREDENTIALS = /\b(https?:\/\/)[^/@\s]+@/gi;
-const AUTH_SCHEME = /\b(?:bearer|basic)\s+[^\s,;]+/gi;
-const SENSITIVE_ASSIGNMENT = /((?:^|[^A-Za-z0-9])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)(?![A-Za-z0-9])\s*[:=]\s*)(?:(?:bearer|basic)\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
+const AUTH_SCHEME = /\b(?:bearer|basic)\s+([^\s,;]+)/gi;
+const AUTH_SCHEME_ASSIGNMENT = /\b(?:proxy-authorization|authorization|token)\b\s*[:=]\s*(?:bearer|basic)\s+[^\s,;]+/i;
+const SENSITIVE_ASSIGNMENT = /((?:^|[^A-Za-z0-9])(?:api[_-]?key|(?:private|signing|encryption|ssh|secret|access|master|client)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)(?![A-Za-z0-9_])\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("[^"]*"|'[^']*'|[^\s,;]+)/gi;
 const SECRET_VALUE = /\b(?:secret[-_]token[-_][A-Za-z0-9_-]+|sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]*/gi;
+const SAFE_TEXT_VALUES = new Set(["budget", "length", "required"]);
+
+function isAuthCredential(value: string): boolean {
+  return value.length >= 24 || (value.length >= 6 && /\d/.test(value));
+}
+
+/** Check the shared plugin text rules used by inventory normalization and error logging. */
+export function containsSensitiveText(value: string, allowSafeValues = false): boolean {
+  if (value.match(SECRET_VALUE) || AUTH_SCHEME_ASSIGNMENT.test(value)) return true;
+  for (const match of value.matchAll(AUTH_SCHEME)) {
+    if (isAuthCredential(match[1] ?? "")) return true;
+  }
+  for (const match of value.matchAll(SENSITIVE_ASSIGNMENT)) {
+    const assigned = (match[2] ?? "").replace(/[.!?]+$/, "").toLowerCase();
+    if (allowSafeValues && SAFE_TEXT_VALUES.has(assigned)) continue;
+    return true;
+  }
+  return false;
+}
 
 const UNPRINTABLE_PLUGIN_ERROR = "Unprintable plugin error";
 

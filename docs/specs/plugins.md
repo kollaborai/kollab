@@ -853,8 +853,9 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 7. If an update is available, then `update` shows the sheet with the commit range and changed folders,
    and nothing changes until the user confirms the commit the sheet showed; the old version keeps running
    meanwhile.
-8. If two plugins register the same slash command, then the one enabled first keeps it and the other's
-   Settings row says `/deploy is taken by Deploy Bot`. Turning off the first frees it for the second.
+8. If two plugins register the same slash command, then the one enabled first keeps it, the composer
+   palette omits the other's command, and the browser console warns which plugin owns the name. Turning
+   off the first frees it for the second.
 9. If the page is open on a phone through PhoneLink, then plugin code is not imported, plugin inventory and
    allowed service logs are readable, and Settings → Plugins is read-only with `Manage plugins on this computer`.
 10. If a plugin needs a newer kollab than the one running, then `add` refuses with `PR Chain needs kollab

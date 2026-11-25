@@ -54,7 +54,13 @@ function toolRendererResetKey(part: ToolPart): string {
   const statusType = status && typeof status === "object" && "type" in status
     ? String(status.type)
     : String(status ?? "");
-  return `${statusType}:${part.result === undefined ? "pending" : "complete"}`;
+  let argsKey: string;
+  try {
+    argsKey = JSON.stringify(part.args) ?? "undefined";
+  } catch {
+    argsKey = "unserializable";
+  }
+  return `${statusType}:${part.result === undefined ? "pending" : "complete"}:${argsKey}`;
 }
 
 /** A registered host UI wins; otherwise a loaded plugin renderer, then `fallback`. */

@@ -76,7 +76,7 @@ import {
 } from "@/plugins/composer-commands";
 import { PluginTaggedText, PluginToolPart } from "@/plugins/renderers";
 import { slashCatalogNotice } from "./slash-catalog-notice";
-import { usePlugins } from "@/plugins/registry";
+import { pluginRegistry, usePlugins } from "@/plugins/registry";
 import { logPluginFailure } from "@/plugins/plugin-errors";
 import {
   panelCommandRequest,
@@ -808,6 +808,8 @@ const Composer: FC<{
     observedComposerRevisionKeyRef.current = composerRevisionSignature("", stateBeforeClear.attachments);
     const clearedRevision = composerRevisionRef.current;
     const fail = (error: unknown) => {
+      const current = pluginRegistry.getSnapshot().plugins.find((record) => record.id === match.entry.pluginId);
+      if (current?.k !== match.entry.k) return;
       if (
         canRestorePluginCommandDraft(
           composerRevisionRef.current,

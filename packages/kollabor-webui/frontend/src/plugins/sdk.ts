@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useState, type ComponentType } from "react";
 import type { PanelField } from "@/api";
+import { declaredIds, isPluginDeclarationId } from "./plugin-declarations";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -238,8 +239,7 @@ const TOAST_MS = 5_000;
 
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 const isLine = (value: unknown): value is string => isText(value) && !/[\r\n]/.test(value);
-const isSlashCommandName = (value: unknown): value is string =>
-  typeof value === "string" && /^[\p{L}\p{N}_-]+$/u.test(value);
+const isSlashCommandName = isPluginDeclarationId;
 const isRendererTagName = (value: unknown): value is string =>
   typeof value === "string" && /^[a-z][\w-]*$/i.test(value);
 const isComponent = (value: unknown) =>
@@ -257,19 +257,6 @@ export function isOpenTarget(value: unknown): value is OpenTarget {
     ["page", "modal", "view", "url"].includes(keys[0]) &&
     isText((value as Record<string, unknown>)[keys[0]])
   );
-}
-
-function declaredIds(list: readonly unknown[] | undefined): Set<string> {
-  const ids = new Set<string>();
-  for (const item of list ?? []) {
-    if (typeof item === "string") ids.add(item);
-    else if (item && typeof item === "object")
-      for (const key of ["id", "name", "tool", "tag"] as const) {
-        const value = (item as Record<string, unknown>)[key];
-        if (typeof value === "string") ids.add(value);
-      }
-  }
-  return ids;
 }
 
 /** Waits `ms`, or less when `signal` aborts. */
@@ -401,6 +388,7 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
   const listeners = new Map<string, Set<(data: unknown) => void>>();
   let events: AbortController | null = null;
   const dispatch = (event: unknown) => {
+    if (disposed) return;
     if (!event || typeof event !== "object") return;
     const { topic, data } = event as { topic?: unknown; data?: unknown };
     if (typeof topic !== "string") return;
@@ -408,15 +396,16 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
       try {
         const result = listener(data);
         void Promise.resolve(result).catch((error: unknown) => {
-          logPluginFailure(id, `event listener for ${topic} failed`, error);
+          if (!disposed) logPluginFailure(id, `event listener for ${topic} failed`, error);
         });
       } catch (error) {
-        logPluginFailure(id, `event listener for ${topic} failed`, error);
+        if (!disposed) logPluginFailure(id, `event listener for ${topic} failed`, error);
       }
     }
   };
 
   const notice = (spec: NoticeSpec): (() => void) => {
+    if (disposed) return () => {};
     const button = spec?.button;
     if (!isLine(spec?.text)) {
       invalid("notice", "text must be one line");
@@ -556,6 +545,7 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
     },
     copy: async (text) => (disposed ? false : copyText(globalThis.navigator?.clipboard, String(text))),
     toast(text) {
+      if (disposed) return;
       const dismiss = notice({ text });
       setTimeout(dismiss, TOAST_MS);
     },

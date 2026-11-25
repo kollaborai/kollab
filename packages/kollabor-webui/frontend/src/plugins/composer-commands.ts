@@ -1,8 +1,10 @@
 import type { ComposerPaletteItem } from "@/components/assistant-ui/composer-palette";
+import { DEFAULT_SLASH_COMMANDS } from "@/api";
 import { PANEL_COMMAND_NAMES } from "@/components/panels/panel-model";
 import type { PluginRecord } from "./registry";
 import type { CommandSpec, PluginApi } from "./sdk";
 import { pluginsByEnableOrder } from "./plugin-order";
+import { declaredIds } from "./plugin-declarations";
 
 /** A plugin command the composer can run. `k` is its owner's, for error toasts. */
 export type PluginCommandEntry = {
@@ -37,16 +39,17 @@ export function canRestorePluginCommandDraft(
   return currentRevision === clearedRevision && Object.is(currentSession, commandSession);
 }
 
-/** Native command names and aliases, lower case, without the slash. */
+/** App-owned and native command names and aliases, lower case, without the slash. */
 export function reservedCommandKeys(
   commands: readonly { name: string; aliases?: readonly string[] }[],
 ): Set<string> {
   const keys = new Set<string>();
-  for (const command of commands) {
+  for (const command of [...DEFAULT_SLASH_COMMANDS, ...commands]) {
     for (const name of [command.name, ...(command.aliases ?? [])]) {
       keys.add(name.replace(/^\//, "").toLowerCase());
     }
   }
+  for (const name of PANEL_COMMAND_NAMES) keys.add(name.replace(/^\//, "").toLowerCase());
   return keys;
 }
 
@@ -55,17 +58,25 @@ function resolvePluginCommands(
   plugins: readonly PluginRecord[],
   reserved: ReadonlySet<string>,
 ): PluginCommandResolution {
-  const taken = new Set([...reserved, ...PANEL_COMMAND_NAMES]);
+  const taken = new Set([...reservedCommandKeys([]), ...reserved]);
   const owners = new Map<string, PluginRecord>();
   const entries: PluginCommandEntry[] = [];
   const conflicts: PluginCommandConflict[] = [];
   const conflictKeys = new Set<string>();
-  for (const record of pluginsByEnableOrder(plugins)) {
+  const ordered = pluginsByEnableOrder(plugins);
+  for (const record of ordered) {
+    for (const declared of declaredIds(record.entry.contributes?.slash)) {
+      const key = declared.toLowerCase();
+      if (!taken.has(key) && !owners.has(key)) owners.set(key, record);
+    }
+  }
+  const emitted = new Set<string>();
+  for (const record of ordered) {
     if (!record.k) continue;
     for (const command of record.contributions.commands) {
       const key = command.name.toLowerCase();
-      if (taken.has(key)) {
-        const winner = owners.get(key);
+      const winner = owners.get(key);
+      if (taken.has(key) || !winner || winner.id !== record.id) {
         const conflictKey = JSON.stringify([record.id, key]);
         if (winner && winner.id !== record.id && !conflictKeys.has(conflictKey)) {
           conflicts.push({
@@ -79,8 +90,8 @@ function resolvePluginCommands(
         }
         continue;
       }
-      taken.add(key);
-      owners.set(key, record);
+      if (emitted.has(key)) continue;
+      emitted.add(key);
       entries.push({
         name: command.name,
         description: command.description,

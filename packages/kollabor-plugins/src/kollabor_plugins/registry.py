@@ -43,6 +43,7 @@ from .redaction import contains_sensitive_text, redact_sensitive_text
 logger = logging.getLogger(__name__)
 
 _INVENTORY_TEXT_LIMIT = 4096
+_DECLARATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _INVENTORY_INVISIBLE_CONTROLS = re.compile(r"[\u00ad\u200b-\u200d\u202a-\u202e\u2060\u2066-\u2069\ufeff]")
 _PLUGIN_INVENTORY_STATES = {"ok", "error", "off", "stopping", "stop-failed", "changed-on-disk", "skipped"}
 _SERVICE_INVENTORY_STATES = {
@@ -776,7 +777,7 @@ def _normalize_capability(value: object) -> str | None:
 def _normalize_declared(value: object) -> str | dict | None:
     if isinstance(value, str):
         safe = _bounded_inventory_identifier(value, 512)
-        return safe if safe and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", safe) else None
+        return safe if safe and _DECLARATION_ID.fullmatch(safe) else None
     if not isinstance(value, dict):
         return None
     result: dict[str, str] = {}
@@ -785,7 +786,7 @@ def _normalize_declared(value: object) -> str | dict | None:
             continue
         normalizer = _bounded_inventory_text if key in {"label", "title"} else _bounded_inventory_identifier
         safe = normalizer(value[key], 512)
-        if not safe or (key not in {"label", "title"} and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", safe)):
+        if not safe or (key not in {"label", "title"} and not _DECLARATION_ID.fullmatch(safe)):
             return None
         result[key] = safe
     return result if any(key in result for key in ("id", "name", "tool", "tag")) else None
@@ -811,7 +812,7 @@ def _normalize_contributes(value: object) -> dict:
             row_id = _bounded_inventory_identifier(item.get("id"), 128)
             label = _bounded_inventory_text(item.get("label"), 256)
             raw_open = item.get("open")
-            if not row_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", row_id) or not label:
+            if not row_id or not _DECLARATION_ID.fullmatch(row_id) or not label:
                 continue
             if (
                 not isinstance(raw_open, dict)
