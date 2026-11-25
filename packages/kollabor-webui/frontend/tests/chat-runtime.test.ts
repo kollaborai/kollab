@@ -154,3 +154,20 @@ describe("buildAdapter", () => {
     expect(adapter.hasEarlier).toBe(false);
   });
 });
+
+describe("hub-note parts", () => {
+  it("map to a data-hub-note part, so a hub note row never carries an undefined part", () => {
+    const part = { type: "hub-note" as const, from: "lapis", to: "", text: "build is green", observed: true, kind: "broadcast" };
+    const like = toThreadMessageLike({
+      id: "hub-1",
+      seq: 3,
+      kind: "note",
+      role: "system",
+      turn_id: null,
+      status: "done",
+      parts: [part],
+      created_at: "2026-11-25T00:00:00Z",
+    });
+    expect(like.content).toEqual([{ type: "data-hub-note", data: part }]);
+  });
+});

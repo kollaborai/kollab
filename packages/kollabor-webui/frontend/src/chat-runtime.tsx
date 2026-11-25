@@ -47,6 +47,9 @@ function toPart(part: ChatPart): LikePart {
       return { type: "image", image: part.url };
     case "prompt":
       return { type: "data-prompt", id: part.prompt_id, data: part.data };
+    case "hub-note":
+      // The thread draws hub notes from the store row; assistant-ui only needs a valid part.
+      return { type: "data-hub-note", data: part };
   }
 }
 

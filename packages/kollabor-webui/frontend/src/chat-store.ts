@@ -90,8 +90,13 @@ function fromSnapshot(event: SnapshotEvent): StreamState {
     rows: [...data.rows],
     inputs: Object.fromEntries(data.inputs.map((input) => [input.id, input] as const)),
     turns: Object.fromEntries(data.turns.map((turn) => [turn.turn_id, turn] as const)),
-    olderCursor: data.older,
+    olderCursor: cursorOf(data.older),
   };
+}
+
+/** The older-rows cursor the daemon sent. A missing or non-string value means there are no older rows. */
+function cursorOf(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
 }
 
 /** Returns the new state, or the reason to resync. */
@@ -166,8 +171,13 @@ export interface LiveStore extends ChatStore {
 export const WEB_INPUT_PREFIX = "web";
 
 const MAX_BACKOFF_MS = 10_000;
+// Rows per older page: the same size the daemon's history route defaults to.
+const HISTORY_PAGE_LIMIT = 50;
 
 type HistoryPage = { rows: ChatRow[]; older: string | null };
+
+/** A send whose row the stream has not delivered yet: the row, and how many POSTs for its id are still running. */
+type LocalSend = { row: ChatRow; posts: number };
 
 /** The HTTP status carried by an error the transport threw, if it has one. */
 function errorStatus(error: unknown): number | undefined {
@@ -185,6 +195,10 @@ export class LiveChatStore implements LiveStore {
   private connectionState: ConnectionState = "connecting";
   // Not named `olderStatus`: that name is the public getter below.
   private paging: OlderStatus = "idle";
+  // Counts the window replacements (a resync or a snapshot). A history page checks it to see that its window is still current.
+  private epoch = 0;
+  // Sends the stream has not delivered yet, by input id. Each row sits in `state.rows` until the stream's row replaces it.
+  private readonly sends = new Map<string, LocalSend>();
   private attempts = 0;
   private started = false;
   private disposed = false;
@@ -268,12 +282,62 @@ export class LiveChatStore implements LiveStore {
     this.listeners.clear();
   }
 
+  /** Shows the input at once as a pending row, then posts it. A failed post leaves the row as failed, and rethrows. */
   async send(input: InputRequest): Promise<void> {
-    const response = await this.transport.request(`/sessions/${this.enc}/inputs`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
+    this.beginSend(input);
+    let response: Response;
+    try {
+      response = await this.transport.request(`/sessions/${this.enc}/inputs`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+    } catch (error) {
+      this.endSend(input.id, false);
+      throw error;
+    }
+    this.endSend(input.id, response.ok);
     if (!response.ok) throw new Error(`send failed: ${response.status}`);
+  }
+
+  /** Adds the pending row at the end of the rows. A send whose id is already on screen adds nothing. */
+  private beginSend(input: InputRequest): void {
+    const send = this.sends.get(input.id);
+    if (send) {
+      send.posts += 1;
+      if (send.row.status === "failed") this.replaceLocalRow(send, { ...send.row, status: "pending" });
+      return;
+    }
+    if (this.state.rows.some((row) => row.id === input.id)) return;
+    const row: ChatRow = {
+      id: input.id,
+      seq: -1, // not on the stream yet
+      kind: "input",
+      role: "user",
+      turn_id: null,
+      status: "pending",
+      parts: [{ type: "text", text: input.text }],
+      created_at: new Date().toISOString(),
+    };
+    this.sends.set(input.id, { row, posts: 1 });
+    this.state = { ...this.state, rows: [...this.state.rows, row] };
+    this.publish();
+  }
+
+  /** Records one POST's answer. A failure with no other POST for the id still running marks the row failed. */
+  private endSend(id: string, ok: boolean): void {
+    const send = this.sends.get(id);
+    if (!send) return; // the stream has delivered the row, so it is no longer local
+    send.posts -= 1;
+    if (!ok && send.posts === 0) this.replaceLocalRow(send, { ...send.row, status: "failed" });
+  }
+
+  private replaceLocalRow(send: LocalSend, row: ChatRow): void {
+    send.row = row;
+    this.state = {
+      ...this.state,
+      rows: this.state.rows.map((candidate) => (candidate.id === row.id ? row : candidate)),
+    };
+    this.publish();
   }
 
   /** Starts a queued input now. Nothing local changes: the daemon answers with input.state on the stream. */
@@ -297,26 +361,36 @@ export class LiveChatStore implements LiveStore {
   async loadOlder(): Promise<void> {
     const cursor = this.state.olderCursor;
     if (cursor === null) return;
+    // The page belongs to the window it was asked for. A resync or a snapshot while it is in flight replaces that window.
+    const { conversationUid } = this.state;
+    const epoch = this.epoch;
+    const current = () => this.epoch === epoch && this.state.conversationUid === conversationUid;
     this.setPaging("loading");
-    const path = `/sessions/${this.enc}/history?before=${encodeURIComponent(cursor)}`;
+    const path = `/sessions/${this.enc}/rows?before=${encodeURIComponent(cursor)}&limit=${HISTORY_PAGE_LIMIT}`;
     let page: HistoryPage;
     try {
       const response = await this.requestHistory(path);
       if (response === null) {
         // A stale cursor: resync, and the next snapshot brings a fresh one.
-        this.setPaging("idle");
-        this.resync();
+        if (current()) this.resync();
+        this.settlePaging();
         return;
       }
       page = (await response.json()) as HistoryPage;
       if (!Array.isArray(page.rows)) throw new Error("history failed: unexpected page");
     } catch (error) {
-      this.setPaging("failed");
+      if (current()) this.setPaging("failed");
+      else this.settlePaging();
       throw error;
+    }
+    if (!current()) {
+      // The window changed while the page was in flight, so its rows and cursor do not belong to it.
+      this.settlePaging();
+      return;
     }
     const held = new Set(this.state.rows.map((row) => row.id));
     const older = page.rows.filter((row) => !held.has(row.id));
-    this.state = { ...this.state, rows: [...older, ...this.state.rows], olderCursor: page.older ?? null };
+    this.state = { ...this.state, rows: [...older, ...this.state.rows], olderCursor: cursorOf(page.older) };
     this.paging = this.state.olderCursor === null ? "complete" : "idle";
     this.publish();
   }
@@ -351,6 +425,11 @@ export class LiveChatStore implements LiveStore {
   private publish(): void {
     this.snapshot = this.snapshotOf();
     for (const listener of [...this.listeners]) listener();
+  }
+
+  /** Sets the paging state from the window: complete when no older rows remain, idle when some do. */
+  private settlePaging(): void {
+    this.setPaging(this.state.olderCursor === null ? "complete" : "idle");
   }
 
   /** Sets the paging state and tells the listeners, unless the state is unchanged. */
@@ -410,13 +489,38 @@ export class LiveChatStore implements LiveStore {
     if (result.outcome.kind === "duplicate") return;
     this.state = result.state;
     // A snapshot brings a new window with its own cursor, so the paging state follows it.
-    if (event.type === "snapshot") this.paging = this.state.olderCursor === null ? "complete" : "idle";
+    if (event.type === "snapshot") {
+      this.epoch += 1;
+      this.paging = this.state.olderCursor === null ? "complete" : "idle";
+    }
+    this.followSends(event);
     this.attempts = 0;
     this.publish();
   }
 
+  /** A row event with a local send's id retires that send: the stream's row now stands in its place. */
+  private followSends(event: ChatStreamEvent): void {
+    if (event.type === "row.upsert" || event.type === "row.delete") this.sends.delete(event.data.id);
+    else if (event.type === "snapshot" || event.type === "replace") this.keepUndelivered();
+  }
+
+  /**
+   * After a snapshot or a replace, the window's row wins over a local row with the same id. A local row the window
+   * lacks stays at the end while its POST runs, and after a failure, so the text stays on screen.
+   */
+  private keepUndelivered(): void {
+    const inWindow = new Set(this.state.rows.map((row) => row.id));
+    const kept: ChatRow[] = [];
+    for (const [id, send] of this.sends) {
+      if (!inWindow.has(id) && (send.posts > 0 || send.row.status === "failed")) kept.push(send.row);
+      else this.sends.delete(id);
+    }
+    if (kept.length > 0) this.state = { ...this.state, rows: [...this.state.rows, ...kept] };
+  }
+
   /** Keeps rows on screen, forgets the cursor, and ends the connection so the loop reconnects without `after`. */
   private resync(): void {
+    this.epoch += 1;
     this.state = { ...this.state, conversationUid: null, lastSeq: null };
     this.controller?.abort();
   }
