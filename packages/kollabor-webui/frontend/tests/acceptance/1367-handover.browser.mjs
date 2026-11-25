@@ -67,7 +67,7 @@ try {
   await denyButton.first().waitFor();
   await allowButton.first().click();
   await page.waitForFunction(() => window.chatHarness.permissionResponses.length === 1);
-  await denyButton.first().click();
+  await denyButton.nth(1).click();
   await page.waitForFunction(() => window.chatHarness.permissionResponses.length === 2);
   const permissionResponses = await page.evaluate(() => window.chatHarness.permissionResponses);
   assert.deepEqual(permissionResponses, [
