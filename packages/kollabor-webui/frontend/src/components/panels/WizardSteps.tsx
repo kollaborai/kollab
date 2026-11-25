@@ -44,13 +44,25 @@ export function WizardSteps({
   onStepChange: (step: number) => void;
   onAction: (action: PanelAction, step: PanelWizardStep) => void;
 }) {
-  const steps = panel.steps ?? [];
+  const providerField = panel.steps.flatMap((item) => item.fields).find((field) => field.path === "provider");
+  const selectedProvider = String(draft.provider ?? providerField?.value ?? "");
+  const chatgpt = selectedProvider.toLowerCase().includes("sign in with chatgpt");
+  const steps = (panel.steps ?? [])
+    .filter((item) => {
+      if (["api_key", "endpoint"].includes(item.id)) return !chatgpt;
+      if (["oauth_sign_in", "oauth_review"].includes(item.id)) return chatgpt;
+      return true;
+    })
+    .map((item) => item.id === "model"
+      ? {
+          ...item,
+          fields: item.fields.filter((field) =>
+            chatgpt ? field.path === "oauth_model" : field.path !== "oauth_model",
+          ),
+        }
+      : item);
   const index = Math.min(step, Math.max(0, steps.length - 1));
   const current = steps[index];
-  const last = index >= steps.length - 1;
-  const actions = panel.actions ?? [];
-  const submit = actions.find((action) => action.id === "finish") ?? actions[actions.length - 1];
-
   if (!current) {
     return (
       <p className="text-muted-foreground px-4 py-6 text-sm sm:px-6">
@@ -58,6 +70,14 @@ export function WizardSteps({
       </p>
     );
   }
+
+  const last = index >= steps.length - 1;
+  const canAdvance = current.id !== "oauth_sign_in" || panel.context?.oauth_status === "signed_in";
+  const actions = (current.actions ?? (last ? panel.actions : [])) ?? [];
+  const visibleActions = chatgpt && last
+    ? actions.filter((action) => action.id === "finish")
+    : actions.filter((action) => !action.id.startsWith("oauth_"));
+  const submit = visibleActions.find((action) => action.id === "finish") ?? visibleActions[visibleActions.length - 1];
 
   // Enter in a text box moves on, like Next / the final action would.
   const advance = () => {
@@ -92,7 +112,48 @@ export function WizardSteps({
           </h3>
         </div>
         <div>
-          {current.fields.map((field) => (
+          {current.id === "oauth_sign_in" ? (
+            <div className="flex flex-col gap-4 py-2">
+              <p className="text-sm">Open this page and enter the code:</p>
+              {panel.context?.user_code ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <a
+                    className="text-sm underline underline-offset-4"
+                    href={String(panel.context.verification_url ?? "https://auth.openai.com/codex/device")}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open Page
+                  </a>
+                  <code className="text-sm font-medium">{String(panel.context.user_code)}</code>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void navigator.clipboard?.writeText(String(panel.context?.user_code ?? ""))}
+                  >
+                    Copy
+                  </Button>
+                </div>
+              ) : null}
+              <p role="status" className="text-muted-foreground text-sm">
+                {panel.context?.oauth_status === "signed_in"
+                  ? `Signed in as ${String(panel.context.account || "ChatGPT account")}`
+                  : panel.context?.oauth_status === "expired"
+                    ? "Code expired. Start sign-in again."
+                    : panel.context?.oauth_status === "denied"
+                      ? "Sign-in denied. Start again if you want to continue."
+                      : panel.context?.oauth_status === "network_error"
+                        ? String(panel.context.oauth_message || "Network error while signing in.")
+                        : panel.context?.oauth_status === "failed"
+                          ? String(panel.context.oauth_message || "Sign-in failed.")
+                          : "Waiting for sign-in…"}
+              </p>
+            </div>
+          ) : current.id === "oauth_review" ? (
+            <p className="text-sm">
+              Signed in as {String(panel.context?.account || "ChatGPT account")}. The selected model will be saved to the openai-oauth profile.
+            </p>
+          ) : current.fields.map((field) => (
             <FieldRenderer
               key={field.path}
               field={field}
@@ -116,7 +177,7 @@ export function WizardSteps({
           </Button>
         ) : null}
         {last ? (
-          actions.map((action) => (
+          visibleActions.map((action) => (
             <Button
               key={action.id}
               type={action === submit ? "submit" : "button"}
@@ -130,10 +191,30 @@ export function WizardSteps({
             </Button>
           ))
         ) : (
-          <Button type="submit" disabled={busy}>
+          <Button type="submit" disabled={busy || !canAdvance}>
             Next
           </Button>
         )}
+        {!last
+          ? (current.actions ?? (current.id === "oauth_sign_in"
+                ? [{ id: "oauth_cancel", label: "Cancel" }]
+                : []))
+              .filter((action) =>
+                action.id !== "oauth_start" ||
+                ["expired", "denied", "network_error", "failed"].includes(String(panel.context?.oauth_status)),
+              )
+              .map((action) => (
+              <Button
+                key={action.id}
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() => onAction(action, current)}
+              >
+                {action.label || titleCase(action.id)}
+              </Button>
+              ))
+          : null}
       </footer>
     </form>
   );

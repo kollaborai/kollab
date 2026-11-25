@@ -81,7 +81,7 @@ describe("guided setup footer", () => {
     // Welcome has no target and is the greeting: its button starts the tour.
     expect(guideMarkup("welcome")).toContain(">Get Started<");
     // Actionable steps open their surface.
-    expect(guideMarkup("provider")).toContain(">Open<");
+    expect(guideMarkup("network")).toContain(">Open<");
     expect(guideMarkup("agent")).toContain(">Open<");
     // Only the final step finishes.
     expect(guideMarkup("done")).toContain(">Finish<");
@@ -92,5 +92,11 @@ describe("guided setup footer", () => {
     expect(markup).not.toContain(">Skip</button>");
     expect(markup).not.toContain(">Finish<");
     expect(markup).toContain(">Get Started<");
+  });
+
+  it("keeps Get Started available while provider facts are pending", () => {
+    expect(guideMarkup("welcome")).toMatch(
+      /<button[^>]*data-testid="setup-guide-next"(?![^>]*disabled)/,
+    );
   });
 });

@@ -332,7 +332,7 @@ export function TrajectoryView({
           if (!open) setSelectedId(null);
         }}
       >
-        <SheetContent side="bottom" className="max-h-[75vh] rounded-t-2xl p-0">
+        <SheetContent side="bottom" className="max-h-[75vh] rounded-t-2xl p-0 pointer-coarse:pt-14">
           <SheetHeader className="sr-only">
             <SheetTitle>Record Details</SheetTitle>
           </SheetHeader>

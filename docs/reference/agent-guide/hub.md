@@ -18,6 +18,7 @@ Peer-to-peer agent mesh with persistent identity.
 - `dns/` - Agent DNS: discovery, Ed25519 identity, trust, capabilities (AID/ARDP/ANS-aligned)
 - `dns/endpoint.py` - Off-box A2A endpoint: TLS listener + federation bootstrap (well-known fetch/import)
 - `messaging_bridge.py` - Telegram bridge: long-poll inbox + send. It runs on `plugins.hub.bridge_target_agent` (empty = coordinator), like the email watcher (`_runs_inbox`), so a chat message wakes that agent and its replies go back through its own bridge; a bridge turned on in another agent (`/hub bridge enable`) sends what it receives on with `_route_message`. A reply to a bridge message goes out whole (`_answers_bridge_message`), anything else is mirrored cut to 500 chars (`_bridge_forward`). `tests/tmux/lib/fake_telegram.py` is a local Bot API for specs
+- `voice_transcription.py` - Telegram CLI transcription owner on Linux: a standalone child subreaper, launched with `python3`, owns one private artifact directory and waits for kernel-confirmed child exhaustion before reading output or deleting files. Cancellation and timeout kill and reap adopted descendants, including detached writers. It requires `/proc`. Other platforms do not use it: `messaging_bridge.py` `_transcribe_unsupervised` runs `whisper` directly, kills and reaps only that process, and removes its private directory after it exits. A missing `whisper` makes the owner exit 127, which the bridge names in the log. Do not replace the Linux ownership with pipe EOF or sampled process trees.
 - `email_bridge.py` - Email wake: IMAP IDLE (stdlib) on one inbox, read-only with `BODY.PEEK`; mail that arrives after start becomes a direct hub message that wakes `plugins.hub.email_target_agent` (empty = coordinator). That agent runs the watcher itself (`_email_inbox_loop`, `_runs_email_watch`); it shares `_run_bridge_inbox` and `BridgePollLock` with the Telegram bridge. Guide `docs/guides/email-wake-setup.md`
 - `network_attach.py` - Open an agent on another device of the network as a full chat: its own socket over the sealed device channel. The device running it decides by its trust, as for messages (`RelayAgentBridge.attach_target`: `open` every member device, `agents` only the agents that device may message, `manual` none); the engine opens `agent@device` session ids through it (`kollabor_engine/remote_attach.py`)
 - `vault.py` - Three-tier persistent memory (stream, working, crystallized)
@@ -130,6 +131,21 @@ kollab service install                           # this folder's agent under sys
 2. LLM emits `<hub_msg>` -> `_parse_hub_messages` -> route + strip tags
 3. Agent receives via socket/mailbox -> display + inject + trigger LLM
 4. Event pipeline: PRE -> MAIN -> POST phase data propagation
+
+Offline task assignments and task-cron controls are kept in a bounded durable
+mailbox until receive classification. If its control capacity is full, Hub
+rejects the new control with a retryable delivery failure instead of deleting
+an earlier accepted control. Ordinary offline messages use a separate limit
+and may be evicted oldest-first when that limit is exceeded.
+If receive refuses a durable control, it stays on disk and continues to count
+against control capacity until a later receive classifies it.
+Admission, pruning and replay share one validated record reader. Only recognized
+ordinary messages permit automatic eviction or consumption. Unreadable files,
+malformed or non-object JSON, and invalid message fields remain on disk and
+consume retained capacity until repaired or explicitly resolved. Even a consuming
+read preserves durable controls until receive classification and acknowledgment.
+Identical durable retries ignore mutable routing evidence and persisted delivery
+claims; different content under the same ID returns a delivery rejection.
 
 The web UI reloads stored Hub notes when they arrive, including observed notes
 that do not wake the receiving agent.

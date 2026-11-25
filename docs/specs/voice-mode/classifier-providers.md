@@ -57,7 +57,7 @@ Current model qualification is partial: the bundled voice intent head improves
 classification, but the 40-example acceptance report contains 34 correct automatic
 decisions, 2 incorrect automatic decisions, and 4 deferrals. The model-quality
 gap remains open; integration and unit-test success do not close it. See
-[the benchmark evidence](../../packages/kollabor-voice/bench/README.md).
+[the benchmark evidence](../../../packages/kollabor-voice/bench/README.md).
 
 ## Recent transcript context (September 26 extension)
 
@@ -132,6 +132,6 @@ Contract:
 
 Acceptance: `bench/qwen_voice.py score runtime` drives the shipped worker code
 and matches the measured MLX 8-bit run on every split (see
-[the benchmark evidence](../../packages/kollabor-voice/bench/README.md#fine-tuned-qwen3-06b)).
+[the benchmark evidence](../../../packages/kollabor-voice/bench/README.md#fine-tuned-qwen3-06b)).
 Unit tests cover the gating, routing, answer path and worker protocol;
 `tests/tmux/specs/voice-classifier-qwen.json` picks the model in `/voice config`.

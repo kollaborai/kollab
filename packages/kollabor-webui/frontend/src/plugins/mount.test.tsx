@@ -1,5 +1,6 @@
 // @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
+import { cloneElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Puzzle } from "lucide-react";
@@ -52,6 +53,23 @@ describe("plugin portal scope", () => {
 });
 
 describe("PluginBoundary", () => {
+  it("keeps a secret-bearing render error out of the expanded error DOM", () => {
+    const secret = "secret-token-123";
+    const error = new Error(secret);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const boundary = new PluginBoundary({ name: "Hello", children: null });
+    boundary.state = { ...boundary.state, ...PluginBoundary.getDerivedStateFromError(error) };
+    boundary.componentDidCatch(error, { componentStack: "at SettingsView" });
+
+    const failure = boundary.render() as ReactElement<{ initiallyOpen?: boolean }>;
+    const html = renderToStaticMarkup(cloneElement(failure, { initiallyOpen: true }));
+
+    expect(html).toContain("Hello Failed to Render");
+    expect(html).not.toContain(secret);
+    expect(html).toContain("Check the browser console for details.");
+    expect(log).toHaveBeenCalledWith("Hello failed to render", error, "at SettingsView");
+  });
+
   it("turns an error thrown while drawing into Failed to Render, not a blank app", () => {
     const state = PluginBoundary.getDerivedStateFromError(new Error("bad render"));
     expect(state).toEqual({ error: expect.any(Error) });
