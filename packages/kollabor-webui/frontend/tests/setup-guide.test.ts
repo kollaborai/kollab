@@ -11,6 +11,8 @@ import {
   SETUP_STEPS,
   STORAGE_KEY,
   emptyFacts,
+  getStartedOpensSetup,
+  hasChosenProvider,
   initialGuideState,
   loadGuideState,
   nextStep,
@@ -45,7 +47,7 @@ test("stepIndex maps every step and next/prev stay in bounds", () => {
   assert.equal(nextStep("done"), "done");
   assert.equal(prevStep("welcome"), "welcome");
   assert.equal(nextStep("agent"), "done");
-  assert.equal(prevStep("provider"), "welcome");
+  assert.equal(prevStep("network"), "welcome");
 });
 
 test("fresh state starts at welcome, not dismissed", () => {
@@ -56,6 +58,31 @@ test("fresh state starts at welcome, not dismissed", () => {
     step: "welcome",
     skipped: [],
   });
+});
+
+test("a profile without a provider does not count as chosen", () => {
+  assert.equal(hasChosenProvider([{ name: "work", provider: null }], "work"), false);
+  assert.equal(hasChosenProvider([{ name: "work" }], "work"), false);
+  assert.equal(hasChosenProvider([{ name: "work", provider: "" }], "work"), false);
+});
+
+test("an active real provider counts, but auto and missing profiles do not", () => {
+  const profiles = [
+    { name: "default", provider: "auto" },
+    { name: "claude-code", provider: "acp" },
+  ];
+  assert.equal(hasChosenProvider(profiles, "default"), false);
+  assert.equal(hasChosenProvider(profiles, "claude-code"), true);
+  assert.equal(hasChosenProvider(profiles, undefined), false);
+  assert.equal(hasChosenProvider(profiles, "gone"), false);
+});
+
+test("Get Started opens Setup for missing and auto providers only", () => {
+  assert.equal(getStartedOpensSetup(emptyFacts()), true);
+  assert.equal(
+    getStartedOpensSetup({ ...emptyFacts(), providerChosen: true }),
+    false,
+  );
 });
 
 test("loadGuideState survives a round trip", () => {
@@ -73,18 +100,6 @@ test("loadGuideState rejects malformed JSON and unknown steps", () => {
   assert.equal(loadGuideState(null).step, "welcome");
 });
 
-test("a finished provider setup auto-skips the provider step", () => {
-  const state: GuideState = { step: "provider", dismissed: false };
-  const facts: SetupFacts = {
-    ...emptyFacts(),
-    profileCount: 2,
-    activeProfile: "openai",
-  };
-  const result = resolveStep(state, facts);
-  assert.equal(result.step, "network");
-  assert.deepEqual(result.skipped, ["provider"]);
-});
-
 test("a live network auto-skips the network step", () => {
   const state: GuideState = { step: "network", dismissed: false };
   const facts: SetupFacts = { ...emptyFacts(), networkLive: true };
@@ -98,16 +113,16 @@ test("an active agent auto-skips the agent step", () => {
 });
 
 test("skips chain: everything already set lands on done", () => {
-  const state: GuideState = { step: "provider", dismissed: false };
+  const state: GuideState = { step: "network", dismissed: false };
   const facts: SetupFacts = {
-    profileCount: 1,
+    providerChosen: true,
     activeProfile: "local",
     anyAgentActive: true,
     networkLive: true,
   };
   const result = resolveStep(state, facts);
   assert.equal(result.step, "done");
-  assert.deepEqual(result.skipped, ["provider", "network", "agent"]);
+  assert.deepEqual(result.skipped, ["network", "agent"]);
 });
 
 test("dismissal is sticky and resolves to done", () => {
@@ -121,7 +136,6 @@ test("dismissal is sticky and resolves to done", () => {
 });
 
 test("each actionable step targets a real surface", () => {
-  assert.equal(stepTarget("provider"), "settings:setup");
   assert.equal(stepTarget("network"), "settings:network");
   assert.equal(stepTarget("agent"), "session:new");
   assert.equal(stepTarget("welcome"), null);
@@ -166,10 +180,16 @@ test("shouldAutoOpenGuide: prototype property names are corrupt steps", { skip: 
 });
 
 test("shouldAutoOpenGuide: engaged or dismissed records never reopen", { skip: !guidePolicyAvailable }, () => {
-  assert.equal(guideModel.shouldAutoOpenGuide('{"step":"provider","dismissed":false}'), false);
+  assert.equal(guideModel.shouldAutoOpenGuide('{"step":"network","dismissed":false}'), false);
   assert.equal(guideModel.shouldAutoOpenGuide('{"step":"agent","dismissed":false}'), false);
   assert.equal(guideModel.shouldAutoOpenGuide('{"step":"done","dismissed":true}'), false);
   assert.equal(guideModel.shouldAutoOpenGuide('{"step":"welcome","dismissed":true}'), false);
+});
+
+test("shouldAutoOpenGuide: removed provider progress resumes at welcome without reopening", { skip: !guidePolicyAvailable }, () => {
+  const saved = '{"step":"provider","dismissed":false}';
+  assert.deepEqual(loadGuideState(saved), { step: "welcome", dismissed: false });
+  assert.equal(guideModel.shouldAutoOpenGuide(saved), false);
 });
 
 test("shouldPersistGuide: the untouched initial state writes nothing", { skip: !guidePolicyAvailable }, () => {
@@ -179,15 +199,15 @@ test("shouldPersistGuide: the untouched initial state writes nothing", { skip: !
 
 test("shouldPersistGuide: engage, advance and dismiss all record", { skip: !guidePolicyAvailable }, () => {
   const initial = initialGuideState();
-  assert.equal(guideModel.shouldPersistGuide(initial, { step: "provider", dismissed: false }), true);
+  assert.equal(guideModel.shouldPersistGuide(initial, { step: "network", dismissed: false }), true);
   assert.equal(guideModel.shouldPersistGuide(initial, { step: "welcome", dismissed: true }), true);
-  const engaged: GuideState = { step: "provider", dismissed: false };
+  const engaged: GuideState = { step: "network", dismissed: false };
   assert.equal(guideModel.shouldPersistGuide(engaged, { step: "agent", dismissed: false }), true);
-  assert.equal(guideModel.shouldPersistGuide(engaged, { step: "provider", dismissed: true }), true);
+  assert.equal(guideModel.shouldPersistGuide(engaged, { step: "network", dismissed: true }), true);
 });
 
 test("shouldPersistGuide: identical states and pristine reverts do not write", { skip: !guidePolicyAvailable }, () => {
-  const engaged: GuideState = { step: "provider", dismissed: false };
+  const engaged: GuideState = { step: "network", dismissed: false };
   assert.equal(guideModel.shouldPersistGuide(engaged, engaged), false);
   // A revert to the pristine state must not clobber the record with an
   // undismissed-welcome entry (that record hides first runs from the check).

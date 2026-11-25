@@ -127,10 +127,14 @@ What option A still cannot stop, stated so nobody claims more:
   accident guard for normal tool launches, not a security boundary against
   arbitrary same-user code that deliberately detaches, as described in the
   threat model above.
-  `/hub stop all` in the TUI is scoped to the
-  agents that session started: peers launched by other lanes or the operator
-  are immune, and the startup status advertises the command only to sessions
-  that started agents (`plugins/hub/plugin.py:_handle_stop_command`). The
+  `/hub stop all` typed by a person in the TUI stops every live agent in that
+  session's hub folder and names the agents in other folders (#1408). The
+  agent `hub_stop` tool, and a typed command from a process under a hub agent
+  (tool-shell markers, or a hub agent among its OS ancestors), keep the
+  caller-owned scope: only agents that session started, so peers launched by
+  other lanes or the operator are immune. The startup status advertises the
+  command only to sessions that started agents
+  (`plugins/hub/plugin.py:_handle_stop_command`). The
   presence PID and row boot time are compared with the tracked `AgentSession`
   PID and the OS process creation time; there is no timestamp grace window.
   On Windows, the scan also validates and includes an inherited external

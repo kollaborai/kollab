@@ -50,6 +50,7 @@ import {
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, prepareRemoteOpen, targetsOn } from "@/components/shell/agent-network";
 import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
+import type { DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
@@ -77,6 +78,7 @@ import {
 } from "@/components/ui/sidebar";
 import {
   EngineApi,
+  ApiError,
 
   HISTORY_PAGE_SIZE,
   type HistoryPage,
@@ -207,6 +209,8 @@ function RuntimeShell({
   agents,
   liveAgents,
   remoteAgents,
+  agentIsCurrent,
+  daemonNotice,
   onSessionUpdated,
   onOpenSettings,
   onOpenWelcome,
@@ -229,6 +233,8 @@ function RuntimeShell({
   agents: AgentPoolEntry[];
   /** Every running agent, one per process: the chat reads its own by its instance, never by name. */
   liveAgents: LiveAgent[];
+  agentIsCurrent: boolean;
+  daemonNotice: DaemonNoticeProps;
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
@@ -326,9 +332,20 @@ function RuntimeShell({
     }
     wasRunning.current = running;
   }, [running, lastPrompt, onHistoryCleared]);
-  const [commands, setCommands] = useState<SlashCommand[]>(
-    DEFAULT_SLASH_COMMANDS,
-  );
+  const [commandCatalog, setCommandCatalog] = useState<{
+    sessionId: string;
+    status: "loading" | "ready" | "empty" | "unavailable" | "fallback";
+    commands: SlashCommand[];
+  }>({ sessionId: "", status: "loading", commands: [] });
+  const [commandCatalogRetry, setCommandCatalogRetry] = useState(0);
+  const catalogIsCurrent = commandCatalog.sessionId === session.session_id;
+  const commandCatalogStatus = catalogIsCurrent ? commandCatalog.status : "loading";
+  const welcomeCommand = DEFAULT_SLASH_COMMANDS.find((command) => command.name === "welcome");
+  const catalogIsAuthoritative = catalogIsCurrent &&
+    (commandCatalog.status === "ready" || commandCatalog.status === "fallback");
+  const commands = catalogIsAuthoritative
+    ? commandCatalog.commands
+    : welcomeCommand ? [welcomeCommand] : [];
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
@@ -342,30 +359,40 @@ function RuntimeShell({
 
   useEffect(() => {
     let mounted = true;
-    setCommands(DEFAULT_SLASH_COMMANDS);
+    setCommandCatalog({ sessionId: session.session_id, status: "loading", commands: [] });
     void api
       .listCommands(session.session_id)
       .then((result) => {
         if (!mounted) return;
-        const source = result.commands?.length
-          ? result.commands
-          : DEFAULT_SLASH_COMMANDS;
-        const welcome = DEFAULT_SLASH_COMMANDS.find(
-          (command) => command.name === "welcome",
-        );
-        setCommands([
-          ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
-          ...(welcome ? [welcome] : []),
-        ]);
+        const source = result.commands ?? [];
+        const hasCommands = source.length > 0;
+        setCommandCatalog({
+          sessionId: session.session_id,
+          status: hasCommands ? "ready" : "empty",
+          commands: hasCommands
+            ? [
+                ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
+                ...(welcomeCommand ? [welcomeCommand] : []),
+              ]
+            : [],
+        });
       })
-      .catch(() => {
-        // Keep the first-paint compatibility catalog when an older daemon does
-        // not expose the live registry yet.
+      .catch((error: unknown) => {
+        if (!mounted) return;
+        if (error instanceof ApiError && error.status === 404 && error.message === "Not Found") {
+          setCommandCatalog({
+            sessionId: session.session_id,
+            status: "fallback",
+            commands: DEFAULT_SLASH_COMMANDS,
+          });
+          return;
+        }
+        setCommandCatalog({ sessionId: session.session_id, status: "unavailable", commands: [] });
       });
     return () => {
       mounted = false;
     };
-  }, [session.session_id]);
+  }, [session.session_id, commandCatalogRetry]);
 
   return (
     <MediaSessionProvider api={api} sessionId={session.session_id}>
@@ -410,6 +437,8 @@ function RuntimeShell({
               <Thread
                 agents={targets.agents}
                 commands={commands}
+                commandCatalogStatus={commandCatalogStatus}
+                onRetryCommands={() => setCommandCatalogRetry((retry) => retry + 1)}
                 onOpenPanel={onOpenSettings}
                 onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={
@@ -445,6 +474,8 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
+                    daemonNotice={daemonNotice}
                     mode={shown === "git" ? "git" : "code"} />
                 </Suspense>
               </div>
@@ -457,6 +488,8 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
+                    daemonNotice={daemonNotice}
                   />
                 </Suspense>
               </div>
@@ -1355,6 +1388,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [versionMismatch, setVersionMismatch] = useState<{ page: string; pageBuild: string; engine: string } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<Awaited<ReturnType<EngineApi["checkForUpdate"]>> | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateCheckBusy, setUpdateCheckBusy] = useState(false);
+  const [updateCheckError, setUpdateCheckError] = useState(false);
+  const [updateRetryFailed, setUpdateRetryFailed] = useState(false);
+  const [updateRetryWaiting, setUpdateRetryWaiting] = useState(false);
   // The engine's own version (GET /version): what a chat's agent is compared with.
   const [engineVersion, setEngineVersion] = useState("");
   // One restart asked for from a chat's notice, until that agent publishes the engine's version.
@@ -1364,9 +1401,65 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   useEffect(() => {
     let active = true;
-    void api.checkForUpdate().then((result) => { if (active && result.available) setUpdateInfo(result); }).catch(() => {});
+    void api.checkForUpdate().then((result) => {
+      if (active) setUpdateInfo(result);
+    }).catch(() => {
+      if (active) {
+        setUpdateCheckError(true);
+        setUpdateInfo((previous) => previous ? { ...previous, status: "failed", available: false } : previous);
+      }
+    });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    const retryAt = updateInfo?.retry_at;
+    if (!retryAt) {
+      setUpdateRetryWaiting(false);
+      return;
+    }
+    const delay = retryAt * 1000 - Date.now();
+    if (delay <= 0) {
+      setUpdateRetryWaiting(false);
+      return;
+    }
+    setUpdateRetryWaiting(true);
+    const timer = window.setTimeout(() => setUpdateRetryWaiting(false), delay);
+    return () => window.clearTimeout(timer);
+  }, [updateInfo?.retry_at]);
+
+  const retryUpdateCheck = async () => {
+    setUpdateCheckBusy(true);
+    setUpdateRetryFailed(false);
+    try {
+      const result = await api.checkForUpdate(true);
+      setUpdateInfo(result);
+      setUpdateCheckError(false);
+      setUpdateRetryFailed(result.status === "failed");
+    } catch {
+      setUpdateCheckError(true);
+      setUpdateInfo((previous) => previous ? { ...previous, status: "failed", available: false } : previous);
+      setUpdateRetryFailed(true);
+    } finally {
+      setUpdateCheckBusy(false);
+    }
+  };
+
+  const updateStatus = updateInfo?.status ?? (updateCheckError ? "failed" : null);
+  const updateRetryBlocked = updateCheckBusy
+    || updateRetryWaiting
+    || Boolean(updateInfo?.retry_at && Date.now() < updateInfo.retry_at * 1000);
+  const updateNoticeMessage = updateCheckBusy
+    ? "Checking for updates…"
+    : updateStatus === "available"
+      ? `Kollab ${updateInfo?.release?.version ?? "update"} is available.`
+      : updateStatus === "current"
+        ? `Kollab is up to date.${updateInfo?.last_successful_check ? ` Last successful check: ${new Date(updateInfo.last_successful_check * 1000).toLocaleString()}.` : ""}`
+        : updateStatus === "disabled"
+          ? "Update checks are off."
+          : updateStatus === "failed"
+            ? `${updateRetryFailed ? "Update check failed again." : "Couldn't check for updates."}${updateInfo?.retry_reason === "rate_limit" && updateInfo.retry_at ? ` GitHub is rate limiting checks. Try again after ${new Date(updateInfo.retry_at * 1000).toLocaleTimeString()}.` : updateInfo?.retry_reason === "retry" && updateInfo.retry_at ? ` Try again after ${new Date(updateInfo.retry_at * 1000).toLocaleTimeString()}.` : ""}${updateInfo?.last_successful_check ? ` Last successful check: ${new Date(updateInfo.last_successful_check * 1000).toLocaleString()}.` : ""}`
+            : "";
 
   const applyAvailableUpdate = async () => {
     setUpdateBusy(true);
@@ -1385,6 +1478,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // The open chat's agent against the engine: older code gets a line above the chat (#968).
   const activeAgent = activeSession ? liveAgentOf(activeSession, liveAgents) : undefined;
   const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents });
+  const agentIsCurrent = Boolean(activeAgent && engineVersion && activeAgent.version === engineVersion);
   const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
   const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
   const restartActiveAgent = async () => {
@@ -1397,6 +1491,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     } catch (error) {
       setAgentRestart({ sessionId, waiting: false, failure: errorText(error), tooOld: isAgentTooOld(error) });
     }
+  };
+  const daemonNotice: DaemonNoticeProps = {
+    notice: versionNotice,
+    busy: Boolean(restartHere) && !restartHere?.failure,
+    waiting: restartHere?.waiting ?? false,
+    failure: restartHere?.failure ?? "",
+    tooOld: restartHere?.tooOld ?? false,
+    onRestart: () => void restartActiveAgent(),
   };
   // Once the agent runs the engine's version (or is gone from presence) the ask is over.
   useEffect(() => {
@@ -2032,22 +2134,39 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               {`Couldn't switch to ${pickLabel(pickFailure.pick)}. ${pickFailure.reason}`}
             </NoticeBar>
           ) : null}
-          {updateInfo?.release ? (
+          {updateStatus ? (
             <NoticeBar
-              actions={
-                <>
-                  <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
-                    Release notes
-                  </a>
-                  <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
-                    {updateBusy ? "Updating…" : "Update Now"}
-                  </NoticeAction>
-                </>
+              detail={
+                updateStatus === "disabled"
+                  ? "Change kollabor.updates.check_enabled in your Kollab configuration."
+                  : updateStatus === "available" && updateInfo?.release
+                    ? `Kollab ${updateInfo.release.version} is available.`
+                    : undefined
               }
-              onDismiss={() => setUpdateInfo(null)}
-              detail={`Kollab ${updateInfo.release.version} is available.`}
+              actions={updateStatus === "disabled" ? undefined : (
+                <>
+                  <NoticeAction disabled={updateRetryBlocked} onClick={() => void retryUpdateCheck()}>
+                    {updateCheckBusy ? "Checking…" : updateStatus === "failed" ? "Try Again" : "Check Again"}
+                  </NoticeAction>
+                  {updateStatus === "available" && updateInfo?.release ? (
+                    <>
+                      <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
+                        Release notes
+                      </a>
+                      <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
+                        {updateBusy ? "Updating…" : "Update Now"}
+                      </NoticeAction>
+                    </>
+                  ) : null}
+                </>
+              )}
+              onDismiss={() => {
+                setUpdateInfo(null);
+                setUpdateCheckError(false);
+                setUpdateRetryFailed(false);
+              }}
             >
-              A Kollab update is available.
+              {updateStatus === "available" ? "A Kollab update is available." : updateNoticeMessage}
             </NoticeBar>
           ) : null}
           {contextCompactionStatus ? (
@@ -2095,6 +2214,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   profiles={profiles}
                   agents={agents}
                   liveAgents={liveAgents}
+                  agentIsCurrent={agentIsCurrent}
+                  daemonNotice={daemonNotice}
                   remoteAgents={network.remote}
                   refreshSignal={refreshSignal}
                   supervisorEvents={supervisorEvents}
@@ -2142,7 +2263,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     label={agentName(nextGem.name, nextGem.display_name)}
                   />
                 ) : (
-                  <KollabLogo mist className="text-foreground/80 mb-2 h-10 w-auto" />
+                  <KollabLogo glass className="text-foreground/80 mb-2 h-10 w-auto" />
                 )}
                 <h1 className="text-2xl font-semibold tracking-tight">
                   {nextGem ? agentName(nextGem.name, nextGem.display_name) : "Start a Session"}

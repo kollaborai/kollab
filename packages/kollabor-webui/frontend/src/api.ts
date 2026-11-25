@@ -97,7 +97,13 @@ export type UpdateRelease = { version: string; tag_name: string; name: string; u
 export type UpdateCheckResponse = {
   current_version: string;
   available: boolean;
+  status: "current" | "available" | "disabled" | "failed";
   release: UpdateRelease | null;
+  checked_at: number | null;
+  last_successful_check: number | null;
+  retry_after_seconds: number | null;
+  retry_at: number | null;
+  retry_reason: "retry" | "rate_limit" | null;
   notes: Array<{ version: string; date: string; sections: Array<{ title: string; items: string[] }> }>;
 };
 export type UpdateApplyResponse = { success: boolean; changed: boolean; message: string; method: string };
@@ -552,10 +558,9 @@ export type SlashCommand = {
   subcommands?: SlashSubcommand[];
 };
 
-// Keep the first paint useful when the browser is connected to an older
-// engine that does not expose GET /sessions/{id}/commands yet. A current
-// engine replaces this compatibility catalog with its complete core + plugin
-// registry as soon as the request resolves.
+// Compatibility catalog for older engines that return 404 for
+// GET /sessions/{id}/commands. RuntimeShell uses it only for that unsupported
+// endpoint response and labels it as a fallback; transport failures stay visible.
 export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   {
     name: "help",
@@ -846,12 +851,14 @@ export type PanelWizardStep = {
   id: string;
   title: string;
   fields: PanelField[];
+  actions?: PanelAction[];
 };
 
 export type PanelWizard = PanelBase & {
   kind: "wizard";
   steps: PanelWizardStep[];
   actions?: PanelAction[];
+  context?: Record<string, unknown>;
 };
 
 export type PanelDescription = PanelForm | PanelPicker | PanelWizard;
@@ -1167,8 +1174,9 @@ export class EngineApi {
   }
 
 
-  async checkForUpdate() {
-    const response = await fetch("/api/update/check", { cache: "no-store" });
+  async checkForUpdate(refresh = false) {
+    const query = refresh ? "?refresh=true" : "";
+    const response = await fetch(`/api/update/check${query}`, { cache: "no-store" });
     if (!response.ok) throw new ApiError(`Update check failed: ${response.status}`, response.status, undefined);
     return (await response.json()) as UpdateCheckResponse;
   }

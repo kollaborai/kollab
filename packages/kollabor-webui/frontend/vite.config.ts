@@ -185,6 +185,7 @@ const mainConfig = defineConfig({
   },
   test: {
     // Vitest suites; Node's built-in test runner remains for older tests.
+    maxWorkers: 4,
     include: [
       "tests/media-tokens.test.ts",
       "tests/media-thumb.test.tsx",
@@ -217,7 +218,11 @@ const mainConfig = defineConfig({
       "src/engine-version.test.ts",
       "tests/agent-type-glyph.test.tsx",
       "tests/kollab-logo.test.tsx",
+      "tests/kollab-logo-recovery.test.tsx",
       "tests/agent-version-notice.test.tsx",
+      "tests/daemon-outdated-panels.test.tsx",
+      "tests/daemon-outdated-file-tree.test.tsx",
+      "tests/daemon-outdated-recovery.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",
       "tests/trajectory-detail-title.test.ts",
