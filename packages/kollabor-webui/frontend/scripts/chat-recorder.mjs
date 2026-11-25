@@ -791,13 +791,10 @@ async function record(flow, session, browser, target) {
       }
       await settle(R(1));
     },
-    // Reload while a saved native goal is running; ACP uses the same goal-shaped chat prompt.
+    // ACP does not expose the persisted goal capability required by this flow.
     async "goal-reload"() {
-      if (activeRuntime === "native") {
-        await command(`/goal ${U(1)}: Use your terminal tool to run \`sleep 10\`, then complete this goal with a concise report containing exactly ${R(1)}.`, "PAGE START GOAL");
-      } else {
-        await send(`${U(1)}: Work toward this goal: ${tools(1, 10)}. ${say(1)}`, "U1");
-      }
+      if (activeRuntime !== "native") throw new Error("goal-reload is unsupported for ACP: persisted goals are unavailable");
+      await command(`/goal ${U(1)}: Use your terminal tool to run ` + "`sleep 10`" + `, then complete this goal with a concise report containing exactly ${R(1)}.`, "PAGE START GOAL");
       await reloadDuringRun(R(1));
     },
     // Inject a real hub message while the page's turn is still running.
