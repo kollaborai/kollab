@@ -82,6 +82,8 @@ async def test_without_sender_id_the_recorded_id_is_the_admission_id():
     result = await admit(acp_view)
 
     assert result["status"] == "injected"
+    assert result["joined_request_id"] == "active-req"
+    assert result["joined_turn_id"] == 1
     assert runner._queue.empty()
     assert [args[0] for args in recorded] == [result["request_id"]]
     assert not recorded[0][0].startswith("steering-")

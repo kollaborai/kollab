@@ -1527,9 +1527,9 @@ class ACPOrchestrator:
             raise ACPSteeringUnconfirmed(
                 "ACP turn changed before steering was confirmed"
             )
-        # The transcript row keeps the sender's id, while request_id tells ACP
-        # which client input joined the running turn. A caller without either
-        # gets a daemon-generated row identity.
+        # The row keeps the sender's id; the admission id names it when the
+        # sender sent none. The steering- fallback is for callers with neither (#1371).
+        return_joined = bool(request_id or record_request_id)
         record_request_id = record_request_id or request_id or f"steering-{uuid.uuid4().hex}"
         self._record_user(
             record_request_id,
@@ -1539,7 +1539,7 @@ class ACPOrchestrator:
             hub_note=(origin or {}).get("hub_note"),
         )
         self._parents.pop(record_request_id, None)
-        if request_id and owner_correlatable:
+        if owner_correlatable and return_joined:
             return {
                 "joined_request_id": active.request_id,
                 "joined_turn_id": active.turn_id,

@@ -809,7 +809,7 @@ async def test_logger_await_cannot_reparent_an_admitted_user_turn():
     logged_parents: list[str | None] = []
     captured_items: list[TaggedInput] = []
 
-    async def log_user_message(_content, *, parent_uuid=None):
+    async def log_user_message(_content, *, parent_uuid=None, message_metadata=None):
         logged_parents.append(parent_uuid)
         logger_started.set()
         await release_logger.wait()
