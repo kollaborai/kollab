@@ -85,6 +85,11 @@ async def test_socket_actions_admit_cancel_and_send_one_input_by_client_id():
     stream = ChatStreamService(state)
     rpc = RpcServer()
     register_chat_stream_handlers(rpc, stream)
+    initial = await _call(
+        rpc,
+        "state.chat_stream.subscribe",
+        {"after": None, "conversation_uid": None},
+    )
 
     added = await _call(
         rpc,
@@ -97,15 +102,13 @@ async def test_socket_actions_admit_cancel_and_send_one_input_by_client_id():
         {"id": "web-a1", "text": "hello", "attachments": []},
     )
 
-    initial = await _call(
-        rpc,
-        "state.chat_stream.subscribe",
-        {"after": None, "conversation_uid": None},
-    )
     replay = await _call(
         rpc,
         "state.chat_stream.subscribe",
-        {"after": 0, "conversation_uid": "conv-1"},
+        {
+            "after": initial["events"][0]["data"]["next_seq"] - 1,
+            "conversation_uid": "conv-1",
+        },
     )
     assert initial["events"][0]["type"] == "snapshot"
     assert [event["type"] for event in replay["events"]] == [
