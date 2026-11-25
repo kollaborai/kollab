@@ -171,3 +171,59 @@ test("the panel shell loads on mount, refreshes read-only, and keeps the hint vi
   expect(html).toContain("Read-only");
   expect(html).toContain("/hub cron delete");
 });
+
+/** The opening tag that directly wraps the first occurrence of `text`. */
+function openingTagBefore(html: string, text: string) {
+  const at = html.indexOf(text);
+  expect(at).toBeGreaterThan(-1);
+  return html.slice(html.lastIndexOf("<", at), at);
+}
+
+test("long agent names, targets, messages and errors wrap inside the phone card", () => {
+  const agent = "a".repeat(63);
+  const target = `/work/project/${"nested/output/".repeat(6)}report`;
+  const message = "m".repeat(120);
+  const error = "e".repeat(90);
+  const long: HubCronJobsView = {
+    count: 1,
+    jobs: [{ ...view.jobs[0], agent, target, message, last_error: error }],
+    agents_responded: [agent],
+    agents_unavailable: [],
+    agents_errors: {},
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={long} />);
+  const card = html.slice(html.indexOf("md:hidden"));
+  expect(card).toContain("grid-cols-[auto_minmax(0,1fr)]");
+  expect(openingTagBefore(card, agent)).toContain("wrap-anywhere");
+  expect(openingTagBefore(card, target)).toContain("wrap-anywhere");
+  expect(openingTagBefore(card, message)).toContain("wrap-anywhere");
+  expect(openingTagBefore(card, error)).toContain("wrap-anywhere");
+});
+
+test("warning alerts and unavailable agent names wrap inside the panel", () => {
+  const agent = "u".repeat(63);
+  const refused: HubCronJobsView = {
+    count: 0,
+    jobs: [],
+    agents_responded: [],
+    agents_unavailable: [agent],
+    agents_errors: { [agent]: "operator gate refused the cron_jobs question" },
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={refused} />);
+  const alert = /<p role="alert" class="([^"]*)"/.exec(html)?.[1] ?? "";
+  expect(alert).toContain("wrap-anywhere");
+  expect(openingTagBefore(html, `Not answering: ${agent}`)).toContain("wrap-anywhere");
+});
+
+test("warning alerts use a light-theme amber shade that clears contrast on white", () => {
+  const refused: HubCronJobsView = {
+    count: 0,
+    jobs: [],
+    agents_responded: [],
+    agents_unavailable: ["garnet"],
+    agents_errors: { garnet: "operator gate refused the cron_jobs question" },
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={refused} />);
+  const alert = /<p role="alert" class="([^"]*)"/.exec(html)?.[1] ?? "";
+  expect(alert).toContain("text-amber-700");
+});
