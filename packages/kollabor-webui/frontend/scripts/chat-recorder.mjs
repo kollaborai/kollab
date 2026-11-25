@@ -323,6 +323,7 @@ function installRecorder(cfg) {
   // The chat, sampled once per animation frame and stored when it changes.
   let nodeSeq = 0;
   const nodeId = (el) => (el.__recNode ??= ++nodeSeq);
+  rec.snapshotUserRows = () => [...document.querySelectorAll('[data-role="user"]')].map((el) => ({ id: nodeId(el), text: el.textContent ?? "" }));
   const hash = (text) => { let h = 2166136261; for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
   let viewport = null;
   const findViewport = (row) => {
@@ -815,6 +816,7 @@ async function record(flow, session, browser, target) {
       if (matches.length !== 1) throw new Error("could not uniquely resolve the selected session hub presence");
       const from = `chat-recorder-${LABEL}`;
       const text = `${tag} hub note arriving during the active turn. Acknowledge it briefly, then finish the current request.`;
+      const beforeUsers = await page.evaluate(() => window.__rec.snapshotUserRows?.() ?? []);
       const afterIndex = await page.evaluate(() => window.__rec.net.length);
       await postFromClient("/hub/messages", {
         target: agent,
@@ -823,6 +825,10 @@ async function record(flow, session, browser, target) {
         content: text,
       }, "HUB NOTE ARRIVES MID-TURN");
       await waitForStreamRowKind("note", { whileRunning: true, afterIndex, hubNote: { from, text } });
+      const afterUsers = await page.evaluate(() => window.__rec.snapshotUserRows?.() ?? []);
+      if (beforeUsers.some((before) => !afterUsers.some((after) => after.id === before.id && after.text === before.text))) {
+        throw new Error("an existing user row changed after the hub note");
+      }
       await settle(R(1));
     },
   };
