@@ -22,7 +22,7 @@ _PATH = re.compile(
     r"(?P<quote>['\"])(?:~|/(?!/)|[A-Za-z]:\\)[^'\"]*(?P=quote)"
     r"|(?<![A-Za-z0-9._~:-])(?:~|/(?!/)|[A-Za-z]:\\)[^\s'\"]*"
 )
-_SAFE_TEXT_VALUES = {"budget", "length", "required"}
+_SAFE_TEXT_VALUES = {"budget", "length", "required", "status"}
 
 
 def _is_auth_credential(value: str) -> bool:

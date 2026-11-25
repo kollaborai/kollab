@@ -899,7 +899,7 @@ const Composer: FC<{
     )) {
       cancelPendingPluginSubmit();
     }
-    if (pluginCommandSubmissionPending(draft, commandCatalogStatus, pluginSnapshot, reserved)) {
+    if (pluginCommandSubmissionPending(draft, commandCatalogStatus, pluginSnapshot, reserved, Boolean(draftKey))) {
       event.preventDefault();
       const pendingSubmission = pendingPluginSubmitRef.current;
       if (!pendingSubmission) {
@@ -983,7 +983,7 @@ const Composer: FC<{
       cancelPendingPluginSubmit();
       return;
     }
-    if (!pluginCommandSubmissionPending(pending.text, commandCatalogStatus, pluginSnapshot, reserved)) {
+    if (!pluginCommandSubmissionPending(pending.text, commandCatalogStatus, pluginSnapshot, reserved, Boolean(draftKey))) {
       replayPendingPluginSubmit(false);
     }
   }, [aui, commandCatalogStatus, composerText, draftKey, pluginSnapshot, queueSessionId, reserved]);
@@ -1267,6 +1267,7 @@ const Composer: FC<{
     commandCatalogStatus,
     pluginSnapshot,
     reserved,
+    Boolean(draftKey),
   ) && commandCatalogStatus !== "loading"
     ? "Loading plugin commands."
     : slashCatalogNotice(commandCatalogStatus, pluginItems.length > 0);

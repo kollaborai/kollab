@@ -678,12 +678,11 @@ def _bounded_inventory_identifier(value: object, limit: int = _INVENTORY_TEXT_LI
     clean = _bounded_inventory_text(value, limit, reject_sensitive=False)
     if clean is None:
         return None
-    if contains_sensitive_text(clean):
-        if (
-            not _DECLARATION_ID.fullmatch(clean)
-            or any(contains_sensitive_text(part) for part in clean.split(":"))
-        ):
-            return None
+    if (
+        contains_sensitive_text(clean, allow_safe_values=True)
+        or any(contains_sensitive_text(part) for part in clean.split(":"))
+    ):
+        return None
     return clean
 
 

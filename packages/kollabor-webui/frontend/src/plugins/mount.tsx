@@ -169,8 +169,10 @@ export class PluginBoundary extends Component<PluginBoundaryProps, PluginBoundar
   }
 
   componentDidUpdate(previousProps: Readonly<PluginBoundaryProps>) {
-    if (previousProps.resetKey !== this.props.resetKey && this.state.error && !this.state.timedOutSuspense) {
-      this.setState({ error: null });
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState(this.state.timedOutSuspense
+        ? { error: null, timedOutSuspense: false }
+        : { error: null });
     }
   }
 
