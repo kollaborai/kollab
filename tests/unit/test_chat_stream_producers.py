@@ -353,3 +353,31 @@ def test_snapshot_and_compaction_read_active_transcript_rows():
 
     assert replacement["type"] == "replace"
     assert any(row["id"] == "hub-message-1" for row in replacement["data"]["rows"])
+
+
+def test_snapshot_translates_canonical_transcript_images_to_chat_parts():
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content=[
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image",
+                    "source": {"kind": "url", "url": "https://example.test/image.png"},
+                },
+            ],
+            metadata={"request_id": "web-image-snapshot"},
+        )
+    ]
+
+    event = ChatStreamService(state).subscribe(
+        {"after": None, "conversation_uid": None}
+    )["events"][0]
+
+    row = event["data"]["rows"][0]
+    assert row["id"] == "web-image-snapshot"
+    assert row["parts"] == [
+        {"type": "text", "text": "look"},
+        {"type": "image", "url": "https://example.test/image.png"},
+    ]
