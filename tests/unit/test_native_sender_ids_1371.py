@@ -100,3 +100,31 @@ async def test_native_voice_admission_queues_under_the_sender_request_id(arrives
     queued = service._enqueue_with_overflow_strategy.await_args.args[0]
     assert isinstance(queued, QueuedInput)
     assert queued.request_ids == ("client-req-V",)
+
+
+class _VoicePlugin:
+    """The voice plugin's admit, submitting each turn as it arrives."""
+
+    async def admit(self, data, submit):
+        return await submit(None)
+
+
+@pytest.mark.asyncio
+async def test_a_public_voice_turn_reaches_admission_with_its_request_id():
+    coordinator = SimpleNamespace(
+        event_bus=SimpleNamespace(get_service={"voice_plugin": _VoicePlugin()}.get),
+        process_user_input=AsyncMock(return_value={"status": "queued"}),
+    )
+    data = {
+        "message": "Make notes",
+        "source": "voice",
+        "voice": {"admission_id": "a1", "epoch": "e1"},
+        "request_id": "client-req-P",
+    }
+
+    await MessageHandler(coordinator).handle_user_input(
+        data, SimpleNamespace(source="voice")
+    )
+
+    kwargs = coordinator.process_user_input.await_args.kwargs
+    assert kwargs.get("request_id") == "client-req-P"
