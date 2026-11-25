@@ -427,6 +427,25 @@ describe("chat recorder analysis", () => {
     expect(`/sessions/${encodeURIComponent("session one")}/inputs`.endsWith(suffix)).toBe(false);
   });
 
+  it("does not report a goal run clean without turn-attributed rendered tool cards", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf('    // Inject a real hub message', start));
+    const turn = { turn_id: "goal-turn", input_ids: [], origin: { type: "goal" } };
+    const goal = { conversation_uid: "conversation", goal: { goal_id: "g", attempt: { attempt_id: "a", turn_id: "goal-turn" } } };
+    const stream = { conversation_uid: "conversation", turns: [turn] };
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native", command: async () => {}, U: () => "u", R: () => "r",
+      readPersistedGoal: async () => goal, currentStreamState: async () => stream,
+      hasMatchingGoalTurn: () => true, mark: async () => {},
+      reloadDuringRun: async (_reply: string, check: any) => {
+        await check.before(turn, stream);
+        await check.after(turn, stream, stream);
+      },
+    });
+    await expect(flow()).rejects.toThrow(/rendered.*turn|turn.*rendered/i);
+  });
+
   it("counts a tool call once across row IDs and reload", () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
