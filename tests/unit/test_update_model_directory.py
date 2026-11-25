@@ -503,3 +503,40 @@ def test_refresh_refuses_to_write_unrepresentable_retained_context_window(tmp_pa
 
     assert upd.main(argv) == 2
     assert registry.read_text() == registry_text
+
+
+def test_refresh_repairs_oversized_context_and_output_from_source(tmp_path):
+    source = {
+        "data": [
+            {
+                "id": "vendor/repaired",
+                "context_length": 2000,
+                "top_provider": {"max_completion_tokens": 4096},
+            }
+        ]
+    }
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/repaired": {
+                    "provider": "openrouter",
+                    "context_window": "OVERSIZED_CONTEXT",
+                    "max_output": "OVERSIZED_OUTPUT",
+                }
+            }
+        }
+    )
+    registry_text = registry_text.replace('"OVERSIZED_CONTEXT"', "9" * 5000)
+    registry_text = registry_text.replace('"OVERSIZED_OUTPUT"', "8" * 5000)
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
+
+    assert upd.main(argv) == 0
+
+    def reject_non_json_number(value):
+        raise AssertionError(f"non-standard JSON number written: {value}")
+
+    models = json.loads(registry.read_text(), parse_constant=reject_non_json_number)[
+        "models"
+    ]
+    assert models["vendor/repaired"]["context_window"] == 2000
+    assert models["vendor/repaired"]["max_output"] == 4096
