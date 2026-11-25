@@ -150,6 +150,7 @@ export type ChatTransport = Pick<EngineApi, "request" | "streamSse">;
 export type ChatSnapshot = {
   readonly rows: readonly ChatRow[];
   readonly inputs: Readonly<Record<string, InputInfo>>;
+  readonly turns?: Readonly<Record<string, TurnInfo>>;
   readonly running: boolean;
   readonly connection: ConnectionState;
   readonly hasEarlier: boolean;
@@ -170,6 +171,7 @@ export interface LiveStore extends ChatStore {
 /** The client prefix for the input ids the web UI picks: newInputId(WEB_INPUT_PREFIX). */
 export const WEB_INPUT_PREFIX = "web";
 
+const HEALTHY_CONNECTION_MS = 30_000;
 const MAX_BACKOFF_MS = 10_000;
 // Rows per older page: the same size the daemon's history route defaults to.
 const HISTORY_PAGE_LIMIT = 50;
@@ -177,7 +179,7 @@ const HISTORY_PAGE_LIMIT = 50;
 type HistoryPage = { rows: ChatRow[]; older: string | null };
 
 /** A send whose row the stream has not delivered yet: the row, and how many POSTs for its id are still running. */
-type LocalSend = { row: ChatRow; posts: number };
+type LocalSend = { row: ChatRow; posts: number; succeeded: boolean };
 
 /** The HTTP status carried by an error the transport threw, if it has one. */
 function errorStatus(error: unknown): number | undefined {
@@ -191,13 +193,16 @@ function errorStatus(error: unknown): number | undefined {
  */
 export class LiveChatStore implements LiveStore {
   private state: StreamState = initialStreamState;
+  private lastConversationUid: string | null = null;
   // Not named `connection`: that name is the public getter below.
   private connectionState: ConnectionState = "connecting";
   // Not named `olderStatus`: that name is the public getter below.
   private paging: OlderStatus = "idle";
-  // Counts the window replacements (a resync or a snapshot). A history page checks it to see that its window is still current.
+  // Counts the window replacements (a resync, a snapshot or a replace). A history page checks it to see that its window is still current.
   private epoch = 0;
-  // Sends the stream has not delivered yet, by input id. Each row sits in `state.rows` until the stream's row replaces it.
+  // A later history request supersedes an older one, even while both use the same window.
+  private pageRequestId = 0;
+  // Sends the stream has not delivered yet, kept separately from authoritative rows.
   private readonly sends = new Map<string, LocalSend>();
   private attempts = 0;
   private started = false;
@@ -284,7 +289,7 @@ export class LiveChatStore implements LiveStore {
 
   /** Shows the input at once as a pending row, then posts it. A failed post leaves the row as failed, and rethrows. */
   async send(input: InputRequest): Promise<void> {
-    this.beginSend(input);
+    const localSend = this.beginSend(input);
     let response: Response;
     try {
       response = await this.transport.request(`/sessions/${this.enc}/inputs`, {
@@ -292,22 +297,22 @@ export class LiveChatStore implements LiveStore {
         body: JSON.stringify(input),
       });
     } catch (error) {
-      this.endSend(input.id, false);
+      this.endSend(input.id, localSend, false);
       throw error;
     }
-    this.endSend(input.id, response.ok);
+    this.endSend(input.id, localSend, response.ok);
     if (!response.ok) throw new Error(`send failed: ${response.status}`);
   }
 
   /** Adds the pending row at the end of the rows. A send whose id is already on screen adds nothing. */
-  private beginSend(input: InputRequest): void {
+  private beginSend(input: InputRequest): LocalSend | undefined {
     const send = this.sends.get(input.id);
     if (send) {
       send.posts += 1;
       if (send.row.status === "failed") this.replaceLocalRow(send, { ...send.row, status: "pending" });
-      return;
+      return send;
     }
-    if (this.state.rows.some((row) => row.id === input.id)) return;
+    if (this.state.rows.some((row) => row.id === input.id)) return undefined;
     const row: ChatRow = {
       id: input.id,
       seq: -1, // not on the stream yet
@@ -318,25 +323,22 @@ export class LiveChatStore implements LiveStore {
       parts: [{ type: "text", text: input.text }],
       created_at: new Date().toISOString(),
     };
-    this.sends.set(input.id, { row, posts: 1 });
-    this.state = { ...this.state, rows: [...this.state.rows, row] };
+    const localSend = { row, posts: 1, succeeded: false };
+    this.sends.set(input.id, localSend);
     this.publish();
+    return localSend;
   }
 
   /** Records one POST's answer. A failure with no other POST for the id still running marks the row failed. */
-  private endSend(id: string, ok: boolean): void {
-    const send = this.sends.get(id);
-    if (!send) return; // the stream has delivered the row, so it is no longer local
+  private endSend(id: string, send: LocalSend | undefined, ok: boolean): void {
+    if (!send || this.sends.get(id) !== send) return; // retired or replaced while the POST was in flight
     send.posts -= 1;
-    if (!ok && send.posts === 0) this.replaceLocalRow(send, { ...send.row, status: "failed" });
+    send.succeeded ||= ok;
+    if (!send.succeeded && send.posts === 0) this.replaceLocalRow(send, { ...send.row, status: "failed" });
   }
 
   private replaceLocalRow(send: LocalSend, row: ChatRow): void {
     send.row = row;
-    this.state = {
-      ...this.state,
-      rows: this.state.rows.map((candidate) => (candidate.id === row.id ? row : candidate)),
-    };
     this.publish();
   }
 
@@ -360,37 +362,48 @@ export class LiveChatStore implements LiveStore {
 
   async loadOlder(): Promise<void> {
     const cursor = this.state.olderCursor;
-    if (cursor === null) return;
-    // The page belongs to the window it was asked for. A resync or a snapshot while it is in flight replaces that window.
+    // Until a snapshot restores the window, its cursor is not trusted: a resync, or a 409 that called it stale, may have left it.
+    if (cursor === null || this.state.lastSeq === null) return;
+    // The page belongs to the window it was asked for. A resync, a snapshot or a replace while it is in flight replaces that window.
     const { conversationUid } = this.state;
     const epoch = this.epoch;
-    const current = () => this.epoch === epoch && this.state.conversationUid === conversationUid;
+    const pageRequestId = ++this.pageRequestId;
+    const isLatestRequest = () => this.pageRequestId === pageRequestId;
+    const current = () =>
+      isLatestRequest() && this.epoch === epoch && this.state.conversationUid === conversationUid;
     this.setPaging("loading");
     const path = `/sessions/${this.enc}/rows?before=${encodeURIComponent(cursor)}&limit=${HISTORY_PAGE_LIMIT}`;
     let page: HistoryPage;
     try {
       const response = await this.requestHistory(path);
       if (response === null) {
-        // A stale cursor: resync, and the next snapshot brings a fresh one.
-        if (current()) this.resync();
-        this.settlePaging();
+        // A stale cursor: forget it and resync. The next snapshot brings a fresh one, so this cursor is never retried.
+        if (current()) {
+          this.state = { ...this.state, olderCursor: null };
+          this.resync();
+          this.settlePaging();
+        } else if (isLatestRequest()) {
+          this.settlePaging();
+        }
         return;
       }
       page = (await response.json()) as HistoryPage;
       if (!Array.isArray(page.rows)) throw new Error("history failed: unexpected page");
     } catch (error) {
       if (current()) this.setPaging("failed");
-      else this.settlePaging();
+      else if (isLatestRequest()) this.settlePaging();
+      else return;
       throw error;
     }
     if (!current()) {
       // The window changed while the page was in flight, so its rows and cursor do not belong to it.
-      this.settlePaging();
+      if (isLatestRequest()) this.settlePaging();
       return;
     }
     const held = new Set(this.state.rows.map((row) => row.id));
     const older = page.rows.filter((row) => !held.has(row.id));
     this.state = { ...this.state, rows: [...older, ...this.state.rows], olderCursor: cursorOf(page.older) };
+    this.keepUndelivered();
     this.paging = this.state.olderCursor === null ? "complete" : "idle";
     this.publish();
   }
@@ -412,11 +425,12 @@ export class LiveChatStore implements LiveStore {
 
   private snapshotOf(): ChatSnapshot {
     return {
-      rows: this.state.rows,
+      rows: this.sends.size === 0 ? this.state.rows : [...this.state.rows, ...Array.from(this.sends.values(), (send) => send.row)],
       inputs: this.state.inputs,
+      turns: this.state.turns,
       running: turnsRunning(this.state.turns),
       connection: this.connectionState,
-      hasEarlier: this.state.olderCursor !== null,
+      hasEarlier: this.state.olderCursor !== null && this.state.lastSeq !== null,
       olderStatus: this.paging,
     };
   }
@@ -427,9 +441,9 @@ export class LiveChatStore implements LiveStore {
     for (const listener of [...this.listeners]) listener();
   }
 
-  /** Sets the paging state from the window: complete when no older rows remain, idle when some do. */
+  /** Sets the paging state from the window: complete when the window is known to have no older rows, idle otherwise. */
   private settlePaging(): void {
-    this.setPaging(this.state.olderCursor === null ? "complete" : "idle");
+    this.setPaging(this.state.lastSeq !== null && this.state.olderCursor === null ? "complete" : "idle");
   }
 
   /** Sets the paging state and tells the listeners, unless the state is unchanged. */
@@ -443,6 +457,7 @@ export class LiveChatStore implements LiveStore {
   private async run(): Promise<void> {
     while (!this.disposed) {
       const controller = new AbortController();
+      let openedAt: number | null = null;
       this.controller = controller;
       const after = this.state.lastSeq;
       const path = `/sessions/${this.enc}/stream` + (after === null ? "" : `?after=${after}`);
@@ -453,13 +468,18 @@ export class LiveChatStore implements LiveStore {
           path,
           controller.signal,
           (event) => this.onEvent(controller, event),
-          () => this.onOpen(controller),
+          () => {
+            if (this.controller === controller && !controller.signal.aborted) openedAt = performance.now();
+            this.onOpen(controller);
+          },
+          () => { if (this.controller === controller && !controller.signal.aborted) this.resync(); },
         );
       } catch {
         // A refused, failed or aborted connection counts as a drop below.
       }
       this.controller = null;
       if (this.disposed) return;
+      if (openedAt !== null && performance.now() - openedAt >= HEALTHY_CONNECTION_MS) this.attempts = 0;
       this.attempts += 1;
       if (this.attempts >= this.maxAttempts) {
         this.connectionState = "failed";
@@ -487,14 +507,19 @@ export class LiveChatStore implements LiveStore {
       return;
     }
     if (result.outcome.kind === "duplicate") return;
-    this.state = result.state;
-    // A snapshot brings a new window with its own cursor, so the paging state follows it.
     if (event.type === "snapshot") {
+      if (this.lastConversationUid !== null && this.lastConversationUid !== event.conversation_uid) this.sends.clear();
+      this.lastConversationUid = event.conversation_uid;
+    }
+    this.state = result.state;
+    // A new window or deletion invalidates an in-flight page, which may contain stale rows.
+    // Keep the current cursor so a fresh page can be requested.
+    if (event.type === "snapshot" || event.type === "replace" || event.type === "row.delete") {
       this.epoch += 1;
       this.paging = this.state.olderCursor === null ? "complete" : "idle";
     }
     this.followSends(event);
-    this.attempts = 0;
+    if (event.type !== "snapshot") this.attempts = 0;
     this.publish();
   }
 
@@ -505,17 +530,14 @@ export class LiveChatStore implements LiveStore {
   }
 
   /**
-   * After a snapshot or a replace, the window's row wins over a local row with the same id. A local row the window
-   * lacks stays at the end while its POST runs, and after a failure, so the text stays on screen.
+   * After a snapshot, a replace, or a history page, the window's row wins over a local row with the same id. A local row the window
+   * lacks stays at the end until delivery, including after a failure, so the text stays on screen.
    */
   private keepUndelivered(): void {
     const inWindow = new Set(this.state.rows.map((row) => row.id));
-    const kept: ChatRow[] = [];
-    for (const [id, send] of this.sends) {
-      if (!inWindow.has(id) && (send.posts > 0 || send.row.status === "failed")) kept.push(send.row);
-      else this.sends.delete(id);
+    for (const id of this.sends.keys()) {
+      if (inWindow.has(id)) this.sends.delete(id);
     }
-    if (kept.length > 0) this.state = { ...this.state, rows: [...this.state.rows, ...kept] };
   }
 
   /** Keeps rows on screen, forgets the cursor, and ends the connection so the loop reconnects without `after`. */

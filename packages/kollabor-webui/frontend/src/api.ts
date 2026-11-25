@@ -1455,6 +1455,7 @@ export class EngineApi {
     signal?: AbortSignal,
     onEvent?: (event: T) => void,
     onOpen?: () => void,
+    onMalformedData?: () => void,
   ): Promise<void> {
     const response = await this.request(path, { method: "GET", signal });
     if (!response.body) throw new Error("event stream response has no body");
@@ -1479,7 +1480,8 @@ export class EngineApi {
           try {
             onEvent?.(JSON.parse(data) as T);
           } catch {
-            // Ignore keepalive/non-JSON frames while preserving the stream.
+            if (onMalformedData) { onMalformedData(); return; }
+            // Other stream consumers ignore non-JSON frames.
           }
         }
       }
@@ -1494,7 +1496,8 @@ export class EngineApi {
           try {
             onEvent?.(JSON.parse(data) as T);
           } catch {
-            // Ignore a partial trailing frame.
+            if (onMalformedData) onMalformedData();
+            // Other stream consumers ignore a partial trailing frame.
           }
         }
       }

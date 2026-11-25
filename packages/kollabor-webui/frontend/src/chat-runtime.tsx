@@ -14,7 +14,7 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
-import { newInputId, type ChatPart, type ChatRow, type ChatStore } from "./chat-stream";
+import { newInputId, type ChatPart, type ChatRow, type ChatStore, type TurnInfo } from "./chat-stream";
 import type { ChatSnapshot, LiveStore } from "./chat-store";
 
 /** The client prefix for the input ids the web UI picks: newInputId(WEB_INPUT_PREFIX). */
@@ -41,7 +41,7 @@ function toPart(part: ChatPart): LikePart {
         args: isRecord(part.args) ? (part.args as ReadonlyJSONObject) : {},
         argsText: JSON.stringify(part.args ?? {}),
         result: part.result,
-        isError: part.is_error,
+        isError: part.is_error ?? undefined,
       };
     case "image":
       return { type: "image", image: part.url };
@@ -53,19 +53,21 @@ function toPart(part: ChatPart): LikePart {
   }
 }
 
-/** One stored row as the message assistant-ui renders. Status, attachments and metadata are not set. */
-export function toThreadMessageLike(row: ChatRow): ThreadMessageLike {
+/** One stored row as the message assistant-ui renders. */
+export function toThreadMessageLike(row: ChatRow, turns: Readonly<Record<string, TurnInfo>> = {}): ThreadMessageLike {
   return {
     id: row.id,
     role: row.role,
     createdAt: new Date(row.created_at),
     content: row.parts.map(toPart),
+    ...(row.role === "assistant" && (row.status === "running" || row.status === "streaming") && row.turn_id !== null && turns[row.turn_id]?.state === "running"
+      ? { status: { type: "running" as const } } : {}),
   };
 }
 
 /** The repository for the rows, one message per row, in row order. */
-export function toRepository(rows: readonly ChatRow[]): ExportedMessageRepository {
-  return ExportedMessageRepository.fromArray(rows.map(toThreadMessageLike));
+export function toRepository(rows: readonly ChatRow[], turns: Readonly<Record<string, TurnInfo>> = {}): ExportedMessageRepository {
+  return ExportedMessageRepository.fromArray(rows.map((row) => toThreadMessageLike(row, turns)));
 }
 
 /** The text of a composed message: its text parts joined in order, other parts ignored. */
@@ -106,8 +108,8 @@ export function buildAdapter(
 /** The assistant-ui runtime for the store: the thread shows its rows and follows its running state. */
 export function useChatRuntime(store: LiveStore): AssistantRuntime {
   const snap: ChatSnapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
-  // Memoized on the rows: a new repository makes assistant-ui sync the whole thread.
-  const repository = useMemo(() => toRepository(snap.rows), [snap.rows]);
+  // Turn transitions can change message status without changing the rows.
+  const repository = useMemo(() => toRepository(snap.rows, snap.turns), [snap.rows, snap.turns]);
   return useExternalStoreRuntime(
     buildAdapter(store, { running: snap.running, hasEarlier: snap.hasEarlier }, repository),
   );

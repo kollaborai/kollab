@@ -1,3 +1,4 @@
+import { EngineApi } from "../src/api";
 import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatRow, InputInfo, InputRequest, TurnInfo } from "../src/chat-stream";
@@ -401,6 +402,55 @@ describe("LiveChatStore", () => {
     expect(store.rows.map((r) => r.id)).toEqual(["r3"]);
   });
 
+  it("fails after repeated snapshots followed by drops", async () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    const { store, streams } = make({ maxAttempts: 3 });
+    store.start();
+    for (let i = 0; i < 3; i++) {
+      await vi.waitFor(() => expect(streams).toHaveLength(i + 1));
+      streams[i].open();
+      streams[i].emit(snapshot(5, [row("r1")]));
+      streams[i].drop();
+    }
+    await vi.waitFor(() => expect(store.connection).toBe("failed"));
+    clock.mockRestore();
+  });
+
+  it("continues reconnecting after sustained idle connections drop", async () => {
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    try {
+      const { store, streams } = make({ maxAttempts: 3 });
+      store.start();
+      for (let i = 0; i < 4; i++) {
+        await vi.waitFor(() => expect(streams).toHaveLength(i + 1));
+        streams[i].open();
+        streams[i].emit(snapshot(5, [row("r1")]));
+        now += 60_000;
+        streams[i].drop();
+      }
+      await vi.waitFor(() => expect(streams).toHaveLength(5));
+      expect(store.connection).toBe("connecting");
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("resyncs without after when the final data frame is malformed", async () => {
+    const api = new EngineApi();
+    const first = `data: ${JSON.stringify(snapshot(5, [row("r1")]))}\n\n: keepalive\n\ndata: {broken}\n\n`;
+    const request = vi.spyOn(api, "request").mockResolvedValueOnce(new Response(first))
+      .mockImplementation((_path, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      }));
+    const store = new LiveChatStore(api, "s1", { retryBaseMs: 0 });
+    stores.push(store);
+    store.start();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(request.mock.calls[1][0]).toBe("/sessions/s1/stream");
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+  });
+
   it("eight failed connects in a row set connection to failed; retry() connects again", async () => {
     const { store, streams, streamSse } = make();
     for (let attempt = 0; attempt < 8; attempt++) streamSse.mockRejectedValueOnce(new Error("refused"));
@@ -652,6 +702,53 @@ describe("LiveChatStore", () => {
     expect(store.olderStatus).toBe("idle");
   });
 
+  it("after a 409 answer, hasEarlier is false until a snapshot restores the cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(store.hasEarlier).toBe(false);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(snapshot(8, [row("r3", "three")], { older: "fresh" }));
+    expect(store.hasEarlier).toBe(true);
+  });
+
+  it("a second loadOlder after a 409 answer sends no request, so the reconnect stream stays open", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    // If the stale cursor were requested again, the daemon would answer 409 again.
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(streams).toHaveLength(2);
+    expect(streams[1].signal.aborted).toBe(false);
+  });
+
+  it("discards an in-flight older page after a stream deletion and retries the same cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one"), row("r2", "two")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(5, "row.delete", { id: "r1" }));
+    respond([row("r0", "zero"), row("r1", "stale")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["r2"]);
+    expect(store.olderStatus).toBe("idle");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [row("r0", "zero")], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c1&limit=50");
+    expect(store.rows.map((r) => r.id)).toEqual(["r0", "r2"]);
+    expect(store.olderStatus).toBe("complete");
+  });
+
   it("a history page that finishes after a resync and a new snapshot is dropped: its rows and cursor do not join the new window", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
@@ -719,11 +816,67 @@ describe("LiveChatStore", () => {
     expect(store.olderStatus).toBe("idle");
   });
 
-  it("a snapshot without an older field has no earlier page: hasEarlier is false, paging is complete, and loadOlder sends nothing", async () => {
+  it("only the newest history request can update the rows, cursor, or paging status", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
-    // The shared validators do not check `older`, so a snapshot can arrive without it.
-    first.emit(streamEvent(1, "snapshot", { rows: [row("r1")], next_seq: 5, turns: [], inputs: [] }));
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+
+    const respondFirst = holdHistory(request);
+    const firstLoad = store.loadOlder();
+    const respondSecond = holdHistory(request);
+    const secondLoad = store.loadOlder();
+    respondSecond([row("r-1", "newer page")], "c-1");
+    await secondLoad;
+
+    const failThird = holdRequest(request);
+    const thirdLoad = store.loadOlder();
+    respondFirst([row("r0", "stale page")], "c0");
+    await firstLoad;
+    const rowsWhileThirdLoads = store.rows.map((item) => item.id);
+    const statusWhileThirdLoads = store.olderStatus;
+
+    failThird(new Response(null, { status: 500 }));
+    await expect(thirdLoad).rejects.toThrow("history failed: 500");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
+    await store.loadOlder();
+
+    expect(rowsWhileThirdLoads).toEqual(["r-1", "r1"]);
+    expect(statusWhileThirdLoads).toBe("loading");
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c-1&limit=50");
+  });
+
+  it("a replace while an older page is in flight drops that page: its rows do not join the replacement window", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(5, "replace", { rows: [row("m1", "Compacted", "marker", "system")] }));
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["m1"]);
+  });
+
+  it("a replace resets the paging state as a snapshot does: olderStatus leaves loading when the window is replaced", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    expect(store.olderStatus).toBe("loading");
+    first.emit(streamEvent(5, "replace", { rows: [row("m1", "Compacted", "marker", "system")] }));
+    expect(store.olderStatus).toBe("idle");
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["m1"]);
+    expect(store.olderStatus).toBe("idle");
+  });
+
+  it("a snapshot with no older cursor has no earlier page: hasEarlier is false, paging is complete, and loadOlder sends nothing", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    // The shared contract requires the field, using null when there are no older rows.
+    first.emit(snapshot(5, [row("r1")]));
     expect(store.hasEarlier).toBe(false);
     expect(store.olderStatus).toBe("complete");
     await store.loadOlder();
@@ -759,6 +912,28 @@ describe("LiveChatStore", () => {
     expect(store.rows[1]).toEqual(row("web-a1", "hello", "input", "user"));
   });
 
+  it("orders interleaved clients by stream delivery", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    await store.send({ id: "web-a1", text: "hello" });
+    first.emit(streamEvent(5, "row.upsert", row("other", "other", "input", "user")));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "other", "web-a1"]);
+    first.emit(streamEvent(6, "row.upsert", row("web-a1", "hello", "input", "user")));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "other", "web-a1"]);
+  });
+
+  it("reconciles an accepted local send found in an older history page", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("recent")], { older: "cursor" }));
+    await store.send({ id: "web-a1", text: "hello" });
+    const accepted = row("web-a1", "hello", "input", "user");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [accepted], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(store.rows).toEqual([accepted, row("recent")]);
+  });
+
   it("a snapshot that contains the pending row's id takes the window's row in its place", async () => {
     const { store, streams } = make();
     const first = await startOpen(store, streams);
@@ -766,6 +941,30 @@ describe("LiveChatStore", () => {
     await store.send({ id: "web-a1", text: "hello" });
     first.emit(snapshot(7, [row("r1", "one"), row("web-a1", "hello", "input", "user")]));
     expect(store.rows).toEqual([row("r1", "one"), row("web-a1", "hello", "input", "user")]);
+  });
+
+  it("clears old local sends after resync to a different conversation and ignores their late POSTs", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("old")]));
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "failed", text: "old failed" })).rejects.toThrow();
+    const oldAnswer = holdRequest(request);
+    const oldSend = store.send({ id: "shared", text: "old pending" });
+    first.emit(streamEvent(7, "row.upsert", row("gap")));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(streamEvent(1, "snapshot", {
+      rows: [row("new")], next_seq: 2, older: null, turns: [], inputs: [],
+    }, "conv-2"));
+    expect(store.rows).toEqual([row("new")]);
+    const newAnswer = holdRequest(request);
+    const newSend = store.send({ id: "shared", text: "new pending" });
+    oldAnswer(new Response(null, { status: 500 }));
+    await expect(oldSend).rejects.toThrow();
+    expect(store.rows[1]).toMatchObject({ id: "shared", status: "pending" });
+    newAnswer(new Response(null, { status: 202 }));
+    await newSend;
   });
 
   it("a snapshot without the pending row's id keeps the row while its POST is in flight", async () => {
@@ -781,13 +980,15 @@ describe("LiveChatStore", () => {
     expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
   });
 
-  it("once the POST has succeeded, a snapshot without the pending row's id drops the row", async () => {
+  it("once the POST has succeeded, a snapshot without the pending row's id retains it", async () => {
     const { store, streams } = make();
     const first = await startOpen(store, streams);
     first.emit(snapshot(5, [row("r1", "one")]));
     await store.send({ id: "web-a1", text: "hello" });
     first.emit(snapshot(7, [row("r1", "one")]));
-    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    first.emit(streamEvent(7, "row.upsert", row("web-a1", "hello", "input", "user")));
+    expect(store.rows).toEqual([row("r1", "one"), row("web-a1", "hello", "input", "user")]);
   });
 
   it("a replace that lacks the pending row's id keeps the row while its POST is in flight", async () => {
@@ -823,6 +1024,19 @@ describe("LiveChatStore", () => {
     first.emit(snapshot(7, [row("r1", "one")]));
     expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
     expect(store.rows[1].status).toBe("failed");
+  });
+
+  it("keeps an accepted send pending when a same-id resend fails", async () => {
+    const { store, request } = make();
+    const firstAnswer = holdRequest(request);
+    const first = store.send({ id: "web-a1", text: "hello" });
+    const secondAnswer = holdRequest(request);
+    const second = store.send({ id: "web-a1", text: "hello" });
+    firstAnswer(new Response(null, { status: 202 }));
+    await first;
+    secondAnswer(new Response(null, { status: 500 }));
+    await expect(second).rejects.toThrow("send failed: 500");
+    expect(store.rows).toEqual([expect.objectContaining({ id: "web-a1", status: "pending" })]);
   });
 
   it("sending again with the same id adds no second row; a resend after a failure is pending again", async () => {

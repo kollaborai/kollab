@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
+import fixture from "./fixtures/chat-stream/bad-gap.json";
+import { applyChatStreamEvent, initialStreamState } from "../src/chat-store";
 import type { ChatRow } from "../src/chat-stream";
 import {
   WEB_INPUT_PREFIX,
@@ -84,6 +86,13 @@ describe("toThreadMessageLike", () => {
     ]);
   });
 
+  it("normalizes a null tool error flag to undefined", () => {
+    const message = toThreadMessageLike(
+      row("nullable", [{ type: "tool-call", tool_call_id: "c", tool_name: "test", args: {}, is_error: null }]),
+    );
+    expect((message.content as { isError?: boolean }[])[0].isError).toBeUndefined();
+  });
+
   it("gives empty args when the tool-call args are not a plain object", () => {
     const message = toThreadMessageLike(
       row("row-4", [{ type: "tool-call", tool_call_id: "call-2", tool_name: "list", args: ["a"] }]),
@@ -106,6 +115,35 @@ describe("toThreadMessageLike", () => {
 });
 
 describe("toRepository", () => {
+  it("tracks running assistant rows through turn end without marking completed rows active", () => {
+    const active = { ...row("active", [
+      { type: "reasoning" as const, text: "thinking" },
+      { type: "tool-call" as const, tool_call_id: "c", tool_name: "test", args: {} },
+    ]), turn_id: "t1", status: "running" };
+    const completed = { ...row("done", []), turn_id: "t1", status: "complete" };
+    const running = { t1: { turn_id: "t1", state: "running" as const, input_ids: [] } };
+    const ended = { t1: { ...running.t1, state: "ended" as const } };
+    expect(toRepository([completed, active], running).messages.map((m) => m.message.status.type)).toEqual(["complete", "running"]);
+    expect(toRepository([active], ended).messages[0].message.status.type).not.toBe("running");
+  });
+
+  it("replays a contract streaming row through its turn lifecycle", () => {
+    const [snapshot, streaming] = fixture.events;
+    const turn = { turn_id: "t1", state: "running", input_ids: [] };
+    let state = initialStreamState;
+    for (const event of [snapshot, streaming, { seq: 3, conversation_uid: "conv-1", type: "turn.state", data: turn }]) {
+      const result = applyChatStreamEvent(state, event);
+      expect(result.outcome.kind).toBe("applied");
+      state = result.state;
+    }
+    expect(toRepository(state.rows, state.turns).messages[0].message.status.type).toBe("running");
+    const ended = applyChatStreamEvent(state, {
+      seq: 4, conversation_uid: "conv-1", type: "turn.state", data: { ...turn, state: "ended" },
+    });
+    expect(ended.outcome.kind).toBe("applied");
+    expect(toRepository(ended.state.rows, ended.state.turns).messages[0].message.status.type).toBe("complete");
+  });
+
   it("returns one message per row, in row order", () => {
     const repository = toRepository([row("a", []), row("b", []), row("c", [])]);
     expect(repository.messages.map((item) => item.message.id)).toEqual(["a", "b", "c"]);
