@@ -47,6 +47,7 @@ import {
   analyzeChatFrames,
   CHAT_RECORDER_FLOWS,
   classifyChatRuntime,
+  findPromptStatusUpdate,
   hasRunningTurnWithInputs,
   isCompactionComplete,
   parseRuntimeMatrix,
@@ -188,6 +189,7 @@ function installRecorder(cfg) {
       if (data.id) entry.row = data.id;
       if (data.kind) entry.rowKind = data.kind;
       if (data.state) entry.state = data.state;
+      if (data.status !== undefined) entry.status = data.status;
       if (Array.isArray(data.rows)) entry.rows = data.rows.length;
       return void rec.net.push(entry);
     }
@@ -467,17 +469,28 @@ async function record(flow, session, browser, target) {
     const started = Date.now();
     while (Date.now() - started < timeout) {
       const state = await page.evaluate((rowKind) => ({
-        seen: window.__rec.net.some((entry) => entry.kind === "stream" && entry.ev === "row.upsert" && entry.rowKind === rowKind),
+        row: window.__rec.net.find((entry) =>
+          entry.kind === "stream" && entry.ev === "row.upsert" && entry.rowKind === rowKind),
         running: !!document.querySelector('[aria-label="Stop generating"]'),
       }), kind);
-      if (state.seen) {
+      if (state.row) {
         if (whileRunning && !state.running) throw new Error(`the ${kind} row arrived after the turn ended`);
-        return;
+        return state.row;
       }
       if (whileRunning && !state.running) throw new Error(`the turn ended before its ${kind} row arrived`);
       await sleep(250);
     }
     throw new Error(`the chat stream did not deliver a ${kind} row within ${timeout / 1000} seconds`);
+  };
+  const waitForPromptStatusUpdate = async (rowId, initialStatus, afterIndex, timeout = 30000) => {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const entries = await page.evaluate(() => window.__rec.net);
+      const updated = findPromptStatusUpdate(entries, rowId, initialStatus, afterIndex);
+      if (updated) return updated;
+      await sleep(250);
+    }
+    throw new Error(`the prompt row ${rowId} did not receive an updated status after approval`);
   };
   const preserveRecorderState = async (expectedActiveTurn) => page.evaluate((activeTurn) => sessionStorage.setItem(
     "__kollabChatRecorderRestore",
@@ -659,15 +672,20 @@ async function record(flow, session, browser, target) {
         const toolId = prompt.tool_id ?? prompt.details?.tool_id;
         const permissionId = prompt.permission_id ?? prompt.details?.permission_id;
         if (!toolId || !permissionId) throw new Error("permission prompt omitted its tool or permission id");
-        await waitForStreamRowKind("prompt");
+        const promptRow = await waitForStreamRowKind("prompt");
+        if (!promptRow.row || typeof promptRow.status !== "string") {
+          throw new Error("the prompt stream row omitted its id or initial status");
+        }
         await mark(`PROMPT OPEN ${toolId}`);
         await sleep(900);
+        const approvalOffset = await page.evaluate(() => window.__rec.net.length - 1);
         await postFromClient(`/sessions/${session}/permission`, {
           tool_id: toolId,
           permission_id: permissionId,
           decision: "approve",
           scope: "once",
         }, "OTHER CLIENT ANSWER PROMPT");
+        await waitForPromptStatusUpdate(promptRow.row, promptRow.status, approvalOffset);
         await settle(R(1));
       } finally {
         if (originalMode !== "confirm_all") {

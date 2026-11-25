@@ -80,6 +80,15 @@ export function hasRunningTurnWithInputs(snapshot, expectedTurn) {
       (input.state === "started" || input.state === "joined")));
 }
 
+/** Find a post-action upsert that changes the status of the same prompt row. */
+export function findPromptStatusUpdate(entries, promptId, initialStatus, afterIndex = 0) {
+  if (!Array.isArray(entries) || !promptId || typeof initialStatus !== "string" ||
+      !Number.isInteger(afterIndex) || afterIndex < -1) return null;
+  return entries.find((entry, index) => index > afterIndex &&
+    entry.kind === "stream" && entry.ev === "row.upsert" && entry.row === promptId &&
+    typeof entry.status === "string" && entry.status !== initialStatus) ?? null;
+}
+
 /** Count the recorder's frame-level defects without accessing a browser. */
 export function analyzeChatFrames(frames, marks) {
   const at = (name) => marks.find((mark) => mark.name === name)?.t;
