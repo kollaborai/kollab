@@ -266,7 +266,8 @@ run snyk if available
 
 run container scanning if dockerfiles exist
 
-  <terminal>find . -name "Dockerfile*" -o -name "docker-compose*" | head -5</terminal>
+  <file-find><pattern>Dockerfile*</pattern></file-find>
+  <file-find><pattern>docker-compose*</pattern></file-find>
 
   with grype:
     <terminal>grype . 2>/dev/null || echo "grype scan failed"</terminal>
