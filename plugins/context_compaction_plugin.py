@@ -22,6 +22,7 @@ from uuid import uuid4
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_ai.conversation_logger import _session_file_write_lock_path, utc_stamp
 from kollabor_ai.fast_model import resolve_fast_model
+from kollabor_ai.model_registry import parse_json_int
 from kollabor_config.config_utils import resolve_global_path
 from kollabor_config.file_lock import locked_file
 from kollabor_events import EventType, Hook, HookPriority
@@ -109,7 +110,7 @@ def _load_model_registry() -> Dict[str, Any]:
         if p.exists():
             try:
                 with open(p) as f:
-                    registry = json.load(f)
+                    registry = json.load(f, parse_int=parse_json_int)
                 break
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Failed to load bundled model registry {p}: {e}")
@@ -119,7 +120,7 @@ def _load_model_registry() -> Dict[str, Any]:
     if user_path.exists():
         try:
             with open(user_path) as f:
-                user_data = json.load(f)
+                user_data = json.load(f, parse_int=parse_json_int)
             # Merge models (user wins)
             if "models" in user_data:
                 registry.setdefault("models", {}).update(user_data["models"])
