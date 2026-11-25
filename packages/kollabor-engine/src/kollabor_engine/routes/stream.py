@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from sse_starlette.sse import EventSourceResponse
 
@@ -267,7 +268,7 @@ async def cancel_input(session_id: str, input_id: str):
     return {"id": input_id, "cancelled": True}
 
 
-@router.post("/{session_id}/inputs/{input_id}/send-now")
+@router.post("/{session_id}/inputs/{input_id}/send-now", status_code=202)
 async def send_input_now(session_id: str, input_id: str):
     result = await _call_daemon(
         session_id,
@@ -277,8 +278,24 @@ async def send_input_now(session_id: str, input_id: str):
     if not isinstance(result, dict) or result.get("found") is not True:
         raise HTTPException(status_code=404, detail="Input not found")
     state = result.get("state")
-    if not isinstance(state, str):
+    accepted = result.get("accepted")
+    turn_id = result.get("turn_id")
+    if (
+        not isinstance(state, str)
+        or state not in {"queued", "started", "joined", "ended"}
+        or not isinstance(accepted, bool)
+        or (turn_id is not None and (not isinstance(turn_id, str) or not turn_id))
+        or (state in {"started", "joined"} and not turn_id)
+    ):
         raise HTTPException(
             status_code=502, detail="The local daemon returned an invalid input state."
         )
-    return {"id": input_id, "state": state}
+    already_moved = state in {"started", "joined"} or (
+        state == "ended" and turn_id is not None
+    )
+    if not accepted and not already_moved:
+        raise HTTPException(status_code=409, detail="Input is no longer queued")
+    return JSONResponse(
+        status_code=202 if accepted else 200,
+        content={"id": input_id, "state": state, "turn_id": turn_id},
+    )

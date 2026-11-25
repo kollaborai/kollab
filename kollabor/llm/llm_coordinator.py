@@ -706,8 +706,8 @@ class LLMService:
         if not isinstance(queue_handoff, QueueHandoffContext):
             return {"status": "rejected", "reason": "invalid_queue_capability"}
         if queue_handoff.force_send:
-            return await self._submit_forced_queue_handoff(
-                message, queue_handoff, batch_lease
+            return await self.submit_forced_queue_handoff_input(
+                message, queue_handoff, batch_lease=batch_lease
             )
         if batch_lease is not None:
             return {"status": "rejected", "reason": "invalid_queue_batch"}
@@ -726,6 +726,73 @@ class LLMService:
                 queue_handoff=queue_handoff,
                 force_next_turn=queue_handoff.force_send,
             )
+
+    async def submit_forced_queue_handoff_input(
+        self,
+        message: MessageContent,
+        queue_handoff: Any,
+        *,
+        batch_lease: object | None = None,
+    ) -> Dict[str, Any]:
+        """Admit one Send Now item through the shared native/ACP queue gate.
+
+        Batch workers pass their existing lease. A standalone input reserves
+        the same gate as a batch of one, so both paths stop the current owner
+        and place this input ahead of the waiting queue without steering.
+        """
+        from .queue_handoff import QueueHandoffContext
+
+        if (
+            not isinstance(queue_handoff, QueueHandoffContext)
+            or not queue_handoff.force_send
+        ):
+            return {"status": "rejected", "reason": "invalid_queue_capability"}
+        if batch_lease is not None:
+            return await self._submit_forced_queue_handoff(
+                message, queue_handoff, batch_lease
+            )
+
+        lease = await self.begin_queue_handoff_batch(
+            conversation_uid=queue_handoff.conversation_uid,
+            conversation_revision=queue_handoff.conversation_revision,
+            queue_scope_id=queue_handoff.queue_scope_id or "",
+            queue_incarnation=queue_handoff.queue_incarnation or "",
+            batch_id=queue_handoff.batch_id or "",
+            claim_id=queue_handoff.claim_id or "",
+            request_ids=(queue_handoff.request_id,),
+        )
+        if lease is None:
+            return {"status": "rejected", "reason": "force_send_unavailable"}
+
+        uncertain = getattr(lease, "in_doubt", False) is True
+        try:
+            result = await self._submit_forced_queue_handoff(
+                message, queue_handoff, lease
+            )
+        except BaseException:
+            uncertain = uncertain or (
+                queue_handoff.provider_admission_started
+                or queue_handoff.history_row_preexisting
+                or queue_handoff.recording_status == "uncertain"
+            )
+            try:
+                self.finish_queue_handoff_batch(
+                    lease,
+                    accepted_count=getattr(lease, "accepted_count", 0),
+                    uncertain=uncertain,
+                )
+            except Exception:
+                logger.warning("Single-input queue handoff finalization failed")
+            raise
+
+        uncertain = uncertain or queue_handoff.recording_status == "uncertain"
+        if not self.finish_queue_handoff_batch(
+            lease,
+            accepted_count=getattr(lease, "accepted_count", 0),
+            uncertain=uncertain,
+        ):
+            raise RuntimeError("Single-input queue handoff finalization failed")
+        return result
 
     async def begin_queue_handoff_batch(
         self,
@@ -3558,7 +3625,10 @@ class LLMService:
         origin_context: dict[str, Any] | None,
         queue_handoff: Any,
     ) -> Dict[str, Any]:
-        """Stop a native turn to terminal settlement, then admit once at head."""
+        """Force a turn boundary before admitting a trusted Send Now input."""
+        if queue_handoff is not None:
+            return await self.submit_forced_queue_handoff_input(message, queue_handoff)
+
         processor = getattr(self, "_queue_processor", None)
         begin = getattr(processor, "begin_forced_send", None)
         end = getattr(processor, "end_forced_send", None)
