@@ -54,9 +54,9 @@ test("sessionless panel name: halted folder keeps connect-halt, setup mount serv
   assert.equal(PANEL_NAME.network, "connect");
 });
 
-test("sessionless tabs: halt shows Network only, the setup mount shows Provider and Network", () => {
-  assert.deepEqual(sessionlessTabs(true), ["network"]);
-  assert.deepEqual(sessionlessTabs(false), ["setup", "network"]);
+test("sessionless tabs: halt shows Network and Plugins, the setup mount adds Provider", () => {
+  assert.deepEqual(sessionlessTabs(true), ["network", "plugins"]);
+  assert.deepEqual(sessionlessTabs(false), ["setup", "network", "plugins"]);
 });
 
 test("panelHostMount: sessioned, halt waiter, sessionless setup, and closed", () => {

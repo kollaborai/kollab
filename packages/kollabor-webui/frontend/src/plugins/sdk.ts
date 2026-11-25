@@ -8,6 +8,7 @@
  * never as HTML, and plugin controls are the app's own components (`k.ui`).
  */
 import { useCallback, useEffect, useState, type ComponentType } from "react";
+import type { PanelField } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -43,12 +44,17 @@ export type Declared = string | { id?: string; name?: string; tool?: string; tag
 
 export type PluginService = {
   name: string;
-  state: string;
-  desired?: string;
+  state: "starting" | "running" | "backoff" | "stopping" | "stop-failed" | "exited" | "stopped" | "crash-stopped" | "error" | "unknown" | "failed";
+  desired?: "running" | "stopped";
   pid?: number | null;
   since?: number | null;
   restarts?: number;
+  secrets?: string[];
+  secrets_omitted: number;
+  heartbeat_s?: number | null;
   heartbeat?: number | null;
+  heartbeat_monitor_since?: number | null;
+  stop_deadline?: number | null;
   error?: string | null;
 };
 
@@ -61,6 +67,7 @@ export type PluginEntry = {
   source?: string | null;
   commit?: string | null;
   enabled: boolean;
+  enable_order?: number | null;
   shadowed: boolean;
   state: "ok" | "error" | "off" | "stopping" | "stop-failed" | "changed-on-disk" | "skipped";
   error: string | null;
@@ -74,8 +81,25 @@ export type PluginEntry = {
     renderers?: Declared[];
   };
   services: PluginService[];
+  settings?: PanelField[];
+  settings_section?: { title?: string } | null;
   uses?: string[];
   granted?: string[];
+  omitted: {
+    services: number;
+    uses: number;
+    granted: number;
+    settings: number;
+    setting_options: number;
+    option_labels: number;
+    contributions: number;
+  };
+};
+
+/** `GET /plugins` response. `server_time` is Unix time in seconds. */
+export type PluginInventoryResponse = {
+  plugins?: unknown;
+  server_time?: unknown;
 };
 
 /** The open chat, as a plugin view receives it. */
