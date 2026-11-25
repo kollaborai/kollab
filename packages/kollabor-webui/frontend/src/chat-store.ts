@@ -90,8 +90,13 @@ function fromSnapshot(event: SnapshotEvent): StreamState {
     rows: [...data.rows],
     inputs: Object.fromEntries(data.inputs.map((input) => [input.id, input] as const)),
     turns: Object.fromEntries(data.turns.map((turn) => [turn.turn_id, turn] as const)),
-    olderCursor: data.older,
+    olderCursor: cursorOf(data.older),
   };
+}
+
+/** The older-rows cursor the daemon sent. A missing or non-string value means there are no older rows. */
+function cursorOf(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
 }
 
 /** Returns the new state, or the reason to resync. */
@@ -330,7 +335,7 @@ export class LiveChatStore implements LiveStore {
     }
     const held = new Set(this.state.rows.map((row) => row.id));
     const older = page.rows.filter((row) => !held.has(row.id));
-    this.state = { ...this.state, rows: [...older, ...this.state.rows], olderCursor: page.older ?? null };
+    this.state = { ...this.state, rows: [...older, ...this.state.rows], olderCursor: cursorOf(page.older) };
     this.paging = this.state.olderCursor === null ? "complete" : "idle";
     this.publish();
   }
