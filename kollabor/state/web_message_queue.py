@@ -946,8 +946,10 @@ class WebMessageQueue:
         operation_id: str,
         batch: _StoredBatch,
         fingerprint: str,
+        items: Sequence[_StoredItem] | None = None,
     ) -> QueueReceipt:
-        self._reserve_claim_lifecycle(operation_id, batch.items)
+        items = batch.items if items is None else items
+        self._reserve_claim_lifecycle(operation_id, items)
         batch.status = BatchStatus.DISPATCHING
         batch.claim_id = operation_id
         self._active_claim = operation_id
@@ -958,7 +960,7 @@ class WebMessageQueue:
             operation_id,
             BatchStatus.DISPATCHING.value,
             batch_id=batch.batch_id,
-            request_ids=tuple(item.request_id for item in batch.items),
+            request_ids=tuple(item.request_id for item in items),
             claim_id=operation_id,
         )
         return self._record(fingerprint, receipt, kind="batch_claim")
@@ -995,17 +997,23 @@ class WebMessageQueue:
         batch_id: str,
         *,
         send_now: bool = False,
+        request_id: str | None = None,
     ) -> QueueReceipt:
         """Claim a named envelope, optionally promoting it ahead of the queue.
 
-        Send Now promotion and claim happen under the same lock. The envelope
-        keeps its internal order and remains one active claim until settled.
+        Send Now promotion and claim happen under the same lock. A selected
+        item alone is reserved; its siblings stay in their original order.
+        Whole-batch claims retain their existing promotion behavior.
         """
         self._validate_identifier(operation_id)
         self._validate_identifier(batch_id)
         if not isinstance(send_now, bool):
             raise ValueError("send_now must be a bool")
-        input_fingerprint = self._fingerprint("claim_batch", batch_id, send_now)
+        if request_id is not None:
+            self._validate_identifier(request_id)
+            if not send_now:
+                raise ValueError("a selected item requires send_now")
+        input_fingerprint = self._fingerprint("claim_batch", batch_id, send_now, request_id)
         async with self._lock:
             replay = self._replay(operation_id, input_fingerprint)
             if replay is not None:
@@ -1032,11 +1040,16 @@ class WebMessageQueue:
             )
             if not send_now and first_queued is not batch:
                 raise OutOfOrderClaim("normal claims must preserve queue order")
-            if send_now:
+            items = batch.items
+            if request_id is not None:
+                items = [item for item in batch.items if item.request_id == request_id]
+                if not items:
+                    raise ItemNotFound("item is not pending in this batch")
+            if send_now and request_id is None:
                 self._ensure_operation_capacity(2 + 3 * len(batch.items))
                 batch.priority_rank = self._next_priority_rank
                 self._next_priority_rank += 1
-            return self._claim_receipt(operation_id, batch, input_fingerprint)
+            return self._claim_receipt(operation_id, batch, input_fingerprint, items)
 
     async def claim_next_item(
         self,
@@ -1064,11 +1077,14 @@ class WebMessageQueue:
                 raise ClaimNotDispatchable("batch claim is not dispatching")
             if self._active_item_attempt_id is not None:
                 raise ClaimBusy("another item in the batch is unresolved")
+            reservation = self._claim_reservations.get(claim_id)
             item = next(
                 (
                     candidate
                     for candidate in batch.items
                     if candidate.status is ItemStatus.QUEUED
+                    and reservation is not None
+                    and candidate.request_id in reservation.item_slots
                 ),
                 None,
             )
@@ -1414,6 +1430,13 @@ class WebMessageQueue:
                 batch.status = BatchStatus.DISPATCHING
                 self._claim_states[batch_claim_id] = BatchStatus.DISPATCHING.value
                 self._free_item_reservation(batch_claim_id, request_id)
+                if reservation is not None and not reservation.item_slots:
+                    batch.status = BatchStatus.QUEUED
+                    batch.claim_id = None
+                    self._active_claim = None
+                    self._active_batch_id = None
+                    self._claim_states[batch_claim_id] = ClaimOutcome.ACCEPTED.value
+                    self._free_claim_reservation(batch_claim_id)
             else:
                 del self._batches[batch.batch_id]
                 self._active_claim = None

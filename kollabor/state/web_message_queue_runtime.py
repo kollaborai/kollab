@@ -710,7 +710,7 @@ class WebMessageQueueRuntime:
             if not self._send_now_available():
                 return {"found": True, "accepted": False, "state": "queued"}
             result = await self._dispatch_scope(
-                matches[0], batch_id=batch.batch_id, send_now=True
+                matches[0], batch_id=batch.batch_id, send_now=True, request_id=input_id
             )
             return {
                 "found": result.get("status") != WorkerStatus.EMPTY.value,
@@ -801,6 +801,7 @@ class WebMessageQueueRuntime:
         *,
         batch_id: str | None,
         send_now: bool,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         if self._closing:
             return {"status": WorkerStatus.CLOSED.value, "accepted": False}
@@ -847,6 +848,7 @@ class WebMessageQueueRuntime:
                         last_result = await worker.dispatch_batch(
                             batch.batch_id,
                             send_now=send_now,
+                            request_id=request_id,
                         )
                         if last_result.status is not WorkerStatus.ADMITTED:
                             return self._worker_result_to_wire(last_result)
