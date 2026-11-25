@@ -32,6 +32,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
+from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
 
 from .device_names import parse_handle
@@ -135,8 +136,9 @@ class ScheduleStore:
         """Replace the file's contents, atomically under the file lock."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps([row.to_dict() for row in rows], indent=2)
-        with locked_file(self._path, "w") as handle:
-            handle.write(payload + "\n")
+        lock_path = self._path.with_name(self._path.name + ".lock")
+        with locked_file(lock_path, "a", private=True):
+            write_text_atomic(self._path, payload + "\n")
 
 
 class RunLog:
