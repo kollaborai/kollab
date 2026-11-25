@@ -123,9 +123,7 @@ test("the panel renders the refresh control and loading state before data arrive
   expect(html).toContain('aria-label="Refresh cron jobs"');
   expect(html).toContain("Refresh");
   expect(html).toContain("Loading scheduled jobs");
-  expect(html).toContain(
-    "Deleting a job happens in the owning agent",
-  );
+  expect(html).toContain("run /hub cron delete in the terminal of");
 });
 
 test("a partial empty roster says unavailable agents have unknown jobs", () => {

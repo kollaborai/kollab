@@ -150,12 +150,12 @@ test("Edit saves the changed fields", async () => {
   await click(button("Edit"));
   expect(field("Prompt").value).toBe("report the pulse");
   expect(field("Every").value).toBe("1h");
-  expect(field("Runs in").value).toBe("lapis");
+  expect(field("Runs In").value).toBe("lapis");
   setValue(field("Prompt"), "report the pulse twice");
   setValue(field("Every"), "30m");
-  setValue(field("Runs in"), "lapis, infra@devbox");
-  await click(button("Open a new instance"));
-  await click(button("Save schedule"));
+  setValue(field("Runs In"), "lapis, infra@devbox");
+  await click(button("Open a New Instance"));
+  await click(button("Save Schedule"));
   expect(calls).toEqual([
     [
       "update",
@@ -176,11 +176,11 @@ test("Add schedule creates a new one", async () => {
   const { api, calls } = stubApi([]);
   await mount(api);
   expect(host.textContent).toContain("No schedules yet");
-  await click(button("Add schedule"));
+  await click(button("Add Schedule"));
   setValue(field("Prompt"), "check the tunnel");
   setValue(field("Every"), "5m");
-  setValue(field("Runs in"), "infra@devbox");
-  await click(button("Save schedule"));
+  setValue(field("Runs In"), "infra@devbox");
+  await click(button("Save Schedule"));
   expect(calls).toEqual([
     [
       "create",
@@ -199,11 +199,11 @@ test("Add schedule creates a new one", async () => {
 test("a bad Every or empty fields block Save with a message", async () => {
   const { api, calls } = stubApi([]);
   await mount(api);
-  await click(button("Add schedule"));
+  await click(button("Add Schedule"));
   setValue(field("Prompt"), "x");
   setValue(field("Every"), "soon");
-  setValue(field("Runs in"), "lapis");
-  await click(button("Save schedule"));
+  setValue(field("Runs In"), "lapis");
+  await click(button("Save Schedule"));
   expect(calls).toEqual([]);
   expect(host.querySelector('[role="alert"]')?.textContent).toContain("Every");
 });
@@ -213,7 +213,7 @@ test("Delete asks once more before deleting", async () => {
   await mount(api);
   await click(button("Delete"));
   expect(calls).toEqual([]);
-  await click(button("Confirm delete"));
+  await click(button("Confirm Delete"));
   expect(calls).toEqual([["delete", "ab12cd34"]]);
 });
 

@@ -57,7 +57,7 @@ function agentsLabel(agents: string[]) {
 
 function StatusText({ active }: { active: boolean }) {
   return active ? (
-    <span className="text-emerald-700 dark:text-emerald-400">Active</span>
+    <span className="text-highlight">Active</span>
   ) : (
     <span className="text-muted-foreground">Paused</span>
   );
@@ -110,7 +110,7 @@ function ScheduleForm({
     const agents = d.agents.split(",").map((a) => a.trim()).filter(Boolean);
     if (!d.prompt.trim()) return setProblem("Write the prompt to send.");
     if (interval === null) return setProblem("Every needs a time like 30s, 5m, 1h or 2h30m.");
-    if (!agents.length) return setProblem("Runs in needs at least one agent name.");
+    if (!agents.length) return setProblem("Runs In needs at least one agent name.");
     setProblem("");
     onSave({
       prompt: d.prompt.trim(),
@@ -124,94 +124,103 @@ function ScheduleForm({
 
   return (
     <div className="min-w-0 text-sm">
-      <h3 className="font-medium">{row ? "Edit schedule" : "Add schedule"}</h3>
-      <div className="mt-3 grid gap-4 sm:grid-cols-2">
-        <label className="block sm:col-span-2">
-          <span className="font-medium">Prompt</span>
-          <textarea
-            aria-label="Prompt"
-            rows={3}
-            className={`${FIELD} mt-1 resize-y`}
-            value={d.prompt}
-            onChange={(e) => set({ prompt: e.target.value })}
-          />
-          <Hint>Sent as a message to each agent when the schedule fires.</Hint>
-        </label>
-        <label className="block">
-          <span className="font-medium">Every</span>
-          <input
-            aria-label="Every"
-            className={`${FIELD} mt-1`}
-            value={d.every}
-            onChange={(e) => set({ every: e.target.value })}
-          />
-          <Hint>30s, 5m, 1h or 2h30m. Repeats until you pause or delete it.</Hint>
-        </label>
-        <label className="block">
-          <span className="font-medium">Skill</span>
-          <input
-            aria-label="Skill"
-            className={`${FIELD} mt-1`}
-            placeholder="No skill"
-            value={d.skill}
-            onChange={(e) => set({ skill: e.target.value })}
-          />
-          <Hint>Optional. The agent that runs it must have this skill.</Hint>
-        </label>
-        <label className="block sm:col-span-2">
-          <span className="font-medium">Runs in</span>
-          <input
-            aria-label="Runs in"
-            className={`${FIELD} mt-1`}
-            placeholder="lapis, infra@devbox"
-            value={d.agents}
-            onChange={(e) => set({ agents: e.target.value })}
-          />
-          <Hint>
-            Agent names, separated by commas. Add @device for an agent on another
-            device. An agent that is not running is started.
-          </Hint>
-        </label>
-        <div className="sm:col-span-2">
-          <span className="block font-medium">If the agent is busy</span>
-          <div className="bg-muted/50 mt-1 grid w-full grid-cols-2 gap-1 rounded-md p-1 sm:inline-grid sm:w-auto">
-            {(
-              [
-                ["queue", "Add to its queue"],
-                ["new_instance", "Open a new instance"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={d.whenBusy === value}
-                onClick={() => set({ whenBusy: value })}
-                className={`rounded px-3 py-1.5 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 ${
-                  d.whenBusy === value ? "bg-background font-medium" : "text-muted-foreground"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <Hint>
-            Add to its queue: the prompt runs right after its current turn, in the
-            same chat. A new instance runs it now, beside the busy one.
-          </Hint>
+      <h3 className="font-medium">{row ? "Edit Schedule" : "Add Schedule"}</h3>
+      <div className="mt-3 grid gap-x-6 gap-y-5 sm:grid-cols-2">
+        <div className="space-y-4">
+          <p className="text-muted-foreground text-xs font-medium">What to Send</p>
+          <label className="block">
+            <span className="font-medium">Prompt</span>
+            <textarea
+              aria-label="Prompt"
+              rows={3}
+              className={`${FIELD} mt-1 resize-y`}
+              value={d.prompt}
+              onChange={(e) => set({ prompt: e.target.value })}
+            />
+            <Hint>Sent as a message to each agent when the schedule fires.</Hint>
+          </label>
+          <label className="block">
+            <span className="font-medium">Skill</span>
+            <input
+              aria-label="Skill"
+              className={`${FIELD} mt-1`}
+              placeholder="No skill"
+              value={d.skill}
+              onChange={(e) => set({ skill: e.target.value })}
+            />
+            <Hint>Optional. The agent that runs it must have this skill.</Hint>
+          </label>
         </div>
-        <div className="sm:col-span-2">
-          <button
-            type="button"
-            aria-pressed={d.active}
-            onClick={() => set({ active: !d.active })}
-            className="rounded font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-          >
-            <StatusText active={d.active} />
-          </button>
-          <Hint>
-            {d.active ? "Press Active to pause." : "Press Paused to make it active."}{" "}
-            Paused keeps the schedule without running it.
-          </Hint>
+        <div className="space-y-4">
+          <p className="text-muted-foreground text-xs font-medium">When</p>
+          <label className="block">
+            <span className="font-medium">Every</span>
+            <input
+              aria-label="Every"
+              className={`${FIELD} mt-1`}
+              value={d.every}
+              onChange={(e) => set({ every: e.target.value })}
+            />
+            <Hint>30s, 5m, 1h or 2h30m. Repeats until you pause or delete it.</Hint>
+          </label>
+          <div>
+            <button
+              type="button"
+              aria-pressed={d.active}
+              onClick={() => set({ active: !d.active })}
+              className="rounded font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            >
+              <StatusText active={d.active} />
+            </button>
+            <Hint>
+              {d.active ? "Press Active to pause." : "Press Paused to make it active."}{" "}
+              Paused keeps the schedule without running it.
+            </Hint>
+          </div>
+        </div>
+        <div className="space-y-4 sm:col-span-2">
+          <p className="text-muted-foreground text-xs font-medium">Where It Runs</p>
+          <label className="block">
+            <span className="font-medium">Runs In</span>
+            <input
+              aria-label="Runs In"
+              className={`${FIELD} mt-1`}
+              placeholder="lapis, infra@devbox"
+              value={d.agents}
+              onChange={(e) => set({ agents: e.target.value })}
+            />
+            <Hint>
+              Agent names, separated by commas. Add @device for an agent on another
+              device. An agent that is not running is started.
+            </Hint>
+          </label>
+          <div>
+            <span className="block font-medium">If the Agent Is Busy</span>
+            <div className="bg-muted/50 mt-1 grid w-full grid-cols-2 gap-1 rounded-md p-1 sm:inline-grid sm:w-auto">
+              {(
+                [
+                  ["queue", "Add to Its Queue"],
+                  ["new_instance", "Open a New Instance"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={d.whenBusy === value}
+                  onClick={() => set({ whenBusy: value })}
+                  className={`rounded px-3 py-1.5 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 ${
+                    d.whenBusy === value ? "bg-background font-medium" : "text-muted-foreground"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <Hint>
+              Add to Its Queue: the prompt runs right after its current turn, in the
+              same chat. A new instance runs it now, beside the busy one.
+            </Hint>
+          </div>
         </div>
       </div>
       {problem ? (
@@ -224,7 +233,7 @@ function ScheduleForm({
           Cancel
         </Button>
         <Button type="button" size="sm" onClick={submit} disabled={saving}>
-          Save schedule
+          Save Schedule
         </Button>
       </div>
     </div>
@@ -272,7 +281,7 @@ function ScheduleDetail({
             disabled={saving}
             onClick={() => (confirming ? onDelete() : setConfirming(true))}
           >
-            {confirming ? "Confirm delete" : "Delete"}
+            {confirming ? "Confirm Delete" : "Delete"}
           </Button>
         </div>
       </div>
@@ -284,7 +293,7 @@ function ScheduleDetail({
           [
             ["Every", formatEvery(row.interval_seconds)],
             ["Next", row.active ? clock(nextRun(row)) : "Paused"],
-            ["Last run", last?.fired_at ? clock(last.fired_at) : "Not yet"],
+            ["Last Run", last?.fired_at ? clock(last.fired_at) : "Not yet"],
             ["Skill", row.skill || "None"],
           ] as const
         ).map(([label, value]) => (
@@ -309,6 +318,7 @@ function ScheduleDetail({
  */
 export function SchedulesSection({ api }: { api: EngineApi }) {
   const [rows, setRows] = useState<HubSchedule[] | null>(null);
+  const [file, setFile] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [mode, setMode] = useState<"view" | "edit" | "add">("view");
   const [error, setError] = useState("");
@@ -324,6 +334,7 @@ export function SchedulesSection({ api }: { api: EngineApi }) {
       // An engine without the route's list shape reads as no schedules, not a crash.
       const schedules = Array.isArray(data?.schedules) ? data.schedules : [];
       setRows(schedules);
+      setFile(typeof data?.file === "string" ? data.file : "");
       setSelected((cur) => (schedules.some((r) => r.id === cur) ? cur : schedules[0]?.id ?? null));
     } catch (err) {
       if (mine === epoch.current) setError(errorText(err));
@@ -354,6 +365,11 @@ export function SchedulesSection({ api }: { api: EngineApi }) {
 
   return (
     <section aria-label="Schedules" className="text-sm">
+      {file ? (
+        <p className="text-muted-foreground mb-2 text-xs wrap-anywhere">
+          Schedules file: <code className="text-foreground">{file}</code>
+        </p>
+      ) : null}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-base font-medium">
           Schedules{" "}
@@ -375,7 +391,7 @@ export function SchedulesSection({ api }: { api: EngineApi }) {
             }}
             disabled={busy}
           >
-            Add schedule
+            Add Schedule
           </Button>
         </div>
       </div>
@@ -388,7 +404,7 @@ export function SchedulesSection({ api }: { api: EngineApi }) {
         <div className="bg-muted/30 min-w-0 self-start rounded-lg p-1">
           {rows && !rows.length ? (
             <p className="text-muted-foreground p-3">
-              No schedules yet. Add schedule sends a prompt to an agent on a timer.
+              No schedules yet. Add Schedule sends a prompt to an agent on a timer.
             </p>
           ) : null}
           {rows?.map((r) => {

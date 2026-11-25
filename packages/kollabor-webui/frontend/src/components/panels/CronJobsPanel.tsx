@@ -108,8 +108,8 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
               <th className="py-2 pr-3 font-medium">Schedule</th>
               <th className="py-2 pr-3 font-medium">Target</th>
               <th className="py-2 pr-3 font-medium">Message</th>
-              <th className="py-2 pr-3 font-medium">Next fire</th>
-              <th className="py-2 font-medium">Last error</th>
+              <th className="py-2 pr-3 font-medium">Next Fire</th>
+              <th className="py-2 font-medium">Last Error</th>
             </tr>
           </thead>
           <tbody>
@@ -167,11 +167,11 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
               <dd className="min-w-0">
                 <ClampText text={job.message} />
               </dd>
-              <dt className="text-muted-foreground">Next fire</dt>
+              <dt className="text-muted-foreground">Next Fire</dt>
               <dd>{inSeconds(job.next_in_seconds)}</dd>
               {job.last_error ? (
                 <>
-                  <dt className="text-destructive">Last error</dt>
+                  <dt className="text-destructive">Last Error</dt>
                   <dd className="min-w-0">
                     <ClampText text={job.last_error} className="text-destructive" />
                   </dd>
@@ -258,8 +258,8 @@ export function CronJobsPanel({ api }: { api: EngineApi }) {
       <div className="mt-2">
         {view ? <CronJobsBody view={view} /> : null}
         <p className="text-muted-foreground mt-3 text-xs">
-          Read-only. Deleting a job happens in the owning agent's terminal
-          (/hub cron delete); the row disappears here on refresh.
+          Read-only. To delete a job, run /hub cron delete in the terminal of
+          the agent named in its row; the row disappears here on refresh.
         </p>
       </div>
     </div>
