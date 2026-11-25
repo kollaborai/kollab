@@ -9,6 +9,7 @@ import {
   captureRecorderFailure,
   findPromptStatusUpdate,
   hasRunningTurnWithInputs,
+  hasMatchingGoalTurn,
   isCompactionComplete,
   requireRecorderApprovalMode,
   parseRuntimeMatrix,
@@ -185,24 +186,18 @@ describe("chat recorder analysis", () => {
     expect(hasRunningTurnWithInputs({ ...snapshot, turns: [{ ...turn, state: "ended" }] }, turn, { allowEmptyInputs: true })).toBe(false);
   });
 
-  it("reports the missing goal-to-turn association after checking reload state", async () => {
-    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
-    const start = source.indexOf('    async "goal-reload"() {');
-    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
-    let checked = false;
-    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
-      activeRuntime: "native", command: async () => {},
-      readPersistedGoal: async () => ({ id: "abc12345", status: "active", objective: "u: work" }),
-      reloadDuringRun: async (_reply: string, check: any) => {
-        expect(check.allowEmptyInputs).toBe(true);
-        await check.before({ turn_id: "t", input_ids: [] });
-        await check.after();
-        checked = true;
-      },
-      U: () => "u", R: () => "r",
-    });
-    await expect(flow()).rejects.toThrow(/association/i);
-    expect(checked).toBe(true);
+  it("matches persisted full goal and attempt identity to the running stream across reload", () => {
+    const origin = { kind: "goal", goal_id: "goal-full-123", attempt_id: "attempt-full-456" };
+    const turn = { turn_id: "turn-full", state: "running", input_ids: [], origin };
+    const persisted = { conversation_uid: "conv-full", goal: { goal_id: origin.goal_id, status: "active", attempt: { attempt_id: origin.attempt_id, state: "dispatched", turn_id: turn.turn_id } } };
+    const snapshot = { conversation_uid: "conv-full", turns: [turn], inputs: [] };
+    expect(hasMatchingGoalTurn(snapshot, persisted, turn)).toBe(true);
+    expect(hasMatchingGoalTurn({ ...snapshot, turns: [{ ...turn, input_ids: ["joined"] }], inputs: [{ id: "joined", turn_id: turn.turn_id, state: "joined" }] }, persisted, turn)).toBe(true);
+    expect(hasMatchingGoalTurn({ ...snapshot, conversation_uid: "other" }, persisted, turn)).toBe(false);
+    expect(hasMatchingGoalTurn({ ...snapshot, turns: [{ ...turn, state: "ended" }] }, persisted, turn)).toBe(false);
+    expect(hasMatchingGoalTurn({ ...snapshot, turns: [{ ...turn, origin: { ...origin, attempt_id: "other" } }] }, persisted, turn)).toBe(false);
+    expect(hasMatchingGoalTurn(snapshot, { ...persisted, goal: { ...persisted.goal, attempt: { ...persisted.goal.attempt, turn_id: "other" } } }, turn)).toBe(false);
+    expect(hasMatchingGoalTurn(snapshot, { ...persisted, goal: { ...persisted.goal, goal_id: "goal-ful" } }, turn)).toBe(false);
   });
 
   it("does not accept an idle compaction before the stream replacement arrives", () => {
