@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import {
   analyzeChatFrames,
   CHAT_RECORDER_FLOWS,
@@ -222,6 +224,21 @@ describe("chat recorder analysis", () => {
       "the engine does not know this agent's approval mode; open the agent and retry",
     );
     expect(() => requireRecorderApprovalMode("unknown")).toThrow();
+  });
+
+  it("records a failure when the expected reply never settles", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("  const settle ="), source.indexOf("  const tools ="));
+    const marks: string[] = [];
+    const settle = runInNewContext(`${body}; settle`, {
+      sleep: async () => {},
+      page: { evaluate: async () => ({ run: false, has: false }) },
+      mark: async (name: string) => { marks.push(name); },
+    });
+
+    const failure = await captureRecorderFailure(() => settle("missing", 0, 1));
+    expect(marks).toContain("SETTLE TIMEOUT");
+    expect(failure).toMatch(/settle.*timeout/i);
   });
 
   it("keeps setup failures in the recorder flow result", async () => {
