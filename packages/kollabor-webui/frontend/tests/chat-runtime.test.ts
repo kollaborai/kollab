@@ -113,6 +113,18 @@ describe("toThreadMessageLike", () => {
 });
 
 describe("toRepository", () => {
+  it("tracks running assistant rows through turn end without marking completed rows active", () => {
+    const active = { ...row("active", [
+      { type: "reasoning" as const, text: "thinking" },
+      { type: "tool-call" as const, tool_call_id: "c", tool_name: "test", args: {} },
+    ]), turn_id: "t1", status: "running" };
+    const completed = { ...row("done", []), turn_id: "t1", status: "complete" };
+    const running = { t1: { turn_id: "t1", state: "running" as const, input_ids: [] } };
+    const ended = { t1: { ...running.t1, state: "ended" as const } };
+    expect(toRepository([completed, active], running).messages.map((m) => m.message.status.type)).toEqual(["complete", "running"]);
+    expect(toRepository([active], ended).messages[0].message.status.type).not.toBe("running");
+  });
+
   it("returns one message per row, in row order", () => {
     const repository = toRepository([row("a", []), row("b", []), row("c", [])]);
     expect(repository.messages.map((item) => item.message.id)).toEqual(["a", "b", "c"]);
