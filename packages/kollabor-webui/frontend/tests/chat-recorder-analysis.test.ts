@@ -100,6 +100,20 @@ describe("chat recorder analysis", () => {
     })).toBe(false);
   });
 
+  it("waits for an idle state observed after the compaction start event", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("  const waitForCompaction ="), source.indexOf("  const runtimeForSession ="));
+    let polls = 0;
+    const wait = runInNewContext(`${body}; waitForCompaction`, {
+      Date, isCompactionComplete, activeRuntime: "codex-cli",
+      contextCompactionStatus: async () => { polls++; return polls === 1 ? "idle" : polls === 2 ? "compacting" : "idle"; },
+      page: { evaluate: async () => [{ kind: "events", ev: "context_compaction_status", status: "compacting" }] },
+      sleep: async () => {},
+    });
+    await wait(0);
+    expect(polls).toBe(3);
+  });
+
   it("lets a staged native compaction reach the request that applies it", () => {
     expect(isCompactionComplete({
       sawStart: true,
