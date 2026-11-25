@@ -403,6 +403,7 @@ describe("LiveChatStore", () => {
   });
 
   it("fails after repeated snapshots followed by drops", async () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
     const { store, streams } = make({ maxAttempts: 3 });
     store.start();
     for (let i = 0; i < 3; i++) {
@@ -412,6 +413,27 @@ describe("LiveChatStore", () => {
       streams[i].drop();
     }
     await vi.waitFor(() => expect(store.connection).toBe("failed"));
+    clock.mockRestore();
+  });
+
+  it("continues reconnecting after sustained idle connections drop", async () => {
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    try {
+      const { store, streams } = make({ maxAttempts: 3 });
+      store.start();
+      for (let i = 0; i < 4; i++) {
+        await vi.waitFor(() => expect(streams).toHaveLength(i + 1));
+        streams[i].open();
+        streams[i].emit(snapshot(5, [row("r1")]));
+        now += 60_000;
+        streams[i].drop();
+      }
+      await vi.waitFor(() => expect(streams).toHaveLength(5));
+      expect(store.connection).toBe("connecting");
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("resyncs without after when the final data frame is malformed", async () => {
