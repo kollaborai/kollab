@@ -74,8 +74,8 @@ describe("renderer declarations", () => {
   it("rejects ambiguous and missing renderer kinds at runtime", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { k, current } = harness("hello", ["hello"], ["hello_tool"]);
-    k.renderer({ tool: "hello_tool", tag: "hello_tool", render: Tab } as RendererSpec);
-    k.renderer({ render: Tab } as RendererSpec);
+    k.renderer({ tool: "hello_tool", tag: "hello_tool", render: Tab } as unknown as RendererSpec);
+    k.renderer({ render: Tab } as unknown as RendererSpec);
 
     expect(current().renderers).toEqual([]);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("renderer ignored: provide exactly one of tool or tag"));

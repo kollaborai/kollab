@@ -7,7 +7,7 @@ import type { ThreadMessage } from "@assistant-ui/core";
 import {
   AssistantRuntimeProvider,
   useLocalRuntime,
-  type ChatModelAdapter,
+  type ChatModelAdapter, type ChatModelRunResult,
 } from "@assistant-ui/react";
 import {
   ThreadListItemRuntimeProvider,
@@ -579,8 +579,8 @@ describe("native command reservations", () => {
 
   it("queues a native-looking slash from the busy submit path until the catalog is ready", async () => {
     prepareMountedThread();
-    let resolveRun!: (value: Awaited<ReturnType<ChatModelAdapter["run"]>>) => void;
-    const activeRun = new Promise<Awaited<ReturnType<ChatModelAdapter["run"]>>>((resolve) => { resolveRun = resolve; });
+    let resolveRun!: (value: ChatModelRunResult) => void;
+    const activeRun = new Promise<ChatModelRunResult>((resolve) => { resolveRun = resolve; });
     const runAdapter = vi.spyOn(threadAdapter, "run").mockReturnValue(activeRun);
     const execute = vi.fn();
     putThreadCommand("exit", execute);
