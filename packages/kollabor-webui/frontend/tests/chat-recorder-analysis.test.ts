@@ -97,6 +97,24 @@ describe("chat recorder analysis", () => {
     await expect(flow()).rejects.toThrow(/user row/i);
   });
 
+  it("waits for the injected note to render before checking user rows", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "hub-note"() {');
+    const body = source.slice(start, source.indexOf("\n  };", start));
+    let rendered = false;
+    const flow = runInNewContext(`({${body}})["hub-note"]`, {
+      send: async () => {}, waitForRunning: async () => {}, sleep: async () => {},
+      page: { evaluate: async (fn: Function, arg: unknown) => fn(arg) },
+      document: { querySelector: () => ({}) }, window: { __rec: { net: [], snapshotUserRows: () => [] } },
+      apiJson: async (route: string) => route.startsWith("/sessions/") ? { identity: "same", daemon_pid: 42 } : { agents: [{ identity: "same", pid: 42, agent_id: "right" }] },
+      postFromClient: async () => {}, waitForStreamRowKind: async () => ({ row: "note-1" }),
+      waitForRenderedHubNote: async () => { rendered = true; }, settle: async () => {},
+      agent: "same", session: "session", LABEL: "test", tag: "tag", U: () => "u", R: () => "r", tools: () => "tools", say: () => "say",
+    });
+    await flow();
+    expect(rendered).toBe(true);
+  });
+
   it("requires the same persisted native goal across reload", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const start = source.indexOf('    async "goal-reload"() {');
