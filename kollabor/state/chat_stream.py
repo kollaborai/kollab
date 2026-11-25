@@ -425,7 +425,7 @@ class ChatStreamService:
         elif kind == "user_message":
             self._on_user_message(uid, event)
         elif kind == "reply_segment_start":
-            turn_id = self._event_turn_id(event)
+            turn_id = self._event_turn_id(event) or self._active_turns.get(uid)
             if turn_id is not None:
                 key = (uid, turn_id)
                 self._reply_segment_offsets[key] = len(self._reply_text.get(key, ""))

@@ -541,12 +541,18 @@ class GoalTurnDriver:
                         fields = {
                             "turn_id": stream_turn_id,
                             "conversation_uid": record.conversation_uid,
-                            "origin": {"kind": "goal", "goal_id": record.goal_id,
-                                       "attempt_id": attempt.attempt_id},
+                            "origin": {
+                                "kind": "goal",
+                                "goal_id": record.goal_id,
+                                "attempt_id": attempt.attempt_id,
+                            },
                         }
                         turn_context_token = current_turn.set(fields)
-                        publish_semantic(getattr(self.coord, "event_bus", None), "turn_start", **fields)
-                        publish_semantic(getattr(self.coord, "event_bus", None), "reply_segment_start", **fields)
+                        publish_semantic(
+                            getattr(self.coord, "event_bus", None),
+                            "turn_start",
+                            **fields,
+                        )
                         await self.coord._continue_conversation()
                         chain_turns = 0
                         while not qp.turn_completed and not qp.cancel_processing:
@@ -574,16 +580,9 @@ class GoalTurnDriver:
                                 self.coord._continue_serial = (
                                     self.coord.claim_turn_serial()
                                 )
-                                publish_semantic(
-                                    getattr(self.coord, "event_bus", None),
-                                    "reply_segment_start",
-                                    **fields,
-                                )
                                 await self.coord._continue_conversation()
                             except Exception as exc:
-                                logger.error(
-                                    "goal turn continuation error: %s", exc
-                                )
+                                logger.error("goal turn continuation error: %s", exc)
                                 error = str(exc)
                                 break
         except Exception as exc:

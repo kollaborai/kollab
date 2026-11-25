@@ -2035,8 +2035,11 @@ class QueueProcessor:
             # queued clears its own stamp as it ends, never this one's. A chain
             # this batch cuts into still owes its requests their completion, so
             # this turn's names them too (#551).
-            self.active_request_ids = tuple(dict.fromkeys((*self.active_request_ids, *request_ids)))
+            self.active_request_ids = tuple(
+                dict.fromkeys((*self.active_request_ids, *request_ids))
+            )
             self._stamp_turn(_voice_turn_id(execution_context), self.active_request_ids)
+            publish_semantic(self.renderer, "reply_segment_start")
             try:
                 if execution_context is not None:
                     parent_uuid = await self._execute_llm_turn_inner(
