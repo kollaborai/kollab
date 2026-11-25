@@ -27,6 +27,7 @@ import { resolveAgentSender, type HubNote } from "@/hub-notes";
 import { useChatStore } from "@/chat-store";
 import type { ChatPart, ChatRow } from "@/chat-stream";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
+import { PermissionToolUI } from "@/components/PermissionTool";
 import { agentName } from "@/utils/session-display";
 import { cn } from "@/lib/utils";
 import { composerDraftStorageKey } from "../composer-draft";
@@ -340,10 +341,9 @@ const HUB_SEND_TOOL_UIS = ["hub_msg", "hub_reply", "hub_broadcast"].map((toolNam
   makeAssistantToolUI<HubSendArgs, unknown>({ toolName, display: "standalone", render: HubSent }),
 );
 
-// Thin adapter over the assistant-ui kit's Thread. Registered tool UIs
-// (PermissionToolUI, mounted in runtime.tsx) resolve via `part.toolUI` inside
-// the kit's own AssistantMessage and take precedence over ToolFallback — see
-// components/assistant-ui/thread.tsx line ~398.
+// Thin adapter over the assistant-ui kit's Thread. Registered tool UIs resolve
+// via `part.toolUI` inside the kit's own AssistantMessage and take precedence
+// over ToolFallback — see components/assistant-ui/thread.tsx.
 export const Thread: FC<{
   agents?: readonly AgentPoolEntry[];
   commands?: readonly SlashCommand[];
@@ -391,6 +391,7 @@ export const Thread: FC<{
         {HUB_SEND_TOOL_UIS.map((HubSendToolUI, index) => (
           <HubSendToolUI key={index} />
         ))}
+        <PermissionToolUI />
         <ComposerLockContext.Provider value={locked}>
           <AssistantThread
             components={{ Welcome, ComposerLeading: ComposerGem, ToolGroup, SystemMessage: HubNoteMessage }}
