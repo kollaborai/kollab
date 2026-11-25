@@ -36,7 +36,6 @@ import {
   loadComposerAttachments,
   loadComposerDraft,
   loadPersistedComposerAttachments,
-  queueComposerDraftSubmission,
   saveComposerAttachments,
   saveComposerDraft,
 } from "@/composer-draft";
@@ -61,11 +60,11 @@ import {
   type VoiceMode,
 } from "@/voice-mode";
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
-import {
-  imageAttachmentAdapter,
-  usePendingPermissionCancellation,
-  useSendWaitingNow,
-} from "@/runtime";
+import { usePendingPermissionCancellation } from "@/runtime";
+import { imageAttachmentAdapter, toInputAttachments } from "@/image-attachment";
+import { useChatStore, WEB_INPUT_PREFIX } from "@/chat-store";
+import { newInputId, type InputRequest } from "@/chat-stream";
+import { composerAction, isWaitingRow } from "@/queue-state";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
@@ -166,6 +165,8 @@ export type ThreadProps = {
   queuePanel?: ReactNode | undefined;
   /** Queue a busy-composer message through the authenticated daemon route. */
   onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
+  /** A harness session takes no Send Now: it steers a message into its running turn. */
+  harness?: boolean | undefined;
 };
 
 
@@ -185,6 +186,12 @@ export const ComposerHubContext = createContext<{ workspace: string; remote: rea
   workspace: "",
   remote: [],
 });
+
+/** Whether the session takes Send Now. A harness session does not. */
+const SendNowAllowedContext = createContext(true);
+
+/** The ids of the input rows the chat store has queued and not yet started or joined. */
+const QueuedIdsContext = createContext<ReadonlySet<string>>(new Set());
 
 // Startup exposes a loading placeholder thread; treat it as a new chat so
 // the composer mounts centered. Loads after startup keep the docked layout.
@@ -210,31 +217,42 @@ export const Thread: FC<ThreadProps> = ({
   queueConversationUid,
   queuePanel,
   onQueueBusyMessage,
+  harness = false,
 }) => {
+  const store = useChatStore();
+  // The queued input rows by id, so each user row finds its queued note in O(1).
+  const queuedIds = useMemo(
+    () => new Set(store.rows.filter((row) => isWaitingRow(row, store.inputs)).map((row) => row.id)),
+    [store.rows, store.inputs],
+  );
   const isEmpty = useAuiState(isNewChatView);
 
   return (
-    <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot
-        isEmpty={isEmpty}
-        agents={agents}
-        commands={commands}
-        commandCatalogStatus={commandCatalogStatus}
-        onRetryCommands={onRetryCommands}
-        onOpenPanel={onOpenPanel}
-        onOpenWelcome={onOpenWelcome}
-        attachmentsEnabled={attachmentsEnabled}
-        historyStatus={historyStatus}
-        onLoadOlder={onLoadOlder}
-        onRetryHistory={onRetryHistory}
-        historyStartIndex={historyStartIndex}
-        draftKey={draftKey}
-        queueSessionId={queueSessionId}
-        queueConversationUid={queueConversationUid}
-        queuePanel={queuePanel}
-        onQueueBusyMessage={onQueueBusyMessage}
-      />
-    </ThreadComponentsContext.Provider>
+    <SendNowAllowedContext.Provider value={!harness}>
+      <QueuedIdsContext.Provider value={queuedIds}>
+        <ThreadComponentsContext.Provider value={components}>
+          <ThreadRoot
+            isEmpty={isEmpty}
+            agents={agents}
+            commands={commands}
+            commandCatalogStatus={commandCatalogStatus}
+            onRetryCommands={onRetryCommands}
+            onOpenPanel={onOpenPanel}
+            onOpenWelcome={onOpenWelcome}
+            attachmentsEnabled={attachmentsEnabled}
+            historyStatus={historyStatus}
+            onLoadOlder={onLoadOlder}
+            onRetryHistory={onRetryHistory}
+            historyStartIndex={historyStartIndex}
+            draftKey={draftKey}
+            queueSessionId={queueSessionId}
+            queueConversationUid={queueConversationUid}
+            queuePanel={queuePanel}
+            onQueueBusyMessage={onQueueBusyMessage}
+          />
+        </ThreadComponentsContext.Provider>
+      </QueuedIdsContext.Provider>
+    </SendNowAllowedContext.Provider>
   );
 };
 
@@ -581,6 +599,10 @@ const Composer: FC<{
     (command) => command.name === "voice" && command.enabled !== false,
   );
   const permissionStop = usePendingPermissionCancellation();
+  const store = useChatStore();
+  const sendNowAllowed = useContext(SendNowAllowedContext);
+  // The store always exposes sendNow; only a harness session turns Send Now off.
+  const sendsNowAvailable = typeof store.sendNow === "function" && sendNowAllowed;
   // The submit under way came from Cmd/Ctrl+Enter: the message goes at once.
   const submitSendsNow = useRef(false);
   const slotMode = useAuiState((s) =>
@@ -855,28 +877,78 @@ const Composer: FC<{
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
+    sendFromComposer(event);
+  };
+
+  // Each composer send is one input under a new web id, sent to the chat store.
+  // The composer keeps its text until the store accepts the send, so a failed
+  // send leaves the draft in place. While a turn runs the daemon queues the
+  // input. Cmd/Ctrl+Enter also asks for Send Now; the flag is read before the
+  // first await, while the submit handler is still running.
+  const sendInFlight = useRef(false);
+  const sendThroughStore = async (wantsSendNow: boolean) => {
+    if (sendInFlight.current) return;
+    const state = aui.composer.getState();
+    const hasContent = state.text.trim().length > 0 || state.attachments.length > 0;
+    const action = composerAction({ running: store.running, hasContent });
+    if (action !== "send" && action !== "queue") return;
+    const fingerprint = `${state.text}\u0000${state.attachments.map((attachment) => attachment.id).join(",")}`;
+    sendInFlight.current = true;
+    setBusySubmitError(null);
+    try {
+      const attachments = await Promise.all(
+        state.attachments.map(async (attachment) => {
+          if (attachment.content) return attachment;
+          if (attachment.type === "image" && attachment.status.type === "requires-action") {
+            return imageAttachmentAdapter.send(attachment as PendingAttachment);
+          }
+          throw new Error("Attachment is not ready to send");
+        }),
+      );
+      const input: InputRequest = {
+        id: newInputId(WEB_INPUT_PREFIX),
+        text: state.text,
+        attachments: toInputAttachments(attachments),
+      };
+      await store.send(input);
+      const current = aui.composer.getState();
+      const currentFingerprint = `${current.text}\u0000${current.attachments.map((attachment) => attachment.id).join(",")}`;
+      if (currentFingerprint === fingerprint) await aui.composer.reset();
+      if (wantsSendNow && sendsNowAvailable) {
+        await store.sendNow(input.id).catch(() => {
+          setBusySubmitError("Message is queued, but Send Now could not be confirmed. Check the queue before retrying.");
+        });
+      }
+    } catch {
+      setBusySubmitError("Could not send this message. Keep it in the composer and retry.");
+    } finally {
+      sendInFlight.current = false;
+    }
+  };
+
+  // A panel command or /welcome opens its panel and is not sent. Anything else is
+  // sent through the store; assistant-ui's own send must not also run, so the event is prevented.
+  const sendFromComposer = (event: {
+    preventDefault: () => void;
+    defaultPrevented?: boolean;
+  }) => {
     openPanelFromComposer(event);
-    sendBusyMessage(event);
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    void sendThroughStore(submitSendsNow.current && sendNowAllowed);
+  };
+
+  const stopRun = () => {
+    store.stop().catch(() => {
+      setBusySubmitError("Could not stop the run. Try again.");
+    });
   };
 
   const handleComposerSubmit = (event: {
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
-    // Keep panel commands on their existing path, then bypass assistant-ui's
-    // disabled-send predicate while a turn is running. Busy text is admitted
-    // through the daemon-owned queue instead of creating a transient stream row.
-    openPanelFromComposer(event);
-    if (event.defaultPrevented) return;
-    if (isRunning) {
-      sendBusyMessage(event);
-      return;
-    }
-    const text = aui.composer.getState().text;
-    if (text.length > 0) {
-      queueComposerDraftSubmission(draftKey, text);
-      skipEmptyDraftPersist.current = true;
-    }
+    sendFromComposer(event);
   };
 
   const openPanelForItem = (item: {
@@ -1238,8 +1310,10 @@ const Composer: FC<{
                 voice={voiceAvailable ? voice : null}
                 running={isRunning}
                 permissionStop={permissionStop}
-                onBeforeSend={openPanelFromComposer}
+                onBeforeSend={sendFromComposer}
                 onSteer={submitBusyMessage}
+                onStop={stopRun}
+                sendsNow={sendsNowAvailable}
               />
             </div>
           </div>
@@ -1338,8 +1412,9 @@ const ComposerSlot: FC<{
   permissionStop: { cancel: () => Promise<void>; cancelling: boolean } | null;
   onBeforeSend: (event: { preventDefault: () => void }) => void;
   onSteer: (event: { preventDefault: () => void }) => void;
-}> = ({ voice, running, permissionStop, onBeforeSend, onSteer }) => {
-  const sendsNow = useSendWaitingNow() !== null;
+  onStop: () => void;
+  sendsNow: boolean;
+}> = ({ voice, running, permissionStop, onBeforeSend, onSteer, onStop, sendsNow }) => {
   return (
     <div
       className={cn(
@@ -1402,21 +1477,22 @@ const ComposerSlot: FC<{
         </ComposerPrimitive.Send>
       )}
       {running ? (
-        <ComposerPrimitive.Cancel asChild>
-          <TooltipIconButton
-            tooltip="Stop Generating"
-            side="top"
-            type="button"
-            variant="default"
-            className={cn(
-              SLOT_BUTTON,
-              "!left-auto !right-1 scale-100 opacity-100 visible",
-            )}
-            aria-label="Stop generating"
-          >
-            <SquareIcon className="size-3.5 fill-current" />
-          </TooltipIconButton>
-        </ComposerPrimitive.Cancel>
+        <TooltipIconButton
+          tooltip="Stop Generating"
+          side="top"
+          type="button"
+          variant="default"
+          className={cn(
+            SLOT_BUTTON,
+            "!left-auto !right-1 scale-100 opacity-100 visible",
+          )}
+          aria-label="Stop generating"
+          onClick={() => {
+            onStop();
+          }}
+        >
+          <SquareIcon className="size-3.5 fill-current" />
+        </TooltipIconButton>
       ) : permissionStop ? (
         <TooltipIconButton
           tooltip="Stop Generating"
@@ -1666,8 +1742,10 @@ const QUEUED_NOTE_ROW = "col-start-2 h-4 any-pointer-coarse:h-[30px]";
 // What the message is waiting for, and the way to send it into the turn at
 // once (#1102). A session that cannot take a message that way (a harness
 // session) gets the word alone.
-const QueuedMessageNote: FC = () => {
-  const sendWaitingNow = useSendWaitingNow();
+const QueuedMessageNote: FC<{ inputId: string }> = ({ inputId }) => {
+  const store = useChatStore();
+  const sendNowAllowed = useContext(SendNowAllowedContext);
+  const [sendNowFailed, setSendNowFailed] = useState(false);
   return (
     <TooltipProvider delayDuration={600}>
       <div className={cn("aui-user-message-queued text-muted-foreground flex items-start justify-end gap-2 text-xs leading-4", QUEUED_NOTE_ROW)}>
@@ -1677,14 +1755,17 @@ const QueuedMessageNote: FC = () => {
           </TooltipTrigger>
           <TooltipContent side="bottom">Sent when the agent finishes this turn</TooltipContent>
         </Tooltip>
-        {sendWaitingNow ? (
+        {sendNowAllowed ? (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 type="button"
                 variant="link"
                 className="text-foreground h-4 p-0 text-xs leading-4 any-pointer-coarse:-mt-[14px] any-pointer-coarse:h-[44px] any-pointer-coarse:min-w-[44px]"
-                onClick={sendWaitingNow}
+                onClick={() => {
+                  setSendNowFailed(false);
+                  store.sendNow(inputId).catch(() => setSendNowFailed(true));
+                }}
               >
                 Send Now
               </Button>
@@ -1692,13 +1773,15 @@ const QueuedMessageNote: FC = () => {
             <TooltipContent side="bottom">The agent reads it at its next step</TooltipContent>
           </Tooltip>
         ) : null}
+        {sendNowFailed ? <span role="alert">Send Now failed. Try again.</span> : null}
       </div>
     </TooltipProvider>
   );
 };
 
 const UserMessage: FC = () => {
-  const queued = useAuiState((s) => s.message.metadata.custom?.queued === true);
+  const id = useAuiState((s) => s.message.id);
+  const queued = useContext(QueuedIdsContext).has(id);
   // A message that was queued keeps the note's row, empty, once it is sent:
   // the rows under it stay where they are.
   const [wasQueued, setWasQueued] = useState(queued);
@@ -1719,7 +1802,7 @@ const UserMessage: FC = () => {
           <UserActionBar />
         </div>
       </div>
-      {queued ? <QueuedMessageNote /> : wasQueued ? <div aria-hidden className={QUEUED_NOTE_ROW} /> : null}
+      {queued ? <QueuedMessageNote inputId={id} /> : wasQueued ? <div aria-hidden className={QUEUED_NOTE_ROW} /> : null}
     </MessagePrimitive.Root>
   );
 };
