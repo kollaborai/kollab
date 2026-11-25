@@ -430,3 +430,13 @@ def test_sequence_rejects_events_from_another_conversation():
         {"seq": 2, "conversation_uid": "b", "type": "replace", "data": {"rows": []}},
     ]
     assert any("conversation" in problem for problem in sequence_problems(events))
+
+
+def test_input_cannot_change_its_turn_binding_to_end_early():
+    events = _lifecycle(
+        {"id": "web-a1", "state": "started", "turn_id": "t1"},
+        {"turn_id": "t2", "state": "ended", "input_ids": []},
+        {"id": "web-a1", "state": "ended", "turn_id": "t2", "outcome": "completed"},
+    )
+    problems = sequence_problems(events)
+    assert any("turn" in problem and "t1" in problem for problem in problems), problems
