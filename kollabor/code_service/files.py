@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import ctypes
 import errno
+import hashlib
 import heapq
 import os
 import secrets
@@ -24,6 +25,7 @@ import shutil
 import stat
 import sys
 import threading
+import weakref
 from collections.abc import Iterator
 from typing import Any
 
@@ -438,9 +440,10 @@ def _existing_bytes(path: str, limit: int) -> bytes | None:
         return None
 
 
-def _version(st: os.stat_result) -> str:
-    """Opaque identity for a file revision, including sub-millisecond and replacement changes."""
-    return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}"
+def _version(st: os.stat_result, data: bytes) -> str:
+    """Opaque identity for a file revision, including content and filesystem metadata."""
+    digest = hashlib.sha256(data).hexdigest()
+    return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}:{digest}"
 
 
 def _mtime_ms(path: str) -> int:
@@ -449,32 +452,60 @@ def _mtime_ms(path: str) -> int:
 
 
 class _StaleWrite(Exception):
-    """The file's modification time is not the one the editor read."""
+    """The file's version, content snapshot or modification time is stale."""
 
 
-_WRITE_LOCK = threading.Lock()
+_WRITE_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
+_WRITE_LOCKS_GUARD = threading.Lock()
 
 
-def _checked_write(path: str, data: bytes, expected: int | None, version: str | None) -> tuple[int, str]:
-    """Check ``expected`` against the file's mtime and write, as one step, so two saves with the same ``expectedMtime``
-    cannot both pass. Returns the new mtime in ms."""
-    with _WRITE_LOCK:
-        if version is not None:
+def _write_lock(path: str) -> threading.Lock:
+    key = os.path.normcase(os.path.realpath(path))
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WRITE_LOCKS[key] = lock
+        return lock
+
+
+def _checked_write(
+    path: str,
+    data: bytes,
+    expected: int | None,
+    version: str | None,
+    observed: bytes | None,
+    limit: int,
+) -> tuple[int, str]:
+    """Serialize saves to one path and compare its current state with the request's snapshot before replacing it."""
+    with _write_lock(path):
+        if expected is not None or version is not None:
+            if observed is None:
+                raise _StaleWrite
+            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
             try:
-                if _version(os.stat(path)) != version:
-                    raise _StaleWrite
+                fd = os.open(path, flags)
             except FileNotFoundError:
                 raise _StaleWrite from None
-        if expected is not None:
             try:
-                current: int | None = _mtime_ms(path)
-            except FileNotFoundError:
-                current = None
-            if current != expected:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    raise _StaleWrite
+                with os.fdopen(fd, "rb") as handle:
+                    fd = -1
+                    current_data = handle.read(limit + 1)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            if current_data != observed:
+                raise _StaleWrite
+            if version is not None and _version(st, current_data) != version:
+                raise _StaleWrite
+            if expected is not None and _mtime_ms(path) != expected:
                 raise _StaleWrite
         _write_atomic(path, data)
         st = os.stat(path)
-        return st.st_mtime_ns // 1_000_000, _version(st)
+        return st.st_mtime_ns // 1_000_000, _version(st, data)
 
 
 def _write_atomic(path: str, data: bytes) -> None:
@@ -631,8 +662,8 @@ def read_file(workspace: str, params: dict[str, Any], settings: CodeSettings | N
         with open(full, "rb") as handle:
             st = os.fstat(handle.fileno())
             mtime = st.st_mtime_ns // 1_000_000
-            version = _version(st)
             data = handle.read(limit + 1)
+            version = _version(st, data)
     except OSError as exc:
         return _disk_failure(exc)
     if len(data) > limit:
@@ -702,7 +733,9 @@ async def write_file(workspace: str, params: dict[str, Any], settings: CodeSetti
     check = expected if body.get("force") is not True else None
     version = version if body.get("force") is not True else None
     try:
-        mtime, version = await asyncio.to_thread(_checked_write, full, data, check, version)
+        mtime, version = await asyncio.to_thread(
+            _checked_write, full, data, check, version, existing, cfg.max_file_kb * 1024
+        )
     except _StaleWrite:
         return _fail(409, "stale_write", "The file changed on disk since you opened it.")
     except OSError as exc:
