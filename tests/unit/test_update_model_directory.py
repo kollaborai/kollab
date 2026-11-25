@@ -106,6 +106,68 @@ def test_map_openrouter_entry_to_kollab_schema():
     assert mapped["released"] == upd.unix_to_date(1789123456)
 
 
+def test_openrouter_unknown_prices_clear_stale_values_and_keep_free_prices():
+    dynamic_router = {
+        "id": "openrouter/auto",
+        "context_length": 100000,
+        "pricing": {"prompt": "-1", "completion": "-1"},
+    }
+    data = {
+        "models": {
+            "openrouter/auto": {
+                "provider": "openrouter",
+                "context_window": 100000,
+                "pricing_in": 25.0,
+                "pricing_out": 50.0,
+            }
+        }
+    }
+
+    changed, _ = upd.apply_merge(
+        data, {}, {"data": [dynamic_router]}, today="2026-11-24"
+    )
+
+    assert changed is True
+    assert data["models"]["openrouter/auto"]["pricing_in"] is None
+    assert data["models"]["openrouter/auto"]["pricing_out"] is None
+    free = upd.map_openrouter_model({"pricing": {"prompt": "0", "completion": "0"}})
+    assert free["pricing_in"] == 0.0
+    assert free["pricing_out"] == 0.0
+
+
+def test_models_dev_invalid_price_becomes_unknown():
+    mapped = upd.map_models_dev_model(
+        "model",
+        {
+            "limit": {"context": 100},
+            "pricing": {"input": -1.0, "output": 0.0},
+        },
+        "openai",
+    )
+
+    assert mapped["pricing_in"] is None
+    assert mapped["pricing_out"] == 0.0
+
+
+def test_openrouter_model_output_caps_survive_catalog_refresh():
+    expected = {
+        "deepseek/deepseek-v4-flash-vision-exp": 262144,
+        "gryphe/mythomax-l2-13b": 4096,
+        "meta-llama/llama-3.1-8b-instruct": 16384,
+        "z-ai/glm-5.3-flash": 131072,
+    }
+
+    for model_id, limit in expected.items():
+        mapped = upd.map_openrouter_model(
+            {
+                "id": f"{model_id}:nitro",
+                "context_length": 100000,
+                "top_provider": {"max_completion_tokens": limit * 2},
+            }
+        )
+        assert mapped["max_output"] == limit
+
+
 def test_unknown_source_providers_are_skipped():
     additions, updates = upd.merge_sources(
         json.loads(REGISTRY.read_text()),
@@ -248,3 +310,256 @@ def test_malformed_openrouter_nested_sections_do_not_abort_refresh():
     upd.apply_merge(data, {}, source, today="2026-11-16")
 
     assert data["models"]["vendor/model"]["supports_vision"] is False
+
+
+def _write_refresh_inputs(tmp_path, openrouter_text, registry_text):
+    models_dev = tmp_path / "models_dev.json"
+    models_dev.write_text("{}")
+    openrouter = tmp_path / "openrouter.json"
+    openrouter.write_text(openrouter_text)
+    registry = tmp_path / "models.json"
+    registry.write_text(registry_text)
+    return [
+        "--source-models-dev",
+        str(models_dev),
+        "--source-openrouter",
+        str(openrouter),
+        "--registry",
+        str(registry),
+    ], registry
+
+
+def test_oversized_json_integer_source_price_becomes_unknown(tmp_path):
+    # json.loads raises ValueError for a literal past Python's int-from-str
+    # digit limit. That price must map to unknown while valid prices refresh.
+    source = {
+        "data": [
+            {
+                "id": "vendor/valid",
+                "context_length": 1000,
+                "pricing": {"prompt": "0.0000005", "completion": "0.000001"},
+            },
+            {
+                "id": "vendor/overflow",
+                "context_length": 1000,
+                "pricing": {"prompt": "PLACEHOLDER", "completion": "0.000001"},
+            },
+        ]
+    }
+    argv, registry = _write_refresh_inputs(
+        tmp_path,
+        json.dumps(source).replace('"PLACEHOLDER"', "9" * 5000),
+        json.dumps({"models": {}}),
+    )
+
+    assert upd.main(argv) == 0
+
+    models = json.loads(registry.read_text())["models"]
+    assert models["vendor/valid"]["pricing_in"] == 0.5
+    assert models["vendor/overflow"]["pricing_in"] is None
+
+
+def test_oversized_json_integer_in_registry_does_not_abort_refresh(tmp_path):
+    # load_registry reads the existing registry with json.loads. A price past
+    # the digit limit must not stop the refresh; the source price replaces it.
+    source = {
+        "data": [
+            {
+                "id": "vendor/valid",
+                "context_length": 1000,
+                "pricing": {"prompt": "0.0000005", "completion": "0.000001"},
+            }
+        ]
+    }
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/valid": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "pricing_in": "PLACEHOLDER",
+                }
+            }
+        }
+    ).replace('"PLACEHOLDER"', "9" * 5000)
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
+
+    assert upd.main(argv) == 0
+
+    models = json.loads(registry.read_text())["models"]
+    assert models["vendor/valid"]["pricing_in"] == 0.5
+
+
+def test_refresh_clears_invalid_retained_prices_before_writing_strict_json(tmp_path):
+    source = {"data": [{"id": "vendor/retained", "context_length": 2000}]}
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/retained": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "pricing_in": "OVERSIZED_POSITIVE",
+                    "pricing_out": "OVERSIZED_NEGATIVE",
+                    "pricing_cached_in": "OVERSIZED_CACHED_NEGATIVE",
+                },
+                "vendor/valid-sibling": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "pricing_in": 0.5,
+                    "pricing_out": 1.25,
+                    "pricing_cached_in": 0.25,
+                },
+            }
+        }
+    )
+    registry_text = (
+        registry_text.replace('"OVERSIZED_POSITIVE"', "9" * 5000)
+        .replace('"OVERSIZED_NEGATIVE"', "-" + "9" * 5000)
+        .replace('"OVERSIZED_CACHED_NEGATIVE"', "-" + "8" * 5000)
+    )
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
+
+    assert upd.main(argv) == 0
+
+    def reject_non_json_number(value):
+        raise AssertionError(f"non-standard JSON number written: {value}")
+
+    models = json.loads(registry.read_text(), parse_constant=reject_non_json_number)[
+        "models"
+    ]
+    retained = models["vendor/retained"]
+    assert retained["context_window"] == 2000
+    assert retained["pricing_in"] is None
+    assert retained["pricing_out"] is None
+    assert retained["pricing_cached_in"] is None
+    assert models["vendor/valid-sibling"]["pricing_in"] == 0.5
+    assert models["vendor/valid-sibling"]["pricing_out"] == 1.25
+    assert models["vendor/valid-sibling"]["pricing_cached_in"] == 0.25
+
+
+def test_refresh_clears_invalid_retained_output_limits_before_writing_strict_json(
+    tmp_path,
+):
+    source = {"data": [{"id": "vendor/retained", "context_length": 2000}]}
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/retained": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": "OVERSIZED_OUTPUT",
+                },
+                "vendor/negative": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": -1,
+                },
+                "vendor/float": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": 1.5,
+                },
+                "vendor/bool": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": True,
+                },
+                "vendor/valid-sibling": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": 4096,
+                },
+            }
+        }
+    ).replace('"OVERSIZED_OUTPUT"', "9" * 5000)
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
+
+    assert upd.main(argv) == 0
+
+    def reject_non_json_number(value):
+        raise AssertionError(f"non-standard JSON number written: {value}")
+
+    models = json.loads(registry.read_text(), parse_constant=reject_non_json_number)[
+        "models"
+    ]
+    for name in ("vendor/retained", "vendor/negative", "vendor/float", "vendor/bool"):
+        assert models[name]["max_output"] is None
+    assert models["vendor/retained"]["context_window"] == 2000
+    assert models["vendor/valid-sibling"]["max_output"] == 4096
+
+
+def test_refresh_refuses_to_write_unrepresentable_retained_context_window(tmp_path):
+    source = {"data": [{"id": "vendor/updated", "context_length": 2000}]}
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/unmapped": {
+                    "provider": "openrouter",
+                    "context_window": "OVERSIZED_CONTEXT",
+                },
+                "vendor/updated": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                },
+            }
+        }
+    ).replace('"OVERSIZED_CONTEXT"', "9" * 5000)
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
+
+    assert upd.main(argv) == 2
+    assert registry.read_text() == registry_text
+
+
+def test_refresh_repairs_oversized_context_and_output_from_source(tmp_path):
+    source = {
+        "data": [
+            {
+                "id": "vendor/repaired",
+                "context_length": 2000,
+                "top_provider": {"max_completion_tokens": 4096},
+            }
+        ]
+    }
+    registry_text = json.dumps(
+        {
+            "models": {
+                "vendor/repaired": {
+                    "provider": "openrouter",
+                    "context_window": "OVERSIZED_CONTEXT",
+                    "max_output": "OVERSIZED_OUTPUT",
+                }
+            }
+        }
+    )
+    registry_text = registry_text.replace('"OVERSIZED_CONTEXT"', "9" * 5000)
+    registry_text = registry_text.replace('"OVERSIZED_OUTPUT"', "8" * 5000)
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
+
+    assert upd.main(argv) == 0
+
+    def reject_non_json_number(value):
+        raise AssertionError(f"non-standard JSON number written: {value}")
+
+    models = json.loads(registry.read_text(), parse_constant=reject_non_json_number)[
+        "models"
+    ]
+    assert models["vendor/repaired"]["context_window"] == 2000
+    assert models["vendor/repaired"]["max_output"] == 4096
+
+
+def test_write_registry_rejects_non_finite_numbers_before_writing(tmp_path):
+    registry = tmp_path / "models.json"
+    original = '{"models": {"preserved": true}}\n'
+    registry.write_text(original)
+
+    try:
+        upd.write_registry(
+            registry,
+            {"models": {"vendor/non-finite": {"max_output": float("inf")}}},
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("write_registry accepted a non-finite JSON number")
+
+    assert registry.read_text() == original

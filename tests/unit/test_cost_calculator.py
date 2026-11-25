@@ -1,8 +1,12 @@
 """Tests for pricing_registry and cost_calculator."""
 
+import json
+import math
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -102,6 +106,140 @@ class TestPricingRegistryLoad(unittest.TestCase):
     def setUp(self):
         PricingRegistry.reset()
 
+    def test_F1_unrepresentable_model_registry_prices_are_skipped_for_all_fields(self):
+        valid_info = {
+            "provider": "openai",
+            "pricing_in": 0.25,
+            "pricing_out": 0.75,
+            "pricing_cached_in": 0.05,
+        }
+        for field in ("pricing_in", "pricing_out", "pricing_cached_in"):
+            with self.subTest(field=field):
+                PricingRegistry.reset()
+                overflow_info = {**valid_info, field: 10**400}
+                model_registry = {
+                    "models": {
+                        "valid-model": valid_info,
+                        "overflow-model": overflow_info,
+                    }
+                }
+                with patch(
+                    "kollabor_ai.model_registry.get_model_registry",
+                    return_value=model_registry,
+                ):
+                    reg = PricingRegistry()
+                    reg.load_from_model_registry()
+
+                valid = reg.get_pricing("openai", "valid-model")
+                self.assertIsNotNone(valid)
+                self.assertAlmostEqual(valid.prompt_per_token, 0.25 / 1_000_000)
+                self.assertAlmostEqual(valid.completion_per_token, 0.75 / 1_000_000)
+                self.assertAlmostEqual(valid.cache_discount, 0.2)
+                self.assertIsNone(reg.get_pricing("openai", "overflow-model"))
+
+    def test_F1_unrepresentable_pricing_file_fields_are_skipped(self):
+        valid_info = {
+            "prompt_per_million": 0.25,
+            "completion_per_million": 0.75,
+            "cache_read_per_million": 0.05,
+        }
+        for field in (
+            "prompt_per_million",
+            "completion_per_million",
+            "cache_read_per_million",
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                overflow_info = {**valid_info, field: 10**400}
+                data = {
+                    "openai": {
+                        "valid-model": valid_info,
+                        "overflow-model": overflow_info,
+                    }
+                }
+                path = Path(tmp) / "pricing.json"
+                path.write_text(json.dumps(data))
+
+                PricingRegistry.reset()
+                reg = PricingRegistry()
+                reg.load_from_file(path)
+
+                valid = reg.get_pricing("openai", "valid-model")
+                self.assertIsNotNone(valid)
+                self.assertAlmostEqual(valid.prompt_per_token, 0.25 / 1_000_000)
+                self.assertAlmostEqual(valid.completion_per_token, 0.75 / 1_000_000)
+                self.assertAlmostEqual(valid.cache_discount, 0.2)
+                self.assertIsNone(reg.get_pricing("openai", "overflow-model"))
+
+    def test_oversized_json_integer_pricing_entries_are_skipped(self):
+        # json.load raises ValueError for a literal past Python's int-from-str
+        # digit limit. That entry must be skipped like any other unrepresentable
+        # rate, and the valid entries in the same file must still load.
+        valid_info = {
+            "prompt_per_million": 0.25,
+            "completion_per_million": 0.75,
+            "cache_read_per_million": 0.05,
+        }
+        for field in (
+            "prompt_per_million",
+            "completion_per_million",
+            "cache_read_per_million",
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                data = {
+                    "openai": {
+                        "valid-model": valid_info,
+                        "overflow-model": {**valid_info, field: "PLACEHOLDER"},
+                    }
+                }
+                path = Path(tmp) / "pricing.json"
+                path.write_text(json.dumps(data).replace('"PLACEHOLDER"', "9" * 5000))
+
+                PricingRegistry.reset()
+                reg = PricingRegistry()
+                reg.load_from_file(path)
+
+                valid = reg.get_pricing("openai", "valid-model")
+                self.assertIsNotNone(valid)
+                self.assertAlmostEqual(valid.prompt_per_token, 0.25 / 1_000_000)
+                self.assertIsNone(reg.get_pricing("openai", "overflow-model"))
+
+    def test_model_registry_loader_skips_malformed_prices_and_preserves_valid_rates(
+        self,
+    ):
+        malformed_values = (
+            ("boolean", True),
+            ("numeric-string", "0.25"),
+            ("negative", -0.25),
+            ("nan", math.nan),
+            ("infinity", math.inf),
+        )
+        valid_info = {
+            "provider": "openai",
+            "pricing_in": 0.25,
+            "pricing_out": 0.75,
+            "pricing_cached_in": 0.05,
+        }
+        for field in ("pricing_in", "pricing_out", "pricing_cached_in"):
+            for label, value in malformed_values:
+                with self.subTest(field=field, value=label):
+                    PricingRegistry.reset()
+                    malformed_info = {**valid_info, field: value}
+                    model_registry = {
+                        "models": {
+                            "valid-model": valid_info,
+                            "malformed-model": malformed_info,
+                        }
+                    }
+                    with patch(
+                        "kollabor_ai.model_registry.get_model_registry",
+                        return_value=model_registry,
+                    ):
+                        reg = PricingRegistry()
+                        reg.load_from_model_registry()
+
+                    self.assertIsNotNone(reg.get_pricing("openai", "valid-model"))
+                    self.assertIsNone(reg.get_pricing("openai", "malformed-model"))
+
     def test_load_defaults_bundled(self):
         reg = PricingRegistry()
         reg.load_defaults()
@@ -136,6 +274,22 @@ class TestPricingRegistryLoad(unittest.TestCase):
             self.assertIsNotNone(
                 reg.get_pricing(provider, model), f"{provider}/{model}"
             )
+
+    def test_dynamic_router_prices_remain_unknown(self):
+        reg = PricingRegistry()
+        reg.load_defaults()
+
+        for model in (
+            "nvidia/switchyard",
+            "openrouter/auto",
+            "openrouter/auto-beta",
+            "openrouter/auto-code",
+            "openrouter/bodybuilder",
+            "openrouter/fusion",
+            "openrouter/pareto-code",
+            "typesafe/jev-router",
+        ):
+            self.assertIsNone(reg.get_pricing("openrouter", model), model)
 
 
 class TestCostCalculator(unittest.TestCase):
