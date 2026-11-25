@@ -399,6 +399,7 @@ export class LiveChatStore implements LiveStore {
     const held = new Set(this.state.rows.map((row) => row.id));
     const older = page.rows.filter((row) => !held.has(row.id));
     this.state = { ...this.state, rows: [...older, ...this.state.rows], olderCursor: cursorOf(page.older) };
+    this.keepUndelivered();
     this.paging = this.state.olderCursor === null ? "complete" : "idle";
     this.publish();
   }
@@ -513,7 +514,7 @@ export class LiveChatStore implements LiveStore {
   }
 
   /**
-   * After a snapshot or a replace, the window's row wins over a local row with the same id. A local row the window
+   * After a snapshot, a replace, or a history page, the window's row wins over a local row with the same id. A local row the window
    * lacks stays at the end until delivery, including after a failure, so the text stays on screen.
    */
   private keepUndelivered(): void {
