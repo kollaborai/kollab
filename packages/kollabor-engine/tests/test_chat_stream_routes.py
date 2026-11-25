@@ -7,7 +7,6 @@ import json
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
-
 from kollabor_engine import server
 from kollabor_engine.routes import stream
 
