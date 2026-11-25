@@ -71,6 +71,9 @@ class FileOperationParser:
         )
         self.read_pattern = re.compile(r"<read>(.*?)</read>", re.DOTALL | re.IGNORECASE)
         self.grep_pattern = re.compile(r"<grep>(.*?)</grep>", re.DOTALL | re.IGNORECASE)
+        self.file_find_pattern = re.compile(
+            r"<file-find>(.*?)</file-find>", re.DOTALL | re.IGNORECASE
+        )
 
         # Special pattern for agent/skill file generation
         # Uses @@@FILE/@@@END syntax to avoid XML tag conflicts
@@ -202,6 +205,14 @@ class FileOperationParser:
         operations.extend(
             self._parse_operations(
                 self.grep_pattern, self._parse_grep_block, text_without_content, "grep"
+            )
+        )
+        operations.extend(
+            self._parse_operations(
+                self.file_find_pattern,
+                self._parse_file_find_block,
+                text_without_content,
+                "file-find",
             )
         )
 
@@ -565,6 +576,13 @@ class FileOperationParser:
             )
 
         return result
+
+    def _parse_file_find_block(self, content: str) -> Dict[str, Any]:
+        """Parse a workspace filename search block."""
+        return {
+            "type": "file_find",
+            "pattern": self._extract_tag("pattern", content).strip(),
+        }
 
 
 class ResponseParser:
