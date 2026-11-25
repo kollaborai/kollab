@@ -411,3 +411,32 @@ def test_a_missing_event_is_a_gap():
     events = json.loads((FIXTURES / "bad-gap.json").read_text())["events"]
     problems = sequence_problems(events, complete=False)
     assert any("expected seq 3" in problem for problem in problems), problems
+
+
+def test_sequence_rejects_events_from_another_conversation():
+    events = [
+        {
+            "seq": 1,
+            "conversation_uid": "a",
+            "type": "snapshot",
+            "data": {
+                "rows": [],
+                "next_seq": 2,
+                "older": None,
+                "turns": [],
+                "inputs": [],
+            },
+        },
+        {"seq": 2, "conversation_uid": "b", "type": "replace", "data": {"rows": []}},
+    ]
+    assert any("conversation" in problem for problem in sequence_problems(events))
+
+
+def test_input_cannot_change_its_turn_binding_to_end_early():
+    events = _lifecycle(
+        {"id": "web-a1", "state": "started", "turn_id": "t1"},
+        {"turn_id": "t2", "state": "ended", "input_ids": []},
+        {"id": "web-a1", "state": "ended", "turn_id": "t2", "outcome": "completed"},
+    )
+    problems = sequence_problems(events)
+    assert any("turn" in problem and "t1" in problem for problem in problems), problems
