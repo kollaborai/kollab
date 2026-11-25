@@ -119,6 +119,10 @@ function installRecorder(cfg) {
     frames: [], net: [], marks: [], cut: null, anchorEl: null,
     toolsStarted: Number(restore?.toolsStarted) || 0,
     toolCalls: Array.isArray(restore?.toolCalls) ? restore.toolCalls : [],
+    measuredInputs: restore?.measuredInputs ?? [],
+    measuredTurns: restore?.measuredTurns ?? [],
+    pendingToolCalls: restore?.pendingToolCalls ?? [],
+    measuring: restore?.measuring ?? false,
     flowSeq: Number.isInteger(restore?.flowSeq) ? restore.flowSeq : null,
     streamTurns: Array.isArray(restore?.streamTurns) ? restore.streamTurns : [],
     streamInputs: Array.isArray(restore?.streamInputs) ? restore.streamInputs : [],
@@ -128,20 +132,43 @@ function installRecorder(cfg) {
     streamReady: false,
   });
   const now = () => Math.round(performance.timeOrigin + performance.now() - cfg.wall0);
+  rec.refreshMeasured = () => {
+    for (const input of rec.streamInputs) {
+      if (rec.measuredInputs.includes(input.id) && input.turn_id && !rec.measuredTurns.includes(input.turn_id)) {
+        rec.measuredTurns.push(input.turn_id);
+      }
+    }
+    for (const turn of rec.streamTurns) {
+      if (turn.input_ids?.some((id) => rec.measuredInputs.includes(id)) && !rec.measuredTurns.includes(turn.turn_id)) {
+        rec.measuredTurns.push(turn.turn_id);
+      }
+    }
+    rec.toolsStarted = rec.pendingToolCalls.filter((call) => rec.measuredTurns.includes(call.turn_id)).length;
+  };
   rec.mark = (name) => {
-    // These marks are emitted immediately before the first marked input is sent.
-    // Retain observed IDs as the baseline for later snapshots and replacements.
-    if (/^(PAGE SEND U1(?: \(|$)|OTHER CLIENT SEND U1$|PAGE START GOAL$)/.test(name)) rec.toolsStarted = 0;
+    if (/^(PAGE SEND U1(?: \(|$)|OTHER CLIENT SEND U1$|PAGE START GOAL$)/.test(name)) {
+      rec.toolsStarted = 0;
+      rec.measuring = true;
+      rec.measuredInputs = [];
+      rec.measuredTurns = [];
+      rec.pendingToolCalls = [];
+    }
     rec.marks.push({ t: now(), name });
   };
   rec.noteToolRow = (row) => {
     if (!row || !Array.isArray(row.parts)) return;
+    if (rec.measuring && row.kind === "input" && row.id && row.parts.some((part) =>
+      part.type === "text" && cfg.user.some((marker) => part.text?.includes(marker)))) {
+      if (!rec.measuredInputs.includes(row.id)) rec.measuredInputs.push(row.id);
+      if (row.turn_id && !rec.measuredTurns.includes(row.turn_id)) rec.measuredTurns.push(row.turn_id);
+    }
     for (const part of row.parts) {
       if (part.type !== "tool-call" || !part.tool_call_id || rec.toolCalls.includes(part.tool_call_id)) continue;
       rec.toolCalls.push(part.tool_call_id);
-      // The observed IDs form the baseline; row and event sequences are independent.
-      if (rec.flowSeq !== null) rec.toolsStarted += 1;
+      if (rec.measuring) rec.pendingToolCalls.push({ id: part.tool_call_id, turn_id: row.turn_id });
+      else if (rec.flowSeq !== null) rec.toolsStarted += 1;
     }
+    if (rec.measuring) rec.refreshMeasured();
   };
 
   // The chat's streams, logged as they pass.
@@ -196,6 +223,7 @@ function installRecorder(cfg) {
       } else if (type === "row.upsert") {
         rec.noteToolRow(data);
       }
+      if (rec.measuring) rec.refreshMeasured();
       if (Number.isInteger(event.seq)) rec.lastStreamSeq = Math.max(rec.lastStreamSeq ?? -1, event.seq);
       const entry = { id, kind, t: now(), ev: type, seq: event.seq };
       if (data.id) entry.row = data.id;
@@ -522,6 +550,10 @@ async function record(flow, session, browser, target) {
     JSON.stringify({
       toolsStarted: window.__rec.toolsStarted,
       toolCalls: window.__rec.toolCalls,
+      measuredInputs: window.__rec.measuredInputs,
+      measuredTurns: window.__rec.measuredTurns,
+      pendingToolCalls: window.__rec.pendingToolCalls,
+      measuring: window.__rec.measuring,
       flowSeq: window.__rec.flowSeq,
       streamTurns: window.__rec.streamTurns,
       streamInputs: window.__rec.streamInputs,
