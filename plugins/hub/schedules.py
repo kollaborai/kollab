@@ -83,6 +83,8 @@ class ScheduleRow:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ScheduleRow":
+        if not isinstance(data, dict):
+            raise TypeError("a schedule row must be an object")
         row = cls(
             id=str(data.get("id", "")),
             agents=[str(a) for a in data.get("agents") or []],
