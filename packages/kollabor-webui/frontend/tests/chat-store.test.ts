@@ -347,6 +347,14 @@ describe("LiveChatStore", () => {
   /** Lets a stray reconnect, if there were one, run before a check that nothing happened. */
   const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
 
+  /** The next history request stays open until the test answers it with a page. */
+  function holdHistory(request: ReturnType<typeof fakeTransport>["request"]) {
+    let respond!: (response: Response) => void;
+    request.mockImplementationOnce(() => new Promise<Response>((resolve) => { respond = resolve; }));
+    return (rows: ChatRow[], older: string | null) =>
+      respond(new Response(JSON.stringify({ rows, older }), { status: 200 }));
+  }
+
   it("start() with no snapshot opens /sessions/s1/stream with no after parameter", async () => {
     const { store, streams } = make();
     store.start();
@@ -634,6 +642,73 @@ describe("LiveChatStore", () => {
     first.emit(snapshot(5, [row("r1")], { older: "stale" }));
     request.mockResolvedValueOnce(new Response(null, { status: 409 }));
     await store.loadOlder();
+    expect(store.olderStatus).toBe("idle");
+  });
+
+  it("a history page that finishes after a resync and a new snapshot is dropped: its rows and cursor do not join the new window", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    // A seq gap resyncs the stream while the page is in flight, then a snapshot replaces the window.
+    first.emit(streamEvent(7, "row.upsert", row("r2", "two")));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(snapshot(9, [row("r9", "nine")], { older: "c9" }));
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["r9"]);
+    expect(store.olderStatus).toBe("idle");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c9&limit=50");
+  });
+
+  it("a history page that finishes after a resync and before the next snapshot is dropped, and paging goes back to idle", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(7, "row.upsert", row("r2", "two")));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+    expect(store.olderStatus).toBe("idle");
+  });
+
+  it("a history page that finishes after the conversation changed is dropped", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(5, "row.upsert", row("x1", "other"), "conv-2"));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(
+      streamEvent(1, "snapshot", { rows: [row("c2-1", "new")], next_seq: 3, older: "c2", turns: [], inputs: [] }, "conv-2"),
+    );
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["c2-1"]);
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c2&limit=50");
+  });
+
+  it("a history page that finishes after a snapshot on the open connection is dropped", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(snapshot(9, [row("r9", "nine")], { older: "c9" }));
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["r9"]);
     expect(store.olderStatus).toBe("idle");
   });
 });
