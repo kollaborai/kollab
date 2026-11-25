@@ -28,6 +28,24 @@ describe("plugin tagged text", () => {
     const parts = splitPluginTags("- top\n    - <todo_write>x</todo_write>", ["todo_write"]);
     expect(parts).toContainEqual({ type: "tag", name: "todo_write", content: "x" });
   });
+  it("parses tags after a fenced block in a numbered-list continuation", () => {
+    const text = "10. Summary\n\n    ```text\n    example\n    ```\n\n    <card>status</card>";
+    expect(splitPluginTags(text, ["card"])).toContainEqual({
+      type: "tag",
+      name: "card",
+      content: "status",
+    });
+  });
+  it("keeps partial renderer openers on the no-tag fast path", () => {
+    const text = "An incomplete <card prefix";
+    const matchAll = vi.spyOn(String.prototype, "matchAll");
+    const parts = splitPluginTags(text, ["card", "notice"]);
+    const pairingCalls = matchAll.mock.calls.length;
+    matchAll.mockRestore();
+
+    expect(parts).toEqual([{ type: "text", text }]);
+    expect(pairingCalls).toBe(0);
+  });
   it("handles nested matching tags and multiple independent blocks", () => {
     expect(splitPluginTags("<x>a<x>b</x>c</x> + <x>d</x>", ["x"])).toEqual([
       { type: "tag", name: "x", content: "a<x>b</x>c" }, { type: "text", text: " + " }, { type: "tag", name: "x", content: "d" },
@@ -129,6 +147,20 @@ describe("plugin tagged text", () => {
     } finally {
       matchAll.mockRestore();
     }
+  });
+
+  it("does not scan the full message once per registered tag name", () => {
+    const text = "A long message with <unknown> tags and no registered opener. ".repeat(200);
+    const names = Array.from({ length: 200 }, (_, index) => `card_${index}`);
+    const includes = vi.spyOn(String.prototype, "includes");
+    let calls = 0;
+    try {
+      expect(splitPluginTags(text, names)).toEqual([{ type: "text", text }]);
+      calls = includes.mock.calls.length;
+    } finally {
+      includes.mockRestore();
+    }
+    expect(calls).toBeLessThan(10);
   });
 
   it.each([

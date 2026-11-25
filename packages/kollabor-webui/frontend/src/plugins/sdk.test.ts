@@ -75,6 +75,29 @@ describe("renderer declarations", () => {
     expect([tool, tag, both, neither]).toHaveLength(4);
   });
 
+  it("requires each renderer branch's payload in plugin render callbacks", () => {
+    const { k, current } = harness("hello", ["hello"], [
+      { tool: "search" },
+      { tag: "card" },
+    ]);
+    k.renderer({
+      tool: "search",
+      render: ({ toolCall }) => {
+        void toolCall.name;
+        return null;
+      },
+    });
+    k.renderer({
+      tag: "card",
+      render: ({ tag }) => {
+        void tag.content;
+        return null;
+      },
+    });
+
+    expect(current().renderers).toHaveLength(2);
+  });
+
   it("rejects ambiguous and missing renderer kinds at runtime", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { k, current } = harness("hello", ["hello"], ["hello_tool"]);

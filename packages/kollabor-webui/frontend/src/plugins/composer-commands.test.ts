@@ -47,6 +47,7 @@ const sendCapture = vi.hoisted(() => ({
   slashPaletteIds: [] as string[],
   setTextCalls: 0,
   busySubmit: null as ((event: { preventDefault: () => void; defaultPrevented?: boolean }) => void) | null,
+  sendWaitingNow: null as (() => void) | null,
   runtime: null as unknown,
   transportCommands: [] as unknown[],
   newMessages: 0,
@@ -160,6 +161,14 @@ vi.mock("@/voice/voice-room", () => ({
   useVoiceRoomLive: () => false,
   VoiceRoomBar: () => null,
 }));
+
+vi.mock("@/runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/runtime")>();
+  return {
+    ...actual,
+    useSendWaitingNow: () => sendCapture.sendWaitingNow,
+  };
+});
 
 const k = {} as PluginApi;
 const run = () => undefined;
@@ -551,6 +560,7 @@ afterEach(() => {
   sendCapture.slashPaletteIds = [];
   sendCapture.setTextCalls = 0;
   sendCapture.busySubmit = null;
+  sendCapture.sendWaitingNow = null;
   sendCapture.runtime = null;
   sendCapture.transportCommands.length = 0;
   sendCapture.newMessages = 0;
@@ -570,7 +580,9 @@ describe("plugin command composer labels", () => {
     "restores a plugin command draft when its handler %s",
     async (failure) => {
       const draft = "/publish now";
-      const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz";
+      const githubToken = "ghp_abcdefghijklmnopqrstuvwxyz";
+      const databasePassword = "correct-horse-7";
+      const secret = `GITHUB_TOKEN=${githubToken}; DB unavailable: postgres://alice:${databasePassword}@db.internal/kollab`;
       const error = new Error(secret);
       const log = vi.spyOn(console, "error").mockImplementation(() => {});
       sendCapture.text = draft;
@@ -597,7 +609,8 @@ describe("plugin command composer labels", () => {
         "Could not run /publish. Check the browser console for redacted details.",
       );
       expect(log.mock.calls.flat().join(" ")).toContain("[redacted]");
-      expect(log.mock.calls.flat().join(" ")).not.toContain(secret);
+      expect(log.mock.calls.flat().join(" ")).not.toContain(githubToken);
+      expect(log.mock.calls.flat().join(" ")).not.toContain(databasePassword);
     },
   );
 
@@ -964,6 +977,75 @@ describe("early plugin command submission", () => {
       resolveRun({ content: [] });
       await act(async () => root.unmount());
       host.remove();
+      runAdapter.mockRestore();
+    }
+  });
+
+  it("preserves Cmd+Enter send-now intent when a slash submit is replayed", async () => {
+    prepareMountedThread();
+    pluginRegistry.setListed(null);
+    const sendWaitingNow = vi.fn();
+    sendCapture.sendWaitingNow = sendWaitingNow;
+    let resolveRun!: (value: ChatModelRunResult) => void;
+    const activeRun = new Promise<ChatModelRunResult>((resolve) => { resolveRun = resolve; });
+    const runAdapter = vi.spyOn(threadAdapter, "run").mockReturnValue(activeRun);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const draftKey = "plugin-submit-send-now";
+    const text = "/please summarize the failing tests";
+
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        draftKey,
+      })));
+      const runtime = sendCapture.runtime as {
+        thread: {
+          composer: { setText(text: string): void; send(): void };
+          getState(): { isRunning: boolean };
+        };
+      };
+      await act(async () => {
+        runtime.thread.composer.setText("start a turn");
+        runtime.thread.composer.send();
+        await Promise.resolve();
+      });
+      expect(runtime.thread.getState().isRunning).toBe(true);
+
+      const input = host.querySelector("textarea[aria-label='Message input']");
+      expect(input).not.toBeNull();
+      await act(async () => {
+        runtime.thread.composer.setText(text);
+        publishComposerText(text);
+        input?.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "Enter",
+          metaKey: true,
+          bubbles: true,
+        }));
+        await Promise.resolve();
+      });
+      expect(sendCapture.transportCommands).not.toContainEqual(expect.objectContaining({
+        type: "add-message",
+        message: { role: "user", parts: [{ type: "text", text }] },
+      }));
+      expect(sendWaitingNow).not.toHaveBeenCalled();
+
+      await act(async () => {
+        root.render(createElement(ThreadHarness, { commandCatalogStatus: "ready", draftKey }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(sendCapture.transportCommands).toContainEqual(expect.objectContaining({
+        type: "add-message",
+        message: { role: "user", parts: [{ type: "text", text }] },
+      }));
+      expect(sendWaitingNow).toHaveBeenCalledOnce();
+    } finally {
+      resolveRun({ content: [] });
+      await act(async () => root.unmount());
+      host.remove();
+      saveComposerDraft(draftKey, "");
       runAdapter.mockRestore();
     }
   });

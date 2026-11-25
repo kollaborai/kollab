@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ComponentProps, type ComponentType, type ReactNode } from "react";
+import { act, type ComponentProps, type ComponentType, type FunctionComponent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -68,7 +68,7 @@ function TagView({ tag }: PluginRendererProps) {
   return <span data-plugin-tag-view="">{tag?.content}</span>;
 }
 
-function addTagRenderer(render: RendererSpec["render"] = TagView) {
+function addTagRenderer(render: FunctionComponent<PluginRendererProps> = TagView) {
   const renderer: RendererSpec = { tag: "card", render };
   const record: PluginRecord = {
     id: "renderer-test",
@@ -180,10 +180,9 @@ describe("plugin tag message markdown", () => {
   it("contains a hostile non-Error throw through the real inline tag renderer", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const Throws = (() => { throw Object.create(null); }) as ComponentType<PluginRendererProps>;
-    const renderer = Throws as RendererSpec["render"];
+    const Throws = (() => { throw Object.create(null); }) as FunctionComponent<PluginRendererProps>;
     primitiveText.value = "<card>x</card>";
-    addTagRenderer(renderer);
+    addTagRenderer(Throws);
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);

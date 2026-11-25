@@ -19,6 +19,11 @@ import pytest
         ("service-name", "service"),
         ("undeclared-secret", "secret"),
         ("contributes", "contributes"),
+        ("invalid-contribution-menu", "contributes"),
+        ("invalid-contribution-views", "contributes"),
+        ("invalid-contribution-pages", "contributes"),
+        ("invalid-contribution-modals", "contributes"),
+        ("invalid-contribution-slash", "contributes"),
         ("multiple-slash-identities", "contributes"),
         ("multiple-renderer-identities", "contributes"),
         ("renderer-string", "contributes"),
@@ -68,6 +73,12 @@ def test_manifest_checks(change, message, tmp_path, monkeypatch):
         manifest["services"] = {"loop": {"command": ["python3"], "secrets": ["KEY"]}}
     elif change == "contributes":
         manifest["contributes"] = {"typo": []}
+    elif change.startswith("invalid-contribution-"):
+        kind = change.removeprefix("invalid-contribution-")
+        identity = "publish command"
+        manifest["contributes"] = {
+            kind: [identity] if kind == "slash" else [{"id": identity}]
+        }
     elif change == "multiple-slash-identities":
         manifest["contributes"] = {"slash": [{"id": "deploy", "name": "review"}]}
     elif change == "multiple-renderer-identities":
@@ -122,6 +133,12 @@ def test_manifest_rejects_non_string_contribution_identities(kind, field, tmp_pa
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="contributes identity"):
         validate_manifest(root, "0.23.0")
+
+
+def test_inventory_preserves_the_documented_sk_fetch_renderer_tag():
+    from kollabor_plugins.registry import _normalize_declared
+
+    assert _normalize_declared({"tag": "sk-fetch"}) == {"tag": "sk-fetch"}
 
 
 @pytest.mark.parametrize("key", ["stop_timeout_s", "heartbeat_s"])

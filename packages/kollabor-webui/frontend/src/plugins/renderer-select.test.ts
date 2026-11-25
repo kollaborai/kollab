@@ -1,4 +1,4 @@
-import { createElement, type ComponentProps } from "react";
+import { createElement, type ComponentProps, type FunctionComponent } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
@@ -6,7 +6,7 @@ import { PluginToolPart } from "./renderers";
 import type { PluginApi, PluginRendererProps, RendererSpec } from "./sdk";
 import { findTagRenderer, findToolRenderer, tagRendererNames } from "./renderer-select";
 
-const Render = (() => null) as unknown as RendererSpec["render"];
+const Render = (() => null) as unknown as FunctionComponent<PluginRendererProps>;
 const k = {} as PluginApi;
 const hostToolUis = ["request_permission", "hub_msg", "hub_reply", "hub_broadcast"] as const;
 
