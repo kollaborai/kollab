@@ -64,7 +64,12 @@ async def test_sender_id_is_the_recorded_id():
 
     result = await admit(acp_view, request_id="client-req-A")
 
-    assert result == {"status": "injected", "request_id": "client-req-A"}
+    assert result == {
+        "status": "injected",
+        "request_id": "client-req-A",
+        "joined_request_id": "active-req",
+        "joined_turn_id": 1,
+    }
     assert runner._queue.empty()
     assert [args[0] for args in recorded] == ["client-req-A"]
 
