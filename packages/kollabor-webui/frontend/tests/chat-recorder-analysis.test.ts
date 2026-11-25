@@ -364,7 +364,7 @@ describe("chat recorder analysis", () => {
     });
     install({ wall0: Date.now(), sessionStreamSuffix: "/sessions/target/stream", user: ["U1-marker"], reply: [] });
     const rec = (window as any).__rec;
-    const row = (call: string) => ({ kind: "tool", parts: [{ type: "tool-call", tool_call_id: call }] });
+    const row = (call: string) => ({ kind: "tool", turn_id: call === "seed" ? "old" : "measured-turn", parts: [{ type: "tool-call", tool_call_id: call }] });
     const emit = async (type: string, data: any, seq: number) => {
       event = { type, data, seq };
       await (await (window.fetch as any)("http://localhost/sessions/target/stream")).text();
@@ -372,10 +372,39 @@ describe("chat recorder analysis", () => {
     rec.flowSeq = 1;
     await emit("row.upsert", row("seed"), 1);
     rec.mark("PAGE SEND U1");
-    await emit("snapshot", { rows: [row("seed"), row("measured")], next_seq: 3 }, 2);
+    await emit("snapshot", { rows: [row("seed"), { id: "u1", kind: "input", turn_id: "measured-turn", parts: [{ type: "text", text: "U1-marker" }] }, row("measured")], next_seq: 3 }, 2);
     await emit("replace", { rows: [row("seed"), row("measured")] }, 3);
     expect(rec.toolsStarted).toBe(1);
     expect(analyzeChatFrames([frame({ toolsDrawn: 2, toolsStarted: rec.toolsStarted })], ready).defects.dupTools).toBe(1);
+  });
+
+  it("excludes unseen old-turn calls recovered after U1 and counts measured concurrent turns", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    let event: any;
+    const window = { fetch: async () => new Response(`data: ${JSON.stringify(event)}\n\n`) };
+    const install = runInNewContext(`(${body})`, {
+      window, Request, Response, ReadableStream, TextDecoder, URL, performance,
+      location: { href: "http://localhost/" },
+      sessionStorage: { getItem: () => null, removeItem: () => {} },
+      requestAnimationFrame: () => {},
+    });
+    install({ wall0: Date.now(), sessionStreamSuffix: "/sessions/target/stream", user: ["U1-marker", "U2-marker"], reply: [] });
+    const rec = (window as any).__rec;
+    const emit = async (type: string, data: any, seq: number) => {
+      event = { type, data, seq };
+      await (await (window.fetch as any)("http://localhost/sessions/target/stream")).text();
+    };
+    const tool = (call: string, turn_id: string) => ({ kind: "tool", turn_id, parts: [{ type: "tool-call", tool_call_id: call }] });
+    const input = (id: string, marker: string) => ({ id, kind: "input", turn_id: null, parts: [{ type: "text", text: marker }] });
+    rec.flowSeq = 1;
+    rec.mark("PAGE SEND U1");
+    await emit("snapshot", { rows: [tool("old-snapshot", "old"), input("u1", "U1-marker"), tool("current", "turn-1")], turns: [], inputs: [], next_seq: 3 }, 2);
+    await emit("replace", { rows: [tool("old-replace", "old"), tool("current", "turn-1"), tool("second", "turn-2"), input("u2", "U2-marker")] }, 3);
+    await emit("turn.state", { turn_id: "turn-2", state: "running", input_ids: ["u2"] }, 4);
+    await emit("input.state", { id: "u1", state: "joined", turn_id: "turn-1" }, 5);
+    expect(rec.toolsStarted).toBe(2);
+    expect(analyzeChatFrames([frame({ toolsDrawn: 3, toolsStarted: rec.toolsStarted })], ready).defects.dupTools).toBe(1);
   });
 
   it("counts newly observed calls independently of row sequences through recovery", async () => {
