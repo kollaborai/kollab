@@ -293,6 +293,7 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
         rows.update(row["id"] for row in new_rows)
         input_rows.update(row["id"] for row in new_rows if row["kind"] == "input")
 
+    conversation_uid = None
     for event in events:
         shape = event_problems(event)
         if shape:
@@ -302,6 +303,10 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 expected = last_seq + 1
             continue
         seq, kind, data = event["seq"], event["type"], event["data"]
+        if conversation_uid is None:
+            conversation_uid = event["conversation_uid"]
+        elif event["conversation_uid"] != conversation_uid:
+            problems.append(f"seq {seq}: conversation uid changed within stream")
         if seq <= last_seq:
             problems.append(f"seq {seq}: seq must increase (previous {last_seq})")
         elif expected is not None and seq != expected:
