@@ -19,7 +19,7 @@ export type ChatPart =
       tool_name: string;
       args: unknown;
       result?: unknown;
-      is_error?: boolean;
+      is_error?: boolean | null;
     }
   | { type: "image"; url: string }
   | { type: "prompt"; prompt_id: string; data: unknown }
@@ -31,11 +31,11 @@ export type ChatPart =
       to: string; // "" for a broadcast
       text: string;
       observed: boolean;
-      kind?: string;
-      thread_id?: string;
-      reply_to?: string;
-      is_direct?: boolean;
-      presence?: "online" | "offline";
+      kind?: string | null;
+      thread_id?: string | null;
+      reply_to?: string | null;
+      is_direct?: boolean | null;
+      presence?: "online" | "offline" | null;
     };
 
 export type ChatRow = {
@@ -49,7 +49,7 @@ export type ChatRow = {
   created_at: string;
 };
 
-export type InputInfo = { id: string; state: InputState; turn_id: string | null; outcome?: Outcome };
+export type InputInfo = { id: string; state: InputState; turn_id: string | null; outcome?: Outcome | null };
 export type TurnInfo = { turn_id: string; state: TurnState; input_ids: string[] };
 
 type StreamEvent<T extends string, D> = { seq: number; conversation_uid: string; type: T; data: D };

@@ -411,3 +411,22 @@ def test_a_missing_event_is_a_gap():
     events = json.loads((FIXTURES / "bad-gap.json").read_text())["events"]
     problems = sequence_problems(events, complete=False)
     assert any("expected seq 3" in problem for problem in problems), problems
+
+
+def test_sequence_rejects_events_from_another_conversation():
+    events = [
+        {
+            "seq": 1,
+            "conversation_uid": "a",
+            "type": "snapshot",
+            "data": {
+                "rows": [],
+                "next_seq": 2,
+                "older": None,
+                "turns": [],
+                "inputs": [],
+            },
+        },
+        {"seq": 2, "conversation_uid": "b", "type": "replace", "data": {"rows": []}},
+    ]
+    assert any("conversation" in problem for problem in sequence_problems(events))
