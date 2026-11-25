@@ -1,0 +1,257 @@
+"""HTTP/SSE bridge to a session daemon's ordered chat stream (#1451)."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from sse_starlette.sse import EventSourceResponse
+
+from kollabor_rpc import RpcError, RpcHandlerError, RpcMethodNotFound
+
+from ..server import get_session_registry
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/sessions", tags=["chat-stream"])
+
+
+class InputAttachment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: StrictStr = Field(min_length=1, max_length=256)
+    content_type: StrictStr = Field(min_length=1, max_length=128)
+    data_url: StrictStr = Field(min_length=1)
+
+
+class InputRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: StrictStr = Field(min_length=1, max_length=256)
+    text: StrictStr
+    attachments: list[InputAttachment] = Field(default_factory=list, max_length=20)
+
+
+def _get_session(session_id: str) -> Any:
+    session = get_session_registry().get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+def _get_rpc(session_id: str) -> tuple[Any, Any]:
+    session = _get_session(session_id)
+    daemon = getattr(session, "daemon", None)
+    rpc = getattr(daemon, "rpc", None) if daemon is not None else None
+    if not callable(getattr(rpc, "call", None)):
+        raise HTTPException(
+            status_code=503, detail="The session daemon is unavailable."
+        )
+    return session, rpc
+
+
+async def _call_daemon(session_id: str, method: str, params: dict[str, Any]) -> Any:
+    _session, rpc = _get_rpc(session_id)
+    try:
+        return await rpc.call(method, params, timeout=15.0)
+    except RpcMethodNotFound:
+        raise HTTPException(
+            status_code=503,
+            detail="This agent's local chat stream is unavailable.",
+        ) from None
+    except RpcHandlerError as exc:
+        logger.debug("chat stream daemon action %s failed: %s", method, exc)
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon could not complete the chat action.",
+        ) from None
+    except RpcError:
+        raise HTTPException(
+            status_code=503, detail="The session daemon is unavailable."
+        ) from None
+
+
+def _event_payload(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    event = value.get("event") if value.get("type") == "chat_stream" else None
+    if not isinstance(event, dict):
+        return None
+    if (
+        not isinstance(event.get("seq"), int)
+        or isinstance(event.get("seq"), bool)
+        or not isinstance(event.get("conversation_uid"), str)
+        or not isinstance(event.get("type"), str)
+        or not isinstance(event.get("data"), dict)
+    ):
+        return None
+    return event
+
+
+def _sse_event(event: dict[str, Any]) -> dict[str, str]:
+    # The data line is the whole protocol event, including its contract type.
+    return {"data": json.dumps(event, ensure_ascii=False, separators=(",", ":"))}
+
+
+async def _read_events(
+    session_id: str,
+    *,
+    after: int | None,
+    conversation_uid: str | None,
+) -> list[dict[str, Any]]:
+    result = await _call_daemon(
+        session_id,
+        "state.chat_stream.subscribe",
+        {"after": after, "conversation_uid": conversation_uid},
+    )
+    events = result.get("events") if isinstance(result, dict) else None
+    if not isinstance(events, list) or any(
+        not isinstance(event, dict) for event in events
+    ):
+        raise HTTPException(
+            status_code=502, detail="The local daemon returned an invalid chat stream."
+        )
+    return events
+
+
+@router.get("/{session_id}/stream")
+async def chat_stream(
+    session_id: str,
+    request: Request,
+    after: int | None = Query(default=None, ge=0),
+    conversation_uid: str | None = Query(default=None, min_length=1, max_length=256),
+):
+    """Relay initial replay and live daemon events as SSE data lines."""
+    session, _rpc = _get_rpc(session_id)
+    try:
+        queue = session.subscribe()
+    except AttributeError, RuntimeError:
+        raise HTTPException(
+            status_code=503, detail="The session event stream is unavailable."
+        ) from None
+
+    try:
+        initial = await _read_events(
+            session_id,
+            after=after,
+            conversation_uid=conversation_uid,
+        )
+    except Exception:
+        session.unsubscribe(queue)
+        raise
+
+    async def event_generator():
+        last_seq = -1
+        last_uid = conversation_uid
+        try:
+            for event in initial:
+                seq = event.get("seq")
+                uid = event.get("conversation_uid")
+                if (
+                    not isinstance(seq, int)
+                    or isinstance(seq, bool)
+                    or not isinstance(uid, str)
+                ):
+                    continue
+                if seq <= last_seq:
+                    continue
+                last_seq, last_uid = seq, uid
+                yield _sse_event(event)
+
+            while not await request.is_disconnected():
+                try:
+                    frame = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield {"comment": "keepalive"}
+                    continue
+                if frame is None or getattr(frame, "name", None) == "daemon_closed":
+                    return
+
+                event = _event_payload(frame)
+                if event is None:
+                    continue
+                seq = event["seq"]
+                if seq <= last_seq:
+                    continue
+                if last_seq >= 0 and seq > last_seq + 1:
+                    replay = await _read_events(
+                        session_id,
+                        after=last_seq,
+                        conversation_uid=last_uid,
+                    )
+                    for missed in replay:
+                        missed_seq = missed.get("seq")
+                        missed_uid = missed.get("conversation_uid")
+                        if (
+                            not isinstance(missed_seq, int)
+                            or isinstance(missed_seq, bool)
+                            or not isinstance(missed_uid, str)
+                            or missed_seq <= last_seq
+                        ):
+                            continue
+                        last_seq, last_uid = missed_seq, missed_uid
+                        yield _sse_event(missed)
+                    if seq <= last_seq:
+                        continue
+                last_seq, last_uid = seq, event["conversation_uid"]
+                yield _sse_event(event)
+        finally:
+            session.unsubscribe(queue)
+
+    return EventSourceResponse(event_generator())
+
+
+@router.post("/{session_id}/inputs", status_code=202)
+async def add_input(session_id: str, body: InputRequest):
+    result = await _call_daemon(
+        session_id,
+        "state.chat_stream.add_input",
+        {
+            "id": body.id,
+            "text": body.text,
+            "attachments": [attachment.model_dump() for attachment in body.attachments],
+        },
+    )
+    if (
+        not isinstance(result, dict)
+        or result.get("id") != body.id
+        or not isinstance(result.get("state"), str)
+    ):
+        raise HTTPException(
+            status_code=502, detail="The local daemon returned an invalid input result."
+        )
+    return {"id": body.id, "state": result["state"]}
+
+
+@router.post("/{session_id}/inputs/{input_id}/cancel")
+async def cancel_input(session_id: str, input_id: str):
+    result = await _call_daemon(
+        session_id,
+        "state.chat_stream.cancel_queued_input",
+        {"id": input_id},
+    )
+    if not isinstance(result, dict) or result.get("found") is not True:
+        raise HTTPException(status_code=404, detail="Input not found")
+    if result.get("cancelled") is not True:
+        raise HTTPException(status_code=409, detail="Input is no longer queued")
+    return {"id": input_id, "cancelled": True}
+
+
+@router.post("/{session_id}/inputs/{input_id}/send-now")
+async def send_input_now(session_id: str, input_id: str):
+    result = await _call_daemon(
+        session_id,
+        "state.chat_stream.send_now",
+        {"id": input_id},
+    )
+    if not isinstance(result, dict) or result.get("found") is not True:
+        raise HTTPException(status_code=404, detail="Input not found")
+    state = result.get("state")
+    if not isinstance(state, str):
+        raise HTTPException(
+            status_code=502, detail="The local daemon returned an invalid input state."
+        )
+    return {"id": input_id, "state": state}
