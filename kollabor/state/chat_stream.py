@@ -169,8 +169,10 @@ class ChatStreamLog:
         if event["type"] == "turn.state":
             data = event["data"]
             if data["state"] == "running":
-                self._current_turn_id = data["turn_id"]
-                self._current_turn_events = {event["seq"]: event}
+                if self._current_turn_id != data["turn_id"]:
+                    self._current_turn_id = data["turn_id"]
+                    self._current_turn_events = {}
+                self._current_turn_events[event["seq"]] = event
             elif data["turn_id"] == self._current_turn_id:
                 self._current_turn_events[event["seq"]] = event
                 self._current_turn_id = None
@@ -343,7 +345,9 @@ class ChatStreamService:
         with self._log(uid)._lock:
             return self._record_event_locked(uid, event_type, data)
 
-    def _record_event_locked(self, uid: str, event_type: str, data: dict[str, Any]) -> Event:
+    def _record_event_locked(
+        self, uid: str, event_type: str, data: dict[str, Any]
+    ) -> Event:
         if event_type == "turn.state":
             prior = self._turns.get(uid, {}).get(data.get("turn_id"))
             if prior is not None and prior.get("origin") != data.get("origin"):
@@ -431,7 +435,11 @@ class ChatStreamService:
             self._on_tool_event(uid, event)
         elif kind == "turn_complete":
             origin = event.get("origin")
-            if isinstance(origin, dict) and origin.get("kind") == "goal" and not event.get("goal_attempt_terminal"):
+            if (
+                isinstance(origin, dict)
+                and origin.get("kind") == "goal"
+                and not event.get("goal_attempt_terminal")
+            ):
                 return
             self._on_turn_complete(uid, event)
         elif kind == "error":
@@ -761,9 +769,7 @@ class ChatStreamService:
             self._upsert(uid, {**row, "turn_id": turn_id, "status": "joined"})
         self._set_turn_state(uid, turn_id, "running")
 
-    def _register_joined_turn(
-        self, uid: str, request_id: str, turn_id: str
-    ) -> bool:
+    def _register_joined_turn(self, uid: str, request_id: str, turn_id: str) -> bool:
         """Recover the active turn identity carried by an ACP steer admission."""
         prior = self._inputs.setdefault(uid, {}).get(request_id, {})
         if prior.get("state") == "ended":
@@ -958,9 +964,7 @@ class ChatStreamService:
             compaction_seq_provider=current_compaction_seq,
         )
 
-    def _snapshot_components(
-        self, uid: str
-    ) -> tuple[
+    def _snapshot_components(self, uid: str) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[dict[str, Any]],
@@ -1197,11 +1201,18 @@ class ChatStreamService:
         origin: dict[str, Any] | None = None,
     ) -> None:
         with self._log(uid)._lock:
-            self._set_turn_state_locked(uid, turn_id, state, input_id=input_id, origin=origin)
+            self._set_turn_state_locked(
+                uid, turn_id, state, input_id=input_id, origin=origin
+            )
 
     def _set_turn_state_locked(
-        self, uid: str, turn_id: str, state: str, *,
-        input_id: str | None = None, origin: dict[str, Any] | None = None,
+        self,
+        uid: str,
+        turn_id: str,
+        state: str,
+        *,
+        input_id: str | None = None,
+        origin: dict[str, Any] | None = None,
     ) -> None:
         previous = self._turns.setdefault(uid, {}).get(turn_id, {})
         if origin is not None and previous and previous.get("origin") != origin:
@@ -1224,7 +1235,9 @@ class ChatStreamService:
         retained_origin = previous.get("origin", origin)
         if retained_origin is not None:
             data["origin"] = copy.deepcopy(retained_origin)
-        problems = event_problems({"seq": 1, "conversation_uid": uid, "type": "turn.state", "data": data})
+        problems = event_problems(
+            {"seq": 1, "conversation_uid": uid, "type": "turn.state", "data": data}
+        )
         if problems:
             raise ValueError("; ".join(problems))
         self._turns[uid][turn_id] = copy.deepcopy(data)
