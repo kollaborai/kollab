@@ -75,6 +75,13 @@ def test_oversized_negative_limits_report_field_error(field):
     assert any(f"model-0: {field} must be" in error for error in errors)
 
 
+@pytest.mark.parametrize("field", ["context_window", "max_output"])
+def test_boolean_limits_are_not_positive_integers(field):
+    errors = validator.validate(_catalog_with_price(field, True))
+
+    assert any(f"model-0: {field} must be" in error for error in errors)
+
+
 @pytest.mark.parametrize("field", PRICE_FIELDS)
 @pytest.mark.parametrize(
     "value",

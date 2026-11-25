@@ -459,6 +459,11 @@ def test_refresh_clears_invalid_retained_output_limits_before_writing_strict_jso
                     "context_window": 1000,
                     "max_output": 1.5,
                 },
+                "vendor/bool": {
+                    "provider": "openrouter",
+                    "context_window": 1000,
+                    "max_output": True,
+                },
                 "vendor/valid-sibling": {
                     "provider": "openrouter",
                     "context_window": 1000,
@@ -477,7 +482,7 @@ def test_refresh_clears_invalid_retained_output_limits_before_writing_strict_jso
     models = json.loads(registry.read_text(), parse_constant=reject_non_json_number)[
         "models"
     ]
-    for name in ("vendor/retained", "vendor/negative", "vendor/float"):
+    for name in ("vendor/retained", "vendor/negative", "vendor/float", "vendor/bool"):
         assert models[name]["max_output"] is None
     assert models["vendor/retained"]["context_window"] == 2000
     assert models["vendor/valid-sibling"]["max_output"] == 4096
