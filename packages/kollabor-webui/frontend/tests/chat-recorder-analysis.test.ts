@@ -3,6 +3,7 @@ import {
   analyzeChatFrames,
   CHAT_RECORDER_FLOWS,
   classifyChatRuntime,
+  hasRunningTurnWithInputs,
   isCompactionComplete,
   parseRuntimeMatrix,
 } from "../scripts/chat-recorder-analysis.mjs";
@@ -29,6 +30,22 @@ function frame(overrides: Record<string, unknown> = {}) {
 }
 
 describe("chat recorder analysis", () => {
+  it("requires the reloaded snapshot to retain the active turn and its running inputs", () => {
+    const expectedTurn = { turn_id: "turn-1", input_ids: ["input-1"] };
+    expect(hasRunningTurnWithInputs({
+      turns: [{ turn_id: "turn-1", state: "running", input_ids: ["input-1"] }],
+      inputs: [{ id: "input-1", turn_id: "turn-1", state: "started" }],
+    }, expectedTurn)).toBe(true);
+    expect(hasRunningTurnWithInputs({
+      turns: [{ turn_id: "turn-1", state: "running", input_ids: ["input-1"] }],
+      inputs: [],
+    }, expectedTurn)).toBe(false);
+    expect(hasRunningTurnWithInputs({
+      turns: [{ turn_id: "turn-1", state: "ended", input_ids: ["input-1"] }],
+      inputs: [{ id: "input-1", turn_id: "turn-1", state: "ended" }],
+    }, expectedTurn)).toBe(false);
+  });
+
   it("does not accept an idle compaction before the stream replacement arrives", () => {
     expect(isCompactionComplete({
       sawStart: true,
