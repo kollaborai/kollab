@@ -64,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restored Web UI image drafts keep one token per attached image and remove orphaned tokens (#1176).
 - Completed Hub tool rows use readable labels and show recipients instead of internal thread ids (#1175).
 - Web UI: image thumbnails always open the matching attachment when session media is stale or unavailable (#1170).
+- Workspace filename discovery now fails if a scanned directory changes, including a move out and back. Bundled guidance routes workspace inventories through `file-find`; general terminal searches remain unrestricted (#1167).
 - Terminal spawn checks allow quoted literal substitution examples while checking executable substitutions (#1163).
 - Connect explains whether a local session or the relay refused authorization to create a device join code and gives a safe next step. (#1146)
 - Terminal, Code and Git show the correct recovery action for outdated agents, including before engine-version metadata loads; long stop commands wrap without splitting `--hub`, and Terminal hides Retry until the agent is current. (#1141)
