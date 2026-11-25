@@ -86,7 +86,7 @@ def test_unrepresentable_overrides_are_not_emitted_in_budget_hud(tmp_path, monke
     )
 
     for model, provider in (
-        ("overflow-override", "openrouter"),
+        ("overflow-override", "overflow-provider"),
         ("model-not-in-registry", "overflow-provider"),
     ):
         active_values.update(model=model, provider=provider)
