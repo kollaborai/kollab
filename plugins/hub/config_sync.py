@@ -425,8 +425,8 @@ class SnapshotBuilder:
         self._resolved: dict[str, str] = {}
         self._core_signature: tuple | None = None
         self._core: tuple[dict, dict, tuple] = ({}, {}, ())
-        self._schedules_signature: tuple | None = None
-        self._schedules_cache: list = []
+        self._schedules_signature: tuple[int, int] | None = None
+        self._schedules_cache: list | None = None
         self._missing: set[str] = set()  # keyring names the last pass could not read
         self._retry: set[str] | None = None  # the names the next pass reads again
 
@@ -473,24 +473,39 @@ class SnapshotBuilder:
     def _schedules_rows(self) -> list:
         """The parsed rows of ``schedules.json``; [] when absent, cached by stat.
 
-        A file damaged mid-write keeps the last good rows: sending nothing is
-        the safe answer, an empty list would erase every device's schedules.
+        A file damaged mid-write keeps the last good rows. With no good read in
+        this process, the snapshot is unreadable and must not be sent: an empty
+        list would erase every device's schedules.
         """
         path = kollab_root(self._root) / "schedules.json"
-        signature = _stat_signature(path)
-        if signature == self._schedules_signature:
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            signature = None
+        except OSError:
+            raise ConfigSyncError("unreadable") from None
+        else:
+            signature = (info.st_mtime_ns, info.st_size)
+        if signature is not None and signature == self._schedules_signature:
+            assert self._schedules_cache is not None
             return self._schedules_cache
-        rows: list = []
-        if signature is not None:
+        if signature is None:
+            rows: list = []
+        else:
             try:
                 parsed = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 parsed = None
-            if isinstance(parsed, list):
-                rows = [
-                    dict(item) for item in parsed if isinstance(item, dict)
-                ]
-        self._schedules_signature, self._schedules_cache = signature, rows
+            rows = _valid_schedule_rows(parsed)
+            if rows is None:
+                logger.warning(
+                    "config sync: schedules are unreadable; keeping the last good roster"
+                )
+                if self._schedules_cache is None:
+                    raise ConfigSyncError("unreadable")
+                return self._schedules_cache
+        self._schedules_signature = signature
+        self._schedules_cache = rows
         return rows
 
     def _core_parts(self) -> tuple[dict, dict, tuple]:

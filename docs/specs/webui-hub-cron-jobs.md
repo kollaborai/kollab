@@ -1,9 +1,11 @@
 # Schedules (hub cron jobs): web UI, sync and firing
 
 Issue: #612 · PR: #653
-Status: design approved for build (mockup v16). Built so far: the read-only
-socket view and engine aggregation below. Everything under "Requirements"
-and "Design" is planned, not built.
+Status: design approved for build (mockup v16). Implemented: persistent
+schedule storage and run history, fixed-grid firing and catch-up, agent
+delivery, sealed config sync, and the read-only cron-job socket/engine view.
+The Schedules management views in Settings and `/schedules` (TUI) are not
+implemented by this PR.
 Last updated: 2026-11-09
 
 ## Goal

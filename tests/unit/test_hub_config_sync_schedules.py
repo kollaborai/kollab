@@ -21,6 +21,7 @@ import pytest
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+from plugins.hub.config_sync import ConfigSyncError, SnapshotBuilder
 from tests.unit.test_config_sync_service import network  # noqa: F401
 
 
@@ -82,6 +83,44 @@ async def test_a_schedules_change_repushes(network):
     await sync_once(net)
 
     assert [r["id"] for r in _read_schedules(net["server"])] == ["s1", "s2"]
+
+
+@pytest.mark.asyncio
+async def test_partial_primary_schedule_file_keeps_last_good_synced_roster(network):
+    net = network
+    _write_schedules(net["mac"], [_row_dict()])
+    await sync_once(net)
+    assert [r["id"] for r in _read_schedules(net["server"])] == ["s1"]
+
+    net["mac"].joinpath("schedules.json").write_text("[", encoding="utf-8")
+    await sync_once(net)
+
+    assert [r["id"] for r in _read_schedules(net["server"])] == ["s1"]
+
+
+def test_snapshot_refuses_malformed_schedule_file_without_a_good_cache(tmp_path):
+    root = tmp_path / ".kollab"
+    root.mkdir()
+    root.joinpath("schedules.json").write_text("[", encoding="utf-8")
+    builder = SnapshotBuilder(root=root)
+
+    with pytest.raises(ConfigSyncError, match="unreadable"):
+        builder.build()
+
+
+def test_snapshot_keeps_cached_roster_until_schedule_file_is_readable(tmp_path):
+    root = tmp_path / ".kollab"
+    root.mkdir()
+    path = root / "schedules.json"
+    _write_schedules(root, [_row_dict()])
+    builder = SnapshotBuilder(root=root)
+    assert [row["id"] for row in builder.build().schedules] == ["s1"]
+
+    path.write_text("[", encoding="utf-8")
+    assert [row["id"] for row in builder.build().schedules] == ["s1"]
+
+    path.write_text("[]", encoding="utf-8")
+    assert builder.build().schedules == ()
 
 
 @pytest.mark.asyncio

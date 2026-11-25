@@ -8168,7 +8168,8 @@ class HubPlugin(BasePlugin):
             )
             deadline = time.monotonic() + ONLINE_TIMEOUT_SECONDS
             while time.monotonic() < deadline:
-                if find_socket(spec.identity):
+                record = _local_record(spec.identity)
+                if record and record.get("pid") == proc.pid:
                     return True
                 time.sleep(0.5)
             return False
