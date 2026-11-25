@@ -1,4 +1,3 @@
-import { useAui, useAuiState } from "@assistant-ui/react";
 import {
   createContext,
   useCallback,
@@ -45,31 +44,35 @@ const VoiceModeContext = createContext<VoiceMode>(IDLE);
 export const useVoiceMode = () => useContext(VoiceModeContext);
 
 /**
- * The composer mic is a /voice toggle. The command goes out as a normal
- * chat turn, the same path a typed slash command takes, and the daemon runs it
- * (LocalStateService._run_web_slash_command).
+ * The composer mic is a /voice toggle. The command goes out through
+ * `sendCommand` as a normal chat turn, the same path a typed slash command
+ * takes, and the daemon runs it (LocalStateService._run_web_slash_command).
  *
  * The mic's state is the daemon's own: `voice_requested` from
  * VoicePlugin.status(), carried in the session state's system snapshot. It is
  * read on mount (so a reload, or voice mode started from the terminal, shows
  * the real state), again once each toggle's run ends, and every
  * ACTIVITY_POLL_MS while voice is on, with `voice_activity`, so the composer
- * shows that the microphone hears and what voice is doing. The reply's
- * `command_success` in history is the fallback for a daemon that predates the
- * field. ponytail: voice started from the terminal shows at the next mount or
- * toggle, since nothing polls while the mic is off.
+ * shows that the microphone hears and what voice is doing. A daemon that omits
+ * `voice_requested` leaves the mic where it was. ponytail: voice started from
+ * the terminal shows at the next mount or toggle, since nothing polls while the
+ * mic is off.
  */
 export function VoiceModeProvider({
   api,
   sessionId,
+  running,
+  sendCommand,
   children,
 }: {
   api: EngineApi;
   sessionId: string;
+  /** A chat turn is in progress; the toggle waits for it to end. */
+  running: boolean;
+  /** Sends one chat turn. The toggle sends `/voice on` or `/voice off` through it. */
+  sendCommand: (text: string) => void | Promise<void>;
   children: ReactNode;
 }) {
-  const aui = useAui();
-  const isRunning = useAuiState((s) => s.thread.isRunning);
   const [on, setOn] = useState(false);
   const [pending, setPending] = useState<"on" | "off" | null>(null);
   const [activity, setActivity] = useState<VoiceActivity | null>(null);
@@ -97,50 +100,34 @@ export function VoiceModeProvider({
   }, [readRequested]);
 
   const toggle = useCallback(() => {
-    if (pending || isRunning) return;
+    if (pending || running) return;
     const action = on ? "off" : "on";
     sawRun.current = false;
     setPending(action);
-    aui.thread.append(`/voice ${action}`);
-  }, [aui, isRunning, on, pending]);
+    void sendCommand(`/voice ${action}`);
+  }, [on, pending, running, sendCommand]);
 
-  // The command is a chat turn: once its run has started and ended, its reply
-  // is in history.
+  // The command is a chat turn: once its run has started and ended, the
+  // daemon's voice_requested says whether the mic is on. The reply in history
+  // is not read.
   useEffect(() => {
     if (!pending) return;
-    if (isRunning) {
+    if (running) {
       sawRun.current = true;
       return;
     }
     if (!sawRun.current) return;
     let cancelled = false;
     void (async () => {
-      let ok = false;
-      try {
-        const { history } = await api.getHistory(sessionId);
-        const reply = [...(history ?? [])].reverse().find((message) => {
-          const meta = (message.metadata ?? {}) as Record<string, unknown>;
-          return (
-            meta.slash_command === `/voice ${pending}` &&
-            typeof meta.command_success === "boolean"
-          );
-        });
-        ok =
-          (reply?.metadata as Record<string, unknown> | undefined)
-            ?.command_success === true;
-      } catch {
-        // Unreadable history counts as unconfirmed: the mic stays where it was.
-      }
       const requested = await readRequested();
       if (cancelled) return;
       if (requested !== undefined) setOn(requested);
-      else if (ok) setOn(pending === "on");
       setPending(null);
     })();
     return () => {
       cancelled = true;
     };
-  }, [api, isRunning, pending, readRequested, sessionId]);
+  }, [pending, readRequested, running]);
 
   // While voice is on, follow the service: a stopped service or /voice off from
   // the terminal turns the mic off here too.
