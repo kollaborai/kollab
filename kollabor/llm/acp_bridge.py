@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -34,6 +35,8 @@ from acp.schema import (
 from kollabor.version import __version__
 
 from .acp_state import ACPBinding
+
+logger = logging.getLogger(__name__)
 
 _ACP_OWNER_TOKEN_ENV = "KOLLAB_ACP_OWNER_TOKEN"
 
@@ -452,6 +455,23 @@ class ACPAdmission:
     future: asyncio.Future["ACPResult"]
     origin: dict[str, Any] = field(default_factory=dict)
     images: tuple[dict[str, str], ...] = field(default_factory=tuple, repr=False)
+    send_now_batch_id: str | None = None
+
+
+@dataclass
+class ACPSendNowBatch:
+    """A reserved, ordered group of messages being handed to the harness."""
+
+    batch_id: str
+    expected_count: int
+    session_id: str | None
+    generation: int | None
+    active_context: Any
+    active_turn_id: int
+    admissions: list[ACPAdmission] = field(default_factory=list)
+    reserved_count: int = 0
+    injected_count: int = 0
+    expiry_handle: asyncio.TimerHandle | None = field(default=None, repr=False)
 
 
 def _turn_usage_payload(usage: Any) -> dict[str, int] | None:
@@ -733,7 +753,9 @@ class ACPRunner:
         self._cancelled_turn_id = 0
         self._cancel_target: tuple[str | None, int | None] | None = None
         self._cancel_active_task: asyncio.Task[Any] | None = None
-        self._permission_cancel_tasks: dict[tuple[str, int], asyncio.Task[None]] = {}
+        self._cancel_tasks: dict[
+            tuple[str | None, int | None], asyncio.Task[None]
+        ] = {}
         self.cancel_timeout = 30.0
         self.session_id: str | None = None
         self._connection: Any = None
@@ -751,6 +773,11 @@ class ACPRunner:
         self._process_group_id: int | None = None
         self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
+        self._send_now_batches: dict[str, ACPSendNowBatch] = {}
+        self._send_now_reserved = 0
+        # A lost engine finalization RPC must not wedge the runner forever.
+        # Each successfully admitted member renews this lease.
+        self.send_now_batch_timeout_seconds = 60.0
         self._worker: asyncio.Task[None] | None = None
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
@@ -780,6 +807,7 @@ class ACPRunner:
             or self._active_future is not None
             or not self._queue.empty()
             or self._cancel_hold
+            or bool(self._send_now_batches)
             or not self._active_done.is_set()
         )
 
@@ -1326,6 +1354,7 @@ class ACPRunner:
         thread_id: str | None = None,
         origin: dict[str, Any] | None = None,
         images: tuple[dict[str, str], ...] = (),
+        send_now_batch_id: str | None = None,
     ) -> ACPAdmission:
         # While the harness restarts (after a failed or cancelled prompt) its
         # connection is briefly gone; a request then waits in the queue like one
@@ -1339,13 +1368,29 @@ class ACPRunner:
             raise ACPError(
                 "This harness can't take images.", error_class="images_unsupported"
             )
+        batch = None
+        if send_now_batch_id is not None:
+            batch = self._send_now_batches.get(send_now_batch_id)
+            if batch is None:
+                raise ACPError(
+                    "Send Now batch is no longer active",
+                    error_class="invalid_send_now_batch",
+                )
+            if batch.reserved_count <= 0:
+                raise ACPError(
+                    "Send Now batch queue reservation is exhausted",
+                    error_class="queue_full",
+                )
+        elif self._queue.qsize() >= self._queue.maxsize - self._send_now_reserved:
+            raise ACPError("ACP prompt queue is full", error_class="queue_full")
         generation = self.generation
         # A rejected queue admission is not a turn and must not create a hole
         # in the orchestrator's compact completed-turn frontier.
         turn_id = self._next_turn_id + 1
         future: asyncio.Future[ACPResult] = asyncio.get_running_loop().create_future()
         admission = ACPAdmission(
-            request_id, source, thread_id, generation, turn_id, text, future, dict(origin or {}), images
+            request_id, source, thread_id, generation, turn_id, text, future,
+            dict(origin or {}), images, send_now_batch_id,
         )
         try:
             self._queue.put_nowait(admission)
@@ -1354,6 +1399,11 @@ class ACPRunner:
                 "ACP prompt queue is full", error_class="queue_full",
                 cause=type(exc).__name__,
             ) from exc
+        if batch is not None:
+            batch.admissions.append(admission)
+            batch.reserved_count -= 1
+            self._send_now_reserved -= 1
+            self._renew_send_now_batch_expiry(batch)
         self._next_turn_id = turn_id
         return admission
 
@@ -1420,7 +1470,7 @@ class ACPRunner:
                     if not item.future.done():
                         item.future.set_exception(exc)
             finally:
-                if not self._cancel_hold:
+                if not self._cancel_hold and not self._send_now_batches:
                     self._queue_release.set()
 
     async def _restart_process(self) -> None:
@@ -1593,6 +1643,188 @@ class ACPRunner:
                 f"{self.profile.name}: turn changed before steering was confirmed"
             )
         return True
+
+    def prioritize_queued(self, admission: ACPAdmission) -> bool:
+        """Move this exact admitted request ahead of waiting turns."""
+        queue = self._queue._queue
+        for index, queued in enumerate(queue):
+            if queued is admission:
+                del queue[index]
+                queue.appendleft(admission)
+                return True
+        return False
+
+    def begin_send_now_batch(
+        self,
+        batch_id: str,
+        expected_count: int,
+        *,
+        session_id: str | None,
+        generation: int | None,
+        active_context: Any,
+        active_turn_id: int,
+    ) -> bool:
+        """Reserve queue capacity and hold the worker until the batch closes."""
+        if (
+            not isinstance(batch_id, str)
+            or not batch_id
+            or len(batch_id) > 128
+            or type(expected_count) is not int
+            or expected_count < 2
+            or expected_count > self._queue.maxsize
+        ):
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        existing = self._send_now_batches.get(batch_id)
+        if existing is not None:
+            return (
+                existing.expected_count == expected_count
+                and existing.session_id == session_id
+                and existing.generation == generation
+                and existing.active_context is active_context
+                and existing.active_turn_id == active_turn_id
+            )
+        if self._send_now_batches:
+            return False
+        if self._queue.qsize() + self._send_now_reserved + expected_count > self._queue.maxsize:
+            return False
+        batch = ACPSendNowBatch(
+            batch_id=batch_id,
+            expected_count=expected_count,
+            session_id=session_id,
+            generation=generation,
+            active_context=active_context,
+            active_turn_id=active_turn_id,
+            reserved_count=expected_count,
+        )
+        self._send_now_batches[batch_id] = batch
+        self._send_now_reserved += expected_count
+        self._renew_send_now_batch_expiry(batch, loop=loop)
+        # The active request continues. If it ends before the engine sends the
+        # rest of this batch, its finally block must leave D behind the gate.
+        self._queue_release.clear()
+        return True
+
+    def _renew_send_now_batch_expiry(
+        self, batch: ACPSendNowBatch, *, loop: asyncio.AbstractEventLoop | None = None
+    ) -> None:
+        """Bound abandoned reservations while allowing time between members."""
+        if batch.expiry_handle is not None:
+            batch.expiry_handle.cancel()
+        loop = loop or asyncio.get_running_loop()
+        batch.expiry_handle = loop.call_later(
+            max(0.0, float(self.send_now_batch_timeout_seconds)),
+            self._expire_send_now_batch,
+            batch.batch_id,
+        )
+
+    def _expire_send_now_batch(self, batch_id: str) -> None:
+        """Release an abandoned group, preserving admitted members ahead of D."""
+        batch = self._send_now_batches.get(batch_id)
+        if batch is None:
+            return
+        logger.warning(
+            "Send Now batch admission lease expired for ACP session %s (%d/%d members admitted)",
+            self.session_id or "unknown",
+            len(batch.admissions),
+            batch.expected_count,
+        )
+        expired = self.finish_send_now_batch(batch_id)
+        if (
+            expired is not None
+            and expired.admissions
+            and expired.injected_count == 0
+            and self._active_context is expired.active_context
+            and self._active_turn_id == expired.active_turn_id
+            and self._active_generation == expired.generation
+            and self.session_id == expired.session_id
+        ):
+            # Keep the same owner fence as normal batch finalization. The queue
+            # has been ordered before this synchronous reservation; no newer
+            # turn can slip between the identity check and prepare_cancel.
+            queue = self._queue._queue
+            has_live_admission = any(
+                not admission.future.cancelled()
+                and any(item is admission for item in queue)
+                for admission in expired.admissions
+            )
+            if has_live_admission:
+                self._schedule_cancel(
+                    session_id=expired.session_id,
+                    generation=expired.generation,
+                )
+
+    def _schedule_cancel(
+        self, *, session_id: str | None, generation: int | None
+    ) -> bool:
+        """Reserve a fenced cancellation and own its asynchronous completion."""
+        key = (session_id, generation)
+        if self._closing or key in self._cancel_tasks:
+            return False
+        if not self.prepare_cancel(
+            expected_session_id=session_id,
+            expected_generation=generation,
+        ):
+            return False
+        task = asyncio.create_task(self.cancel(
+            expected_session_id=session_id,
+            expected_generation=generation,
+        ))
+        self._cancel_tasks[key] = task
+
+        def settled(completed: asyncio.Task[None]) -> None:
+            if self._cancel_tasks.get(key) is completed:
+                self._cancel_tasks.pop(key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(settled)
+        return True
+
+    def has_send_now_batch(self, batch_id: str) -> bool:
+        """Whether an open batch still owns a queue reservation."""
+        return batch_id in self._send_now_batches
+
+    def send_now_batch_has_admissions(self, batch_id: str) -> bool:
+        """Whether this group already has queued messages to preserve."""
+        batch = self._send_now_batches.get(batch_id)
+        return bool(batch and batch.admissions)
+
+    def record_send_now_batch_injected(self, batch_id: str) -> bool:
+        """Remember that stopping the captured owner could discard accepted text."""
+        batch = self._send_now_batches.get(batch_id)
+        if batch is None:
+            return False
+        batch.injected_count += 1
+        self._renew_send_now_batch_expiry(batch)
+        return True
+
+    def finish_send_now_batch(self, batch_id: str) -> ACPSendNowBatch | None:
+        """Place every admitted member contiguously, then release the worker."""
+        batch = self._send_now_batches.pop(batch_id, None)
+        if batch is None:
+            return None
+        if batch.expiry_handle is not None:
+            batch.expiry_handle.cancel()
+            batch.expiry_handle = None
+        self._send_now_reserved -= batch.reserved_count
+        batch.reserved_count = 0
+        queued = self._queue._queue
+        members = [
+            admission
+            for admission in batch.admissions
+            if any(item is admission for item in queued)
+        ]
+        member_ids = {id(admission) for admission in members}
+        remaining = [item for item in queued if id(item) not in member_ids]
+        queued.clear()
+        queued.extend([*members, *remaining])
+        if not self._send_now_batches:
+            self._queue_release.set()
+        return batch
 
     def cancel_queued(self, request_id: str, admission: ACPAdmission | None = None) -> bool:
         """Cancel one queued admission: that exact admission if given, else the first with this id."""
@@ -1864,23 +2096,7 @@ class ACPRunner:
 
     def _schedule_permission_cancel(self, session_id: str, generation: int) -> None:
         """Reserve this owner synchronously; never await cancel inside an SDK callback."""
-        key = (session_id, generation)
-        if self._closing or key in self._permission_cancel_tasks:
-            return
-        if not self.prepare_cancel(expected_session_id=session_id, expected_generation=generation):
-            return
-        task = asyncio.create_task(self.cancel(
-            expected_session_id=session_id, expected_generation=generation,
-        ))
-        self._permission_cancel_tasks[key] = task
-
-        def settled(completed: asyncio.Task[None]) -> None:
-            if self._permission_cancel_tasks.get(key) is completed:
-                self._permission_cancel_tasks.pop(key, None)
-            if not completed.cancelled():
-                completed.exception()
-
-        task.add_done_callback(settled)
+        self._schedule_cancel(session_id=session_id, generation=generation)
 
 
     def _mark_cancelled(self) -> None:
@@ -1923,9 +2139,25 @@ class ACPRunner:
                     return
             elif target != (expected_session_id, expected_generation):
                 return
+            active = self._cancel_active_task or self._active_rpc_task
+            if target is not None and (
+                active is None
+                or active.done()
+                or self._active_rpc_task is not active
+                or self.session_id != expected_session_id
+                or self.generation != expected_generation
+            ):
+                # The prepared owner finished or changed before its task ran.
+                # Do not send session/cancel to whichever turn owns the
+                # harness now; release only this stale queue reservation.
+                self._cancel_hold = False
+                self._cancel_target = None
+                self._cancel_active_task = None
+                if not self._send_now_batches:
+                    self._queue_release.set()
+                return
             self.permission_bridge.cancel()
             self.state = "cancelling"
-            active = self._cancel_active_task or self._active_rpc_task
             if active is None and self._cancel_target is None:
                 return
             # Hold the worker at the queue boundary before sending cancel so a
@@ -1977,7 +2209,8 @@ class ACPRunner:
                 self._cancel_hold = False
                 self._cancel_target = None
                 self._cancel_active_task = None
-                self._queue_release.set()
+                if not self._send_now_batches:
+                    self._queue_release.set()
 
     async def _terminate_process(self) -> None:
         async with self._teardown_lock:
@@ -2112,12 +2345,17 @@ class ACPRunner:
         self.permission_bridge.cancel()
         current_task = asyncio.current_task()
         cancel_tasks = [
-            task for task in self._permission_cancel_tasks.values()
+            task for task in self._cancel_tasks.values()
             if task is not current_task
         ]
         for task in cancel_tasks:
             task.cancel()
         self._queue_release.set()
+        for batch in self._send_now_batches.values():
+            if batch.expiry_handle is not None:
+                batch.expiry_handle.cancel()
+        self._send_now_batches.clear()
+        self._send_now_reserved = 0
 
         def settle_queued() -> None:
             while True:

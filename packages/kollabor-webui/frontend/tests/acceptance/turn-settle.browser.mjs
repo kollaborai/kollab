@@ -482,12 +482,9 @@ try {
       assert.equal(await t.page.getByText("Queued", { exact: true }).count(), 0, "a message on its way is not queued");
       await t.page.close();
     },
-    // A harness session (Codex CLI, Claude Code) offers no Send Now: the
-    // harness steers a message into its running turn, and the engine never
-    // ends the stream of such a message, so the chat would stay busy with
-    // the reply hidden. The message waits for the turn to end, whatever the
-    // keys (#1102).
-    async "offers no Send Now on a harness session"() {
+    // A harness session can inject a message into its running turn or stop
+    // that turn before sending when steering is unavailable (#1371).
+    async "sends now on a harness session with an explicit handover flag"() {
       const t = await open("?chat&harness");
       const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
       await t.send();
@@ -499,15 +496,126 @@ try {
       await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
       const box = t.page.getByLabel("Message input");
       await box.fill("what");
-      await box.press("Control+Enter");
-      await t.waitFor((s) => s.users === "hello|what", "the message Ctrl+Enter sent");
-      await t.page.getByText("Queued", { exact: true }).waitFor();
-      assert.equal(await t.page.getByRole("button", { name: "Send Now" }).count(), 0, "no Send Now on a harness session");
-      for (let n = 0; n < 8; n++) {
-        assert.deepEqual(await t.page.evaluate(() => [window.transports.length, window.transports[0].aborted]),
-          [1, false], "the message waits for the turn to end");
-        await t.page.waitForTimeout(50);
-      }
+      await box.press("Enter");
+      await t.waitFor((s) => s.users === "hello|what", "the waiting message");
+      await t.page.locator("#send-more").click();
+      await t.waitFor((s) => s.users === "hello|what|again", "the second waiting message");
+      await t.page.getByText("Queued", { exact: true }).first().waitFor({ timeout: 3000 });
+      const sendNow = t.page.getByRole("button", { name: "Send Now" }).first();
+      await sendNow.waitFor({ timeout: 3000 });
+      await sendNow.click();
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("Send Now did not submit the waiting message"));
+      const handover = await t.page.evaluate(() => ({
+        requests: window.transports.map((transport) => transport.request),
+        aborted: window.transports.map((transport) => transport.aborted),
+        cancels: window.cancels,
+      }));
+      assert.equal(handover.requests[1].send_now, true, "the new request asks the daemon for Send Now");
+      assert.equal(handover.requests[1].commands.length, 2, "the waiting batch is sent in one request");
+      assert.deepEqual(
+        handover.requests[1].commands.map((command) => command.message.parts[0].text),
+        ["what", "again"],
+        "both waiting messages are submitted once and in order",
+      );
+      assert.equal(new Set(handover.requests[1].commands.map((command) => command.message.id)).size, 2);
+      assert.deepEqual(handover.aborted, [true, false], "the page hands over only its old stream");
+      assert.equal(handover.cancels, 0, "the page does not race a separate daemon cancellation");
+      await t.page.close();
+    },
+    async "uses Meta+Enter to send a waiting harness batch at once"() {
+      const t = await open("?chat&harness");
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: text("Wor") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
+      const box = t.page.getByLabel("Message input");
+      await box.fill("what");
+      await box.press("Enter");
+      await t.waitFor((s) => s.users === "hello|what", "the waiting message");
+      await t.page.locator("#send-more").click();
+      await t.waitFor((s) => s.users === "hello|what|again", "the second waiting message");
+      await box.fill("mac shortcut");
+      await box.press("Meta+Enter");
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("Meta+Enter did not submit the waiting messages"));
+      const handover = await t.page.evaluate(() => ({
+        request: window.transport.request,
+        aborted: window.transports.map((transport) => transport.aborted),
+        cancels: window.cancels,
+      }));
+      assert.equal(handover.request.send_now, true, "Meta+Enter marks the harness handover as Send Now");
+      assert.deepEqual(
+        handover.request.commands.map((command) => command.message.parts[0].text),
+        ["what", "again", "mac shortcut"],
+        "the new message and existing waiting batch are sent once and in order",
+      );
+      assert.deepEqual(handover.aborted, [true, false]);
+      assert.equal(handover.cancels, 0);
+      await t.page.close();
+    },
+    async "repeats a harness handover after accepted rows arrive"() {
+      const t = await open("?chat&harness");
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: text("Wor") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
+      const box = t.page.getByLabel("Message input");
+      await box.fill("what");
+      await box.press("Enter");
+      await t.waitFor((s) => s.users === "hello|what", "the waiting message");
+      await t.page.locator("#send-more").click();
+      await t.waitFor((s) => s.users === "hello|what|again", "the second waiting message");
+      await t.page.getByRole("button", { name: "Send Now" }).first().click();
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 });
+
+      const acceptedRows = await t.page.evaluate(() => {
+        const request = window.transport.request;
+        const messages = [...(request.state?.messages ?? [])];
+        for (const command of request.commands) {
+          const text = command.message.parts.map((part) => part.type === "text" ? part.text : "").join("");
+          messages.push({
+            id: `user-s1-${messages.length}`,
+            role: "user",
+            content: text,
+            metadata: { custom: { requestId: command.message.id } },
+          });
+        }
+        messages.push({ id: `assistant-s1-${messages.length}`, role: "assistant", content: "" });
+        return messages;
+      });
+      await t.page.evaluate((frame) => window.transport.push(frame), state([
+        { type: "set", path: ["messages"], value: acceptedRows },
+      ]));
+      await t.waitFor((s) => s.users === "hello|what|again", "the accepted rows");
+
+      await box.fill("later");
+      await box.press("Enter");
+      await t.waitFor((s) => s.users === "hello|what|again|later", "the later waiting message");
+      await box.fill("mac shortcut");
+      await box.press("Meta+Enter");
+      await t.page.waitForFunction(() => window.transports.length === 3, null, { timeout: 3000 })
+        .catch(() => assert.fail("Meta+Enter did not hand over the later waiting messages"));
+      const handover = await t.page.evaluate(() => ({
+        requests: window.transports.map((transport) => transport.request),
+        aborted: window.transports.map((transport) => transport.aborted),
+        cancels: window.cancels,
+      }));
+      assert.equal(handover.requests[2].send_now, true);
+      assert.deepEqual(
+        handover.requests[2].commands.map((command) => command.message.parts[0].text),
+        ["later", "mac shortcut"],
+      );
+      assert.deepEqual(handover.aborted, [true, true, false]);
+      assert.equal(handover.cancels, 0);
       await t.page.close();
     },
     // A queued message keeps its row when it is sent. The reply's first row

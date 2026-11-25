@@ -55,9 +55,16 @@ def busy_room():
     extension = FakeExtension()
     runner = ACPRunner(ACPProfile("test", ("test",)))
     runner.session_id = "session"
+    runner.generation = 1
     runner.initialize_metadata = {"steering": {"supported": True}}
     runner._active_turn_id = 1
-    runner._active_context = SimpleNamespace(thread_id=None, origin={})
+    runner._active_generation = 1
+    runner._active_context = SimpleNamespace(
+        request_id="active-request",
+        turn_id=1,
+        thread_id=None,
+        origin={},
+    )
     runner._connection = extension
     orchestrator = object.__new__(ACPOrchestrator)
     orchestrator._runner = runner
