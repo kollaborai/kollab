@@ -489,3 +489,101 @@ def test_snapshot_exposes_a_cursor_for_transcript_rows_older_than_its_window():
 
     assert len(event["data"]["rows"]) == REPLAY_WINDOW
     assert isinstance(event["data"]["older"], str)
+
+
+def test_goal_origin_survives_inputless_turn_replay_and_snapshot():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "full-goal-id", "attempt_id": "full-attempt-id"}
+    _publish(state, "turn_start", turn_id="goal-turn", origin=origin)
+    running = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert running["data"]["turns"] == [{"turn_id": "goal-turn", "state": "running", "input_ids": [], "origin": origin}]
+    _publish(state, "turn_complete", turn_id="goal-turn", stop_reason="cancelled")
+    events = _events(stream, initial)
+    turns = [e["data"] for e in events if e["type"] == "turn.state"]
+    assert [t["state"] for t in turns] == ["running", "ended"]
+    assert all(t["origin"] == origin for t in turns)
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"][-1] == turns[-1]
+
+
+def test_goal_intermediate_completion_does_not_end_attempt():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    _publish(state, "turn_start", turn_id="t", origin=origin)
+    _publish(state, "turn_complete", turn_id="t", origin=origin, stop_reason="end_turn")
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert snapshot["data"]["turns"][0]["state"] == "running"
+    _publish(state, "turn_complete", turn_id="t", origin=origin, goal_attempt_terminal=True)
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert snapshot["data"]["turns"][0]["state"] == "ended"
+
+
+@pytest.mark.asyncio
+async def test_goal_origin_survives_joined_human_input():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "full-goal", "attempt_id": "full-attempt"}
+    _publish(state, "turn_start", turn_id="goal-turn", origin=origin)
+    await _add(stream, "human", "steer")
+    _publish(state, "user_message", request_id="human", turn_id="goal-turn", text="steer")
+    _publish(state, "turn_complete", turn_id="goal-turn", goal_attempt_terminal=True)
+    turns = [e["data"] for e in _events(stream, initial) if e["type"] == "turn.state"]
+    assert any(t["input_ids"] == ["human"] for t in turns)
+    assert all(t["origin"] == origin for t in turns)
+    assert turns[-1]["state"] == "ended"
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"][-1] == turns[-1]
+
+
+@pytest.mark.parametrize("transition", ["start", "end"])
+def test_snapshot_cursor_is_atomic_with_goal_turn_transition(transition):
+    import threading
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    if transition == "end":
+        _publish(state, "turn_start", turn_id="t", origin=origin)
+    log = stream._log("conversation-a")
+    publish = log.publish
+    entered = threading.Event()
+    release = threading.Event()
+    snapshot_done = threading.Event()
+    snapshots = []
+    def paused_publish(kind, data):
+        if kind == "turn.state":
+            entered.set()
+            assert release.wait(2)
+        return publish(kind, data)
+    log.publish = paused_publish
+    def produce():
+        if transition == "start":
+            _publish(state, "turn_start", turn_id="t", origin=origin)
+        else:
+            _publish(state, "turn_complete", turn_id="t", goal_attempt_terminal=True)
+    def snapshot():
+        snapshots.append(stream.subscribe({"after": None, "conversation_uid": None})["events"][0])
+        snapshot_done.set()
+    producer = threading.Thread(target=produce)
+    reader = threading.Thread(target=snapshot)
+    producer.start()
+    try:
+        assert entered.wait(2)
+        reader.start()
+        assert not snapshot_done.wait(0.1)
+    finally:
+        release.set()
+        producer.join(2)
+        if reader.ident is not None:
+            reader.join(2)
+    assert snapshot_done.is_set()
+    turn = snapshots[0]["data"]["turns"][0]
+    assert turn["origin"] == origin
+    assert turn["state"] == ("running" if transition == "start" else "ended")
+    assert snapshots[0]["data"]["next_seq"] == log.next_seq
