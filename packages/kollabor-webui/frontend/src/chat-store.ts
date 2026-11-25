@@ -197,6 +197,8 @@ export class LiveChatStore implements LiveStore {
   private paging: OlderStatus = "idle";
   // Counts the window replacements (a resync, a snapshot or a replace). A history page checks it to see that its window is still current.
   private epoch = 0;
+  // A later history request supersedes an older one, even while both use the same window.
+  private pageRequestId = 0;
   // Sends the stream has not delivered yet, by input id. Each row sits in `state.rows` until the stream's row replaces it.
   private readonly sends = new Map<string, LocalSend>();
   private attempts = 0;
@@ -365,7 +367,10 @@ export class LiveChatStore implements LiveStore {
     // The page belongs to the window it was asked for. A resync, a snapshot or a replace while it is in flight replaces that window.
     const { conversationUid } = this.state;
     const epoch = this.epoch;
-    const current = () => this.epoch === epoch && this.state.conversationUid === conversationUid;
+    const pageRequestId = ++this.pageRequestId;
+    const isLatestRequest = () => this.pageRequestId === pageRequestId;
+    const current = () =>
+      isLatestRequest() && this.epoch === epoch && this.state.conversationUid === conversationUid;
     this.setPaging("loading");
     const path = `/sessions/${this.enc}/rows?before=${encodeURIComponent(cursor)}&limit=${HISTORY_PAGE_LIMIT}`;
     let page: HistoryPage;
@@ -376,20 +381,22 @@ export class LiveChatStore implements LiveStore {
         if (current()) {
           this.state = { ...this.state, olderCursor: null };
           this.resync();
+        } else if (isLatestRequest()) {
+          this.settlePaging();
         }
-        this.settlePaging();
         return;
       }
       page = (await response.json()) as HistoryPage;
       if (!Array.isArray(page.rows)) throw new Error("history failed: unexpected page");
     } catch (error) {
       if (current()) this.setPaging("failed");
-      else this.settlePaging();
+      else if (isLatestRequest()) this.settlePaging();
+      else return;
       throw error;
     }
     if (!current()) {
       // The window changed while the page was in flight, so its rows and cursor do not belong to it.
-      this.settlePaging();
+      if (isLatestRequest()) this.settlePaging();
       return;
     }
     const held = new Set(this.state.rows.map((row) => row.id));
