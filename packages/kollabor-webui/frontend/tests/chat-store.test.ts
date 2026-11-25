@@ -437,7 +437,7 @@ describe("LiveChatStore", () => {
     expect(request).toHaveBeenCalledWith("/sessions/s1/cancel", { method: "POST" });
   });
 
-  it("loadOlder GETs /sessions/s1/history?before=<encoded cursor>, prepends rows not already held, and takes the returned cursor", async () => {
+  it("loadOlder GETs /sessions/s1/rows?before=<encoded cursor>&limit=50, prepends rows not already held, and takes the returned older cursor", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
     first.emit(snapshot(5, [row("r1", "one"), row("r2", "two")], { older: "cursor/1 x" }));
@@ -447,13 +447,13 @@ describe("LiveChatStore", () => {
       }),
     );
     await store.loadOlder();
-    expect(request).toHaveBeenLastCalledWith("/sessions/s1/history?before=cursor%2F1%20x");
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=cursor%2F1%20x&limit=50");
     expect(store.rows.map((r) => r.id)).toEqual(["r0", "r1", "r2"]);
     expect(store.rows[1]).toEqual(row("r1", "one"));
     expect(store.hasEarlier).toBe(true);
     request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
     await store.loadOlder();
-    expect(request).toHaveBeenLastCalledWith("/sessions/s1/history?before=cursor-0");
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=cursor-0&limit=50");
     expect(store.hasEarlier).toBe(false);
   });
 
