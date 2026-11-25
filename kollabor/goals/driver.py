@@ -24,8 +24,6 @@ from kollabor.goals.service import (
     TurnOutcome,
 )
 from kollabor.state.goal_store import GoalStoreError
-from kollabor_tui.display_tap import publish_semantic
-from kollabor_tui.turn_context import current_turn
 from kollabor_ai.goal_image_scope import goal_image_scope
 from kollabor_ai.message_content import MessageContentError, normalize_message_content
 
@@ -335,12 +333,8 @@ class GoalTurnDriver:
             pre_out = int(stats.get("total_output_tokens", 0) or 0)
 
             self.service.note_dispatched(goal_id, attempt)
-            task_cancelled = False
             try:
                 turn_status, error = await self._run_one_turn(goal_id, attempt)
-            except asyncio.CancelledError:
-                task_cancelled = True
-                turn_status, error = "cancelled", None
             except Exception as exc:
                 # settle it as an error turn: an attempt left dispatched reads
                 # as a daemon that died mid-turn, and check_stalled skips it
@@ -359,7 +353,7 @@ class GoalTurnDriver:
 
             final = self.service.store.get(goal_id)
             real_outcome = TurnOutcome(
-                turn_id=self.service.store.get_attempt(attempt.attempt_id).turn_id,
+                turn_id=attempt.attempt_id[:12],
                 origin="goal",
                 status=turn_status,
                 goal_id=goal_id,
@@ -380,12 +374,6 @@ class GoalTurnDriver:
                 )
             except GoalStoreError as exc:
                 logger.warning("finish_turn failed for %s: %s", goal_id, exc)
-
-            if task_cancelled:
-                try:
-                    self.service.maybe_continue(goal_id, real_outcome, self._boundary_ctx())
-                finally:
-                    raise asyncio.CancelledError
 
             # commit completion only after the tool batch settled (8.5)
             try:
@@ -442,7 +430,7 @@ class GoalTurnDriver:
             with goal_image_scope(
                 parts, self.coord._queue_processor, getattr(self.coord, "api_service", None),
             ) as scope:
-                return await self._run_turn_with_context(record, attempt, scope)
+                return await self._run_turn_with_context(record, scope)
         except (GoalError, MessageContentError) as exc:
             return "error", f"goal image unavailable: {exc}"
         finally:
@@ -456,7 +444,7 @@ class GoalTurnDriver:
             for part in parts:
                 self.coord._image_store.remove(part["source"]["media_id"])
 
-    async def _run_turn_with_context(self, record, attempt, image_scope) -> tuple[str, Optional[str]]:
+    async def _run_turn_with_context(self, record, image_scope) -> tuple[str, Optional[str]]:
         note = self.service.render_goal_context(record)
         previous_hud = tuple(getattr(self.coord, "_pending_agent_hud", None) or ())
         previous_hud_ids = {id(entry) for entry in previous_hud}
@@ -466,8 +454,6 @@ class GoalTurnDriver:
         yielded = False
         cancelled = False
         cursor_before = getattr(self.coord, "_cursor_winner_serial", -1)
-        stream_turn_id = None
-        turn_context_token = None
 
         def discard_pending_context() -> None:
             pending = getattr(self.coord, "_pending_agent_hud", None)
@@ -534,18 +520,6 @@ class GoalTurnDriver:
                         # Open the HUD drain deterministically. A fresh queue
                         # initializes turn_completed=False and would otherwise
                         # send a system-only request.
-                        stream_turn_id = f"goal-{attempt.attempt_id}"
-                        self.service.store.bind_attempt_turn(
-                            attempt.attempt_id, attempt.lease_epoch, stream_turn_id
-                        )
-                        fields = {
-                            "turn_id": stream_turn_id,
-                            "conversation_uid": record.conversation_uid,
-                            "origin": {"kind": "goal", "goal_id": record.goal_id,
-                                       "attempt_id": attempt.attempt_id},
-                        }
-                        turn_context_token = current_turn.set(fields)
-                        publish_semantic(getattr(self.coord, "event_bus", None), "turn_start", **fields)
                         await self.coord._continue_conversation()
                         chain_turns = 0
                         while not qp.turn_completed and not qp.cancel_processing:
@@ -584,18 +558,6 @@ class GoalTurnDriver:
             logger.error("goal turn error: %s", exc)
             error = str(exc)
         finally:
-            if stream_turn_id is not None:
-                stop_reason = "cancelled" if qp.cancel_processing else (
-                    "error" if error or getattr(qp, "last_turn_error", None) else "end_turn"
-                )
-                # Task cancellation can bypass the ordinary exception handler.
-                if asyncio.current_task() and asyncio.current_task().cancelling():
-                    stop_reason = "cancelled"
-                publish_semantic(getattr(self.coord, "event_bus", None), "turn_complete",
-                                 turn_id=stream_turn_id, conversation_uid=record.conversation_uid,
-                                 stop_reason=stop_reason, goal_attempt_terminal=True)
-            if turn_context_token is not None:
-                current_turn.reset(turn_context_token)
             if image_scope is not None:
                 try:
                     image_scope.close()

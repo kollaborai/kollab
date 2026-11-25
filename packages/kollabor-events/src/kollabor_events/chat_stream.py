@@ -161,11 +161,6 @@ def _turn_problems(turn: Any, where: str) -> list[str]:
     input_ids = turn.get("input_ids")
     if not isinstance(input_ids, list) or not all(_is_id(i) for i in input_ids):
         problems.append(f"{where}: turn needs input_ids, a list of ids")
-    if "origin" in turn:
-        origin = turn["origin"]
-        if (not isinstance(origin, dict) or origin.get("kind") != "goal"
-                or not _is_id(origin.get("goal_id")) or not _is_id(origin.get("attempt_id"))):
-            problems.append(f"{where}: invalid turn origin")
     return problems
 
 

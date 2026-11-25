@@ -439,7 +439,7 @@ class DriverTests(unittest.TestCase):
             await release_hud_log.wait()
             return "goal-hud-row"
 
-        async def log_user_message(_content, *, parent_uuid=None, message_metadata=None):
+        async def log_user_message(_content, *, parent_uuid=None):
             return "human-row"
 
         async def enqueue(item):
@@ -497,7 +497,6 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(qp.processing_queue.qsize(), 1)
         self.assertEqual(self.store.get(goal_id).status, "active")
         self.assertIn(goal_id, driver._yielded_goals)
-        self.assertIsNone(self.store.attempts(goal_id)[0].turn_id)
 
     def test_settle_while_goal_is_running_is_replayed_after_it_exits(self):
         goal_id = self._create()
@@ -782,71 +781,3 @@ class DriverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-def test_admitted_goal_publishes_persisted_attempt_origin():
-    from kollabor_tui.display_tap import DisplayTap
-    from types import SimpleNamespace
-    with TemporaryDirectory() as tmp:
-        store = GoalStore(Path(tmp) / "goals.db")
-        try:
-            service = GoalService(store, daemon_id="test")
-            record = service.create_goal("conv-1", "objective", "/repo")
-            attempt = service.maybe_continue(record.goal_id, TurnOutcome(turn_id="start", origin="goal", status="ok", goal_id=record.goal_id), BoundaryContext(queue_empty=True, pending_work=False))
-            coord = FakeCoordinator()
-            tap = DisplayTap()
-            events = []
-            tap.add_listener(events.append)
-            coord.event_bus = SimpleNamespace(get_service=lambda name: tap if name == "display_tap" else None)
-            driver = GoalTurnDriver(service, coord)
-            async def run():
-                original = coord._continue_conversation
-                async def check():
-                    starts = [e for e in events if e["type"] == "turn_start"]
-                    assert len(starts) == 1
-                    assert store.get_attempt(attempt.attempt_id).turn_id == starts[0]["turn_id"]
-                    await original()
-                coord._continue_conversation = check
-                return await driver._run_one_turn(record.goal_id, attempt)
-            assert asyncio.run(run()) == ("ok", None)
-            starts = [e for e in events if e["type"] == "turn_start"]
-            ends = [e for e in events if e["type"] == "turn_complete"]
-            assert starts[0]["origin"] == {"kind": "goal", "goal_id": record.goal_id, "attempt_id": attempt.attempt_id}
-            assert ends[0]["turn_id"] == starts[0]["turn_id"]
-        finally:
-            store.close()
-
-
-def test_task_cancellation_closes_and_settles_admitted_goal_turn():
-    from kollabor_tui.display_tap import DisplayTap
-    with TemporaryDirectory() as tmp:
-        store = GoalStore(Path(tmp) / "goals.db")
-        try:
-            service = GoalService(store, daemon_id="test")
-            record = service.create_goal("conv-1", "objective", "/repo")
-            coord = FakeCoordinator()
-            tap = DisplayTap()
-            events = []
-            tap.add_listener(events.append)
-            coord.event_bus = SimpleNamespace(get_service=lambda name: tap if name == "display_tap" else None)
-            driver = GoalTurnDriver(service, coord)
-            async def run():
-                started = asyncio.Event()
-                async def block():
-                    started.set()
-                    await asyncio.Event().wait()
-                coord._continue_conversation = block
-                task = asyncio.create_task(driver.start(record.goal_id))
-                await started.wait()
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            asyncio.run(run())
-            attempt = store.attempts(record.goal_id)[0]
-            assert attempt.state == "settled"
-            assert attempt.turn_id == next(e["turn_id"] for e in events if e["type"] == "turn_start")
-            assert [e["stop_reason"] for e in events if e["type"] == "turn_complete"] == ["cancelled"]
-        finally:
-            store.close()

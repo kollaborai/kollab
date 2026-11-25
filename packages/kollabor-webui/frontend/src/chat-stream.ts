@@ -50,7 +50,7 @@ export type ChatRow = {
 };
 
 export type InputInfo = { id: string; state: InputState; turn_id: string | null; outcome?: Outcome | null };
-export type TurnInfo = { turn_id: string; state: TurnState; input_ids: string[]; origin?: { kind: "goal"; goal_id: string; attempt_id: string } };
+export type TurnInfo = { turn_id: string; state: TurnState; input_ids: string[] };
 
 type StreamEvent<T extends string, D> = { seq: number; conversation_uid: string; type: T; data: D };
 
@@ -130,9 +130,7 @@ const isRow = (value: unknown): boolean =>
 
 const isTurnInfo = (value: unknown): boolean =>
   isRecord(value) && isId(value.turn_id) && (value.state === "running" || value.state === "ended") &&
-  Array.isArray(value.input_ids) && value.input_ids.every(isId) &&
-  (!has(value, "origin") || (isRecord(value.origin) && value.origin.kind === "goal" &&
-    isId(value.origin.goal_id) && isId(value.origin.attempt_id)));
+  Array.isArray(value.input_ids) && value.input_ids.every(isId);
 
 const isInputInfo = (value: unknown): boolean => {
   if (!isRecord(value) || !isId(value.id) || !INPUT_STATES.has(value.state as string)) return false;

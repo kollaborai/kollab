@@ -53,7 +53,7 @@ class TurnOutcome:
     """Typed scheduling-boundary outcome (8.3). Bare turn_completed flags
     also fire on cancellation/error and are never eligibility evidence."""
 
-    turn_id: Optional[str]
+    turn_id: str
     origin: str  # user | goal | command | hub
     status: str  # ok | cancelled | error
     goal_id: Optional[str] = None

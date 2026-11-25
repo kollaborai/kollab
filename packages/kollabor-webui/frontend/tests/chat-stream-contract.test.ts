@@ -75,18 +75,6 @@ describe("chat stream contract", () => {
     expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "row.append", data: { id: "r1", part, text: "x" } })).toBe(false);
   });
 
-  it("validates the optional goal origin on turns and snapshots", () => {
-    const turn = { turn_id: "t", state: "running", input_ids: [] };
-    const valid = { kind: "goal", goal_id: "full-goal", attempt_id: "full-attempt" };
-    const event = (origin: unknown) => ({ seq: 1, conversation_uid: "c", type: "turn.state", data: { ...turn, origin } });
-    expect(isChatStreamEvent(event(valid))).toBe(true);
-    expect(isChatStreamEvent(snapshot({ ...SNAPSHOT, turns: [{ ...turn, origin: valid }] }))).toBe(true);
-    for (const origin of [null, {}, { ...valid, attempt_id: "" }, { ...valid, kind: "user" }]) {
-      expect(isChatStreamEvent(event(origin))).toBe(false);
-      expect(isChatStreamEvent(snapshot({ ...SNAPSHOT, turns: [{ ...turn, origin }] }))).toBe(false);
-    }
-  });
-
   it("accepts a full row and a snapshot whose older is a cursor or null", () => {
     expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "row.upsert", data: ROW })).toBe(true);
     expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "snapshot", data: SNAPSHOT })).toBe(true);
