@@ -127,7 +127,11 @@ describe("which plugins load", () => {
     expect(isActive(entry("hello", { shadowed: true }))).toBe(false);
     expect(isActive(entry("hello", { state: "changed-on-disk" }))).toBe(false);
     expect(isActive(entry("hello", { state: "skipped" }))).toBe(false);
-    expect(isActive(entry("hub", { kind: "built-in", web: null, contributes: {} }))).toBe(false);
+    expect(isActive(entry("hub", {
+      kind: "built-in",
+      web: null,
+      contributes: { menu: [], views: [], pages: [], modals: [], slash: [], renderers: [] },
+    }))).toBe(false);
     expect(isActive(entry("../x"))).toBe(false);
   });
 

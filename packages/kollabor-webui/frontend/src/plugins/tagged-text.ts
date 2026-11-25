@@ -106,20 +106,31 @@ function indexCodeSpanClosers(text: string): ReadonlyMap<number, number> {
   const blockBoundaries: number[] = [];
   const listItems: number[] = [];
   let previousIndentedCode = false;
+  let paragraphQuoteDepth = 0;
   for (let index = 0; index < text.length; ) {
     if (index === 0 || text[index - 1] === "\n") {
-      if (!isBlankLineAt(text, index)) {
+      if (isBlankLineAt(text, index)) {
+        paragraphQuoteDepth = 0;
+      } else {
         const indentedCode = startsIndentedCode(text, index, previousIndentedCode);
         const blockEnd = codeBlockEnd(text, index, indentedCode);
         if (blockEnd >= 0) {
           blockBoundaries.push(index);
+          paragraphQuoteDepth = 0;
           previousIndentedCode = indentedCode;
           index = blockEnd;
           continue;
         }
         previousIndentedCode = false;
+        const quotePrefix = BLOCKQUOTE_PREFIX.exec(text.slice(index, lineEnd(text, index)))?.[0] ?? "";
+        const currentQuoteDepth = quoteDepth(quotePrefix);
         if (startsListItem(text, index)) listItems.push(index);
-        if (startsMarkdownBlock(text, index)) blockBoundaries.push(index);
+        if (startsMarkdownBlock(text, index, paragraphQuoteDepth)) {
+          blockBoundaries.push(index);
+          paragraphQuoteDepth = currentQuoteDepth;
+        } else if (currentQuoteDepth > 0) {
+          paragraphQuoteDepth = currentQuoteDepth;
+        }
       }
     }
     if (text[index] !== "`") {
@@ -158,7 +169,7 @@ function indexCodeSpanClosers(text: string): ReadonlyMap<number, number> {
 }
 
 /** Block markers end the paragraph, so an unmatched inline-code opener cannot hide later tags. */
-function startsMarkdownBlock(text: string, index: number): boolean {
+function startsMarkdownBlock(text: string, index: number, paragraphQuoteDepth: number): boolean {
   const quotePrefix = BLOCKQUOTE_PREFIX.exec(text.slice(index, lineEnd(text, index)))?.[0] ?? "";
   const currentQuoteDepth = quoteDepth(quotePrefix);
   if (currentQuoteDepth > 0) {
@@ -166,7 +177,10 @@ function startsMarkdownBlock(text: string, index: number): boolean {
     const previousLineEnd = index - 1;
     const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
     const previousPrefix = BLOCKQUOTE_PREFIX.exec(text.slice(previousLineStart, previousLineEnd))?.[0] ?? "";
-    if (quoteDepth(previousPrefix) !== currentQuoteDepth) return true;
+    if (
+      quoteDepth(previousPrefix) !== currentQuoteDepth &&
+      paragraphQuoteDepth !== currentQuoteDepth
+    ) return true;
   }
   const contentIndex = index + quotePrefix.length;
   ATX_HEADING.lastIndex = contentIndex;

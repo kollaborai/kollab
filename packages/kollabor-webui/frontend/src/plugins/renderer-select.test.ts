@@ -103,7 +103,10 @@ describe("findToolRenderer", () => {
     const first = record("alpha", [{ tool: "shared", render: Render }]);
     const untyped = {
       ...first,
-      entry: { ...first.entry, contributes: { renderers: ["shared"] } },
+      entry: {
+        ...first.entry,
+        contributes: { ...first.entry.contributes, renderers: ["shared"] },
+      },
     };
     const laterTag = record("beta", [{ tag: "shared", render: Render }]);
 

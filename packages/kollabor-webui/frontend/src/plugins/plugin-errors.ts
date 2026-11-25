@@ -15,7 +15,13 @@ const SESSION_ASSIGNMENT = /((?:^|[^A-Za-z0-9])session(?![A-Za-z0-9_])\s*[:=]\s*
 const SESSION_ASSIGNMENTS = new RegExp(SESSION_ASSIGNMENT.source, "gi");
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/i;
 const JWT_VALUES = new RegExp(JWT_VALUE.source, "gi");
-const SENSITIVE_ASSIGNMENT = /((?:^|[^A-Za-z0-9])(?:"(?:api[ _-]?key|(?:oauth[ _-]?)?client[ _-]?(?:key|secret|token)|(?:private|signing|encryption|ssh|secret|access|master)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)"|(?:api[ _-]?key|(?:oauth[ _-]?)?client[ _-]?(?:key|secret|token)|(?:private|signing|encryption|ssh|secret|access|master)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)(?![A-Za-z0-9_]))\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi;
+const PRIVATE_KEY_PEM_BLOCK = /-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*?-----END \1-----/i;
+const PRIVATE_KEY_PEM_BLOCKS = new RegExp(PRIVATE_KEY_PEM_BLOCK.source, "gi");
+const SENSITIVE_KEY_NAME = String.raw`(?:api[ _-]?key|(?:oauth[ _-]?)?client[ _-]?(?:key|secret|token)|(?:private|signing|encryption|ssh|secret|access|master)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)`;
+const SENSITIVE_ASSIGNMENT = new RegExp(
+  String.raw`((?:^|[^A-Za-z0-9])(?:"${SENSITIVE_KEY_NAME}(?:[_-][A-Za-z0-9]+)*"|${SENSITIVE_KEY_NAME}(?:[_-][A-Za-z0-9]+)*)(?![A-Za-z0-9_])\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)`,
+  "gi",
+);
 const SECRET_VALUE = /\b(?:secret[-_]token[-_][A-Za-z0-9_-]+|sk-|gh[pousr]_|github_pat_|AIza[A-Za-z0-9_-]{34,35})[A-Za-z0-9_-]*/gi;
 const SAFE_TEXT_VALUES = new Set(["budget", "length", "required"]);
 
@@ -26,7 +32,10 @@ function isAuthCredential(value: string): boolean {
 /** Check the shared plugin text rules used by inventory normalization and error logging. */
 export function containsSensitiveText(value: string, allowSafeValues = false): boolean {
   if (
-    value.match(SECRET_VALUE) || COOKIE_HEADER.test(value) || SESSION_ASSIGNMENT.test(value) ||
+    value.match(SECRET_VALUE) ||
+    PRIVATE_KEY_PEM_BLOCK.test(value) ||
+    COOKIE_HEADER.test(value) ||
+    SESSION_ASSIGNMENT.test(value) ||
     JWT_VALUE.test(value) || AUTH_SCHEME_ASSIGNMENT.test(value)
   ) return true;
   for (const match of value.matchAll(AUTH_SCHEME)) {
@@ -88,6 +97,7 @@ export function redactPluginError(error: unknown): string {
     .replace(URL_CREDENTIALS, "$1[redacted]@")
     .replace(FILE_URL, "[path]")
     .replace(URL_QUERY_OR_FRAGMENT, "$1")
+    .replace(PRIVATE_KEY_PEM_BLOCKS, "[redacted]")
     .replace(COOKIE_HEADERS, "$1[redacted]")
     .replace(SESSION_ASSIGNMENTS, "$1[redacted]")
     .replace(SENSITIVE_ASSIGNMENT, "$1[redacted]")

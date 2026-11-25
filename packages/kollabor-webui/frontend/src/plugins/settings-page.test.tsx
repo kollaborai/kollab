@@ -13,7 +13,7 @@ import { PanelHost } from "@/components/panels/PanelHost";
 import { PluginsSettings, pluginRowControls } from "./settings";
 import { createPluginLoader, listedPluginEntries } from "./loader";
 import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
-import type { PluginEntry } from "./sdk";
+import type { PluginEntry, PluginInventoryResponse } from "./sdk";
 
 const source = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "settings.tsx"), "utf8");
 
@@ -42,7 +42,7 @@ async function markupFor(
   runtimeRecords: PluginRecord[] = [],
 ): Promise<string> {
   const loader = createPluginLoader(pluginRegistry, {
-    list: async () => ({ plugins: entries, server_time: serverTime }),
+    list: async () => ({ plugins: entries as PluginInventoryResponse["plugins"], server_time: serverTime }),
     importModule: async () => ({}),
     fetchText: async () => "",
     loadCode: false,

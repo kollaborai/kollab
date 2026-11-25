@@ -75,12 +75,12 @@ export type PluginEntry = {
   error: string | null;
   web: { entry: string; style?: string | null; hash: string } | null;
   contributes: {
-    menu?: DeclaredRow[];
-    views?: Declared[];
-    pages?: Declared[];
-    modals?: Declared[];
-    slash?: Declared[];
-    renderers?: Declared[];
+    menu: DeclaredRow[];
+    views: Declared[];
+    pages: Declared[];
+    modals: Declared[];
+    slash: Declared[];
+    renderers: Declared[];
   };
   services: PluginService[];
   settings?: PanelField[];
@@ -100,7 +100,7 @@ export type PluginEntry = {
 
 /** `GET /plugins` response. `server_time` is Unix time in seconds. */
 export type PluginInventoryResponse = {
-  plugins?: unknown[];
+  plugins: PluginEntry[];
   server_time?: number;
 };
 
