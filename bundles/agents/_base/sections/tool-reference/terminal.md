@@ -1,5 +1,17 @@
 terminal command system (subprocess backend):
 
+filename discovery:
+  <file-find><pattern>*.py</pattern></file-find>
+  use file_find(pattern="*.py") in native mode. Searches stay in the active
+  workspace and never follow symlinks. Check the result's truncated flag.
+  It searches recursively and matches entry basenames; it cannot select a
+  subdirectory or depth, exclude paths, inspect metadata or contents, or run
+  per-match commands. Use terminal searches when those semantics matter.
+  Ask before searching another folder; switch workspaces only after the user
+  grants that folder. Do not start exploratory shell searches at home, /Users,
+  / or a parent directory. General terminals and session input are unrestricted
+  shell capabilities, without an enforced workspace sandbox.
+
 basic foreground execution:
   <terminal>ls -la</terminal>                     # temp session, capture output
   <terminal>git status</terminal>                 # wait for completion

@@ -5,6 +5,10 @@ description: "Architecture Mapping skill - discover and document system architec
 
 architecture mapping mode: DISCOVER AND DOCUMENT, DO NOT MODIFY
 
+Use file-find for filename discovery across the active workspace. It searches
+recursively; check the truncated flag. Use terminal find when depth, excluded
+paths, directory-only results, metadata, or file-content operations matter.
+
 when this skill is active, you follow systematic architecture investigation.
 this is a comprehensive guide to mapping system architecture for documentation.
 
@@ -59,14 +63,19 @@ verify project access
 
   <terminal>ls -la</terminal>
 
-  <terminal>find . -maxdepth 2 -type f -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.java" | head -20</terminal>
+  <file-find><pattern>*.py</pattern></file-find>
+  <file-find><pattern>*.js</pattern></file-find>
+  <file-find><pattern>*.ts</pattern></file-find>
+  <file-find><pattern>*.java</pattern></file-find>
 
 
 check for existing documentation
 
   <terminal>ls -la docs/ 2>/dev/null || echo "no docs directory"</terminal>
 
-  <terminal>find . -maxdepth 3 -type f -name "*README*" -o -name "*ARCHITECTURE*" -o -name "*DESIGN*" 2>/dev/null</terminal>
+  <file-find><pattern>*README*</pattern></file-find>
+  <file-find><pattern>*ARCHITECTURE*</pattern></file-find>
+  <file-find><pattern>*DESIGN*</pattern></file-find>
 
 
 PHASE 1: IDENTIFYING SYSTEM BOUNDARIES
@@ -86,23 +95,27 @@ ask these questions:
 find entry points
 
 python projects:
-  <terminal>find . -maxdepth 3 -type f -name "main.py" -o -name "__main__.py" -o -name "app.py"</terminal>
+  <file-find><pattern>main.py</pattern></file-find>
+  <file-find><pattern>__main__.py</pattern></file-find>
+  <file-find><pattern>app.py</pattern></file-find>
 
   <terminal>find . -maxdepth 3 -type f -name "*.py" -exec grep -l "if __name__" {} \;</terminal>
 
   <terminal>grep -r "def main" . --include="*.py" | head -20</terminal>
 
 javascript/node projects:
-  <terminal>find . -maxdepth 3 -type f -name "index.js" -o -name "main.js" -o -name "server.js"</terminal>
+  <file-find><pattern>index.js</pattern></file-find>
+  <file-find><pattern>main.js</pattern></file-find>
+  <file-find><pattern>server.js</pattern></file-find>
 
   <terminal>cat package.json | grep -A5 '"main"'</terminal>
 
   <terminal>cat package.json | grep -A10 '"scripts"'</terminal>
 
 java projects:
-  <terminal>find . -type f -name "*.class" | head -5</terminal>
+  <file-find><pattern>*.class</pattern></file-find>
 
-  <terminal>find . -type f -name "*.jar" | head -5</terminal>
+  <file-find><pattern>*.jar</pattern></file-find>
 
   <terminal>grep -r "public static void main" . --include="*.java" | head -10</terminal>
 
@@ -187,7 +200,7 @@ analyze module organization
 
 identify public vs private boundaries
 
-  <terminal>find . -type f -name "__init__.py" | head -20</terminal>
+  <file-find><pattern>__init__.py</pattern></file-find>
 
   <terminal>find . -type f -name "*.py" -exec grep -l "^def " {} \; | head -20</terminal>
 
@@ -439,7 +452,8 @@ event-driven systems:
 discover rpc/service interfaces
 
 grpc, thrift, custom rpc:
-  <terminal>find . -name "*.proto" -o -name "*.thrift"</terminal>
+  <file-find><pattern>*.proto</pattern></file-find>
+  <file-find><pattern>*.thrift</pattern></file-find>
 
   <terminal>grep -r "@grpc\|@service\|@rpc" . --include="*.py" --include="*.js" | head -20</terminal>
 
@@ -514,7 +528,9 @@ identify data storage
 databases:
   <terminal>grep -r "sqlite\|postgres\|mysql\|mongodb\|redis\|elasticsearch" . --include="*.py" --include="*.js" --include="*.json" --include="*.yaml" | head -20</terminal>
 
-  <terminal>find . -name "*.db" -o -name "*.sqlite" -o -name "schema.sql"</terminal>
+  <file-find><pattern>*.db</pattern></file-find>
+  <file-find><pattern>*.sqlite</pattern></file-find>
+  <file-find><pattern>schema.sql</pattern></file-find>
 
 file storage:
   <terminal>grep -r "open(\|file\|path\|Path(" . --include="*.py" | grep -v "test" | head -20</terminal>
@@ -525,7 +541,9 @@ map data models
 python orm models:
   <terminal>grep -r "class.*\(Base\|Model\|Entity\)" . --include="*.py" | grep -v test | head -30</terminal>
 
-  <terminal>find . -name "models.py" -o -name "entities.py" -o -name "schemas.py" | head -10</terminal>
+  <file-find><pattern>models.py</pattern></file-find>
+  <file-find><pattern>entities.py</pattern></file-find>
+  <file-find><pattern>schemas.py</pattern></file-find>
 
 document each model:
   [ ] model name
@@ -541,7 +559,8 @@ active record (database logic in model):
   <terminal>grep -r "save()\|delete()\|update()" . --include="*.py" | grep "class " | head -20</terminal>
 
 repository pattern (separate data access):
-  <terminal>find . -name "*repository*.py" -o -name "*dao*.py"</terminal>
+  <file-find><pattern>*repository*.py</pattern></file-find>
+  <file-find><pattern>*dao*.py</pattern></file-find>
 
   <terminal>grep -r "class.*Repository\|class.*DAO" . --include="*.py" | head -20</terminal>
 
@@ -560,7 +579,7 @@ http/rest:
   <terminal>grep -r "axios\|fetch\|XMLHttpRequest" . --include="*.js" | head -20</terminal>
 
 grpc:
-  <terminal>find . -name "*.proto"</terminal>
+  <file-find><pattern>*.proto</pattern></file-find>
 
   <terminal>grep -r "grpc\|@grpc" . --include="*.py" --include="*.js" | head -10</terminal>
 
@@ -962,9 +981,13 @@ look for evidence of decisions:
   [ ] integration approaches
   [ ] deployment strategy
 
-  <terminal>find . -name "requirements.txt" -o -name "package.json" -o -name "pom.xml"</terminal>
+  <file-find><pattern>requirements.txt</pattern></file-find>
+  <file-find><pattern>package.json</pattern></file-find>
+  <file-find><pattern>pom.xml</pattern></file-find>
 
-  <terminal>find . -name "docker-compose.yml" -o -name "Dockerfile" -o -name "kubernetes"</terminal>
+  <file-find><pattern>docker-compose.yml</pattern></file-find>
+  <file-find><pattern>Dockerfile</pattern></file-find>
+  <file-find><pattern>kubernetes</pattern></file-find>
 
 
 PHASE 16: RESEARCH RULES (STRICT MODE)
