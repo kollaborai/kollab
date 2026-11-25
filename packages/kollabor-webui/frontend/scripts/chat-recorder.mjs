@@ -560,7 +560,9 @@ async function record(flow, session, browser, target) {
   const waitForCompaction = async (previousNetCount, phase = "staged") => {
     const started = Date.now();
     let sawStart = phase === "transcript";
+    let observedUpdates = 0;
     while (Date.now() - started < 240000) {
+      const startedBeforeState = sawStart;
       const status = await contextCompactionStatus();
       const updates = await page.evaluate((offset) => window.__rec.net.slice(offset), previousNetCount);
       const eventStatuses = updates
@@ -569,13 +571,17 @@ async function record(flow, session, browser, target) {
       const replaced = updates.some((entry) => entry.kind === "stream" && entry.ev === "replace");
       sawStart ||= status === "compacting" || eventStatuses.includes("compacting") || replaced;
       const latestEventStatus = eventStatuses.at(-1);
+      const newerEventStatuses = updates.slice(observedUpdates)
+        .filter((entry) => entry.kind === "events" && entry.ev === "context_compaction_status")
+        .map((entry) => entry.status);
+      observedUpdates = updates.length;
       if (["failed", "paused", "warning", "rolled_over"].includes(status) ||
           ["failed", "paused", "warning", "rolled_over"].includes(latestEventStatus)) {
         throw new Error(`compaction ended with status ${status === "compacting" ? latestEventStatus : status}`);
       }
       if (isCompactionComplete({
-        sawStart,
-        status,
+        sawStart: activeRuntime === "native" ? sawStart : startedBeforeState,
+        status: newerEventStatuses.at(-1) === "compacting" ? "compacting" : status,
         latestEventStatus,
         replaced,
         runtime: activeRuntime,
