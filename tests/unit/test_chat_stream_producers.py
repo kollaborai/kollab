@@ -225,3 +225,89 @@ async def test_compaction_replaces_rows_with_a_marker_and_kept_transcript_ids():
     replacement = next(event for event in events if event["type"] == "replace")
     assert replacement["data"]["rows"][0]["kind"] == "marker"
     assert replacement["data"]["rows"][1]["id"] == "web-compact-1"
+
+
+@pytest.mark.asyncio
+async def test_input_image_parts_keep_the_clients_row_id_when_the_turn_starts():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    input_id = "web-image-1"
+    await stream.add_input(
+        {
+            "id": input_id,
+            "text": "look",
+            "attachments": [
+                {
+                    "name": "image.png",
+                    "content_type": "image/png",
+                    "data_url": "data:image/png;base64,AAAA",
+                }
+            ],
+        }
+    )
+
+    _publish(
+        state,
+        "user_message",
+        request_id=input_id,
+        turn_id="image-turn",
+        text="look",
+    )
+
+    events = _events(stream, initial)
+    assert sequence_problems(events, complete=False) == []
+    input_rows = [
+        event["data"]
+        for event in events
+        if event["type"] == "row.upsert"
+        and event["data"]["kind"] == "input"
+        and event["data"]["id"] == input_id
+    ]
+    assert input_rows[-1]["parts"] == [
+        {"type": "text", "text": "look"},
+        {"type": "image", "url": "data:image/png;base64,AAAA"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_turn_error_is_a_marker_row_and_fails_its_input():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    await _add(stream, "web-error-1", "hello")
+    _publish(
+        state,
+        "turn_start",
+        request_id="web-error-1",
+        turn_id="error-turn",
+    )
+    _publish(
+        state,
+        "error",
+        request_id="web-error-1",
+        turn_id="error-turn",
+        message="provider failed",
+    )
+    _publish(
+        state,
+        "turn_complete",
+        request_id="web-error-1",
+        turn_id="error-turn",
+        stop_reason="error",
+    )
+
+    events = _events(stream, initial)
+
+    assert sequence_problems(events) == []
+    markers = [
+        event["data"]
+        for event in events
+        if event["type"] == "row.upsert" and event["data"]["kind"] == "marker"
+    ]
+    assert len(markers) == 1
+    assert markers[0]["role"] == "system"
+    assert markers[0]["status"] == "failed"
+    assert markers[0]["parts"] == [{"type": "text", "text": "provider failed"}]
