@@ -4,6 +4,7 @@ import {
   CHAT_RECORDER_FLOWS,
   classifyChatRuntime,
   chatRecorderStreamSuffix,
+  captureRecorderFailure,
   findPromptStatusUpdate,
   hasRunningTurnWithInputs,
   isCompactionComplete,
@@ -221,5 +222,11 @@ describe("chat recorder analysis", () => {
       "the engine does not know this agent's approval mode; open the agent and retry",
     );
     expect(() => requireRecorderApprovalMode("unknown")).toThrow();
+  });
+
+  it("keeps setup failures in the recorder flow result", async () => {
+    await expect(captureRecorderFailure(async () => {
+      throw new Error("the chat stream did not send its initial snapshot");
+    })).resolves.toBe("Error: the chat stream did not send its initial snapshot");
   });
 });
