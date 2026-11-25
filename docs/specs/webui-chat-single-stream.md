@@ -36,7 +36,7 @@ The sync layer is written from scratch rather than patched: new files carry the 
 Non-goals:
 
 - How inputs reach the model. Several inputs may still reach the model in one step; the transcript keeps one row per input.
-- New chat design. Bubbles, labels and layout stay as they are, apart from the open question below.
+- New chat design. Bubbles, labels and layout stay as they are, apart from the open question below and one removal: the follow-up suggestion row and the new-chat suggestion chips go, because no agent kind produces suggestions (the new-chat composer sits about 7px lower). Edit and Reload stay hidden, as they are today: neither works on any agent kind, and edit and regenerate need their own spec.
 - Cross-device merging. The daemon is the only writer of its transcript.
 - The daemon-owned waiting queue itself, which is `docs/specs/webui-daemon-queue.md` (#1366). This spec relies on it for admission and adds ids, lifecycle events and the stream.
 
@@ -54,15 +54,15 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 
 **Ids.** A client picks the id of each input it sends; the web UI already does, as the `add-message` id. The daemon makes one when a sender has none (the TUI, hub messages, goals). That id is the row's id for the life of the row: queued, joined, saved, shown. No path creates a second id for an input. A resend with a known id is answered with the input's current state instead of making a second input.
 
-**Rows.** `{id, seq, kind, role, turn_id, status, parts, created_at}`. `kind` is one of `input`, `reply`, `tool`, `note` (hub notes, today glued into user text as `<agent_hud>`), `prompt`, or `marker` (compaction, errors shown in the thread).
+**Rows.** `{id, seq, kind, role, turn_id, status, parts, created_at}`. `kind` is one of `input`, `reply`, `tool`, `note` (hub notes, today glued into user text as `<agent_hud>`), `prompt`, or `marker` (compaction, errors shown in the thread). A hub message carries a `hub-note` part built from the daemon's structured hub fields (`from`, `to`, `text`, `observed`, optional `kind`, `thread_id`, `reply_to`, `is_direct`, `presence`), never parsed from text: a hub message that starts no turn is a `note` row with that part and no input lifecycle; one that starts a turn is an `input` row whose id is the hub message id, with the full input lifecycle and the part inside its parts.
 
-**Lifecycle.** Each input moves `queued`, then `started` or `joined`, then `ended`, with `ended.outcome` one of `completed`, `failed` or `cancelled`. `joined` names the turn it joined, and the input ends when that turn ends. Every input reaches `ended` exactly once.
+**Lifecycle.** Each input moves `queued`, then `started` or `joined`, then `ended`, with `ended.outcome` one of `completed`, `failed` or `cancelled`. `joined` names the turn it joined, and the input ends when that turn ends. A state never goes back, and an input that belongs to a turn ends only after that turn's `turn.state` `ended`, whatever its outcome. Every input reaches `ended` exactly once.
 
 **Stream.** `GET /sessions/{id}/stream?after=<seq>` (SSE). Every event is `{seq, conversation_uid, type, data}`, with `seq` strictly increasing per conversation:
 
 | type | data |
 |---|---|
-| `snapshot` | the latest window of rows, `next_seq`, and a cursor for older rows |
+| `snapshot` | the latest window of rows, `next_seq`, and `older`: the cursor for older rows, or `null` when there are none |
 | `row.upsert` | a whole row |
 | `row.append` | `{id, part, text}`: text streaming into a row |
 | `row.delete` | `{id}` |
@@ -70,7 +70,7 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 | `input.state` | `{id, state, turn_id, outcome}` |
 | `turn.state` | `{turn_id, state, input_ids}` |
 
-A client connects without `after` and gets a `snapshot`. It reconnects with the last `seq` it applied and gets every later event. It gets a new `snapshot` instead when that `seq` is older than the daemon keeps (default: the current turn and the last 2,000 events) or when `conversation_uid` changed. Older rows load through `GET /sessions/{id}/history?before=<cursor>` in the same row shape.
+A client connects without `after` and gets a `snapshot`. It reconnects with the last `seq` it applied and gets every later event. It gets a new `snapshot` instead when that `seq` is older than the daemon keeps (default: the current turn and the last 2,000 events) or when `conversation_uid` changed. Older rows load through `GET /sessions/{id}/rows?before=<cursor>&limit=<n>`, which answers `{rows, older}` in the same row shape, oldest first; `older` is the next older cursor or `null`, and a `409` means the cursor belongs to another conversation, so the client resyncs. The legacy `/history` route keeps its old envelope until cutover.
 
 **Sending.** `POST /sessions/{id}/inputs {id, text, attachments}` answers `202 {id, state}`. The reply arrives on the stream, for the sender as for every other client. `POST /sessions/{id}/inputs/{input_id}/cancel` cancels a queued input. `/assistant`, the `synced` point and the `history_updated` refetch are removed at cutover.
 
@@ -102,7 +102,7 @@ AG-UI (MIT) defines the same ideas (`MESSAGES_SNAPSHOT`, `STATE_SNAPSHOT` and ru
 3. The engine restarts: clients reconnect with `after`. The daemon, not the engine, owns the events, so nothing is lost.
 4. A resend of a known id (a POST retried after a timeout): answered with the input's current state, with no second row.
 5. A harness crashes or a turn never ends: the daemon ends the turn `failed`, and every input that joined it `failed`, so no client stays in the working state.
-6. A snapshot is too large: it carries only the latest window; older rows come from `history?before=`.
+6. A snapshot is too large: it carries only the latest window; older rows come from `GET /sessions/{id}/rows?before=`.
 7. Two clients pick the same id for different text: the second POST is refused with 409. Ids carry a per-client prefix, so only a bug can cause this.
 
 ## Decisions

@@ -1,8 +1,9 @@
 {
- "description": "Wrong: seq goes backwards.",
+ "description": "Wrong: seq goes backwards. Seq 3 arrives where 2 was due (a gap), then 2 arrives after 3.",
  "complete": true,
  "expect": [
-  "seq must increase"
+  "seq must increase",
+  "expected seq 2"
  ],
  "events": [
   {
