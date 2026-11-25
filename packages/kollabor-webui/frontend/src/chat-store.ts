@@ -171,6 +171,7 @@ export interface LiveStore extends ChatStore {
 /** The client prefix for the input ids the web UI picks: newInputId(WEB_INPUT_PREFIX). */
 export const WEB_INPUT_PREFIX = "web";
 
+const HEALTHY_CONNECTION_MS = 30_000;
 const MAX_BACKOFF_MS = 10_000;
 // Rows per older page: the same size the daemon's history route defaults to.
 const HISTORY_PAGE_LIMIT = 50;
@@ -456,6 +457,7 @@ export class LiveChatStore implements LiveStore {
   private async run(): Promise<void> {
     while (!this.disposed) {
       const controller = new AbortController();
+      let openedAt: number | null = null;
       this.controller = controller;
       const after = this.state.lastSeq;
       const path = `/sessions/${this.enc}/stream` + (after === null ? "" : `?after=${after}`);
@@ -466,7 +468,10 @@ export class LiveChatStore implements LiveStore {
           path,
           controller.signal,
           (event) => this.onEvent(controller, event),
-          () => this.onOpen(controller),
+          () => {
+            if (this.controller === controller && !controller.signal.aborted) openedAt = performance.now();
+            this.onOpen(controller);
+          },
           () => { if (this.controller === controller && !controller.signal.aborted) this.resync(); },
         );
       } catch {
@@ -474,6 +479,7 @@ export class LiveChatStore implements LiveStore {
       }
       this.controller = null;
       if (this.disposed) return;
+      if (openedAt !== null && performance.now() - openedAt >= HEALTHY_CONNECTION_MS) this.attempts = 0;
       this.attempts += 1;
       if (this.attempts >= this.maxAttempts) {
         this.connectionState = "failed";
