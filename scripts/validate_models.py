@@ -46,6 +46,20 @@ def _describe(value: object) -> str:
     return f"<{type(value).__name__}>"
 
 
+def _parse_json_int(text: str) -> int | float:
+    """Read a JSON integer literal without raising past Python's digit limit.
+
+    int() refuses a literal longer than sys.get_int_max_str_digits() with a
+    plain ValueError, which json.loads does not wrap. Such a value is
+    unrepresentable, so it reads as the float it overflows to (inf or -inf);
+    the checks in validate() reject that as a field error.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        return float(text)
+
+
 def validate(data: dict) -> list[str]:
     errors: list[str] = []
     models = data.get("models", {})
@@ -114,7 +128,7 @@ def validate(data: dict) -> list[str]:
 
 def main() -> int:
     try:
-        data = json.loads(REGISTRY.read_text())
+        data = json.loads(REGISTRY.read_text(), parse_int=_parse_json_int)
     except (OSError, json.JSONDecodeError) as exc:
         print(f"FAIL: cannot read {REGISTRY}: {exc}")
         return 1
