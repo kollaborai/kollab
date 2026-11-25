@@ -77,6 +77,21 @@ const module = (setup: Setup) => async () => ({ default: setup });
 const page = (k: PluginApi) =>
   k.page({ id: "main", title: "Main", tabs: [{ id: "one", label: "One", render: Tab }] });
 
+const inventoryResponseCases: readonly [string, () => Promise<unknown>, boolean][] = [
+  ["null", async () => null, false],
+  ["undefined", async () => undefined, false],
+  ["non-object", async () => "not an inventory", false],
+  ["top-level array", async () => [], false],
+  ["missing plugins", async () => ({ schema: 1 }), false],
+  ["non-array plugins", async () => ({ plugins: null }), false],
+  ["error body", async () => ({ detail: "Inventory unavailable" }), false],
+  ["only invalid rows", async () => ({ plugins: [null, {}] }), false],
+  ["partially invalid rows", async () => ({ plugins: [entry("replacement"), {}] }), false],
+  ["thrown JSON parse", async () => { throw new SyntaxError("Invalid JSON"); }, false],
+  ["non-2xx response", async () => { throw new Error("HTTP 503 Service Unavailable"); }, false],
+  ["valid empty inventory", async () => ({ plugins: [] }), true],
+];
+
 beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -146,21 +161,27 @@ describe("plugin inventory text redaction", () => {
 });
 
 describe("loading", () => {
-  it.each([
-    ["null", null],
-    ["undefined", undefined],
-  ] as const)("keeps loaded plugins when the inventory response is %s", async (_label, response) => {
+  it.each(inventoryResponseCases)("handles %s plugin inventory without losing the last good page", async (_label, nextList, isValidEmpty) => {
     const existing = entry("hello");
     const setup = harness([[existing]], { [assetUrl(existing, "entry")!]: module(page) });
     await setup.loader.refresh();
     await setup.loader.idle();
     expect(setup.plugin("hello")?.status).toBe("ready");
 
-    setup.deps.list.mockImplementationOnce(async () => response as never);
+    setup.deps.list.mockImplementationOnce(nextList as never);
     await setup.loader.refresh();
 
-    expect(setup.plugin("hello")?.status).toBe("ready");
-    expect(setup.registry.getSnapshot().listError).toBe("Invalid plugin inventory response.");
+    if (isValidEmpty) {
+      expect(setup.plugin("hello")).toBeUndefined();
+      expect(listedPluginEntries()).toEqual([]);
+      expect(setup.registry.getSnapshot().listError).toBeNull();
+      expect(setup.removed).toEqual(["hello"]);
+    } else {
+      expect(setup.plugin("hello")).toMatchObject({ status: "ready", contributions: { pages: [{ id: "main" }] } });
+      expect(listedPluginEntries().map((item) => item.id)).toEqual(["hello"]);
+      expect(setup.registry.getSnapshot().listError).toBeTruthy();
+      expect(setup.removed).toEqual([]);
+    }
   });
 
   it("imports every enabled entry in parallel and awaits each plugin function before showing it", async () => {
