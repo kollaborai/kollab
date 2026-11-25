@@ -239,6 +239,7 @@ const mainConfig = defineConfig({
       "tests/team-launch-api.test.ts",
       "tests/cron-jobs-panel.test.tsx",
       "tests/cron-jobs-panel-mount.test.tsx",
+      "tests/schedules-panel.test.tsx",
       "tests/model-choices.test.ts",
       "tests/panel-dialog-surface.test.tsx",
       "tests/whats-new-model.test.ts",
