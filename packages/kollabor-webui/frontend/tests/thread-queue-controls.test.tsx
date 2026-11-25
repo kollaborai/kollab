@@ -55,16 +55,11 @@ function fakeStore(rows: ChatRow[], inputs: Record<string, InputInfo>, running: 
 type Spies = {
   onNew: ReturnType<typeof vi.fn>;
   onCancel: ReturnType<typeof vi.fn>;
-  onQueueBusyMessage: ReturnType<typeof vi.fn>;
 };
 
 const spies = (): Spies => ({
   onNew: vi.fn(),
   onCancel: vi.fn(),
-  // The batch submit must never run from these controls; if it does, it fails loudly.
-  onQueueBusyMessage: vi.fn(async () => {
-    throw new Error("the batch submit was called");
-  }),
 });
 
 // The thread's messages come from the store's rows. Send and Stop reach the runtime's
@@ -105,7 +100,7 @@ function mount(live: LiveStore, runtimeSpies: Spies): HTMLElement {
       <ChatStoreProvider store={live}>
         <SpyRuntime store={live} spies={runtimeSpies}>
           <Capture />
-          <Thread commands={[]} onQueueBusyMessage={runtimeSpies.onQueueBusyMessage} />
+          <Thread commands={[]} />
         </SpyRuntime>
       </ChatStoreProvider>,
     );
@@ -137,7 +132,7 @@ const byLabel = (container: HTMLElement, label: string) =>
   container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
 
 describe("composer send, queue, Stop and Send Now on the chat store", () => {
-  it("while running with content, Send calls store.send once with a new id and never calls the batch submit", async () => {
+  it("while running with content, Send calls store.send once with a new id", async () => {
     const { store, live } = fakeStore([], {}, true);
     const runtimeSpies = spies();
     const container = mount(live, runtimeSpies);
@@ -145,7 +140,6 @@ describe("composer send, queue, Stop and Send Now on the chat store", () => {
     await typeText("hello");
     await click(byLabel(container, "Send message while generating"));
 
-    expect(runtimeSpies.onQueueBusyMessage).not.toHaveBeenCalled();
     expect(store.send).toHaveBeenCalledTimes(1);
     expect(store.send.mock.calls[0]?.[0]).toMatchObject({
       id: expect.stringMatching(/^web-[0-9a-f]{24}$/),
