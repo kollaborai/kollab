@@ -257,7 +257,11 @@ def test_the_web_ui_update_check_follows_the_channel(install, tmp_path, monkeypa
         return newest_release(RELEASES) if self.include_prereleases else published(f"v{STABLE}")
 
     monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", fetch)
-    with TestClient(server.create_app(), base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as client:
+    with TestClient(
+        server.create_app(update_settings={"kollabor.updates.include_prereleases": True}),
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 12345),
+    ) as client:
         body = client.get("/api/update/check").json()
     assert channels == [True]
     assert body["available"] is True and body["release"]["version"] == NIGHTLY

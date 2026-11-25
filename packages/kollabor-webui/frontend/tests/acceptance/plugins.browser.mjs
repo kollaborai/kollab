@@ -151,6 +151,21 @@ function engine(url, req, res) {
     sendJson(res, { engine_url: "/engine" });
     return true;
   }
+  if (pathname === "/api/update/check") {
+    sendJson(res, {
+      current_version: "0.0.1",
+      available: false,
+      status: "current",
+      release: null,
+      checked_at: null,
+      last_successful_check: null,
+      retry_after_seconds: null,
+      retry_at: null,
+      retry_reason: null,
+      notes: [],
+    });
+    return true;
+  }
   if (pathname === "/plugins/hello/web/index.js") {
     send(res, 200, mime[".js"], helloJs);
     return true;
@@ -246,6 +261,7 @@ async function openApp(width, height, { route = "/", touch = false } = {}) {
     await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
   }
   await page.goto(`${origin}${route}`, { waitUntil: "domcontentloaded" });
+  await page.getByText("Kollab is up to date.", { exact: false }).waitFor({ timeout: 10_000 });
   return { context, page };
 }
 
