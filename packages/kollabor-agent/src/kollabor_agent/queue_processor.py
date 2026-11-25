@@ -1067,8 +1067,11 @@ class QueueProcessor:
         for item in [
             i
             for i in getattr(queue, "_queue", ())
-            if isinstance(i, (TaggedInput, QueuedInput))
-            and not isinstance(i, QueueHandoffInput)
+            if (
+                isinstance(i, TaggedInput)
+                and not isinstance(i, QueueHandoffInput)
+            )
+            or (isinstance(i, QueuedInput) and bool(i.request_ids))
         ]:
             self._end_queued(item)
 
@@ -1108,19 +1111,26 @@ class QueueProcessor:
         if queue is None or entries is None:
             return
         for item in messages:
-            if isinstance(item, (TaggedInput, QueuedInput)) and not isinstance(
-                item, QueueHandoffInput
-            ):
+            if isinstance(item, TaggedInput) and not isinstance(item, QueueHandoffInput):
                 self._end_dropped(item, "Stopped before this message ran. Send it again.")
-        # The messages were removed from this queue moments ago. Reinsert only
-        # the exact protected identities, preserving their relative order and
+            elif isinstance(item, QueuedInput) and item.request_ids:
+                self._end_dropped(item, "Stopped before this message ran. Send it again.")
+        # The messages were removed from this queue moments ago. Reinsert the
+        # protected handoffs and untagged inputs, preserving their order and
         # keeping them ahead of work admitted while the local batch was held.
-        for item in reversed(handoffs):
+        retained = tuple(
+            item
+            for item in messages
+            if isinstance(item, QueueHandoffInput)
+            or (isinstance(item, QueuedInput) and not item.request_ids)
+        )
+        for item in reversed(retained):
             if not any(current is item for current in entries):
                 entries.appendleft(item)
-            handoffs_by_attempt = getattr(self, "_queue_handoffs", {})
-            if isinstance(handoffs_by_attempt, dict):
-                handoffs_by_attempt[item.attempt_id] = (item, "queued")
+            if isinstance(item, QueueHandoffInput):
+                handoffs_by_attempt = getattr(self, "_queue_handoffs", {})
+                if isinstance(handoffs_by_attempt, dict):
+                    handoffs_by_attempt[item.attempt_id] = (item, "queued")
         self._drained_batch_messages = ()
         self._drained_handoff_items = ()
         self._drained_handoff_started = False

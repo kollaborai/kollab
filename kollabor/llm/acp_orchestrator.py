@@ -2192,7 +2192,13 @@ class ACPOrchestrator:
                 input_source=update.get("source", "acp"),
                 thread_id=update.get("thread_id"),
                 acp_passthrough=kind
-                in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"},
+                in {
+                    "tool_call",
+                    "tool_call_update",
+                    "agent_thought_chunk",
+                    "plan",
+                    "usage_update",
+                },
             )
 
         if kind == "turn_start" and persist_dispatch is not None:

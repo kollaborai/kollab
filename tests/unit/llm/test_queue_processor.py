@@ -1188,6 +1188,36 @@ class TestQueueProcessor(unittest.TestCase):
             ],
         )
 
+    def test_stop_preserves_a_queued_voice_input_without_request_id(self):
+        voice = QueuedInput("Check the tests", {})
+        self.processor.processing_queue.put_nowait(voice)
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            self.processor.request_cancellation(origin="human")
+
+        self.assertIs(self.processor.processing_queue.get_nowait(), voice)
+        publish.assert_not_called()
+
+    def test_stop_restores_an_untagged_voice_input_with_protected_handoff(self):
+        voice = QueuedInput("Check the tests", {})
+        handoff = QueueHandoffInput(
+            content="Run the queued job",
+            request_ids=("handoff-id",),
+            queue_request_id="handoff-id",
+            attempt_id="attempt-1",
+        )
+        self.processor._drained_batch_messages = (voice, handoff)
+        self.processor.processing_queue.put_nowait("already queued")
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            self.processor.request_cancellation(origin="human")
+
+        queued = list(self.processor.processing_queue._queue)
+        self.assertEqual(queued, [voice, handoff, "already queued"])
+        self.assertIs(queued[0], voice)
+        self.assertIs(queued[1], handoff)
+        publish.assert_not_called()
+
     def test_stop_ends_local_voice_input_and_restores_protected_handoff(self):
         voice = QueuedInput("Check the tests", {}, request_ids=("voice-stop",))
         handoff = QueueHandoffInput(
