@@ -8,24 +8,35 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Puzzle } from "lucide-react";
 import { PluginBoundary, PluginFailure, PluginMount, PluginTabs, pluginIcon } from "./mount";
 import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
-import type { PluginApi, PluginEntry } from "./sdk";
+import type { PluginApi, PluginEntry, PluginRendererProps, RendererSpec } from "./sdk";
 import { PluginToolPart } from "./renderers";
 
 const XSS = '"><img src=x onerror=alert(1)>';
 
 const k = { id: "hello" } as unknown as PluginApi;
 
-const record = (extra: Partial<PluginRecord> = {}): PluginRecord => ({
-  id: "hello",
-  name: "Hello",
-  entry: { id: "hello", name: "Hello" } as PluginEntry,
-  status: "ready",
-  error: null,
-  retries: 0,
-  k,
-  contributions: EMPTY_CONTRIBUTIONS,
-  ...extra,
-});
+const record = (extra: Partial<PluginRecord> = {}): PluginRecord => {
+  const contributions = extra.contributions ?? EMPTY_CONTRIBUTIONS;
+  return {
+    id: "hello",
+    name: "Hello",
+    entry: extra.entry ?? ({
+      id: "hello",
+      name: "Hello",
+      contributes: {
+        renderers: contributions.renderers.map((renderer) =>
+          "tool" in renderer ? { tool: renderer.tool } : { tag: renderer.tag },
+        ),
+      },
+    } as PluginEntry),
+    status: "ready",
+    error: null,
+    retries: 0,
+    k,
+    contributions,
+    ...extra,
+  };
+};
 
 afterEach(() => {
   pluginRegistry.reset();
@@ -93,6 +104,44 @@ describe("PluginMount", () => {
       });
       if (kind.endsWith("suspend")) expect(host.textContent).toContain("Rendering plugin view");
       else expect(host.textContent).toContain("Hello Failed to Render");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+});
+
+describe("PluginToolPart recovery", () => {
+  it("clears a renderer failure when streamed tool args change", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const Render = ({ toolCall }: PluginRendererProps) => {
+      const args = toolCall?.args as { target?: string };
+      if (!args?.target) throw new Error("target is not ready");
+      return <p>{args.target}</p>;
+    };
+    const renderer: RendererSpec = { tool: "deploy", render: Render };
+    pluginRegistry.put(record({
+      contributions: { ...EMPTY_CONTRIBUTIONS, renderers: [renderer] },
+    }));
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const part = (args: unknown) => (
+      <PluginToolPart
+        part={{ toolName: "deploy", args, status: "running" }}
+        fallback={<p>Native tool card</p>}
+      />
+    );
+
+    try {
+      await act(async () => root.render(part({})));
+      expect(host.textContent).toContain("Hello Failed to Render");
+
+      await act(async () => root.render(part({ target: "ready" })));
+
+      expect(host.textContent).toContain("ready");
+      expect(host.textContent).not.toContain("Failed to Render");
     } finally {
       await act(async () => root.unmount());
       host.remove();

@@ -281,3 +281,11 @@ def test_plugin_web_entry_normalizes_manifest_relative_paths(path, expected):
 
     assert entry is not None
     assert (entry["web"]["entry"] if entry["web"] else None) == expected
+
+
+def test_plugin_slash_command_inventory_uses_ascii_declaration_names():
+    from kollabor_plugins.registry import _normalize_contributes
+
+    normalized = _normalize_contributes({"slash": ["publish", "_publish", "café"]})
+
+    assert normalized["slash"] == ["publish"]

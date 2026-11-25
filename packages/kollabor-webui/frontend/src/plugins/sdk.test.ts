@@ -160,6 +160,16 @@ describe("contribution points", () => {
     }
   });
 
+  it("uses the inventory declaration rule for slash command names", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["_publish", "café", "publish"]);
+    for (const name of ["_publish", "café", "publish"])
+      k.command({ name, description: "", run: () => {} });
+
+    expect(current().commands.map(({ name }) => name)).toEqual(["publish"]);
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
   it("ignores malformed specs instead of storing something that cannot draw", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { k, current } = harness();
@@ -311,6 +321,30 @@ describe("k.events", () => {
     expect(signal.aborted).toBe(true);
     k.notice({ text: "Late" });
     k.page({ id: "main", title: "Late", tabs: [{ id: "one", label: "One", render: Tab }] });
+    expect(current()).toEqual(EMPTY_CONTRIBUTIONS);
+  });
+
+  it("ignores late event failures and notices after disposal", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const timer = vi.spyOn(globalThis, "setTimeout");
+    const { k, deps, dispose, current } = harness();
+    let reject!: (reason: unknown) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    void pending.catch(() => {});
+    k.events.on("late", () => pending);
+    deps.stream.mock.calls[0]![2]({ topic: "late", data: null });
+
+    dispose();
+    k.toast("Too late");
+    k.notice({ text: "Too late" });
+    reject(new Error("late plugin rejection"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(error).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
+    expect(timer).not.toHaveBeenCalled();
     expect(current()).toEqual(EMPTY_CONTRIBUTIONS);
   });
 });

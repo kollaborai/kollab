@@ -23,7 +23,14 @@ function record(id: string, renderers: RendererSpec[], withK = true, enableOrder
   return {
     id,
     name: id,
-    entry: (enableOrder === undefined ? {} : { enable_order: enableOrder }) as PluginRecord["entry"],
+    entry: {
+      ...(enableOrder === undefined ? {} : { enable_order: enableOrder }),
+      contributes: {
+        renderers: renderers.map((renderer) =>
+          "tool" in renderer ? { tool: renderer.tool } : { tag: renderer.tag },
+        ),
+      },
+    } as PluginRecord["entry"],
     status: "ready",
     error: null,
     retries: 0,
@@ -89,6 +96,21 @@ describe("findToolRenderer", () => {
 
     expect(findToolRenderer(plugins, "shell")?.spec).toBe(zuluTool);
     expect(findTagRenderer(plugins, "status-card")?.spec).toBe(zuluTag);
+  });
+
+  it("does not give a later loaded plugin a renderer declared by an earlier loading plugin", () => {
+    const firstTool: RendererSpec = { tool: "shell", render: Render };
+    const laterTool: RendererSpec = { tool: "shell", render: Render };
+    const firstTag: RendererSpec = { tag: "status-card", render: Render };
+    const laterTag: RendererSpec = { tag: "status-card", render: Render };
+    const waiting = record("alpha", [firstTool, firstTag], false, 1);
+    const loadedLater = record("zulu", [laterTool, laterTag], true, 2);
+
+    expect(findToolRenderer([loadedLater, waiting], "shell")).toBeNull();
+    expect(findTagRenderer([loadedLater, waiting], "status-card")).toBeNull();
+    expect(tagRendererNames([loadedLater, waiting])).toEqual([]);
+    expect(findToolRenderer([loadedLater, record("alpha", [firstTool], true, 1)], "shell")?.spec).toBe(firstTool);
+    expect(findTagRenderer([loadedLater, record("alpha", [firstTag], true, 1)], "status-card")?.spec).toBe(firstTag);
   });
 });
 

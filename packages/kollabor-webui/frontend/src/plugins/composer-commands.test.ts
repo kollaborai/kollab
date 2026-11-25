@@ -14,7 +14,8 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/core/react";
 import { Thread } from "@/components/assistant-ui/thread";
-import type { SlashCommand } from "@/api";
+import { DEFAULT_SLASH_COMMANDS, type SlashCommand } from "@/api";
+import { PANEL_COMMAND_NAMES } from "@/components/panels/panel-model";
 import {
   EMPTY_CONTRIBUTIONS,
   pluginRegistry,
@@ -153,7 +154,10 @@ function record(id: string, commands: CommandSpec[], withK = true, enableOrder?:
   return {
     id,
     name: id,
-    entry: (enableOrder === undefined ? {} : { enable_order: enableOrder }) as PluginRecord["entry"],
+    entry: {
+      ...(enableOrder === undefined ? {} : { enable_order: enableOrder }),
+      contributes: { slash: commands.map(({ name }) => name) },
+    } as PluginRecord["entry"],
     status: "ready",
     error: null,
     retries: 0,
@@ -165,7 +169,18 @@ function record(id: string, commands: CommandSpec[], withK = true, enableOrder?:
 describe("reservedCommandKeys", () => {
   it("reserves native names and aliases without the slash, in lower case", () => {
     const keys = reservedCommandKeys([{ name: "/Config", aliases: ["/CFG"] }, { name: "help" }]);
-    expect([...keys].sort()).toEqual(["cfg", "config", "help"]);
+    expect(keys.has("cfg")).toBe(true);
+    expect(keys.has("config")).toBe(true);
+    expect(keys.has("help")).toBe(true);
+  });
+
+  it("reserves every built-in and panel command when the native catalog is empty", () => {
+    const keys = reservedCommandKeys([]);
+    for (const command of DEFAULT_SLASH_COMMANDS) {
+      expect(keys.has(command.name)).toBe(true);
+      for (const alias of command.aliases ?? []) expect(keys.has(alias)).toBe(true);
+    }
+    for (const name of PANEL_COMMAND_NAMES) expect(keys.has(name)).toBe(true);
   });
 });
 
@@ -173,6 +188,18 @@ describe("pluginCommandEntries", () => {
   it("reserves browser panel commands omitted from the engine list", () => {
     const entries = pluginCommandEntries(
       [record("alpha", [command("prompts")])],
+      reservedCommandKeys([]),
+    );
+    expect(entries).toEqual([]);
+  });
+
+  it("hides every built-in and panel command even when the catalog is empty", () => {
+    const names = [
+      ...DEFAULT_SLASH_COMMANDS.flatMap(({ name, aliases }) => [name, ...(aliases ?? [])]),
+      ...PANEL_COMMAND_NAMES,
+    ];
+    const entries = pluginCommandEntries(
+      [record("alpha", names.map((name) => command(name)))],
       reservedCommandKeys([]),
     );
     expect(entries).toEqual([]);
@@ -209,6 +236,24 @@ describe("pluginCommandEntries", () => {
     expect(entries[0].description).toBe("from zulu");
   });
 
+  it("keeps a declared earlier owner while that plugin is still loading", () => {
+    const waiting = record("alpha", [command("deploy")], false, 1);
+    const loadedLater = record("zulu", [command("deploy")], true, 2);
+
+    expect(pluginCommandEntries([loadedLater, waiting], new Set())).toEqual([]);
+    expect(pluginCommandEntries([loadedLater, record("alpha", [command("deploy")], true, 1)], new Set())
+      .map(({ pluginId }) => pluginId)).toEqual(["alpha"]);
+    expect(pluginCommandConflicts([loadedLater, waiting], new Set())).toEqual([
+      {
+        pluginId: "zulu",
+        pluginName: "zulu",
+        commandName: "deploy",
+        winnerPluginId: "alpha",
+        winnerName: "alpha",
+      },
+    ]);
+  });
+
   it("preserves API order when enable order is missing", () => {
     const entries = pluginCommandEntries(
       [record("beta", [command("deploy", "from beta")]), record("alpha", [command("deploy", "from alpha")])],
@@ -232,7 +277,7 @@ describe("pluginCommandEntries", () => {
 });
 
 describe("pluginCommandConflicts", () => {
-  it("records the losing plugin and first-enabled winner for Settings", async () => {
+  it("records the losing plugin and first-enabled winner for diagnostics", async () => {
     const { pluginCommandConflicts } = (await import("./composer-commands")) as unknown as {
       pluginCommandConflicts: (
         plugins: readonly PluginRecord[],
@@ -388,7 +433,7 @@ function putThreadCommand(name: string, run = () => {}, toast = vi.fn()) {
   pluginRegistry.put({
     id: "punctuation",
     name: "Punctuation",
-    entry: {} as PluginEntry,
+    entry: { contributes: { slash: [name] } } as PluginEntry,
     status: "ready",
     error: null,
     retries: 0,
@@ -531,6 +576,41 @@ describe("plugin command composer labels", () => {
       expect(sendCapture.text).toBe("");
       expect(sendCapture.setTextCalls).toBe(1);
       expect(toast).toHaveBeenCalledWith("Could not run /publish. Check the browser console for redacted details.");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("ignores a command rejection after its plugin unloads", async () => {
+    prepareMountedThread();
+    let reject!: (error: unknown) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    void pending.catch(() => {});
+    const toast = putThreadCommand("publish", () => pending);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, { draftKey: "session-a" })));
+      publishComposerText("/publish now");
+      const submit = sendCapture.handlers.at(-1);
+      expect(submit).toBeTypeOf("function");
+      await act(async () => submit?.({ preventDefault: () => {} }));
+      expect(sendCapture.text).toBe("");
+
+      pluginRegistry.remove("punctuation");
+      await act(async () => {
+        reject(new Error("late rejection"));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(sendCapture.text).toBe("");
+      expect(toast).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       host.remove();

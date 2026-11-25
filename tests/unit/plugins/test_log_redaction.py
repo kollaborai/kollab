@@ -74,6 +74,26 @@ def test_plugin_secret_redaction_boundaries_are_shared():
             "PluginError: GITHUB_TOKEN: [redacted]",
         ),
         (
+            "private key assignment",
+            "PluginError: private_key=private-secret",
+            "PluginError: private_key: [redacted]",
+        ),
+        (
+            "hyphenated private key assignment",
+            "PluginError: private-key=private-secret",
+            "PluginError: private-key: [redacted]",
+        ),
+        (
+            "signing key assignment",
+            "PluginError: signing_key=signing-secret",
+            "PluginError: signing_key: [redacted]",
+        ),
+        (
+            "encryption key assignment",
+            "PluginError: encryption_key=encryption-secret",
+            "PluginError: encryption_key: [redacted]",
+        ),
+        (
             "log filesystem path",
             "RuntimeError: /private/tmp/account/config.json",
             "RuntimeError: [path]",

@@ -14,6 +14,7 @@ import {
 } from "./loader";
 import { createPluginRegistry } from "./registry";
 import { pluginsByEnableOrder } from "./plugin-order";
+import { logPluginFailure } from "./plugin-errors";
 import type { PluginApi, PluginEntry } from "./sdk";
 
 const Tab = () => null;
@@ -154,10 +155,24 @@ describe("plugin inventory text redaction", () => {
 
   it.each([
     ["underscore credential assignment", "GITHUB_TOKEN=ghp_fakecredentialvalue123"],
+    ["private key assignment", "private_key=private-secret"],
+    ["secret key assignment", "secret-key=secret-secret"],
+    ["signing key assignment", "signing_key=signing-secret"],
     ["bearer credential", "Bearer abc123XYZ987"],
     ["API key shape", "sk-live-abcdefghijklmnop"],
   ])("rejects %s", (_label, value) => {
     expect(normalizePluginEntry({ ...entry("hello"), name: value })?.name).toBe("hello");
+  });
+
+  it("redacts private-key assignments from browser plugin errors", () => {
+    const secret = "private_key=private-secret";
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    logPluginFailure("hello", "command failed", new Error(secret));
+
+    const output = logged.mock.calls.flat().join(" ");
+    expect(output).toContain("[redacted]");
+    expect(output).not.toContain("private-secret");
   });
 });
 
@@ -538,6 +553,68 @@ describe("plugins-changed", () => {
     expect(plugin("hello")?.entry.contributes.slash).toEqual(["publish"]);
     expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
     expect(plugin("hello")?.contributions.renderers.map((renderer) => renderer.tool)).toEqual(["shell"]);
+    expect(deps.importModule).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["menu", "views", "pages", "modals", "slash", "renderers"] as const)(
+    "retains last-good declarations when the %s contribution is malformed",
+    (kind) => {
+      const contributes: PluginEntry["contributes"] = {
+        menu: [{ id: "main-menu", label: "Main", open: { page: "main" } }],
+        views: ["peek"],
+        pages: ["main"],
+        modals: ["about"],
+        slash: ["publish"],
+        renderers: [{ tool: "shell" }],
+      };
+      const previous = entry("hello", { contributes });
+
+      for (const malformedValue of ["not-an-array", [null]]) {
+        const malformed = {
+          ...previous,
+          contributes: { ...contributes, [kind]: malformedValue },
+        } as unknown as PluginEntry;
+        const normalized = normalizePluginEntry(malformed, previous);
+
+        expect(normalized?.contributes, `${kind}: ${JSON.stringify(malformedValue)}`).toEqual(contributes);
+        expect(normalized?.omitted.contributions).toBe(1);
+      }
+    },
+  );
+
+  it("does not reload a plugin when malformed-present declarations follow a valid inventory row", async () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [{ id: "main-menu", label: "Main", open: { page: "main" } }],
+      views: ["peek"],
+      pages: ["main"],
+      modals: ["about"],
+      slash: ["publish"],
+      renderers: [{ tool: "shell" }],
+    };
+    const declared = entry("hello", { contributes });
+    const malformed = {
+      ...declared,
+      contributes: { ...contributes, slash: "publish" },
+    } as unknown as PluginEntry;
+    const { loader, plugin, deps } = harness(
+      [[declared], [malformed]],
+      {
+        "/plugins/hello/web/index.js?v=abc": module((k) => {
+          k.command({ name: "publish", description: "Publish", run: () => {} });
+          k.renderer({ tool: "shell", render: Tab });
+        }),
+      },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    await loader.refresh();
+    await loader.idle();
+
+    expect(plugin("hello")?.entry.contributes).toEqual(contributes);
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
+    expect(plugin("hello")?.contributions.renderers.map(({ tool }) => tool)).toEqual(["shell"]);
+    expect(plugin("hello")?.entry.omitted.contributions).toBe(1);
     expect(deps.importModule).toHaveBeenCalledTimes(1);
   });
 
