@@ -2514,11 +2514,10 @@ class ToolExecutor:
                 error=KOLLAB_SPAWN_BLOCK_MESSAGE,
             )
 
+        cwd = self._resolve_terminal_cwd(tool_data.get("cwd"))
         logger.debug(
             f"Executing terminal command: {command[:100]}... (background={background})"
         )
-
-        cwd = self._resolve_terminal_cwd(tool_data.get("cwd"))
 
         # Use TmuxPlugin if available, otherwise fallback to ShellExecutor
         if self.tmux_plugin:
@@ -3116,9 +3115,18 @@ class ToolExecutor:
         # Run file operation synchronously (file I/O is blocking anyway)
         # Use asyncio.to_thread to avoid blocking the event loop
         try:
-            result_dict = await asyncio.to_thread(
-                self.file_ops_executor.execute_operation, tool_data
-            )
+            if tool_type == "file_find":
+                # Capture the active workspace before entering the worker. Search
+                # never accepts a root or session cwd from the tool arguments.
+                result_dict = await asyncio.to_thread(
+                    self.file_ops_executor.execute_operation,
+                    tool_data,
+                    workspace=self.workspace or Path.cwd(),
+                )
+            else:
+                result_dict = await asyncio.to_thread(
+                    self.file_ops_executor.execute_operation, tool_data
+                )
 
             # Convert to ToolExecutionResult, preserving metadata (e.g., diff_info)
             metadata = {}

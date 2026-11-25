@@ -62,7 +62,7 @@ check project structure for api code
 
   <terminal>ls -la src/api/ 2>/dev/null || ls -la core/api/ 2>/dev/null || echo "no api directory"</terminal>
 
-  <terminal>find . -name "*client*.py" -type f | grep -v __pycache__ | head -5</terminal>
+  <file-find><pattern>*client*.py</pattern></file-find>
 
 understand existing api patterns before adding new integrations.
 
