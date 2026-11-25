@@ -174,8 +174,8 @@ async def test_a_tagged_chat_message_overflows_like_any_typed_message():
 
 @pytest.mark.asyncio
 async def test_a_stop_ends_a_message_still_waiting_for_room():
-    # Variscite on #554 round 4: B waited for room when Stop swept the queue, went
-    # in after the sweep, and waited there with its stream open.
+    # A message that has not entered the queue when Stop arrives is rejected
+    # after admission; an already queued input remains pending.
     for strategy in ("block", "drop_oldest"):
         processor = QueueProcessor.__new__(QueueProcessor)
         processor.renderer = DisplayTap()
@@ -194,10 +194,15 @@ async def test_a_stop_ends_a_message_still_waiting_for_room():
         admitting = asyncio.ensure_future(processor.enqueue(TaggedInput("b", ("B",))))
         await asyncio.sleep(0)  # B waits for room, or in the pause after A was dropped
         processor.request_cancellation(origin="human")
+        if strategy == "block":
+            assert processor.processing_queue.get_nowait() == TaggedInput("a", ("A",))
+            processor.processing_queue.task_done()
+            await asyncio.sleep(0.02)
         await admitting
         assert processor.processing_queue.empty(), strategy
         ended = [e["request_ids"] for e in _drain(events) if e["type"] == "turn_complete"]
-        assert sorted(ended) == [["A"], ["B"]], strategy
+        expected = [["B"]] if strategy == "block" else [["A"], ["B"]]
+        assert sorted(ended) == expected, strategy
 
 
 @pytest.mark.asyncio
@@ -228,22 +233,27 @@ async def test_a_chain_a_safety_exit_stops_ends_its_requests(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_stop_ends_a_queued_chat_message_and_keeps_typed_input():
-    # Chrysoprase on #554 round 3: a Stop left X queued and no drain ran it, so
-    # X's stream waited for whatever message came next.
+async def test_a_stop_preserves_queued_inputs_with_request_ids():
+    # Queued inputs remain pending after Stop and are run by the next drain.
     processor = QueueProcessor.__new__(QueueProcessor)
     processor.renderer = DisplayTap()
     events = processor.renderer.subscribe("test")
     processor._cancel_generation = 0
     processor.processing_queue = asyncio.Queue(maxsize=10)
-    for item in ("typed here", TaggedInput("x", ("X",)), QueuedInput("spoken", {})):
+    inputs = (
+        "typed here",
+        TaggedInput("x", ("X",)),
+        QueuedInput("spoken", {}, request_ids=("voice-X",)),
+    )
+    for item in inputs:
         processor.processing_queue.put_nowait(item)
     processor.request_cancellation(origin="human")
-    kept = [processor.processing_queue.get_nowait() for _ in range(processor.processing_queue.qsize())]
-    assert kept == ["typed here", QueuedInput("spoken", {})]  # these still run with the next message
-    error, done = _drain(events)
-    assert (error["type"], error["request_ids"]) == ("error", ["X"]) and "Stopped" in error["message"]
-    assert (done["type"], done["request_ids"]) == ("turn_complete", ["X"])
+    kept = [
+        processor.processing_queue.get_nowait()
+        for _ in range(processor.processing_queue.qsize())
+    ]
+    assert kept == list(inputs)
+    assert _drain(events) == []
 
 
 @pytest.mark.asyncio

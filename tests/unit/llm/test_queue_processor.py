@@ -1162,31 +1162,15 @@ class TestQueueProcessor(unittest.TestCase):
             list(self.processor.processing_queue._queue), ["already queued"]
         )
 
-    def test_stop_ends_a_queued_voice_request(self):
+    def test_stop_preserves_a_queued_voice_request(self):
         voice = QueuedInput("Check the tests", {}, request_ids=("voice-stop",))
         self.processor.processing_queue.put_nowait(voice)
 
         with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
             self.processor.request_cancellation(origin="human")
 
-        self.assertTrue(self.processor.processing_queue.empty())
-        self.assertEqual(
-            publish.call_args_list,
-            [
-                call(
-                    self.renderer,
-                    "error",
-                    request_ids=["voice-stop"],
-                    message="Stopped before this message ran. Send it again.",
-                ),
-                call(
-                    self.renderer,
-                    "turn_complete",
-                    stop_reason="error",
-                    request_ids=["voice-stop"],
-                ),
-            ],
-        )
+        self.assertIs(self.processor.processing_queue.get_nowait(), voice)
+        publish.assert_not_called()
 
     def test_stop_preserves_a_queued_voice_input_without_request_id(self):
         voice = QueuedInput("Check the tests", {})
@@ -1218,39 +1202,25 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertIs(queued[1], handoff)
         publish.assert_not_called()
 
-    def test_stop_ends_local_voice_input_and_restores_protected_handoff(self):
+    def test_stop_restores_local_inputs_with_protected_handoff(self):
         voice = QueuedInput("Check the tests", {}, request_ids=("voice-stop",))
+        chat = TaggedInput("Queued chat", ("chat-stop",))
         handoff = QueueHandoffInput(
             content="Run the queued job",
             request_ids=("handoff-id",),
             queue_request_id="handoff-id",
             attempt_id="attempt-1",
         )
-        self.processor._drained_batch_messages = (voice, handoff)
+        self.processor._drained_batch_messages = (voice, chat, handoff)
 
         with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
             self.processor.request_cancellation(origin="human")
 
-        self.assertEqual(list(self.processor.processing_queue._queue), [handoff])
-        self.assertIs(self.processor.processing_queue._queue[0], handoff)
-        self.assertEqual(self.processor._drained_batch_messages, ())
         self.assertEqual(
-            publish.call_args_list,
-            [
-                call(
-                    self.renderer,
-                    "error",
-                    request_ids=["voice-stop"],
-                    message="Stopped before this message ran. Send it again.",
-                ),
-                call(
-                    self.renderer,
-                    "turn_complete",
-                    stop_reason="error",
-                    request_ids=["voice-stop"],
-                ),
-            ],
+            list(self.processor.processing_queue._queue), [voice, chat, handoff]
         )
+        self.assertEqual(self.processor._drained_batch_messages, ())
+        publish.assert_not_called()
 
     def test_remote_cancellation_requires_idle_matching_generation(self):
         self.processor.is_processing = True
