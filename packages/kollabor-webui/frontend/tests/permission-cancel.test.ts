@@ -1,22 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ApiError, EngineApi } from "../src/api.ts";
-import { cancelPendingPermission, pendingPermissions, permissionOwner, promptParkedSinceShown } from "../src/utils/permission-cancel.ts";
+import type { ChatPart, ChatRow } from "../src/chat-stream.ts";
+import { cancelPendingPermission, pendingPermissions, permissionOwner } from "../src/utils/permission-cancel.ts";
 
 const owner = (toolId: string, requestId = toolId, source = "acp", parked = false) => ({ toolId, requestId, source, parked });
-const permission = (id: string, result?: unknown, status = "requires-action") => ({
-  status: { type: status },
-  content: [{ type: "tool-call", toolName: "request_permission", args: { tool_id: id, request_id: `turn-${id}`, details: { source: "acp", parked: false } }, result }],
+const row = (id: string, parts: ChatPart[], status = "running"): ChatRow => ({
+  id, seq: 1, kind: "tool", role: "assistant", turn_id: "turn-1", status, parts, created_at: "2026-11-25T00:00:00Z",
 });
+const call = (toolCallId: string, toolName: string, args: unknown, result?: unknown): ChatPart => ({
+  type: "tool-call", tool_call_id: toolCallId, tool_name: toolName, args, result,
+});
+const permission = (id: string, result?: unknown) =>
+  call(`call-${id}`, "request_permission", { tool_id: id, request_id: `turn-${id}`, details: { source: "acp", parked: false } }, result);
 
-test("only unresolved permission parts expose their parent request owner", () => {
+test("pendingPermissions returns only request_permission tool-call parts with no result", () => {
   assert.deepEqual(pendingPermissions([
-    permission("pending"), permission("answered", { decision: "deny" }),
-    permission("ended", undefined, "incomplete"),
-    { status: { type: "requires-action" }, content: [{ type: "tool-call", toolName: "request_permission", args: { tool_id: "native-without-owner" } }] },
-    { status: { type: "requires-action" }, content: [{ type: "tool-call", toolName: "read_file", args: { tool_id: "other" } }] },
+    row("pending", [permission("pending")]),
+    row("native-without-owner", [call("call-native", "request_permission", { tool_id: "native-without-owner" })]),
+    row("other-tool", [call("call-read", "read_file", { tool_id: "other" })]),
+    row("text", [{ type: "text", text: "no tool call" }]),
   ]), [owner("pending", "turn-pending")]);
   assert.equal(permissionOwner({ tool_id: "" }), null);
+});
+
+test("a permission part with a result is not pending", () => {
+  assert.deepEqual(pendingPermissions([
+    row("answered", [permission("answered", { decision: "deny" })], "complete"),
+    row("pending", [permission("pending")]),
+  ]), [owner("pending", "turn-pending")]);
 });
 
 test("live and restored permission args read the top-level turn owner, not nested detail metadata", () => {
@@ -31,14 +43,8 @@ test("live and restored permission args read the top-level turn owner, not neste
   assert.deepEqual(permissionOwner(liveArgs), owner("reused-tool", "parent-live", "acp", false));
   assert.deepEqual(permissionOwner(restoredArgs), owner("reused-tool", "parent-restored", "acp", true));
   assert.deepEqual(pendingPermissions([
-    {
-      status: { type: "requires-action" },
-      content: [{ type: "tool-call", toolName: "request_permission", args: liveArgs }],
-    },
-    {
-      status: { type: "requires-action" },
-      content: [{ type: "tool-call", toolName: "request_permission", args: restoredArgs }],
-    },
+    row("live", [call("call-live", "request_permission", liveArgs)]),
+    row("restored", [call("call-restored", "request_permission", restoredArgs)]),
   ]), [owner("reused-tool", "parent-live", "acp", false), owner("reused-tool", "parent-restored", "acp", true)]);
   assert.equal(permissionOwner({
     tool_id: "old-prompt", details: { source: "acp", request_id: "vendor-only" },
@@ -216,23 +222,4 @@ test("an older engine's unsupported owner endpoint never becomes an unscoped can
     return true;
   });
   assert.deepEqual(requests, ["http://127.0.0.1:9000/sessions/existing-session/cancel-owned"]);
-});
-
-test("a prompt its turn left open reloads a thread whose run showed it, once", () => {
-  const card = (parked: boolean, result?: unknown) => ({
-    type: "tool-call", toolName: "request_permission", result,
-    args: { tool_id: "t1", details: parked ? { parked: true } : {} },
-  });
-  const waitingOn = (id: string, part: object) => ({ id, status: { type: "requires-action" }, content: [part] });
-  const shownByRun = [{ id: "u", content: "go" }, waitingOn("assistant-s-1", card(false))];
-  const reloadedParked = [{ id: "history-0", content: "go" }, waitingOn("permission-t1-0", card(true))];
-
-  assert.equal(promptParkedSinceShown(shownByRun, reloadedParked), true);
-  // After the whole reload the thread shows the loaded prompt: no second reload.
-  assert.equal(promptParkedSinceShown(reloadedParked, reloadedParked), false);
-  // A card that still waits on its turn, or one answered, is not parked.
-  assert.equal(promptParkedSinceShown(shownByRun, [waitingOn("permission-t1-0", card(false))]), false);
-  assert.equal(promptParkedSinceShown(shownByRun, [waitingOn("permission-t1-0", card(true, { decision: "deny" }))]), false);
-  // A thread that waits on nothing is the waiting-mismatch rule's case.
-  assert.equal(promptParkedSinceShown([{ id: "a", status: { type: "complete" }, content: [] }], reloadedParked), false);
 });
