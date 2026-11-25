@@ -22,7 +22,21 @@ export type ChatPart =
       is_error?: boolean;
     }
   | { type: "image"; url: string }
-  | { type: "prompt"; prompt_id: string; data: unknown };
+  | { type: "prompt"; prompt_id: string; data: unknown }
+  // A hub message, built from the daemon's structured hub fields (never parsed from text).
+  // In a note row when it starts no turn; in an input row (id = hub message id) when it does.
+  | {
+      type: "hub-note";
+      from: string;
+      to: string; // "" for a broadcast
+      text: string;
+      observed: boolean;
+      kind?: string;
+      thread_id?: string;
+      reply_to?: string;
+      is_direct?: boolean;
+      presence?: "online" | "offline";
+    };
 
 export type ChatRow = {
   id: string;
