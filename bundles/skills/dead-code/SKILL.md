@@ -70,7 +70,9 @@ step 1: understand project structure
 
   <terminal>pwd</terminal>
   <terminal>ls -la</terminal>
-  <terminal>find . -type f -name "*.py" -o -name "*.js" -o -name "*.ts" | head -30</terminal>
+  <file-find><pattern>*.py</pattern></file-find>
+  <file-find><pattern>*.js</pattern></file-find>
+  <file-find><pattern>*.ts</pattern></file-find>
 
 identify primary languages:
   <terminal>find . -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.java" -o -name "*.go" -o -name "*.rs" \) | wc -l</terminal>

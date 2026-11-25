@@ -24,7 +24,7 @@ if pytest not installed:
 
 verify tests exist for code you will refactor
 
-  <terminal>find . -name "test_*.py" -type f | head -20</terminal>
+  <file-find><pattern>test_*.py</pattern></file-find>
 
   <terminal>python -m pytest tests/ --collect-only</terminal>
 

@@ -84,13 +84,16 @@ terminal_tool = ToolDefinition(
         "the configured terminal timeout when timeout is omitted. Requested "
         "foreground values may shorten but not exceed it; voice calls may use "
         "a stricter limit. Background sessions have no automatic timeout "
-        "unless one is set."
+        "unless one is set. Use file-find for workspace filename discovery. "
+        "General terminal commands and session input run with the user's filesystem access; "
+        "they do not enforce a workspace sandbox."
     ),
     safety_features=[
         "background sessions run as subprocesses with auto-kill timeouts",
         "foreground commands enforce a requested timeout within the configured limit",
     ],
     key_rules=[
+        "use file-find for filename searches inside the workspace; ask before searching another folder",
         "use background=true for dev servers, build scripts, and long-running processes",
         "use foreground (default) for git, pytest, pip, and quick commands",
         "user can view live sessions with /terminal view <name>",
