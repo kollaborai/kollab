@@ -1421,7 +1421,10 @@ class ACPRunner:
     async def begin_queue_handoff_batch(
         self, request_ids: tuple[str, ...]
     ) -> object | None:
-        """Reserve queue capacity, stop its active owner, and hold dequeue."""
+        """Reserve capacity, stop the active owner and hold dequeue.
+
+        Per-input Send Now uses this same gate with a one-item request tuple.
+        """
         async with self._queue_gate_lock:
             if (
                 not isinstance(request_ids, tuple)
