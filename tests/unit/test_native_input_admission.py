@@ -1,7 +1,7 @@
 """Native input is reported as accepted only when the queue admitted it (#589).
 
 The queue can drop a message after the caller was told it was queued: a block
-timeout, a drop_oldest race for the freed slot, or a Stop that sweeps it while it
+timeout, a drop_oldest race for the freed slot, or a Stop that fences it while it
 waits for room. Each drop ends the request's stream once, and the caller must
 also get a rejection instead of ``accepted: true``.
 """

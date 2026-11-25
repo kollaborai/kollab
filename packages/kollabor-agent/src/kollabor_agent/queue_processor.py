@@ -800,9 +800,10 @@ class QueueProcessor:
     ) -> int:
         """Set the cancellation latch and return its supersession generation.
 
-        ``preserve_queued`` is reserved for a force-send handover. The active
-        turn still stops, but already-admitted chat stays queued so the forced
-        item can be inserted ahead of it after the old turn settles.
+        Human Stop keeps admitted inputs queued for the next drain. The
+        ``preserve_queued`` flag also keeps them queued for a force-send
+        handover, so its item can be inserted ahead of older work after the
+        current turn settles.
         """
         if origin not in {"human", "remote_task", "external"}:
             raise ValueError("invalid cancellation origin")
@@ -811,8 +812,9 @@ class QueueProcessor:
         self._cancel_generation += 1
         self._cancel_processing = True
         self._cancel_origin = origin
-        self._restore_unstarted_queue_handoffs()
-        if not preserve_queued:
+        retain_queued = origin == "human" or preserve_queued
+        self._restore_unstarted_queue_handoffs(preserve_queued=retain_queued)
+        if not retain_queued:
             self._end_queued_chat()
         return self._cancel_generation
 
@@ -1061,8 +1063,7 @@ class QueueProcessor:
         )
 
     def _end_queued_chat(self) -> None:
-        """A cancel stops the drain, and the queue waits for the next message:
-        a chat message in it would wait with its stream open, so it ends now (#551)."""
+        """End request-tagged queued work for cancellation that abandons the queue."""
         queue = getattr(self, "processing_queue", None)
         for item in [
             i
@@ -1096,32 +1097,43 @@ class QueueProcessor:
                 handoffs.pop(attempt_id, None)
         self._active_turn_handoff_attempts = ()
 
-    def _restore_unstarted_queue_handoffs(self) -> None:
-        """Return a locally drained but unstarted protected prefix to the deque."""
+    def _restore_unstarted_queue_handoffs(
+        self, *, preserve_queued: bool = False
+    ) -> None:
+        """Restore unstarted local work when it must remain queued."""
         if getattr(self, "_drained_handoff_started", False):
             return
         messages = tuple(getattr(self, "_drained_batch_messages", ()))
+        if not messages:
+            return
         handoffs = tuple(
             item for item in messages if isinstance(item, QueueHandoffInput)
         )
-        if not handoffs:
+        if not handoffs and not preserve_queued:
             return
         queue = getattr(self, "processing_queue", None)
         entries = getattr(queue, "_queue", None)
         if queue is None or entries is None:
             return
-        for item in messages:
-            if isinstance(item, TaggedInput) and not isinstance(item, QueueHandoffInput):
-                self._end_dropped(item, "Stopped before this message ran. Send it again.")
-            elif isinstance(item, QueuedInput) and item.request_ids:
-                self._end_dropped(item, "Stopped before this message ran. Send it again.")
-        # The messages were removed from this queue moments ago. Reinsert the
-        # protected handoffs and untagged inputs, preserving their order and
-        # keeping them ahead of work admitted while the local batch was held.
+        if not preserve_queued:
+            for item in messages:
+                if isinstance(item, TaggedInput) and not isinstance(item, QueueHandoffInput):
+                    self._end_dropped(
+                        item, "Stopped before this message ran. Send it again."
+                    )
+                elif isinstance(item, QueuedInput) and item.request_ids:
+                    self._end_dropped(
+                        item, "Stopped before this message ran. Send it again."
+                    )
+        # The messages were removed from this queue moments ago. Reinsert all
+        # queued work for Stop/force-send, or only protected handoffs and
+        # untagged voice input for other cancellation origins. Preserve order
+        # and keep them ahead of work admitted while the local batch was held.
         retained = tuple(
             item
             for item in messages
-            if isinstance(item, QueueHandoffInput)
+            if preserve_queued
+            or isinstance(item, QueueHandoffInput)
             or (isinstance(item, QueuedInput) and not item.request_ids)
         )
         for item in reversed(retained):
@@ -1313,9 +1325,9 @@ class QueueProcessor:
         """Enqueue message with overflow strategy.
 
         Returns True only when the message entered the queue and will run. False
-        means it never will: the strategy dropped it, or a Stop swept it while it
-        waited for room. Its stream has already ended, so callers must not report
-        it as accepted (#589).
+        means it never will: the strategy dropped it, or a Stop fenced it while
+        it waited for room. Its stream has already ended, so callers must not
+        report it as accepted (#589).
         """
         # Watchdog heartbeat: new work arriving is activity — keeps a session
         # that just received a message from being flagged as wedged.
@@ -1357,7 +1369,9 @@ class QueueProcessor:
                 self._drop_newest_strategy()  # always raises: the new message is refused
                 admitted = False
             elif strategy == "block":
-                admitted = await self._block_strategy(message)
+                admitted = await self._block_strategy(
+                    message, cancellation_generation=generation
+                )
             else:
                 admitted = self._unknown_strategy(message)
         except RuntimeError:
@@ -1463,8 +1477,10 @@ class QueueProcessor:
             f"Queue is full (max size: {self.max_queue_size}) and overflow strategy is 'drop_newest'"
         )
 
-    async def _block_strategy(self, message: MessageContent) -> bool:
-        """Block until queue has space or timeout. False when the timeout dropped it (#589)."""
+    async def _block_strategy(
+        self, message: MessageContent, *, cancellation_generation: int
+    ) -> bool:
+        """Block until space, timeout, or Stop fences the pending admission."""
         self._queue_metrics["block_count"] += 1
         if self.task_config.queue.log_queue_events:
             logger.debug(
@@ -1475,6 +1491,11 @@ class QueueProcessor:
         poll_interval = 0.01
 
         while True:
+            if getattr(self, "_cancel_generation", 0) != cancellation_generation:
+                self._end_dropped(
+                    message, "Stopped before this message ran. Send it again."
+                )
+                return False
             if self._has_unreserved_capacity():
                 try:
                     self.processing_queue.put_nowait(message)
