@@ -97,7 +97,13 @@ export type UpdateRelease = { version: string; tag_name: string; name: string; u
 export type UpdateCheckResponse = {
   current_version: string;
   available: boolean;
+  status: "current" | "available" | "disabled" | "failed";
   release: UpdateRelease | null;
+  checked_at: number | null;
+  last_successful_check: number | null;
+  retry_after_seconds: number | null;
+  retry_at: number | null;
+  retry_reason: "retry" | "rate_limit" | null;
   notes: Array<{ version: string; date: string; sections: Array<{ title: string; items: string[] }> }>;
 };
 export type UpdateApplyResponse = { success: boolean; changed: boolean; message: string; method: string };
@@ -1168,8 +1174,9 @@ export class EngineApi {
   }
 
 
-  async checkForUpdate() {
-    const response = await fetch("/api/update/check", { cache: "no-store" });
+  async checkForUpdate(refresh = false) {
+    const query = refresh ? "?refresh=true" : "";
+    const response = await fetch(`/api/update/check${query}`, { cache: "no-store" });
     if (!response.ok) throw new ApiError(`Update check failed: ${response.status}`, response.status, undefined);
     return (await response.json()) as UpdateCheckResponse;
   }
