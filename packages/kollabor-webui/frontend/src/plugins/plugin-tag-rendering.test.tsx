@@ -59,7 +59,8 @@ vi.mock("@assistant-ui/react-markdown", async (importOriginal) => {
 
 import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
 import { PluginTaggedText } from "./renderers";
-import type { PluginApi, PluginRendererProps, RendererSpec } from "./sdk";
+import { logPluginFailure } from "./plugin-errors";
+import type { PluginApi, PluginInventoryResponse, PluginRendererProps, RendererSpec } from "./sdk";
 
 const k = {} as PluginApi;
 
@@ -98,6 +99,53 @@ afterEach(() => {
 });
 
 describe("plugin tag message markdown", () => {
+  it("redacts nested JSON credentials with quoted keys and escaped values", () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const token = "quoted-token-secret-9471";
+    const key = "quoted-api-key-secret-9472";
+    const password = "quoted-password-secret-9473";
+    try {
+      const message = JSON.stringify({
+        nested: { token, credentials: { api_key: key, password: `escaped \\"${password}\\"` } },
+      });
+      logPluginFailure("renderer-test", "event listener failed", new Error(message));
+      const output = log.mock.calls.flat().join(" ");
+      expect(output).toContain("[redacted]");
+      expect(output).not.toContain(token);
+      expect(output).not.toContain(key);
+      expect(output).not.toContain(password);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("redacts file URLs in plugin error stacks", () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      logPluginFailure("renderer-test", "render failed", {
+        name: "Error",
+        message: "plugin failed",
+        stack: "Error: plugin failed\n    at file:///Users/marco/private/plugin.js:12:4",
+      });
+      const output = log.mock.calls.flat().join(" ");
+      expect(output).not.toContain("file:///Users/marco/private/plugin.js");
+      expect(output).not.toContain("/Users/marco/private/plugin.js");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("keeps inventory and renderer prop types aligned with their runtime shapes", () => {
+    const inventory: PluginInventoryResponse = { plugins: [], server_time: 123 };
+    // @ts-expect-error inventory plugins must be an array
+    const malformedInventory: PluginInventoryResponse = { plugins: {} };
+    const toolCall: NonNullable<PluginRendererProps["toolCall"]> = { name: "shell", args: {} };
+
+    expect(inventory.plugins).toEqual([]);
+    expect(malformedInventory.plugins).toEqual({});
+    expect(toolCall.result).toBeUndefined();
+  });
+
   it("keeps Markdown syntax continuous across an inline plugin view", () => {
     const html = render("**before <card>x</card> after**");
     const start = html.indexOf("<strong");

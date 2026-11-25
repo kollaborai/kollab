@@ -92,6 +92,38 @@ def test_manifest_checks(change, message, tmp_path, monkeypatch):
         assert validate_manifest(root, "0.23.0") == manifest
 
 
+@pytest.mark.parametrize("kind", ["menu", "views", "pages", "modals", "slash", "renderers"])
+@pytest.mark.parametrize("field", ["id", "name", "tool", "tag"])
+def test_manifest_rejects_non_string_contribution_identities(kind, field, tmp_path, monkeypatch):
+    if kind == "menu" and field != "id":
+        pytest.skip("menu declarations require id")
+    if kind == "renderers" and field not in {"tool", "tag"}:
+        pytest.skip("renderer declarations require tool or tag")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+    from kollabor_plugins.registry import _normalize_declared
+
+    root = tmp_path / "package"
+    (root / "python").mkdir(parents=True)
+    (root / "python" / "entry.py").write_text("pass\n")
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "Example",
+        "kollab": ">=0.23.0",
+        "python": "python/entry.py:Hello",
+        "uses": [],
+        "contributes": {kind: [{field: 42}]},
+    }
+    assert _normalize_declared({field: 42}) is None
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="contributes identity"):
+        validate_manifest(root, "0.23.0")
+
+
 @pytest.mark.parametrize("key", ["stop_timeout_s", "heartbeat_s"])
 @pytest.mark.parametrize("value", [10**1000, 86401, float("nan"), float("inf"), True])
 def test_service_seconds_must_be_finite_and_bounded(key, value, tmp_path, monkeypatch):

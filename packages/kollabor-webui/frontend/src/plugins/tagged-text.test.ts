@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { splitPluginTags } from "./tagged-text";
 
 describe("plugin tagged text", () => {
@@ -113,6 +113,22 @@ describe("plugin tagged text", () => {
       name: "todo_write",
       content: "x",
     });
+  });
+
+  it("pairs inline code across soft line breaks inside one blockquote", () => {
+    const text = "> `<card>literal</card>\n> still inside the same code span`";
+    expect(splitPluginTags(text, ["card"])).toEqual([{ type: "text", text }]);
+  });
+
+  it("skips Markdown and tag parsing when no registered tag can occur", () => {
+    const matchAll = vi.spyOn(String.prototype, "matchAll");
+    try {
+      const text = "streamed assistant text without tag delimiters ".repeat(200);
+      expect(splitPluginTags(text, ["card"])).toEqual([{ type: "text", text }]);
+      expect(matchAll).not.toHaveBeenCalled();
+    } finally {
+      matchAll.mockRestore();
+    }
   });
 
   it.each([

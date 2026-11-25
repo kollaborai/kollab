@@ -16,6 +16,7 @@ import {
 import { Thread } from "@/components/assistant-ui/thread";
 import { DEFAULT_SLASH_COMMANDS, type SlashCommand } from "@/api";
 import { PANEL_COMMAND_NAMES } from "@/components/panels/panel-model";
+import { loadComposerDraft, saveComposerDraft } from "../composer-draft";
 import {
   EMPTY_CONTRIBUTIONS,
   pluginRegistry,
@@ -42,11 +43,14 @@ const sendCapture = vi.hoisted(() => ({
   attachments: [] as unknown[],
   composerState: null as { text: string; attachments: unknown[] } | null,
   composerListeners: new Set<() => void>(),
+  syncComposerState: false,
   slashPaletteIds: [] as string[],
   setTextCalls: 0,
   busySubmit: null as ((event: { preventDefault: () => void; defaultPrevented?: boolean }) => void) | null,
   runtime: null as unknown,
   transportCommands: [] as unknown[],
+  newMessages: 0,
+  modelRuns: 0,
 }));
 
 vi.mock("@assistant-ui/react", async (importOriginal) => {
@@ -84,6 +88,7 @@ vi.mock("@assistant-ui/react", async (importOriginal) => {
               text,
               attachments: sendCapture.attachments,
             };
+            if (sendCapture.syncComposerState) aui.composer.setText(text);
             for (const listener of sendCapture.composerListeners) listener();
           },
         },
@@ -452,7 +457,12 @@ function prepareMountedThread() {
   });
 }
 
-const threadAdapter: ChatModelAdapter = { run: async () => ({ content: [] }) };
+const threadAdapter: ChatModelAdapter = {
+  run: async () => {
+    sendCapture.modelRuns += 1;
+    return { content: [] };
+  },
+};
 
 function putThreadCommand(name: string, run = () => {}, toast = vi.fn()) {
   pluginRegistry.put({
@@ -515,7 +525,7 @@ const ThreadHarness: ComponentType<{
 }> = ({ commands = [], commandCatalogStatus, draftKey }) => {
   const host = useExternalStoreRuntime<ThreadMessage>({
     messages: [],
-    onNew: async () => {},
+    onNew: async () => { sendCapture.newMessages += 1; },
   });
   return createElement(
     AssistantRuntimeProvider,
@@ -537,11 +547,14 @@ afterEach(() => {
   sendCapture.text = "";
   sendCapture.attachments.length = 0;
   sendCapture.composerState = null;
+  sendCapture.syncComposerState = false;
   sendCapture.slashPaletteIds = [];
   sendCapture.setTextCalls = 0;
   sendCapture.busySubmit = null;
   sendCapture.runtime = null;
   sendCapture.transportCommands.length = 0;
+  sendCapture.newMessages = 0;
+  sendCapture.modelRuns = 0;
 });
 
 describe("plugin command composer labels", () => {
@@ -624,6 +637,57 @@ describe("plugin command composer labels", () => {
     } finally {
       await act(async () => root.unmount());
       host.remove();
+    }
+  });
+
+  it("preserves the rejected command draft in its session across another session", async () => {
+    prepareMountedThread();
+    sendCapture.syncComposerState = true;
+    const sessionA = "plugin-command-draft-session-a";
+    const sessionB = "plugin-command-draft-session-b";
+    const draftA = "/publish from session a";
+    const draftB = "draft owned by session b";
+    saveComposerDraft(sessionA, draftA);
+    saveComposerDraft(sessionB, draftB);
+    let reject!: (error: unknown) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    void pending.catch(() => {});
+    const toast = putThreadCommand("publish", () => pending);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, { draftKey: sessionA })));
+      expect(sendCapture.text).toBe(draftA);
+      const submit = sendCapture.handlers.at(-1);
+      expect(submit).toBeTypeOf("function");
+      await act(async () => submit?.({ preventDefault: () => {} }));
+      expect(sendCapture.text).toBe("");
+      expect(loadComposerDraft(sessionA)).toBe(draftA);
+
+      await act(async () => root.render(createElement(ThreadHarness, { draftKey: sessionB })));
+      expect(sendCapture.text).toBe(draftB);
+      await act(async () => {
+        reject(new Error("late rejection"));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(sendCapture.text).toBe(draftB);
+      expect(loadComposerDraft(sessionB)).toBe(draftB);
+      await act(async () => root.render(createElement(ThreadHarness, { draftKey: sessionA })));
+      expect(sendCapture.text).toBe(draftA);
+      expect(loadComposerDraft(sessionA)).toBe(draftA);
+      expect(toast).toHaveBeenCalledWith(
+        "Could not run /publish. Check the browser console for redacted details.",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      saveComposerDraft(sessionA, "");
+      saveComposerDraft(sessionB, "");
+      log.mockRestore();
     }
   });
 
@@ -775,6 +839,50 @@ describe("early plugin command submission", () => {
 
     expect(invokeFormSubmit()).toBe(true);
     expect(sendCapture.text).toBe("/probe");
+  });
+
+  it.each([
+    ["ordinary slash prose", "/please explain this error", false],
+    ["a known plugin command that is still loading", "/probe now", true],
+  ] as const)("submits %s normally after the bounded catalog wait", async (_label, text, knownPlugin) => {
+    vi.useFakeTimers();
+    prepareMountedThread();
+    sendCapture.text = text;
+    if (knownPlugin) {
+      pluginRegistry.setListed(null);
+      putLoadingThreadCommand("probe");
+    }
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        draftKey: "plugin-command-wait-test",
+      })));
+      const runtime = sendCapture.runtime as {
+        thread: { composer: { setText(text: string): void } };
+      };
+      await act(async () => {
+        runtime.thread.composer.setText(text);
+        publishComposerText(text);
+      });
+      const form = host.querySelector("form");
+      expect(form).not.toBeNull();
+      await act(async () => form?.requestSubmit());
+      expect(sendCapture.modelRuns).toBe(0);
+      expect(sendCapture.text).toBe(text);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+
+      expect(sendCapture.modelRuns).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      saveComposerDraft("plugin-command-wait-test", "");
+      vi.useRealTimers();
+    }
   });
 
   it("keeps an unknown slash draft while the initial plugin inventory has not been read", () => {
