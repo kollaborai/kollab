@@ -1378,7 +1378,7 @@ class ACPOrchestrator:
         record_request_id = record_request_id or request_id or f"steering-{uuid.uuid4().hex}"
         self._record_user(record_request_id, text, "steering", thread_id)
         self._parents.pop(record_request_id, None)
-        if request_id and owner_correlatable:
+        if owner_correlatable:
             return {
                 "joined_request_id": active.request_id,
                 "joined_turn_id": active.turn_id,
