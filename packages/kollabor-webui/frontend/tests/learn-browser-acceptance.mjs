@@ -252,7 +252,16 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint === "/config" && options.engineVersion) return json(route, { engine_version: options.engineVersion });
     if (endpoint === "/update/check" && options.update) {
-      return json(route, { current_version: "0.0.1", available: true, release: options.update, notes: [] });
+      return json(route, {
+        current_version: "0.0.1",
+        status: "available",
+        available: true,
+        release: options.update,
+        checked_at: Date.now() / 1000,
+        last_successful_check: Date.now() / 1000,
+        retry_after_seconds: null,
+        notes: [],
+      });
     }
     if (endpoint.startsWith("/sessions/")) {
       const requestedId = endpoint.split("/")[2];
