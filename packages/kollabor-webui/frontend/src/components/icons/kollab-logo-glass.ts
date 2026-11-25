@@ -315,31 +315,38 @@ function build(
     draw(performance.now());
   };
   motion?.addEventListener?.("change", onMotionChange);
-  draw(start);
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    cancelAnimationFrame(frame);
+    window.removeEventListener("pointermove", onPointer);
+    canvas.removeEventListener?.("webglcontextlost", onContextLost);
+    resizeObserver?.disconnect();
+    motion?.removeEventListener?.("change", onMotionChange);
+    geo.dispose();
+    glass.dispose();
+    quad.dispose();
+    mist.dispose();
+    mistRT.dispose();
+    backdropGeo.dispose();
+    backdropMat.dispose();
+    env.dispose();
+    renderer.dispose();
+    renderer.forceContextLoss();
+  };
+
+  // A failed first frame must release what was registered above: the caller gets no handle.
+  try {
+    draw(start);
+  } catch (error) {
+    stop();
+    throw error;
+  }
 
   return {
     flare: () => {
       if (!motion?.matches) flare = 1.4;
     },
-    stop: () => {
-      if (stopped) return;
-      stopped = true;
-      cancelAnimationFrame(frame);
-      window.clearTimeout(frame);
-      window.removeEventListener("pointermove", onPointer);
-      canvas.removeEventListener?.("webglcontextlost", onContextLost);
-      resizeObserver?.disconnect();
-      motion?.removeEventListener?.("change", onMotionChange);
-      geo.dispose();
-      glass.dispose();
-      quad.dispose();
-      mist.dispose();
-      mistRT.dispose();
-      backdropGeo.dispose();
-      backdropMat.dispose();
-      env.dispose();
-      renderer.dispose();
-      renderer.forceContextLoss();
-    },
+    stop,
   };
 }
