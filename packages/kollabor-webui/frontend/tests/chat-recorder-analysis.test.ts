@@ -217,6 +217,23 @@ describe("chat recorder analysis", () => {
     expect(`/sessions/${encodeURIComponent("session one")}/inputs`.endsWith(suffix)).toBe(false);
   });
 
+  it("records event streams only for the selected session", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    const window = { fetch: async (_url: string) => new Response('data: {"type":"context_compaction_status","status":"idle"}\n\n') };
+    const install = runInNewContext(`(${body})`, {
+      window, Request, Response, ReadableStream, TextDecoder, URL, performance,
+      location: { href: "http://localhost/" },
+      sessionStorage: { getItem: () => null, removeItem: () => {} },
+      requestAnimationFrame: () => {},
+    });
+    install({ wall0: Date.now(), sessionStreamSuffix: chatRecorderStreamSuffix("target"), user: [], reply: [] });
+    await (await window.fetch("http://localhost/sessions/other/events")).text();
+    await (await window.fetch("http://localhost/sessions/target/events")).text();
+    const entries = (window as any).__rec.net.filter((entry: any) => entry.ev === "context_compaction_status");
+    expect(entries).toHaveLength(1);
+  });
+
   it("requires a known approval mode before the prompt flow changes it", () => {
     expect(requireRecorderApprovalMode("trust_all")).toBe("trust_all");
     expect(requireRecorderApprovalMode("confirm_all")).toBe("confirm_all");
