@@ -9,7 +9,6 @@ import {
   ComposerPalette,
   type ComposerPaletteItem,
 } from "@/components/assistant-ui/composer-palette";
-import { ThreadFollowupSuggestions } from "@/components/assistant-ui/follow-up-suggestions";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { MessageTimingBadge } from "@/components/assistant-ui/message-timing";
 import {
@@ -60,9 +59,10 @@ import {
   type VoiceMode,
 } from "@/voice-mode";
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
-import { usePendingPermissionCancellation } from "@/runtime";
+import { usePendingPermissionCancellation } from "@/permission-cancellation";
 import { imageAttachmentAdapter, toInputAttachments } from "@/image-attachment";
 import { useChatStore, WEB_INPUT_PREFIX } from "@/chat-store";
+import { useOlderBanner } from "@/history-banner";
 import { newInputId, type InputRequest } from "@/chat-stream";
 import { composerAction, isWaitingRow } from "@/queue-state";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
@@ -79,7 +79,6 @@ import {
   ErrorPrimitive,
   groupPartByType,
   MessagePrimitive,
-  SuggestionPrimitive,
   ThreadPrimitive,
   type PendingAttachment,
   type ToolCallMessagePartComponent,
@@ -94,8 +93,6 @@ import {
   DownloadIcon,
   MicIcon,
   MoreHorizontalIcon,
-  PencilIcon,
-  RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
 import {
@@ -149,12 +146,6 @@ export type ThreadProps = {
   onOpenWelcome?: (() => void) | undefined;
   /** Offer image attachments; false hides the paperclip and refuses drops and pastes. */
   attachmentsEnabled?: boolean | undefined;
-  /** Visible status while a bounded history page is being fetched. */
-  historyStatus?: { kind: string; message: string } | undefined;
-  /** Loads the page immediately older than the current window. */
-  onLoadOlder?: (() => Promise<boolean | void>) | undefined;
-  onRetryHistory?: (() => void) | undefined;
-  historyStartIndex?: number | undefined;
   /** Per-agent/conversation localStorage key for the unsent composer text. */
   draftKey?: string | null | undefined;
   /** Engine session owning this daemon queue submission plan. */
@@ -208,10 +199,6 @@ export const Thread: FC<ThreadProps> = ({
   onOpenPanel,
   onOpenWelcome,
   attachmentsEnabled = true,
-  historyStatus,
-  onLoadOlder,
-  onRetryHistory,
-  historyStartIndex = 0,
   draftKey,
   queueSessionId,
   queueConversationUid,
@@ -240,10 +227,6 @@ export const Thread: FC<ThreadProps> = ({
             onOpenPanel={onOpenPanel}
             onOpenWelcome={onOpenWelcome}
             attachmentsEnabled={attachmentsEnabled}
-            historyStatus={historyStatus}
-            onLoadOlder={onLoadOlder}
-            onRetryHistory={onRetryHistory}
-            historyStartIndex={historyStartIndex}
             draftKey={draftKey}
             queueSessionId={queueSessionId}
             queueConversationUid={queueConversationUid}
@@ -265,10 +248,6 @@ const ThreadRoot: FC<{
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
   onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
-  historyStatus: ThreadProps["historyStatus"];
-  onLoadOlder: ThreadProps["onLoadOlder"];
-  onRetryHistory: ThreadProps["onRetryHistory"];
-  historyStartIndex: number;
   draftKey: ThreadProps["draftKey"];
   queueSessionId: ThreadProps["queueSessionId"];
   queueConversationUid: ThreadProps["queueConversationUid"];
@@ -283,10 +262,6 @@ const ThreadRoot: FC<{
   onOpenPanel,
   onOpenWelcome,
   attachmentsEnabled,
-  historyStatus,
-  onLoadOlder,
-  onRetryHistory,
-  historyStartIndex,
   draftKey,
   queueSessionId,
   queueConversationUid,
@@ -295,7 +270,9 @@ const ThreadRoot: FC<{
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const scrollAnchorRef = useRef<{ start: number } | null>(null);
+  const store = useChatStore();
+  const olderBanner = useOlderBanner(store.olderStatus);
+  const scrollAnchorRef = useRef<object | null>(null);
 
   const userScrollRef = useRef(false);
   const touchStartYRef = useRef<number | null>(null);
@@ -310,61 +287,27 @@ const ThreadRoot: FC<{
   }, [voiceLive]);
 
   // Shared load-older trigger: only real user scroll intent, only at (or
-  // near) the top of the viewport, and only when no older load is already
-  // anchored or in flight.
+  // near) the top of the viewport, and only when no older load is already in
+  // flight or nothing is older. The store loads the page and extends the rows.
   const requestLoadOlder = (viewport: HTMLElement) => {
     if (
       viewport.scrollTop > 64 ||
       !userScrollRef.current ||
-      !onLoadOlder ||
       scrollAnchorRef.current ||
-      historyStatus?.kind === "loading" ||
-      historyStatus?.kind === "loading-older"
+      store.olderStatus === "loading" ||
+      store.olderStatus === "complete"
     ) {
       return;
     }
-    const anchor = { start: historyStartIndex };
+    const anchor = {};
     scrollAnchorRef.current = anchor;
-    void onLoadOlder()
-      .then((merged) => {
-        // A load that did not extend this window — a no-op because no older
-        // history exists, a merge dropped because a refresh replaced the
-        // window mid-flight, or a cursor-rejected rebuild — must not leave
-        // the anchor set. A dangling anchor would block every later trigger,
-        // stranding the view at the top of a window whose older history
-        // becomes available again (e.g. a byte-capped refresh replacing an
-        // exhausted window with one that has older pages).
-        if (!merged) {
-          if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
-        } else {
-          // A concurrent refresh can replace the extended window before
-          // React publishes its start index. In that case the layout effect
-          // cannot consume the anchor; release it so the next up gesture
-          // can retry instead of leaving paging blocked indefinitely.
-          window.setTimeout(() => {
-            if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
-          }, 600);
-        }
-      })
-      .catch(() => {
-        if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
-      })
+    void store.loadOlder()
+      .catch(() => {})
       .finally(() => {
+        if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
         userScrollRef.current = false;
       });
   };
-
-  useLayoutEffect(() => {
-    const anchor = scrollAnchorRef.current;
-    if (!anchor) return;
-    if (historyStatus?.kind === "error" || (
-      historyStatus?.kind === "ready" && historyStartIndex === anchor.start
-    )) {
-      scrollAnchorRef.current = null;
-      return;
-    }
-    if (historyStartIndex < anchor.start) scrollAnchorRef.current = null;
-  }, [historyStartIndex, historyStatus?.kind]);
 
   return (
     <ThreadPrimitive.Root
@@ -449,28 +392,27 @@ const ThreadRoot: FC<{
             {queuePanel}
             {/* Keep transient status in the sticky footer so its mount/unmount
                 does not change the positions of transcript rows above it. */}
-            {historyStatus ? (
+            {olderBanner ? (
               <div
                 data-slot="history-status"
-                role={historyStatus.kind === "error" ? "alert" : "status"}
-                aria-live={historyStatus.kind === "error" ? "assertive" : "polite"}
+                role={olderBanner.kind === "error" ? "alert" : "status"}
+                aria-live={olderBanner.kind === "error" ? "assertive" : "polite"}
                 className={cn(
                   "mx-auto flex w-full max-w-(--thread-max-width) items-center justify-between gap-3 rounded-md px-3 py-2 text-xs",
-                  historyStatus.kind === "error"
+                  olderBanner.kind === "error"
                     ? "bg-destructive/10 text-destructive"
                     : "text-muted-foreground bg-muted/50",
                 )}
               >
-                <span>{historyStatus.message}</span>
-                {historyStatus.kind === "error" && onRetryHistory ? (
-                  <Button type="button" size="sm" variant="outline" onClick={onRetryHistory}>
+                <span>{olderBanner.message}</span>
+                {olderBanner.kind === "error" ? (
+                  <Button type="button" size="sm" variant="outline" onClick={() => { void store.loadOlder().catch(() => {}); }}>
                     Retry
                   </Button>
                 ) : null}
               </div>
             ) : null}
             <ThreadScrollToBottom />
-            <ThreadFollowupSuggestions />
             <div data-slot="aui_composer-dock" className="flex min-w-0 items-end gap-2 sm:gap-3">
               {!isEmpty && ComposerLeading ? <ComposerLeading /> : null}
               <Composer
@@ -487,9 +429,6 @@ const ThreadRoot: FC<{
                 onQueueBusyMessage={onQueueBusyMessage}
               />
             </div>
-            <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
-              <ThreadSuggestions />
-            </AuiIf>
           </ThreadPrimitive.ViewportFooter>
         </div>
       </ThreadPrimitive.Viewport>
@@ -503,9 +442,6 @@ const ThreadMessage: FC = () => {
     SystemMessage: SystemMessageComponent = SystemMessage,
   } = useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
-  const isEditing = useAuiState((s) => s.message.composer.isEditing);
-
-  if (isEditing) return <EditComposer />;
   if (role === "user") return <UserMessage />;
   if (role === "system") return <SystemMessageComponent />;
   return <AssistantMessageComponent />;
@@ -541,32 +477,6 @@ const ThreadWelcome: FC = () => {
       <h1 className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-2xl font-semibold duration-200">
         How can I help you today?
       </h1>
-    </div>
-  );
-};
-
-const ThreadSuggestions: FC = () => {
-  return (
-    <div className="aui-thread-welcome-suggestions flex w-full flex-wrap items-center justify-center gap-2 px-4">
-      <ThreadPrimitive.Suggestions>
-        {() => <ThreadSuggestionItem />}
-      </ThreadPrimitive.Suggestions>
-    </div>
-  );
-};
-
-const ThreadSuggestionItem: FC = () => {
-  return (
-    <div className="aui-thread-welcome-suggestion-display fade-in slide-in-from-bottom-2 animate-in fill-mode-both duration-200">
-      <SuggestionPrimitive.Trigger send asChild>
-        <Button
-          variant="ghost"
-          className="aui-thread-welcome-suggestion text-muted-foreground hover:text-foreground hover:bg-muted/50 h-auto gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-normal whitespace-nowrap transition-colors"
-        >
-          <SuggestionPrimitive.Title className="aui-thread-welcome-suggestion-text-1" />
-          <SuggestionPrimitive.Description className="aui-thread-welcome-suggestion-text-2 empty:hidden" />
-        </Button>
-      </SuggestionPrimitive.Trigger>
     </div>
   );
 };
@@ -1640,15 +1550,6 @@ const AssistantActionBar: FC = () => {
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      {/* Reload and Edit throw "Runtime does not support ..." when the runtime
-          has no handler, so they render only when the runtime reports it. */}
-      <AuiIf condition={(s) => s.thread.capabilities.reload}>
-        <ActionBarPrimitive.Reload asChild>
-          <TooltipIconButton tooltip="Reload">
-            <RefreshCwIcon />
-          </TooltipIconButton>
-        </ActionBarPrimitive.Reload>
-      </AuiIf>
       <MessageTimingBadge />
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
@@ -1824,45 +1725,7 @@ const UserActionBar: FC = () => {
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      <AuiIf condition={(s) => s.thread.capabilities.edit}>
-        <ActionBarPrimitive.Edit asChild>
-          <TooltipIconButton tooltip="Edit" className="aui-user-action-edit">
-            <PencilIcon />
-          </TooltipIconButton>
-        </ActionBarPrimitive.Edit>
-      </AuiIf>
     </ActionBarPrimitive.Root>
   );
 };
 
-const EditComposer: FC = () => {
-  return (
-    <MessagePrimitive.Root
-      data-slot="aui_edit-composer-wrapper"
-      className="flex flex-col px-2 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
-    >
-      <ComposerPrimitive.Root className="aui-edit-composer-root ms-auto flex w-full max-w-[85%] flex-col rounded-(--composer-radius) bg-(--composer-bg) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] dark:shadow-none">
-        <ComposerPrimitive.Input
-          className="aui-edit-composer-input text-foreground min-h-14 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-base outline-none pointer-fine:text-sm"
-          autoFocus
-        />
-        <div className="aui-edit-composer-footer mx-2.5 mb-2.5 flex items-center gap-1.5 self-end">
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 rounded-lg px-3.5"
-            >
-              Cancel
-            </Button>
-          </ComposerPrimitive.Cancel>
-          <ComposerPrimitive.Send asChild>
-            <Button size="sm" className="h-8 rounded-lg px-3.5">
-              Update
-            </Button>
-          </ComposerPrimitive.Send>
-        </div>
-      </ComposerPrimitive.Root>
-    </MessagePrimitive.Root>
-  );
-};

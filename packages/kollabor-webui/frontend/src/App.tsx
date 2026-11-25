@@ -3,7 +3,16 @@ import { refreshesOnEvent, tracksStreamedRequest } from "./live-follow";
 import type { SessionEvent } from "./api";
 import { createHistoryReconciliation } from "./history-reconciliation";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAuiState } from "@assistant-ui/react";
+import { useAuiState, AssistantRuntimeProvider } from "@assistant-ui/react";
+import type { ReactNode } from "react";
+import { ChatStoreProvider, LiveChatStore, useChatStore, WEB_INPUT_PREFIX } from "./chat-store";
+import { useChatRuntime } from "./chat-runtime";
+import { newInputId } from "./chat-stream";
+import { PermissionCancellationContext, type PermissionCancellation } from "./permission-cancellation";
+import { cancelPendingPermission, respondToPermission } from "./permission-respond";
+import { pendingPermissions } from "./utils/permission-cancel";
+import { PermissionResponseContext, type PermissionArgs, type PermissionResult } from "./components/PermissionTool";
+import { VoiceModeProvider } from "./voice-mode";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { ComposerKeeper, forgetComposerText } from "./components/assistant-ui/composer-keeper";
@@ -111,7 +120,6 @@ import {
   pluginViewGone,
 } from "@/plugins/surfaces";
 import {
-  EngineRuntimeProvider,
   buildInitialState,
   useEngineRuntimeState,
   type EngineState,
@@ -202,6 +210,61 @@ function hasPendingPermission(state: EngineState): boolean {
         (part) =>
           part.type === "tool-call" && part.toolName === "request_permission",
       ),
+  );
+}
+
+// One session's chat (#1451): its store, the assistant-ui runtime over the store,
+// and the permission and voice contexts the chat reads. App keys it by session,
+// so a switch starts a new store and thread; the page stays mounted.
+function ChatSession({ api: engine, sessionId, children }: { api: EngineApi; sessionId: string; children: ReactNode }) {
+  const [store] = useState(() => new LiveChatStore(engine, sessionId));
+  useEffect(() => {
+    store.start();
+    return () => store.dispose();
+  }, [store]);
+  return (
+    <ChatStoreProvider store={store}>
+      <ChatRuntime api={engine} sessionId={sessionId} store={store}>{children}</ChatRuntime>
+    </ChatStoreProvider>
+  );
+}
+
+function ChatRuntime({ api: engine, sessionId, store, children }: {
+  api: EngineApi;
+  sessionId: string;
+  store: LiveChatStore;
+  children: ReactNode;
+}) {
+  const runtime = useChatRuntime(store);
+  const chat = useChatStore();
+  const [cancelling, setCancelling] = useState(false);
+  const respond = useCallback(
+    (toolCallId: string, args: PermissionArgs, result: PermissionResult) =>
+      respondToPermission({ api: engine, sessionId, toolCallId, args, answer: result, rows: () => store.rows }),
+    [engine, sessionId, store],
+  );
+  const cancellation = useMemo<PermissionCancellation>(() => ({
+    cancelling,
+    cancel: async (expected) => {
+      setCancelling(true);
+      try {
+        await cancelPendingPermission({ api: engine, sessionId, expected, current: () => pendingPermissions(store.rows) });
+      } finally {
+        setCancelling(false);
+      }
+    },
+  }), [cancelling, engine, sessionId, store]);
+  const sendCommand = useCallback((text: string) => chat.send({ id: newInputId(WEB_INPUT_PREFIX), text }), [chat.send]);
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <PermissionResponseContext.Provider value={respond}>
+        <PermissionCancellationContext.Provider value={cancellation}>
+          <VoiceModeProvider api={engine} sessionId={sessionId} running={chat.running} sendCommand={sendCommand}>
+            {children}
+          </VoiceModeProvider>
+        </PermissionCancellationContext.Provider>
+      </PermissionResponseContext.Provider>
+    </AssistantRuntimeProvider>
   );
 }
 
@@ -455,10 +518,7 @@ function RuntimeShell({
                 device={session.device ?? ""}
                 locked={locked}
 
-                historyStatus={historyStatus}
-                onLoadOlder={onLoadOlder}
-                onRetryHistory={onRetryHistory}
-                historyStartIndex={historyStartIndex}
+                harness={Boolean(session.harness)}
                 queuePanel={
                   <WebQueuePanelMount
                     api={api}
@@ -2221,16 +2281,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             // Outside the epoch key: a thread reload (resetThread) must not
             // stop the voice room, as a talk-over that cuts a reply reloads it.
             <VoiceRoomProvider api={api} sessionId={activeSession.session_id}>
-              <EngineRuntimeProvider
-                key={`${activeId}:${runtimeEpoch}`}
-                api={api}
-                sessionId={activeSession.session_id}
-                agentIdentity={activeSession.identity}
-                harness={Boolean(activeSession.harness)}
-                initialState={initialState}
-                onStale={(stillCurrent) => resetThread(activeSession.session_id, stillCurrent)}
-                liveEvents={liveEventsRef}
-              >
+              <ChatSession key={activeSession.session_id} api={api} sessionId={activeSession.session_id}>
                 <RuntimeShell
                   session={activeSession}
                   profiles={profiles}
@@ -2259,7 +2310,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   onRetryHistory={retryHistory}
                   historyStartIndex={initialState.synced?.start ?? 0}
                 />
-              </EngineRuntimeProvider>
+              </ChatSession>
             </VoiceRoomProvider>
           ) : (
             <>

@@ -25,6 +25,8 @@ import type { BusyWebMessageComposerRequest, BusyWebMessageResult } from "@/comp
 import { Avatar } from "@/components/agents/Avatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { resolveAgentSender, type HubNote } from "@/hub-notes";
+import { useChatStore } from "@/chat-store";
+import type { ChatPart, ChatRow } from "@/chat-stream";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
 import { agentName } from "@/utils/session-display";
 import { cn } from "@/lib/utils";
@@ -244,8 +246,32 @@ const PresenceChip: FC<{ note: HubNote }> = ({ note }) => {
 
 // Another agent's hub message (runtime.tsx turns the daemon's agent HUD into
 // these). One this agent only saw go by is dimmed, like the terminal's ◇.
+/** The hub-note part a note row carries, or undefined for any other row (decision s, #1451). */
+export function hubNoteOf(row: ChatRow): Extract<ChatPart, { type: "hub-note" }> | undefined {
+  return row.parts.find((part): part is Extract<ChatPart, { type: "hub-note" }> => part.type === "hub-note");
+}
+
+/** The part as the hub box draws it, in the names the view uses. */
+function noteOf(part: Extract<ChatPart, { type: "hub-note" }>): HubNote {
+  return {
+    from: part.from,
+    to: part.to,
+    text: part.text,
+    observed: part.observed,
+    threadId: part.thread_id,
+    replyTo: part.reply_to,
+    isDirect: part.is_direct,
+    presence: part.presence,
+  };
+}
+
 const HubNoteMessage: FC = () => {
-  const note = useAuiState((s) => s.message.metadata.custom["hub"]) as HubNote | undefined;
+  // The message's row is the note row the store holds under the same id.
+  const id = useAuiState((s) => s.message.id);
+  const { rows } = useChatStore();
+  const row = rows.find((candidate) => candidate.id === id);
+  const part = row ? hubNoteOf(row) : undefined;
+  const note = part ? noteOf(part) : undefined;
   if (note?.presence) {
     // A run of presence chips stacks tight instead of taking a thread gap each.
     return (
@@ -345,16 +371,14 @@ export const Thread: FC<{
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked?: string;
 
-  historyStatus?: { kind: string; message: string };
-  onLoadOlder?: () => Promise<boolean | void>;
-  onRetryHistory?: () => void;
-  historyStartIndex?: number;
   /** Daemon-backed queue mounted above the composer. */
   queuePanel?: ReactNode;
+  /** A harness session takes no Send Now: it steers a message into its running turn. */
+  harness?: boolean;
   /** Current canonical conversation for local queue retry ownership. */
   queueConversationUid?: string | null;
   onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
-}> = ({ agents = [], commands = [], commandCatalogStatus = "ready", onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0, queuePanel, queueConversationUid, onQueueBusyMessage }) => (
+}> = ({ agents = [], commands = [], commandCatalogStatus = "ready", onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", queuePanel, queueConversationUid, onQueueBusyMessage, harness = false }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -385,11 +409,8 @@ export const Thread: FC<{
             queueSessionId={sessionId}
             queueConversationUid={queueConversationUid}
 
-            historyStatus={historyStatus}
-            onLoadOlder={onLoadOlder}
-            onRetryHistory={onRetryHistory}
-            historyStartIndex={historyStartIndex}
             queuePanel={queuePanel}
+            harness={harness}
             onQueueBusyMessage={onQueueBusyMessage}
           />
         </ComposerLockContext.Provider>
