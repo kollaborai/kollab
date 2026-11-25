@@ -97,6 +97,20 @@ describe("chat recorder analysis", () => {
     await expect(flow()).rejects.toThrow(/user row/i);
   });
 
+  it("requires the same persisted native goal across reload", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    let reads = 0;
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native", command: async () => {},
+      readPersistedGoal: async () => ++reads === 1 ? { id: "abc12345", status: "active", objective: "u: work" } : null,
+      reloadDuringRun: async (_reply: string, check: any) => { if (check) { await check.before({ turn_id: "t", input_ids: ["i"] }); await check.after(); } },
+      U: () => "u", R: () => "r",
+    });
+    await expect(flow()).rejects.toThrow(/goal/i);
+  });
+
   it("reports ACP goal reload as unsupported without sending a chat prompt", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const start = source.indexOf('    async "goal-reload"() {');
