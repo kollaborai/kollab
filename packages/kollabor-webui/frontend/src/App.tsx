@@ -7,6 +7,8 @@ import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { ComposerKeeper, forgetComposerText } from "./components/assistant-ui/composer-keeper";
+import { WebQueuePanelMount } from "./components/web-queue/WebQueuePanelMount";
+import { submitBusyWebMessage } from "./components/web-queue/submit";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 
 // Monaco and xterm are large: each view loads the first time it is opened, not with the main bundle.
@@ -457,6 +459,26 @@ function RuntimeShell({
                 onLoadOlder={onLoadOlder}
                 onRetryHistory={onRetryHistory}
                 historyStartIndex={historyStartIndex}
+                queuePanel={
+                  <WebQueuePanelMount
+                    api={api}
+                    sessionId={session.session_id}
+                    conversationUid={runtimeState?.state?.conversationUid}
+                    busy={running}
+                  />
+                }
+                queueConversationUid={runtimeState?.state?.conversationUid}
+                onQueueBusyMessage={(input) => {
+                  const conversationUid = runtimeState?.state?.conversationUid;
+                  if (!conversationUid) {
+                    return Promise.reject(new Error("The current conversation is not ready for queue admission."));
+                  }
+                  return submitBusyWebMessage(api, {
+                    ...input,
+                    sessionId: session.session_id,
+                    conversationUid,
+                  });
+                }}
               />
             ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
