@@ -8,24 +8,33 @@ import type { ConnectionState } from "./chat-store";
 
 export type OlderStatus = ChatStore["olderStatus"];
 
-export type HistoryBanner = { kind: "loading" | "error"; message: string };
+export type HistoryBanner = {
+  kind: "loading" | "error";
+  message: string;
+  /** What Retry does when it is not a page of older rows: a failed connection reconnects. Absent: it loads older rows. */
+  retry?: "reconnect";
+};
 
 export const OLDER_LOADING = "Loading older messages…";
 export const OLDER_LOAD_FAILED = "Couldn't load older messages. Scroll up or retry to try again.";
-// The copy the runtime's history status showed while a conversation loaded (#1451).
+// The copy the runtime's history status showed while a conversation loaded, and when it did not (#1451).
 export const INITIAL_LOADING = "Loading conversation history…";
+export const CONVERSATION_LOAD_FAILED = "Couldn't load conversation history. Check the connection and retry.";
 
 // Module-level, so a banner that is already shown keeps its identity.
 const LOADING: HistoryBanner = { kind: "loading", message: OLDER_LOADING };
 const FAILED: HistoryBanner = { kind: "error", message: OLDER_LOAD_FAILED };
 const INITIAL: HistoryBanner = { kind: "loading", message: INITIAL_LOADING };
+const CONNECT_FAILED: HistoryBanner = { kind: "error", message: CONVERSATION_LOAD_FAILED, retry: "reconnect" };
 
 /**
- * The line for a chat whose first snapshot is still on its way: it is connecting and nothing is on
- * screen. Once rows arrive, or the stream opens, the line is gone (#1451).
+ * The line for a chat with nothing on screen yet: while its stream connects, the load line; once the stream
+ * has failed for good, the load failure with a retry that reconnects. Rows on screen show no line (#1451).
  */
 export function initialHistoryBanner(connection: ConnectionState, rowCount: number): HistoryBanner | null {
-  return connection === "connecting" && rowCount === 0 ? INITIAL : null;
+  if (rowCount > 0) return null;
+  if (connection === "connecting") return INITIAL;
+  return connection === "failed" ? CONNECT_FAILED : null;
 }
 
 /**

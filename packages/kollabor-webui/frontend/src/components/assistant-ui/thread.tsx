@@ -273,8 +273,13 @@ const ThreadRoot: FC<{
   const viewportRef = useRef<HTMLDivElement>(null);
   const store = useChatStore();
   const olderBanner = useOlderBanner(store.olderStatus);
-  // Before the first snapshot nothing is on screen: the conversation's load line stands in for the banner.
+  // Before the first snapshot nothing is on screen: the conversation's load line, or its failure, stands in for the banner.
   const banner = olderBanner ?? initialHistoryBanner(store.connection, store.rows.length);
+  // Retry: a failed connection reconnects; a failed page of older rows loads again.
+  const retryBanner = () => {
+    if (banner?.retry === "reconnect") store.retry();
+    else void store.loadOlder().catch(() => {});
+  };
   const scrollAnchorRef = useRef<object | null>(null);
 
   const userScrollRef = useRef(false);
@@ -409,7 +414,7 @@ const ThreadRoot: FC<{
               >
                 <span>{banner.message}</span>
                 {banner.kind === "error" ? (
-                  <Button type="button" size="sm" variant="outline" onClick={() => { void store.loadOlder().catch(() => {}); }}>
+                  <Button type="button" size="sm" variant="outline" onClick={retryBanner}>
                     Retry
                   </Button>
                 ) : null}
