@@ -218,6 +218,7 @@ const mainConfig = defineConfig({
       "src/engine-version.test.ts",
       "tests/agent-type-glyph.test.tsx",
       "tests/kollab-logo.test.tsx",
+      "tests/kollab-logo-recovery.test.tsx",
       "tests/agent-version-notice.test.tsx",
       "tests/daemon-outdated-panels.test.tsx",
       "tests/daemon-outdated-file-tree.test.tsx",
