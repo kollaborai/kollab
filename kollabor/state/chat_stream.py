@@ -601,8 +601,29 @@ class ChatStreamService:
     def _on_hub_message(self, uid: str, event: dict[str, Any]) -> None:
         if event.get("input_source") == "steering":
             input_id = event.get("message_id")
+            joined_request_id = event.get("joined_request_id")
+            joined_turn_id = self._event_turn_id(
+                {"turn_id": event.get("joined_turn_id")}
+            )
+            has_join_identity = (
+                "joined_request_id" in event or "joined_turn_id" in event
+            )
+            if has_join_identity:
+                if (
+                    isinstance(input_id, str)
+                    and input_id
+                    and isinstance(joined_request_id, str)
+                    and joined_request_id
+                    and joined_request_id != input_id
+                    and joined_turn_id is not None
+                    and self._register_joined_turn(
+                        uid, joined_request_id, joined_turn_id
+                    )
+                ):
+                    self._join_input(uid, input_id, joined_turn_id)
+                return
             turn_id = self._active_turns.get(uid)
-            if isinstance(input_id, str) and turn_id:
+            if isinstance(input_id, str) and input_id and turn_id:
                 self._join_input(uid, input_id, turn_id)
         elif isinstance(event.get("text"), str):
             self._on_hub_note(uid, event)
@@ -699,13 +720,45 @@ class ChatStreamService:
         prior = self._inputs.setdefault(uid, {}).get(input_id, {})
         if prior.get("state") == "ended":
             return
-        self._set_input_state(uid, input_id, "joined", turn_id=turn_id)
+        prior_turn_id = prior.get("turn_id")
+        if prior_turn_id is not None and prior_turn_id != turn_id:
+            return
+        if prior.get("state") != "joined":
+            self._set_input_state(uid, input_id, "joined", turn_id=turn_id)
         self._input_turns[(uid, input_id)] = turn_id
         self._add_turn_input(uid, turn_id, input_id)
         row = self._rows.setdefault(uid, {}).get(input_id)
-        if row is not None:
+        if row is not None and (
+            row.get("turn_id") != turn_id or row.get("status") != "joined"
+        ):
             self._upsert(uid, {**row, "turn_id": turn_id, "status": "joined"})
         self._set_turn_state(uid, turn_id, "running")
+
+    def _register_joined_turn(
+        self, uid: str, request_id: str, turn_id: str
+    ) -> bool:
+        """Recover the active turn identity carried by an ACP steer admission."""
+        prior = self._inputs.setdefault(uid, {}).get(request_id, {})
+        if prior.get("state") == "ended":
+            return False
+        prior_turn_id = prior.get("turn_id")
+        if prior_turn_id is not None and prior_turn_id != turn_id:
+            return False
+
+        self._ensure_input_row(uid, request_id)
+        if prior.get("state") not in {"started", "joined"}:
+            self._set_input_state(uid, request_id, "started", turn_id=turn_id)
+        self._input_turns[(uid, request_id)] = turn_id
+        self._add_turn_input(uid, turn_id, request_id)
+        row = self._rows.setdefault(uid, {}).get(request_id)
+        state = self._inputs[uid][request_id]["state"]
+        if row is not None and (
+            row.get("turn_id") != turn_id or row.get("status") != state
+        ):
+            self._upsert(uid, {**row, "turn_id": turn_id, "status": state})
+        self._set_turn_state(uid, turn_id, "running")
+        self._active_turns[uid] = turn_id
+        return True
 
     def _ensure_input_row(
         self,

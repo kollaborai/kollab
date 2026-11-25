@@ -1354,6 +1354,8 @@ class ACPOrchestrator:
         generation: int | None = None,
         hub_note: dict[str, Any] | None = None,
         hub_admission: str | None = None,
+        joined_request_id: str | None = None,
+        joined_turn_id: int | None = None,
     ) -> None:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
@@ -1474,6 +1476,19 @@ class ACPOrchestrator:
                 "request_id": request_id,
                 "input_source": source,
             }
+            if (
+                isinstance(joined_request_id, str)
+                and joined_request_id
+                and isinstance(joined_turn_id, int)
+                and not isinstance(joined_turn_id, bool)
+                and joined_turn_id > 0
+            ):
+                event_fields.update(
+                    {
+                        "joined_request_id": joined_request_id,
+                        "joined_turn_id": joined_turn_id,
+                    }
+                )
             if isinstance(hub_note, dict):
                 event_fields.update(
                     {
@@ -1537,6 +1552,14 @@ class ACPOrchestrator:
             "steering",
             thread_id,
             hub_note=(origin or {}).get("hub_note"),
+            **(
+                {
+                    "joined_request_id": active.request_id,
+                    "joined_turn_id": active.turn_id,
+                }
+                if owner_correlatable
+                else {}
+            ),
         )
         self._parents.pop(record_request_id, None)
         if owner_correlatable and return_joined:
