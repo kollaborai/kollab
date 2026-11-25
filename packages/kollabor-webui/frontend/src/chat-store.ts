@@ -518,13 +518,13 @@ export class LiveChatStore implements LiveStore {
 
   /**
    * After a snapshot or a replace, the window's row wins over a local row with the same id. A local row the window
-   * lacks stays at the end while its POST runs, and after a failure, so the text stays on screen.
+   * lacks stays at the end until delivery, including after a failure, so the text stays on screen.
    */
   private keepUndelivered(): void {
     const inWindow = new Set(this.state.rows.map((row) => row.id));
     const kept: ChatRow[] = [];
     for (const [id, send] of this.sends) {
-      if (!inWindow.has(id) && (send.posts > 0 || send.row.status === "failed")) kept.push(send.row);
+      if (!inWindow.has(id)) kept.push(send.row);
       else this.sends.delete(id);
     }
     if (kept.length > 0) this.state = { ...this.state, rows: [...this.state.rows, ...kept] };
