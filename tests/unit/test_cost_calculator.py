@@ -1,8 +1,10 @@
 """Tests for pricing_registry and cost_calculator."""
 
+import math
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -101,6 +103,74 @@ class TestPricingRegistryMatching(unittest.TestCase):
 class TestPricingRegistryLoad(unittest.TestCase):
     def setUp(self):
         PricingRegistry.reset()
+
+    def test_F1_unrepresentable_model_registry_prices_are_skipped_for_all_fields(self):
+        valid_info = {
+            "provider": "openai",
+            "pricing_in": 0.25,
+            "pricing_out": 0.75,
+            "pricing_cached_in": 0.05,
+        }
+        for field in ("pricing_in", "pricing_out", "pricing_cached_in"):
+            with self.subTest(field=field):
+                PricingRegistry.reset()
+                overflow_info = {**valid_info, field: 10**400}
+                model_registry = {
+                    "models": {
+                        "valid-model": valid_info,
+                        "overflow-model": overflow_info,
+                    }
+                }
+                with patch(
+                    "kollabor_ai.model_registry.get_model_registry",
+                    return_value=model_registry,
+                ):
+                    reg = PricingRegistry()
+                    reg.load_from_model_registry()
+
+                valid = reg.get_pricing("openai", "valid-model")
+                self.assertIsNotNone(valid)
+                self.assertAlmostEqual(valid.prompt_per_token, 0.25 / 1_000_000)
+                self.assertAlmostEqual(valid.completion_per_token, 0.75 / 1_000_000)
+                self.assertAlmostEqual(valid.cache_discount, 0.2)
+                self.assertIsNone(reg.get_pricing("openai", "overflow-model"))
+
+    def test_model_registry_loader_skips_malformed_prices_and_preserves_valid_rates(
+        self,
+    ):
+        malformed_values = (
+            ("boolean", True),
+            ("numeric-string", "0.25"),
+            ("negative", -0.25),
+            ("nan", math.nan),
+            ("infinity", math.inf),
+        )
+        valid_info = {
+            "provider": "openai",
+            "pricing_in": 0.25,
+            "pricing_out": 0.75,
+            "pricing_cached_in": 0.05,
+        }
+        for field in ("pricing_in", "pricing_out", "pricing_cached_in"):
+            for label, value in malformed_values:
+                with self.subTest(field=field, value=label):
+                    PricingRegistry.reset()
+                    malformed_info = {**valid_info, field: value}
+                    model_registry = {
+                        "models": {
+                            "valid-model": valid_info,
+                            "malformed-model": malformed_info,
+                        }
+                    }
+                    with patch(
+                        "kollabor_ai.model_registry.get_model_registry",
+                        return_value=model_registry,
+                    ):
+                        reg = PricingRegistry()
+                        reg.load_from_model_registry()
+
+                    self.assertIsNotNone(reg.get_pricing("openai", "valid-model"))
+                    self.assertIsNone(reg.get_pricing("openai", "malformed-model"))
 
     def test_load_defaults_bundled(self):
         reg = PricingRegistry()

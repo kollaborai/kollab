@@ -46,9 +46,16 @@ def test_rejects_invalid_catalog_prices(field, value):
 
 
 @pytest.mark.parametrize("field", PRICE_FIELDS)
+def test_F1_rejects_unrepresentable_integer_catalog_prices(field):
+    errors = validator.validate(_catalog_with_price(field, 10**400))
+
+    assert any(f"model-0: {field} must be" in error for error in errors)
+
+
+@pytest.mark.parametrize("field", PRICE_FIELDS)
 @pytest.mark.parametrize(
     "value",
-    [None, 0, 0.25, pytest.param(10**400, id="large-positive-integer")],
+    [None, 0, 0.25, pytest.param(10**308, id="large-representable-integer")],
 )
 def test_accepts_unknown_and_nonnegative_catalog_prices(field, value):
     errors = validator.validate(_catalog_with_price(field, value))
