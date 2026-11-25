@@ -92,12 +92,10 @@ describe("declared plugin uses", () => {
     ]);
   });
 
-  it("explains mediated agent runs and granted secrets", () => {
+  it("keeps declared agent permissions visible and says runs are unavailable", () => {
     expect(describeUses(["agents", "agents:unattended", "secret:GITHUB_TOKEN"])).toEqual({
       throughKollab: [
-        "Can start agent runs through Kollab.",
-        "Agent-run limits are not enforced; unreported token use is not capped.",
-        "Can run agent tools without asking; those agents can do anything you can.",
+        "Agent runs are not available yet.",
         "Can request the secret GITHUB_TOKEN through Kollab.",
       ],
       onItsOwn: [],
@@ -105,10 +103,12 @@ describe("declared plugin uses", () => {
     });
   });
 
-  it("discloses that agent run limits are not enforced before consent", () => {
-    expect(describeUses(["agents"]).throughKollab).toContain(
-      "Agent-run limits are not enforced; unreported token use is not capped.",
-    );
+  it("keeps either agent permission visible while runs are unavailable", () => {
+    for (const permission of ["agents", "agents:unattended"]) {
+      expect(describeUses([permission]).throughKollab).toEqual([
+        "Agent runs are not available yet.",
+      ]);
+    }
   });
 
   it("lists network, file and other declarations", () => {
