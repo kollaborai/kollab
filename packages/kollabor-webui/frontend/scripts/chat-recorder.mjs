@@ -48,6 +48,7 @@ import {
   CHAT_RECORDER_FLOWS,
   classifyChatRuntime,
   chatRecorderStreamSuffix,
+  captureRecorderFailure,
   findPromptStatusUpdate,
   hasRunningTurnWithInputs,
   isCompactionComplete,
@@ -589,18 +590,21 @@ async function record(flow, session, browser, target) {
     return classifyChatRuntime(details);
   };
 
-  await page.goto(WEB, { waitUntil: "domcontentloaded" });
-  await page.getByText(new RegExp(agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first().click({ timeout: 30000 });
-  await sleep(5000);
-  await waitForStreamSnapshot();
-  await page.evaluate(() => {
-    if (window.__rec.flowSeq === null) window.__rec.flowSeq = (window.__rec.lastStreamSeq ?? -1) + 1;
+  let activeRuntime = runtime === "single" ? "unknown" : runtime;
+  let failed = await captureRecorderFailure(async () => {
+    await page.goto(WEB, { waitUntil: "domcontentloaded" });
+    await page.getByText(new RegExp(agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first().click({ timeout: 30000 });
+    await sleep(5000);
+    await waitForStreamSnapshot();
+    await page.evaluate(() => {
+      if (window.__rec.flowSeq === null) window.__rec.flowSeq = (window.__rec.lastStreamSeq ?? -1) + 1;
+    });
+    activeRuntime = await runtimeForSession();
+    if (runtime !== "single" && activeRuntime !== runtime) {
+      throw new Error(`identity "${agent}" is ${activeRuntime}, expected ${runtime}`);
+    }
+    await mark("READY");
   });
-  const activeRuntime = await runtimeForSession();
-  if (runtime !== "single" && activeRuntime !== runtime) {
-    throw new Error(`identity "${agent}" is ${activeRuntime}, expected ${runtime}`);
-  }
-  await mark("READY");
 
   const flows = {
     // One plain send and reply.
@@ -760,8 +764,7 @@ async function record(flow, session, browser, target) {
       await settle(R(1));
     },
   };
-  let failed = null;
-  try { await flows[flow](); } catch (error) { failed = String(error); }
+  if (!failed) failed = await captureRecorderFailure(() => flows[flow]());
   await mark("END");
   await collect();
   await page.screenshot({ path: path.join(dir, "final.png") }).catch(() => undefined);
@@ -820,6 +823,18 @@ const targets = runtimeMatrix
   : [{ runtime: "single", agent: AGENT }];
 for (const target of targets) {
   target.session = await sessionId(target.agent, target.runtime, target.runtime === "single" ? sessionOverride : "");
+}
+if (runtimeMatrix) {
+  for (const target of targets) {
+    const response = await engine(`/sessions/${target.session}`);
+    if (!response.ok) {
+      throw new Error(`could not preflight runtime ${target.runtime}: session lookup returned ${response.status}`);
+    }
+    const activeRuntime = classifyChatRuntime(await response.json());
+    if (activeRuntime !== target.runtime) {
+      throw new Error(`identity "${target.agent}" is ${activeRuntime}, expected ${target.runtime}`);
+    }
+  }
 }
 const { chromium } = require(process.env.PLAYWRIGHT_CORE_PATH ?? "playwright-core");
 const browser = await chromium.launch({ headless: !HEADED, executablePath: process.env.CHROME_PATH ?? chromium.executablePath() });

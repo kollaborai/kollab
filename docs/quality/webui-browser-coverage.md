@@ -62,8 +62,11 @@ test a real remote agent or provider.
 The suites above play fixtures. `scripts/chat-recorder.mjs` drives the real
 page against a running engine and a real agent, and records what the chat
 shows on every animation frame. Use it before calling a change to the chat's
-history sync, live turn or runtime done, and to compare a pull request's build
-with `main`. It is not part of CI: each flow is a real model turn.
+history sync, live turn or runtime done. The recorder requires the single-stream
+engine routes `GET /sessions/{id}/stream` and `POST /sessions/{id}/inputs` from
+the stream/API lanes. Run it against a combined stack that serves those routes;
+compare a pull request's build with a baseline only when both stacks have them.
+It is not part of CI: each flow is a real model turn.
 
 From `packages/kollabor-webui/frontend`, with a web UI and engine running and
 a throwaway agent in a scratch folder (Trust All, so it can run `sleep`):

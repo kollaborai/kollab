@@ -36,6 +36,16 @@ export function requireRecorderApprovalMode(mode) {
   return mode;
 }
 
+/** Return setup or flow errors as recorder results instead of aborting a run. */
+export async function captureRecorderFailure(action) {
+  try {
+    await action();
+    return null;
+  } catch (error) {
+    return String(error);
+  }
+}
+
 /** Parse --runtime-matrix runtime=identity,... into its fixed runtime order. */
 export function parseRuntimeMatrix(value) {
   if (typeof value !== "string" || !value.trim()) {
