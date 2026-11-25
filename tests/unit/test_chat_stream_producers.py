@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kollabor.state.chat_stream import ChatStreamService
-from kollabor_events.chat_stream import sequence_problems
+from kollabor_events.chat_stream import REPLAY_WINDOW, sequence_problems
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import DisplayTap
 
@@ -471,3 +471,21 @@ def test_retained_transcript_row_keeps_its_id_when_compaction_changes_its_index(
         if row["parts"] == [{"type": "text", "text": "kept reply"}]
     )
     assert after_id == before_id
+
+
+def test_snapshot_exposes_a_cursor_for_transcript_rows_older_than_its_window():
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content=f"transcript row {index}",
+            metadata={"request_id": f"input-{index}"},
+        )
+        for index in range(REPLAY_WINDOW + 3)
+    ]
+    stream = ChatStreamService(state)
+
+    event = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+
+    assert len(event["data"]["rows"]) == REPLAY_WINDOW
+    assert isinstance(event["data"]["older"], str)

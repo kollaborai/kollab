@@ -135,6 +135,7 @@ async def test_send_now_dispatches_only_the_input_named_by_the_client():
     assert added["result"] == {"id": "web-a1", "state": "queued"}
     assert sent["error"] is None
     assert sent["result"]["found"] is True
+    assert sent["result"]["accepted"] is True
     assert state.dispatches[0][1].request_id == "web-a1"
     assert state.dispatches[0][1].force_send is True
 

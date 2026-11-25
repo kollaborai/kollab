@@ -10,6 +10,8 @@ from kollabor.state.chat_stream_rows import (
     StaleRowCursor,
     register_chat_stream_rows_handler,
 )
+from kollabor.state.handlers import register_state_handlers
+from kollabor.state.local import LocalStateService
 from kollabor_rpc import RpcRequest, RpcServer
 
 
@@ -115,3 +117,34 @@ async def test_rows_rpc_maps_compaction_and_conversation_cursors_to_conflict_cod
         rpc, "state.chat_stream.rows", {"before": cursor, "limit": 2}
     )
     assert changed == {"error": "conversation_changed"}
+
+
+@pytest.mark.asyncio
+async def test_state_startup_registers_the_rows_handler_for_local_chat_stream():
+    llm = type("LLM", (), {})()
+    llm.conversation_history = [
+        {
+            "role": "user",
+            "content": "hello",
+            "metadata": {},
+            "timestamp": "2026-11-25T12:00:00Z",
+            "uuid": "input-1",
+        }
+    ]
+    llm.conversation_manager = type(
+        "ConversationManager", (), {"conversation_uid": lambda self: "conv-1"}
+    )()
+    state = LocalStateService(llm, profile_manager=object(), event_bus=None)
+    rpc = RpcServer()
+
+    register_state_handlers(rpc, state)
+    response = await rpc.handle_request(
+        RpcRequest(
+            request_id="rows-at-startup",
+            method="state.chat_stream.rows",
+            params={"before": None, "limit": 10},
+        )
+    )
+
+    assert response.error is None
+    assert response.result == {"rows": [], "older": None}

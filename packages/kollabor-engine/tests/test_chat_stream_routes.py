@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from kollabor_engine import server
 from kollabor_engine.routes import stream
+from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
+from kollabor_rpc import RpcRequest, RpcServer
 
 
 class _Rpc:
@@ -20,10 +22,13 @@ class _Rpc:
             "state": "started",
             "turn_id": "turn-1",
         }
+        self.subscribe_results = []
 
     async def call(self, method: str, params: dict, *, timeout: float | None = None):
         self.calls.append((method, params))
         if method == "state.chat_stream.subscribe":
+            if self.subscribe_results:
+                return self.subscribe_results.pop(0)
             return {
                 "events": [
                     {
@@ -111,6 +116,79 @@ def test_stream_route_forwards_cursor_and_sends_whole_events_as_sse(monkeypatch)
     ]
 
 
+def test_stream_refreshes_the_snapshot_when_live_events_switch_conversations(
+    monkeypatch,
+):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.subscribe_results = [
+        {
+            "events": [
+                {
+                    "seq": 7,
+                    "conversation_uid": "conv-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 8,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        },
+        {
+            "events": [
+                {
+                    "seq": 0,
+                    "conversation_uid": "conv-2",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 2,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        },
+    ]
+    session.queue = asyncio.Queue()
+    session.queue.put_nowait(
+        {
+            "type": "chat_stream",
+            "event": {
+                "seq": 1,
+                "conversation_uid": "conv-2",
+                "type": "row.upsert",
+                "data": {"id": "input-2"},
+            },
+        }
+    )
+    session.queue.put_nowait(None)
+
+    response = client.get("/sessions/s1/stream?after=6&conversation_uid=conv-1")
+
+    assert response.status_code == 200
+    data_lines = [
+        line[6:] for line in response.text.splitlines() if line.startswith("data: ")
+    ]
+    events = [json.loads(line) for line in data_lines]
+    assert [event["conversation_uid"] for event in events] == ["conv-1", "conv-2"]
+    assert events[1]["type"] == "snapshot"
+    assert session.rpc.calls == [
+        (
+            "state.chat_stream.subscribe",
+            {"after": 6, "conversation_uid": "conv-1"},
+        ),
+        (
+            "state.chat_stream.subscribe",
+            {"after": None, "conversation_uid": "conv-2"},
+        ),
+    ]
+
+
 def test_input_route_returns_202_with_the_sender_id_and_state(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
 
@@ -155,6 +233,81 @@ def test_send_now_route_returns_202_with_the_started_turn(monkeypatch):
         "turn_id": "turn-1",
     }
     assert session.rpc.calls == [("state.chat_stream.send_now", {"id": "web-a1"})]
+
+
+class _LiveQueueRuntime:
+    async def add_input(self, params):
+        return {"accepted": True, "id": params["id"], "state": "queued"}
+
+    async def send_now(self, params):
+        return {
+            "found": True,
+            "accepted": True,
+            "state": "started",
+            "turn_id": "turn-1",
+        }
+
+
+class _LiveBus:
+    def __init__(self):
+        self.runtime = _LiveQueueRuntime()
+
+    def get_service(self, name):
+        return self.runtime if name == "web_message_queue_runtime" else None
+
+
+class _DispatchingRpc:
+    def __init__(self, server):
+        self.server = server
+        self.next_request_id = 0
+        self.calls = []
+
+    async def call(self, method, params, *, timeout=None):
+        self.calls.append((method, params))
+        self.next_request_id += 1
+        response = await self.server.handle_request(
+            RpcRequest(
+                request_id=f"engine-{self.next_request_id}",
+                method=method,
+                params=params,
+            )
+        )
+        assert response.error is None
+        return response.result
+
+
+def test_send_now_http_route_uses_registered_daemon_handler_response(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    state = SimpleNamespace(
+        _event_bus=_LiveBus(),
+        _llm_service=SimpleNamespace(conversation_history=[]),
+        get_conversation_uid=lambda: "conv-1",
+    )
+    daemon_rpc = RpcServer()
+    register_chat_stream_handlers(daemon_rpc, ChatStreamService(state))
+    adapter = _DispatchingRpc(daemon_rpc)
+    session.daemon.rpc = adapter
+
+    admitted = client.post(
+        "/sessions/s1/inputs",
+        json={"id": "web-a1", "text": "send immediately", "attachments": []},
+    )
+    response = client.post("/sessions/s1/inputs/web-a1/send-now")
+
+    assert admitted.status_code == 202
+    assert response.status_code == 202
+    assert response.json() == {
+        "id": "web-a1",
+        "state": "started",
+        "turn_id": "turn-1",
+    }
+    assert adapter.calls == [
+        (
+            "state.chat_stream.add_input",
+            {"id": "web-a1", "text": "send immediately", "attachments": []},
+        ),
+        ("state.chat_stream.send_now", {"id": "web-a1"}),
+    ]
 
 
 def test_send_now_route_returns_current_state_when_input_already_moved(monkeypatch):
