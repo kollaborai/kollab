@@ -519,7 +519,7 @@ class ChatStreamService:
                     "parts": parts,
                 },
             )
-        if current.get("state") != "running":
+        if current.get("state") != "running" or joined:
             self._set_turn_state(uid, turn_id, "running")
         self._active_turns[uid] = turn_id
 
