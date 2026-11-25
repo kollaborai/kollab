@@ -867,6 +867,9 @@ async function record(flow, session, browser, target) {
           await mark(`GOAL AFTER ${JSON.stringify({ persisted: restored, turn: reloadedTurn, conversation_uid: snapshot.conversation_uid })}`);
         },
       });
+      // Rendered assistant rows and tool groups expose no stream row, turn,
+      // or tool-call identity, so they cannot be attributed to this goal.
+      throw new Error("goal reload proof inconclusive: rendered tool cards cannot be associated with the verified goal turn");
     },
     // Inject a real hub message while the page's turn is still running.
     async "hub-note"() {
