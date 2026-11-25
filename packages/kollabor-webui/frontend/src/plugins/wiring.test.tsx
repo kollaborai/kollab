@@ -49,6 +49,7 @@ function putHello() {
       web: { entry: "web/dist/index.js", hash: "abc" },
       contributes: { menu: [{ id: "hello", label: "Hello Row", icon: "hand", open: { page: "main" } }] },
       services: [],
+      omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
     },
     status: "ready",
     error: null,

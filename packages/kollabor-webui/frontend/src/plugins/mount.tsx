@@ -109,6 +109,8 @@ export function PluginFailure({
 }
 
 /** Catches an error a plugin throws while drawing; Retry draws it again. */
+const SAFE_PLUGIN_RENDER_ERROR = "This plugin's view failed to render. Check the browser console for details.";
+
 type PluginBoundaryProps = {
   name: string;
   resetKey?: unknown;
@@ -142,7 +144,7 @@ export class PluginBoundary extends Component<PluginBoundaryProps, { error: Erro
     return (
       <PluginFailure
         title={`${this.props.name} Failed to Render`}
-        error={this.state.error.message}
+        error={SAFE_PLUGIN_RENDER_ERROR}
         onRetry={this.retry}
         inline={this.props.inline}
       />

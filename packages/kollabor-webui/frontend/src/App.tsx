@@ -1388,6 +1388,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [versionMismatch, setVersionMismatch] = useState<{ page: string; pageBuild: string; engine: string } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<Awaited<ReturnType<EngineApi["checkForUpdate"]>> | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateCheckBusy, setUpdateCheckBusy] = useState(false);
+  const [updateCheckError, setUpdateCheckError] = useState(false);
+  const [updateRetryFailed, setUpdateRetryFailed] = useState(false);
+  const [updateRetryWaiting, setUpdateRetryWaiting] = useState(false);
   // The engine's own version (GET /version): what a chat's agent is compared with.
   const [engineVersion, setEngineVersion] = useState("");
   // One restart asked for from a chat's notice, until that agent publishes the engine's version.
@@ -1397,9 +1401,65 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   useEffect(() => {
     let active = true;
-    void api.checkForUpdate().then((result) => { if (active && result.available) setUpdateInfo(result); }).catch(() => {});
+    void api.checkForUpdate().then((result) => {
+      if (active) setUpdateInfo(result);
+    }).catch(() => {
+      if (active) {
+        setUpdateCheckError(true);
+        setUpdateInfo((previous) => previous ? { ...previous, status: "failed", available: false } : previous);
+      }
+    });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    const retryAt = updateInfo?.retry_at;
+    if (!retryAt) {
+      setUpdateRetryWaiting(false);
+      return;
+    }
+    const delay = retryAt * 1000 - Date.now();
+    if (delay <= 0) {
+      setUpdateRetryWaiting(false);
+      return;
+    }
+    setUpdateRetryWaiting(true);
+    const timer = window.setTimeout(() => setUpdateRetryWaiting(false), delay);
+    return () => window.clearTimeout(timer);
+  }, [updateInfo?.retry_at]);
+
+  const retryUpdateCheck = async () => {
+    setUpdateCheckBusy(true);
+    setUpdateRetryFailed(false);
+    try {
+      const result = await api.checkForUpdate(true);
+      setUpdateInfo(result);
+      setUpdateCheckError(false);
+      setUpdateRetryFailed(result.status === "failed");
+    } catch {
+      setUpdateCheckError(true);
+      setUpdateInfo((previous) => previous ? { ...previous, status: "failed", available: false } : previous);
+      setUpdateRetryFailed(true);
+    } finally {
+      setUpdateCheckBusy(false);
+    }
+  };
+
+  const updateStatus = updateInfo?.status ?? (updateCheckError ? "failed" : null);
+  const updateRetryBlocked = updateCheckBusy
+    || updateRetryWaiting
+    || Boolean(updateInfo?.retry_at && Date.now() < updateInfo.retry_at * 1000);
+  const updateNoticeMessage = updateCheckBusy
+    ? "Checking for updates…"
+    : updateStatus === "available"
+      ? `Kollab ${updateInfo?.release?.version ?? "update"} is available.`
+      : updateStatus === "current"
+        ? `Kollab is up to date.${updateInfo?.last_successful_check ? ` Last successful check: ${new Date(updateInfo.last_successful_check * 1000).toLocaleString()}.` : ""}`
+        : updateStatus === "disabled"
+          ? "Update checks are off."
+          : updateStatus === "failed"
+            ? `${updateRetryFailed ? "Update check failed again." : "Couldn't check for updates."}${updateInfo?.retry_reason === "rate_limit" && updateInfo.retry_at ? ` GitHub is rate limiting checks. Try again after ${new Date(updateInfo.retry_at * 1000).toLocaleTimeString()}.` : updateInfo?.retry_reason === "retry" && updateInfo.retry_at ? ` Try again after ${new Date(updateInfo.retry_at * 1000).toLocaleTimeString()}.` : ""}${updateInfo?.last_successful_check ? ` Last successful check: ${new Date(updateInfo.last_successful_check * 1000).toLocaleString()}.` : ""}`
+            : "";
 
   const applyAvailableUpdate = async () => {
     setUpdateBusy(true);
@@ -2074,22 +2134,39 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               {`Couldn't switch to ${pickLabel(pickFailure.pick)}. ${pickFailure.reason}`}
             </NoticeBar>
           ) : null}
-          {updateInfo?.release ? (
+          {updateStatus ? (
             <NoticeBar
-              actions={
-                <>
-                  <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
-                    Release notes
-                  </a>
-                  <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
-                    {updateBusy ? "Updating…" : "Update Now"}
-                  </NoticeAction>
-                </>
+              detail={
+                updateStatus === "disabled"
+                  ? "Change kollabor.updates.check_enabled in your Kollab configuration."
+                  : updateStatus === "available" && updateInfo?.release
+                    ? `Kollab ${updateInfo.release.version} is available.`
+                    : undefined
               }
-              onDismiss={() => setUpdateInfo(null)}
-              detail={`Kollab ${updateInfo.release.version} is available.`}
+              actions={updateStatus === "disabled" ? undefined : (
+                <>
+                  <NoticeAction disabled={updateRetryBlocked} onClick={() => void retryUpdateCheck()}>
+                    {updateCheckBusy ? "Checking…" : updateStatus === "failed" ? "Try Again" : "Check Again"}
+                  </NoticeAction>
+                  {updateStatus === "available" && updateInfo?.release ? (
+                    <>
+                      <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
+                        Release notes
+                      </a>
+                      <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
+                        {updateBusy ? "Updating…" : "Update Now"}
+                      </NoticeAction>
+                    </>
+                  ) : null}
+                </>
+              )}
+              onDismiss={() => {
+                setUpdateInfo(null);
+                setUpdateCheckError(false);
+                setUpdateRetryFailed(false);
+              }}
             >
-              A Kollab update is available.
+              {updateStatus === "available" ? "A Kollab update is available." : updateNoticeMessage}
             </NoticeBar>
           ) : null}
           {contextCompactionStatus ? (
@@ -2186,7 +2263,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     label={agentName(nextGem.name, nextGem.display_name)}
                   />
                 ) : (
-                  <KollabLogo mist className="text-foreground/80 mb-2 h-10 w-auto" />
+                  <KollabLogo glass className="text-foreground/80 mb-2 h-10 w-auto" />
                 )}
                 <h1 className="text-2xl font-semibold tracking-tight">
                   {nextGem ? agentName(nextGem.name, nextGem.display_name) : "Start a Session"}

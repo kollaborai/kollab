@@ -374,7 +374,8 @@ def create_app(port: Optional[int] = None) -> FastAPI:
 
         token = auth_header[7:]
         if not validate_token(token) and not app.state.plugin_tokens.authorize(
-            token, request.method, request.scope["path"], app.state.plugin_events
+            token, request.method, request.scope["path"], app.state.plugin_events,
+            request.scope.get("query_string", b""),
         ):
             return JSONResponse(status_code=401, content={"detail": "Invalid token"})
 

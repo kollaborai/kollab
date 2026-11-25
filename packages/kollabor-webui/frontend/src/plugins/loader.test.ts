@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
+import { readFileSync } from "node:fs";
 import {
   assetUrl,
   bundlesOwnReact,
   createPluginLoader,
   isActive,
+  listedPluginEntries,
   LOAD_TIMEOUT_MS,
+  normalizePluginEntry,
   pluginsOff,
   type LoaderDeps,
 } from "./loader";
@@ -29,6 +33,7 @@ function entry(id: string, extra: Partial<PluginEntry> = {}): PluginEntry {
       pages: [{ id: "main", title: "Main" }],
     },
     services: [],
+    omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
     ...extra,
   };
 }
@@ -73,6 +78,21 @@ const module = (setup: Setup) => async () => ({ default: setup });
 const page = (k: PluginApi) =>
   k.page({ id: "main", title: "Main", tabs: [{ id: "one", label: "One", render: Tab }] });
 
+const inventoryResponseCases: readonly [string, () => Promise<unknown>, boolean][] = [
+  ["null", async () => null, false],
+  ["undefined", async () => undefined, false],
+  ["non-object", async () => "not an inventory", false],
+  ["top-level array", async () => [], false],
+  ["missing plugins", async () => ({ schema: 1 }), false],
+  ["non-array plugins", async () => ({ plugins: null }), false],
+  ["error body", async () => ({ detail: "Inventory unavailable" }), false],
+  ["only invalid rows", async () => ({ plugins: [null, {}] }), false],
+  ["partially invalid rows", async () => ({ plugins: [entry("replacement"), {}] }), false],
+  ["thrown JSON parse", async () => { throw new SyntaxError("Invalid JSON"); }, false],
+  ["non-2xx response", async () => { throw new Error("HTTP 503 Service Unavailable"); }, false],
+  ["valid empty inventory", async () => ({ plugins: [] }), true],
+];
+
 beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -114,6 +134,33 @@ describe("which plugins load", () => {
   });
 });
 
+describe("plugin inventory text redaction", () => {
+  it("preserves safe labels and provenance while rejecting credential text", () => {
+    const source = "https://github.com/acme/token-manager.git";
+    const normalized = normalizePluginEntry({
+      ...entry("hello"),
+      name: "Token-Budget",
+      source,
+      settings: [{
+        type: "text_input", path: "plugins.demo.password", label: "Password: required",
+        help: "Password: required", value: null, editable: false,
+      }],
+    });
+    expect(normalized?.name).toBe("Token-Budget");
+    expect(normalized?.source).toBe(source);
+    expect(normalized?.settings?.[0]?.label).toBe("Password: required");
+    expect(normalized?.settings?.[0]?.help).toBe("Password: required");
+  });
+
+  it.each([
+    ["underscore credential assignment", "GITHUB_TOKEN=ghp_fakecredentialvalue123"],
+    ["bearer credential", "Bearer abc123XYZ987"],
+    ["API key shape", "sk-live-abcdefghijklmnop"],
+  ])("rejects %s", (_label, value) => {
+    expect(normalizePluginEntry({ ...entry("hello"), name: value })?.name).toBe("hello");
+  });
+});
+
 describe("loading", () => {
   it.each([
     ["missing", undefined],
@@ -124,6 +171,29 @@ describe("loading", () => {
     await loader.refresh();
 
     expect(pluginsByEnableOrder(registry.getSnapshot().plugins).map(({ id }) => id)).toEqual(["beta", "alpha"]);
+  });
+
+  it.each(inventoryResponseCases)("handles %s plugin inventory without losing the last good page", async (_label, nextList, isValidEmpty) => {
+    const existing = entry("hello");
+    const setup = harness([[existing]], { [assetUrl(existing, "entry")!]: module(page) });
+    await setup.loader.refresh();
+    await setup.loader.idle();
+    expect(setup.plugin("hello")?.status).toBe("ready");
+
+    setup.deps.list.mockImplementationOnce(nextList as never);
+    await setup.loader.refresh();
+
+    if (isValidEmpty) {
+      expect(setup.plugin("hello")).toBeUndefined();
+      expect(listedPluginEntries()).toEqual([]);
+      expect(setup.registry.getSnapshot().listError).toBeNull();
+      expect(setup.removed).toEqual(["hello"]);
+    } else {
+      expect(setup.plugin("hello")).toMatchObject({ status: "ready", contributions: { pages: [{ id: "main" }] } });
+      expect(listedPluginEntries().map((item) => item.id)).toEqual(["hello"]);
+      expect(setup.registry.getSnapshot().listError).toBeTruthy();
+      expect(setup.removed).toEqual([]);
+    }
   });
 
   it("imports every enabled entry in parallel and awaits each plugin function before showing it", async () => {
@@ -164,8 +234,8 @@ describe("loading", () => {
     expect(plugin("hello")?.status).toBe("loading");
     await vi.advanceTimersByTimeAsync(1);
     await loader.idle();
-    expect(plugin("hello")).toMatchObject({ status: "failed", error: "Hello did not finish loading within 5 s." });
-    expect(plugin("pr-chain")).toMatchObject({ status: "failed", error: "PR Chain did not finish loading within 5 s." });
+    expect(plugin("hello")).toMatchObject({ status: "failed", error: "This plugin's web code failed while loading. Check the browser console for details." });
+    expect(plugin("pr-chain")).toMatchObject({ status: "failed", error: "This plugin's web code failed while loading. Check the browser console for details." });
   });
 
   it("a timed-out import that resolves later is ignored: its plugin function never runs", async () => {
@@ -207,16 +277,22 @@ describe("loading", () => {
     expect(plugin("hello")?.contributions.notices).toEqual([]);
   });
 
-  it("a plugin that throws while loading shows Failed to Load and the others still load", async () => {
+  it("keeps arbitrary setup errors out of plugin UI and logs the original exception", async () => {
+    const original = new Error("secret returned by a plugin API");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const { loader, plugin } = harness([[entry("hello"), entry("pr-chain")]], {
       "/plugins/hello/web/index.js?v=abc": module(() => {
-        throw new Error("boom");
+        throw original;
       }),
       "/plugins/pr-chain/web/index.js?v=abc": module(page),
     });
     await loader.refresh();
     await loader.idle();
-    expect(plugin("hello")).toMatchObject({ status: "failed", error: "boom" });
+    expect(plugin("hello")).toMatchObject({
+      status: "failed",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
+    });
+    expect(logged).toHaveBeenCalledWith("Plugin hello web code failed while loading", original);
     expect(plugin("pr-chain")?.status).toBe("ready");
   });
 
@@ -228,7 +304,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js does not default-export definePlugin(...).",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
   });
 
@@ -241,7 +317,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js bundles its own React: mark react as external",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
     expect(deps.importModule).not.toHaveBeenCalled();
   });
@@ -259,7 +335,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js bundles its own React: mark react as external",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
     expect(deps.importModule).not.toHaveBeenCalled();
   });
@@ -293,7 +369,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js bundles its own React: mark react as external",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
     expect(deps.importModule).not.toHaveBeenCalled();
   });
@@ -314,7 +390,11 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")?.status).toBe("failed");
     await loader.retry("hello");
-    expect(plugin("hello")).toMatchObject({ status: "failed", error: "second try fails", retries: 1 });
+    expect(plugin("hello")).toMatchObject({
+      status: "failed",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
+      retries: 1,
+    });
     fail = false;
     await loader.retry("hello");
     expect(plugin("hello")).toMatchObject({ status: "ready", retries: 2, error: null });
@@ -404,6 +484,24 @@ describe("plugins-changed", () => {
     expect(plugin("hello")).toBeUndefined();
   });
 
+  it("does not load a listing that finishes after the loader stops", async () => {
+    const gate = deferred<{ plugins: PluginEntry[] }>();
+    const setup = vi.fn(page);
+    const { loader, deps, plugin } = harness([[entry("hello")]], {
+      "/plugins/hello/web/index.js?v=abc": module(setup),
+    });
+    deps.list.mockImplementationOnce(() => gate.promise);
+
+    const refresh = loader.refresh();
+    loader.stop();
+    gate.resolve({ plugins: [entry("hello")] });
+    await refresh;
+    await loader.idle();
+
+    expect(setup).not.toHaveBeenCalled();
+    expect(plugin("hello")).toBeUndefined();
+  });
+
   it("an engine notice for a loaded plugin becomes its notice; one for an unknown plugin is dropped", async () => {
     const { loader, plugin } = harness([[entry("hello")]], {
       "/plugins/hello/web/index.js?v=abc": module(page),
@@ -426,5 +524,34 @@ describe("own React detection", () => {
     expect(bundlesOwnReact('import{useState as e}from"react";export default function(){}')).toBe(false);
     expect(bundlesOwnReact("var s=r.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;s.H")).toBe(false);
     expect(bundlesOwnReact("if(r.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE===void 0)x()")).toBe(false);
+  });
+});
+
+describe("PhoneLink lists plugins and loads no code", () => {
+  it("fills the list, imports nothing and keeps the registry empty when loadCode is false", async () => {
+    const runtimeSource = readFileSync(new URL("./loader.ts", import.meta.url), "utf8");
+    const { registry, deps } = harness([[entry("hello"), entry("pr-chain")]], {});
+    const phone = { ...deps, loadCode: false };
+    const loader = createPluginLoader(registry, phone);
+    await loader.refresh();
+    await loader.idle();
+    expect(deps.importModule).not.toHaveBeenCalled();
+    expect(deps.fetchText).not.toHaveBeenCalled();
+    expect(deps.addStyle).not.toHaveBeenCalled();
+    expect(runtimeSource).toContain("loadCode: !inPhoneApp(where.pathname)");
+    expect(listedPluginEntries().map((item) => item.id)).toEqual(["hello", "pr-chain"]);
+    expect(registry.getSnapshot()).toMatchObject({ listed: true, plugins: [] });
+  });
+});
+
+describe("fixed plugin inventory errors", () => {
+  it("preserves the development manifest error", () => {
+    const normalized = normalizePluginEntry(entry("hello@dev", {
+      kind: "dev",
+      state: "error",
+      error: "Development plugin metadata could not be loaded",
+    }));
+
+    expect(normalized?.error).toBe("Development plugin metadata could not be loaded");
   });
 });

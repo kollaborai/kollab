@@ -46,7 +46,7 @@ export function rowCount(record: PluginRecord, fetched: unknown): { text: string
   if (record.entry.services.some((service) => service.state === "crash-stopped")) return { text: "Stopped", hint: "" };
   if (record.entry.state === "stopping") return { text: "Stopping", hint: "" };
   if (record.entry.state === "stop-failed") {
-    return { text: "Stop Failed", hint: record.entry.services.find((service) => service.state === "stop-failed")?.error ?? "" };
+    return { text: "Failed to Stop", hint: record.entry.services.find((service) => service.state === "stop-failed")?.error ?? "" };
   }
   const badge = (fetched ?? {}) as { text?: unknown; hint?: unknown };
   return {

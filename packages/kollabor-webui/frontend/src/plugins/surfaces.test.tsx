@@ -56,6 +56,7 @@ function put(id: string, name: string, extra: Partial<PluginRecord> = {}, entry:
       web: { entry: "web/dist/index.js", hash: "abc" },
       contributes: { menu: [{ id, label: name, icon: "git-pull-request", open: { page: "main" } }] },
       services: [],
+      omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
       ...entry,
     },
     status: "ready",
@@ -117,7 +118,7 @@ describe("right-hand menu rows", () => {
     const engineError = put("hello", "Hello", {}, { state: "error", error: "engine part failed" });
     expect(rowCount(engineError, undefined).text).toBe("Failed to Load");
     const crashed = put("hello", "Hello", {}, {
-      services: [{ name: "loop", state: "crash-stopped" }],
+      services: [{ name: "loop", state: "crash-stopped", secrets_omitted: 0 }],
     });
     expect(rowCount(crashed, { text: "4", hint: "4 chains running" }).text).toBe("Stopped");
     const stopping = put("hello", "Hello", {}, { state: "stopping" });
@@ -125,10 +126,10 @@ describe("right-hand menu rows", () => {
     expect(rows()).toContain("Stopping");
     const stopFailed = put("hello", "Hello", {}, {
       state: "stop-failed",
-      services: [{ name: "loop", state: "stop-failed", error: "signal failed" }],
+      services: [{ name: "loop", state: "stop-failed", error: "signal failed", secrets_omitted: 0 }],
     });
-    expect(rowCount(stopFailed, undefined)).toEqual({ text: "Stop Failed", hint: "signal failed" });
-    expect(rows()).toContain("Stop Failed");
+    expect(rowCount(stopFailed, undefined)).toEqual({ text: "Failed to Stop", hint: "signal failed" });
+    expect(rows()).toContain("Failed to Stop");
   });
 
   it("otherwise shows the plugin's own count and hover text", () => {

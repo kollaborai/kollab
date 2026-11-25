@@ -35,6 +35,21 @@ def test_long_stop_timeout_is_preserved(tmp_path, monkeypatch):
 
 
 
+def test_windows_service_stop_uses_process_tree_helper(monkeypatch):
+    from types import SimpleNamespace
+
+    from kollabor_config import proc_ctl
+    from kollabor_plugins import services
+
+    killed = []
+    monkeypatch.setattr(services, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(proc_ctl, "kill_tree", lambda pid, sig: killed.append((pid, sig)))
+
+    services._signal_service_tree(4321, proc_ctl.HARD)
+
+    assert killed == [(4321, proc_ctl.HARD)]
+
+
 def test_failed_stop_is_visible_and_disable_reports_partial_failure(tmp_path, monkeypatch):
     from kollabor_plugins import registry, services, settings
     from kollabor_plugins.packages import files_sha256
