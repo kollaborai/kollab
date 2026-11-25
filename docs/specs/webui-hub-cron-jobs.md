@@ -6,7 +6,7 @@ schedule storage and run history, fixed-grid firing and catch-up, agent
 delivery, sealed config sync, and the read-only cron-job socket/engine view.
 The Schedules management views in Settings and `/schedules` (TUI) are not
 implemented by this PR.
-Last updated: 2026-11-09
+Last updated: 2026-11-25
 
 ## Goal
 
@@ -34,7 +34,7 @@ keep working when a device drops off and comes back.
    across devices, no blind 10-second polling.
 9. Every fire is recorded (time, result, error) and shown as Last run.
 
-## Today (code on main)
+## Baseline before this implementation
 
 - Jobs live in memory in the agent that made them
   (`HubPlugin._hub_cron_jobs`, `HubCronJob` in `plugins/hub/plugin.py`) and
