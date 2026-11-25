@@ -202,6 +202,7 @@ class ChatStreamService:
         self._rows: dict[str, dict[str, dict[str, Any]]] = {}
         self._inputs: dict[str, dict[str, dict[str, Any]]] = {}
         self._turns: dict[str, dict[str, dict[str, Any]]] = {}
+        self._input_scopes: dict[tuple[str, str], tuple[str, str, str]] = {}
         self._input_text: dict[tuple[str, str], str] = {}
         self._input_attachments: dict[tuple[str, str], list[dict[str, str]]] = {}
         self._input_lock = asyncio.Lock()
@@ -236,7 +237,11 @@ class ChatStreamService:
         self.attach_display_tap()
         input_id, text, attachments = self._validate_input(params)
         uid = self._conversation_uid()
+        runtime = self._queue_runtime()
+        scope = await runtime.input_scope(uid)
         known = self._inputs.setdefault(uid, {}).get(input_id)
+        if known is not None and self._input_scopes.get((uid, input_id)) != scope:
+            return {"error": "input was not admitted"}
         if known is not None:
             previous_text = self._input_text.get((uid, input_id), text)
             previous_attachments = self._input_attachments.get(
@@ -246,7 +251,6 @@ class ChatStreamService:
                 return {"error": "input id is already bound to different content"}
             return {"id": input_id, "state": known["state"]}
 
-        runtime = self._queue_runtime()
         result = await runtime.add_input(
             {"id": input_id, "text": text, "attachments": attachments}
         )
@@ -267,6 +271,7 @@ class ChatStreamService:
         if state in {"started", "joined"} and not isinstance(turn_id, str):
             return {"error": "daemon omitted the input turn"}
 
+        self._input_scopes[(uid, input_id)] = scope
         self._input_text[(uid, input_id)] = text
         self._input_attachments[(uid, input_id)] = copy.deepcopy(attachments)
         self._set_input_state(
@@ -320,22 +325,36 @@ class ChatStreamService:
         if not isinstance(input_id, str) or not input_id:
             return {"found": False}
         uid = self._conversation_uid()
+        runtime = self._queue_runtime()
+        scope = await runtime.input_scope(uid)
         current = self._inputs.get(uid, {}).get(input_id, {})
-        if current.get("state") in {"started", "joined", "ended"} and current.get("turn_id"):
+        if current.get("state") in {"started", "joined", "ended"} and current.get(
+            "turn_id"
+        ):
+            if self._input_scopes.get((uid, input_id)) != scope:
+                return {"found": False}
             return {
-                "found": True, "accepted": False,
-                "state": current["state"], "turn_id": current["turn_id"],
+                "found": True,
+                "accepted": False,
+                "state": current["state"],
+                "turn_id": current["turn_id"],
             }
-        result = await self._queue_runtime().send_now({"id": input_id})
+        result = await runtime.send_now({"id": input_id})
+        if await runtime.input_scope(uid) != scope:
+            return {"found": False}
         current = self._inputs.get(uid, {}).get(input_id, {})
+        if current and self._input_scopes.get((uid, input_id)) != scope:
+            return {"found": False}
         if (
             (not isinstance(result, dict) or result.get("found") is not True)
             and current.get("state") in {"started", "joined", "ended"}
             and current.get("turn_id")
         ):
             return {
-                "found": True, "accepted": False,
-                "state": current["state"], "turn_id": current["turn_id"],
+                "found": True,
+                "accepted": False,
+                "state": current["state"],
+                "turn_id": current["turn_id"],
             }
         if not isinstance(result, dict) or result.get("found") is not True:
             return {"found": False}
@@ -345,7 +364,7 @@ class ChatStreamService:
             uid = self._conversation_uid()
             self._set_input_state(uid, input_id, state, turn_id=turn_id)
             self._set_turn_state(uid, turn_id, "running", input_id=input_id)
-        current = self._inputs.get(self._conversation_uid(), {}).get(input_id, {})
+        current = self._inputs.get(uid, {}).get(input_id, {})
         return {
             "found": True,
             "accepted": result.get("accepted") is True,
@@ -754,9 +773,7 @@ class ChatStreamService:
             self._upsert(uid, {**row, "turn_id": turn_id, "status": "joined"})
         self._set_turn_state(uid, turn_id, "running")
 
-    def _register_joined_turn(
-        self, uid: str, request_id: str, turn_id: str
-    ) -> bool:
+    def _register_joined_turn(self, uid: str, request_id: str, turn_id: str) -> bool:
         """Recover the active turn identity carried by an ACP steer admission."""
         prior = self._inputs.setdefault(uid, {}).get(request_id, {})
         if prior.get("state") == "ended":
@@ -951,9 +968,7 @@ class ChatStreamService:
             compaction_seq_provider=current_compaction_seq,
         )
 
-    def _snapshot_components(
-        self, uid: str
-    ) -> tuple[
+    def _snapshot_components(self, uid: str) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[dict[str, Any]],

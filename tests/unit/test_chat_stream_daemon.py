@@ -14,6 +14,9 @@ class _QueueRuntime:
         self.calls: list[tuple[str, dict]] = []
         self.queued: set[str] = set()
 
+    async def input_scope(self, conversation_uid):
+        return ("scope", conversation_uid, "principal")
+
     async def add_input(self, params):
         self.calls.append(("add", params))
         self.queued.add(params["id"])
@@ -183,13 +186,22 @@ async def test_send_now_retry_returns_recorded_moved_input(lifecycle):
     state = _State()
     stream = ChatStreamService(state)
     stream._set_input_state(
-        "conv-1", "web-moved", lifecycle, turn_id="turn-1",
+        "conv-1",
+        "web-moved",
+        lifecycle,
+        turn_id="turn-1",
         outcome="completed" if lifecycle == "ended" else None,
     )
 
+    stream._input_scopes[("conv-1", "web-moved")] = ("scope", "conv-1", "principal")
     result = await stream.send_now({"id": "web-moved"})
 
-    assert result == {"found": True, "accepted": False, "state": lifecycle, "turn_id": "turn-1"}
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": lifecycle,
+        "turn_id": "turn-1",
+    }
     assert state._queue_runtime.calls == []
 
 
@@ -202,7 +214,11 @@ async def test_send_now_retry_handles_input_moving_during_queue_lookup():
         stream._set_input_state("conv-1", params["id"], "started", turn_id="turn-1")
         return {"found": False}
 
+    stream._input_scopes[("conv-1", "web-moved")] = ("scope", "conv-1", "principal")
     state._queue_runtime.send_now = moved_during_lookup
     assert await stream.send_now({"id": "web-moved"}) == {
-        "found": True, "accepted": False, "state": "started", "turn_id": "turn-1"
+        "found": True,
+        "accepted": False,
+        "state": "started",
+        "turn_id": "turn-1",
     }
