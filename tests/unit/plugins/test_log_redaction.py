@@ -3,6 +3,8 @@
 import json
 import sys
 
+import pytest
+
 from kollabor_ai.profile_manager import _keyring_set
 from kollabor_plugins.cli import main
 from kollabor_plugins.packages import files_sha256
@@ -19,6 +21,126 @@ def test_log_filter_redacts_across_chunks_and_suppresses_oversized_lines():
     oversized = filt.feed(b"a" * (1024 * 1024 + 1)) + filt.feed(b"arbitrary-secret\n")
     assert b"arbitrary-secret" not in oversized
     assert b"oversized" in oversized
+
+
+def test_plugin_secret_redaction_boundaries_are_shared():
+    from kollabor_plugins.packages import _normalize_plugin_use
+    from kollabor_plugins.registry import _bounded_inventory_text
+    from kollabor_plugins.services import redact_log
+
+    credential = "ghp_fakecredentialvalue123"
+    cases = [
+        ("manifest use", "run:GITHUB_TOKEN=" + credential, None),
+        ("inventory token assignment", "GITHUB_TOKEN=" + credential, None),
+        ("inventory bearer", "Bearer abc123XYZ987", None),
+        (
+            "short bearer log token",
+            "Authorization: Bearer abc123",
+            "Authorization: Bearer [redacted]",
+        ),
+        (
+            "letters-only authorization bearer",
+            "Authorization: Bearer secrettoken",
+            "Authorization: Bearer [redacted]",
+        ),
+        (
+            "proxy authorization basic credential",
+            "Proxy-Authorization: Basic dXNlcjpwYXNz",
+            "Proxy-Authorization: Basic [redacted]",
+        ),
+        (
+            "token assignment with bearer credential",
+            "token: bearer abcdef",
+            "token: bearer [redacted]",
+        ),
+        (
+            "authorization basic credential",
+            "Authorization: Basic secret",
+            "Authorization: Basic [redacted]",
+        ),
+        ("basic settings label", "Basic settings", "Basic settings"),
+        ("bearer help placeholder", "Bearer <key>", "Bearer <key>"),
+        ("inventory key shape", "sk-live-abcdefghijklmnop", None),
+        ("token label", "Token-Budget", "Token-Budget"),
+        ("password help", "Password: required", "Password: required"),
+        (
+            "provenance URL",
+            "https://github.com/acme/token-manager.git",
+            "https://github.com/acme/token-manager.git",
+        ),
+        (
+            "log assignment",
+            "PluginError: GITHUB_TOKEN=" + credential,
+            "PluginError: GITHUB_TOKEN: [redacted]",
+        ),
+        (
+            "log filesystem path",
+            "RuntimeError: /private/tmp/account/config.json",
+            "RuntimeError: [path]",
+        ),
+    ]
+    actual = []
+    for surface, value, _ in cases:
+        if surface == "manifest use":
+            actual.append(_normalize_plugin_use(value))
+        elif surface.startswith("inventory") or surface in {"token label", "password help", "provenance URL"}:
+            actual.append(_bounded_inventory_text(value))
+        else:
+            actual.append(redact_log(value))
+
+    failures = [
+        f"{surface}: expected {expected!r}, got {result!r}"
+        for (surface, _, expected), result in zip(cases, actual)
+        if result != expected
+    ]
+    assert failures == [], "; ".join(failures)
+
+
+def test_service_output_redaction_preserves_paths_and_hides_credentials():
+    from kollabor_plugins.services import _LogFilter
+
+    cases = [
+        (
+            "KOLLAB_PLUGIN_DATA=/private/tmp/plugin-data/hello\n",
+            "KOLLAB_PLUGIN_DATA=/private/tmp/plugin-data/hello\n",
+        ),
+        (
+            "GITHUB_TOKEN=ghp_fakecredentialvalue123\n",
+            "GITHUB_TOKEN: [redacted]\n",
+        ),
+    ]
+    actual = [
+        _LogFilter([]).feed(value.encode(), final=True).decode()
+        for value, _ in cases
+    ]
+    failures = [
+        f"expected {expected!r}, got {result!r}"
+        for (_, expected), result in zip(cases, actual)
+        if result != expected
+    ]
+    assert failures == [], "; ".join(failures)
+
+
+@pytest.mark.parametrize(
+    ("exception_message", "expected_fragment", "forbidden"),
+    [
+        ("Cannot read /private/tmp/account/config.json", "[path]", "/private/tmp/account/config.json"),
+        ("GITHUB_TOKEN=ghp_fakecredentialvalue123", "GITHUB_TOKEN: [redacted]", "ghp_fakecredentialvalue123"),
+    ],
+)
+def test_plugin_exception_logs_redact_paths_and_credentials(
+    caplog, exception_message, expected_fragment, forbidden
+):
+    from kollabor_plugins.plugin_utils import get_plugin_config_safely
+
+    class BrokenPlugin:
+        @staticmethod
+        def get_default_config():
+            raise RuntimeError(exception_message)
+
+    assert get_plugin_config_safely(BrokenPlugin) == {}
+    assert expected_fragment in caplog.text
+    assert forbidden not in caplog.text
 
 
 def test_echoed_secret_and_token_are_redacted_in_cli(tmp_path, monkeypatch, capsys):

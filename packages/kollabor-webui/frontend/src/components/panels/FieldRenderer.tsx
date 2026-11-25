@@ -234,12 +234,14 @@ export function FieldRenderer({
         dirty={dirty}
         error={error}
         aside={
-          <Switch
-            id={id}
-            checked={Boolean(value)}
-            disabled={disabled}
-            onCheckedChange={set}
-          />
+          <label htmlFor={id} className="pointer-coarse:flex pointer-coarse:size-11 pointer-coarse:items-center pointer-coarse:justify-center">
+            <Switch
+              id={id}
+              checked={Boolean(value)}
+              disabled={disabled}
+              onCheckedChange={set}
+            />
+          </label>
         }
       />
     );
@@ -257,7 +259,7 @@ export function FieldRenderer({
           <Slider
             id={id}
             aria-label={field.label}
-            className="min-w-0 flex-1"
+            className="min-w-0 flex-1 pointer-coarse:min-h-11"
             min={min}
             max={max}
             step={step}

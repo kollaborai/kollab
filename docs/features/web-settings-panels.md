@@ -1,6 +1,6 @@
 # Web Settings Panels
 
-The web UI (`kollab --web-ui`) has a **Settings** dialog with nine tabs. Most mirror the terminal's fullscreen screens (`/config`, `/llm`, `/model`, `/setup`, `/connect`, `/voice config`) through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. The Prompts tab is browser-only: it edits shared prompt libraries and picks which sections each role sends, per model variant, without changing bundled files ([Prompt Libraries and Roles](prompt-libraries.md)). On a phone the dialog is a full-screen sheet.
+The web UI (`kollab --web-ui`) has a **Settings** dialog with ten tabs. Most mirror the terminal's fullscreen screens (`/config`, `/llm`, `/model`, `/setup`, `/connect`, `/voice config`) through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. The Prompts tab is browser-only: it edits shared prompt libraries and picks which sections each role sends, per model variant, without changing bundled files ([Prompt Libraries and Roles](prompt-libraries.md)). On a phone the dialog is a full-screen sheet.
 
 Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-unified-config.md).
 
@@ -9,7 +9,7 @@ Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-uni
 | Tab | What it is | Where a change goes |
 | --- | --- | --- |
 | Session | This chat's model and profile override. Apply changes the session only. | Nowhere on disk. It lasts as long as the session. |
-| Configuration | Every setting, in collapsed sections with a count per section. Checkboxes, sliders, dropdowns and text fields; managed settings are read-only. | The footer saves to **Project** (`.kollab/config.json` in the workspace) or **Globally** (`~/.kollab/config.json`). The two real paths are printed on the buttons. Only values that differ from the defaults are written. |
+| Configuration | Core configuration fields, in collapsed sections with a count per section. Plugin settings have their own Plugins tab. Checkboxes, sliders, dropdowns and text fields; managed settings are read-only. | The footer saves to **Project** (`.kollab/config.json` in the workspace) or **Globally** (`~/.kollab/config.json`). The two real paths are printed on the buttons. Only values that differ from the defaults are written. |
 | Loadouts | The same list as terminal `/llm`: use one, create, edit, delete (delete asks twice). | The profile manager the terminal `/llm` uses. |
 | Model | Reasoning effort and the model picker for the active provider (terminal `/model`). | The profile manager the terminal `/model` uses. |
 | Setup | The first-run wizard as steps: provider, API key, endpoint, model, optional connection test, Save and Activate. A bad key or failed/timed-out activation shows a redacted error; a missing key jumps back to the key step. A failed activation leaves the previous profile active. | A new profile, activated, through the same code as terminal `/setup`. |
@@ -17,6 +17,7 @@ Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-uni
 | PhoneLink | Link a phone with an expiring QR code and local approval over the existing Kollab connection. | Private phone identities on this computer; no provider credential sync to the phone. |
 | Voice | Transcript context, speech engine, Kokoro and VibeVoice settings, plus transcription, microphone and current readiness (terminal `/voice config`). | **Save for This Device**, to `~/.kollab/voice/preferences.json` on the device running Kollab. Saving never starts listening. |
 | Prompts | Libraries (Defaults plus your own) and Roles. Tick the sections a role sends, per variant (All Models, Local Models...), edit a section for every role or only one, and preview the assembled prompt. | Library edits in `~/.kollab/prompt-libraries/<library>/<key>.md`, role picks in `~/.kollab/prompt-roles/<role>.json`, a role's own copy in `~/.kollab/prompt-overrides/<role>/<key>.md`; bundled prompt files are unchanged. |
+| Plugins | Installed, development and built-in plugins, their declared uses, background processes and settings. PhoneLink shows a read-only view; install and management actions require a local page. | The engine plugin registry and each plugin's settings store. |
 
 A change that is not saved yet is marked "changed" on its field; closing the dialog with unsaved changes asks first.
 

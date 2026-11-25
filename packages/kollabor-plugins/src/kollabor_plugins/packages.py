@@ -1,7 +1,6 @@
 """Git sources for installable plugin packages."""
 
 import hashlib
-import io
 import json
 import logging
 import os
@@ -10,6 +9,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
@@ -18,8 +18,11 @@ from urllib.parse import urlsplit
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from kollabor_config import proc_ctl
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
+
+from .redaction import contains_sensitive_text, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,9 @@ def parse_git_source(source: str) -> tuple[str, str | None]:
 _ID = re.compile(r"[a-z0-9][a-z0-9-]{1,39}\Z", re.ASCII)
 _SERVICE = re.compile(r"[a-z0-9][a-z0-9-]{0,39}\Z", re.ASCII)
 _SYMBOL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z", re.ASCII)
+_PLUGIN_USE_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z", re.ASCII)
+_PLUGIN_USE_DETAIL = re.compile(r"[A-Za-z0-9_./,-]{1,256}\Z", re.ASCII)
+_PLUGIN_USE_INVISIBLE = re.compile(r"[\u200b\u202a-\u202e\u2066-\u2069]")
 _MANIFEST_KEYS = {
     "format",
     "id",
@@ -84,6 +90,93 @@ _MANIFEST_KEYS = {
 }
 _SERVICE_KEYS = {"command", "autostart", "restart", "stop_timeout_s", "heartbeat_s", "secrets"}
 _MAX_SERVICE_SECONDS = 86400
+_MAX_MANIFEST_STRING = 4096
+_MAX_PLUGIN_MANIFEST_BYTES = 1_048_576
+_MAX_PLUGIN_SERVICES = 128
+_MAX_PLUGIN_SERVICE_SECRETS = 64
+_MAX_PLUGIN_USES = 256
+_MAX_PLUGIN_CONTRIBUTIONS = 256
+_MAX_PLUGIN_SETTINGS = 256
+_MAX_PLUGIN_SETTING_OPTIONS = 256
+_MAX_PLUGIN_OPTION_LABELS = 256
+_MAX_PLUGIN_SETTINGS_BYTES = 1_048_576
+_MAX_PLUGIN_ARCHIVE_BYTES = 64 * 1024 * 1024
+_MAX_PLUGIN_ARCHIVE_FILES = 10_000
+_PLUGIN_ARCHIVE_MEMORY_BYTES = 4 * 1024 * 1024
+_PLUGIN_ARCHIVE_READ_BYTES = 64 * 1024
+
+
+class ManifestReviewLimitError(ValueError):
+    """A manifest exceeds a limit that the review UI can display."""
+
+
+def _normalize_plugin_use(value: object) -> str | None:
+    if isinstance(value, str) and value in {"agents", "agents:unattended"}:
+        return value
+    if (
+        not isinstance(value, str)
+        or len(value) > 1024
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        or _PLUGIN_USE_INVISIBLE.search(value)
+    ):
+        return None
+    if value.startswith("secret:"):
+        secret = value[7:]
+        return value if len(secret) <= 64 and _SYMBOL.fullmatch(secret) else None
+    if contains_sensitive_text(value):
+        return None
+    kind, separator, detail = value.partition(":")
+    if separator and kind in {"run", "net", "files"}:
+        if not detail or len(detail) > 1000:
+            return None
+        return value
+    if separator and _PLUGIN_USE_KIND.fullmatch(kind) and _PLUGIN_USE_DETAIL.fullmatch(detail):
+        return value
+    return None
+
+
+def _validate_settings_review_limits(path: Path) -> None:
+    try:
+        if path.stat().st_size > _MAX_PLUGIN_SETTINGS_BYTES:
+            raise ManifestReviewLimitError("Plugin settings file exceeds the review size limit")
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except ManifestReviewLimitError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid plugin settings JSON") from exc
+    widgets = settings.get("widgets") if isinstance(settings, dict) else None
+    if not isinstance(widgets, list):
+        raise ValueError("Invalid settings widgets")
+    if len(widgets) > _MAX_PLUGIN_SETTINGS:
+        raise ManifestReviewLimitError(f"Plugin settings list exceeds {_MAX_PLUGIN_SETTINGS} widgets")
+    for widget in widgets:
+        if not isinstance(widget, dict):
+            continue
+        options = widget.get("options")
+        if isinstance(options, list) and len(options) > _MAX_PLUGIN_SETTING_OPTIONS:
+            raise ManifestReviewLimitError(
+                f"Plugin setting exceeds {_MAX_PLUGIN_SETTING_OPTIONS} options"
+            )
+        labels = widget.get("option_labels")
+        if isinstance(labels, dict) and len(labels) > _MAX_PLUGIN_OPTION_LABELS:
+            raise ManifestReviewLimitError(
+                f"Plugin setting exceeds {_MAX_PLUGIN_OPTION_LABELS} option labels"
+            )
+
+
+def _check_manifest_string_lengths(value: object) -> None:
+    """Reject oversized strings anywhere in untrusted manifest data, including nested keys."""
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            if len(current) > _MAX_MANIFEST_STRING:
+                raise ManifestReviewLimitError(f"Manifest string exceeds {_MAX_MANIFEST_STRING} characters")
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
 
 
 def stop_timeout(service: object) -> float:
@@ -120,11 +213,18 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
     root = Path(root).resolve()
     manifest_path = _within(root, "kollab-plugin.json", "manifest")
     try:
+        manifest_size = manifest_path.stat().st_size
+    except OSError as exc:
+        raise ValueError("Invalid plugin manifest JSON") from exc
+    if manifest_size > _MAX_PLUGIN_MANIFEST_BYTES:
+        raise ManifestReviewLimitError("Plugin manifest is too large")
+    try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("Invalid plugin manifest JSON") from exc
     if not isinstance(manifest, dict):
         raise ValueError("Plugin manifest must be an object")
+    _check_manifest_string_lengths(manifest)
     try:
         required = manifest.get("kollab")
         if not isinstance(required, str) or not required:
@@ -145,7 +245,11 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
         if not isinstance(manifest.get(field), str) or not manifest[field].strip():
             raise ValueError(f"Invalid plugin {field}")
     uses = manifest.get("uses", [])
-    if not isinstance(uses, list) or any(not isinstance(item, str) for item in uses):
+    if not isinstance(uses, list):
+        raise ValueError("Invalid uses")
+    if len(uses) > _MAX_PLUGIN_USES:
+        raise ManifestReviewLimitError(f"Plugin manifest exceeds {_MAX_PLUGIN_USES} uses")
+    if any(_normalize_plugin_use(item) is None for item in uses):
         raise ValueError("Invalid uses")
     for field in ("python", "engine"):
         if field in manifest:
@@ -159,7 +263,9 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
                 raise ValueError(f"{field} entry must be a file")
     for field in ("agents", "skills", "commands", "hooks", "mcp", "settings"):
         if field in manifest:
-            _within(root, manifest[field], field)
+            path = _within(root, manifest[field], field)
+            if field == "settings":
+                _validate_settings_review_limits(path)
     web = manifest.get("web", {})
     if not isinstance(web, dict) or set(web) - {"entry", "style"}:
         raise ValueError("Invalid web keys")
@@ -172,9 +278,16 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
         raise ValueError("Invalid contributes keys")
     if any(not isinstance(value, list) for value in contributes.values()):
         raise ValueError("Invalid contributes entries")
+    for kind, items in contributes.items():
+        if len(items) > _MAX_PLUGIN_CONTRIBUTIONS:
+            raise ManifestReviewLimitError(
+                f"Plugin manifest exceeds {_MAX_PLUGIN_CONTRIBUTIONS} {kind} contributions"
+            )
     services = manifest.get("services", {})
     if not isinstance(services, dict):
         raise ValueError("Invalid services")
+    if len(services) > _MAX_PLUGIN_SERVICES:
+        raise ManifestReviewLimitError(f"Plugin manifest exceeds {_MAX_PLUGIN_SERVICES} services")
     for name, service in services.items():
         if not isinstance(name, str) or not _SERVICE.fullmatch(name) or not isinstance(service, dict):
             raise ValueError("Invalid service name or definition")
@@ -193,7 +306,13 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
             if type(value) not in (int, float) or not 0 < value <= _MAX_SERVICE_SECONDS:
                 raise ValueError(f"Invalid service {key}")
         secrets = service.get("secrets", [])
-        if not isinstance(secrets, list) or any(not isinstance(x, str) or f"secret:{x}" not in uses for x in secrets):
+        if not isinstance(secrets, list):
+            raise ValueError("Undeclared service secret")
+        if len(secrets) > _MAX_PLUGIN_SERVICE_SECRETS:
+            raise ManifestReviewLimitError(
+                f"Plugin service exceeds {_MAX_PLUGIN_SERVICE_SECRETS} secrets"
+            )
+        if any(not isinstance(x, str) or f"secret:{x}" not in uses for x in secrets):
             raise ValueError("Undeclared service secret")
     for path in root.rglob("*"):
         if path.is_symlink() and not path.resolve().is_relative_to(root):
@@ -209,17 +328,92 @@ def _git(*args: str) -> bytes:
     if completed.returncode:
         diagnostic = completed.stderr.decode("utf-8", "replace")[:4096]
         # URLs may contain arbitrary credentials in userinfo, paths, or queries.
-        diagnostic = re.sub(r"(?:https?|ssh)://[^\s'\"<>]+", "[redacted URL]", diagnostic)
-        diagnostic = re.sub(
-            r"(?i)\b(password|token|secret|credential|authorization)\s*[:=]\s*[^\s,;]+",
-            r"\1=[REDACTED]",
-            diagnostic,
-        )
-        diagnostic = re.sub(r"(?i)\b(bearer|basic)\s+[^\s,;]+", r"\1 [REDACTED]", diagnostic)
-        diagnostic = re.sub(r"\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+", "[REDACTED]", diagnostic).strip()
+        diagnostic = redact_sensitive_text(
+            diagnostic, replacement="[REDACTED]", url_replacement="[redacted URL]"
+        ).strip()
         message = f"Git {args[0]} failed (exit {completed.returncode})"
         raise ValueError(f"{message}: {diagnostic}" if diagnostic else message)
     return completed.stdout
+
+
+def _write_bounded_git_archive(clone: Path, commit: str, archive: BinaryIO) -> None:
+    """Stream a Git archive to bounded storage, stopping once its byte limit is crossed."""
+    process = proc_ctl.start_child(
+        ["git", "-C", str(clone), "archive", "--format=tar", commit],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    diagnostic = bytearray()
+
+    def drain_stderr() -> None:
+        while chunk := process.stderr.read(4096):
+            remaining = 4096 - len(diagnostic)
+            if remaining > 0:
+                diagnostic.extend(chunk[:remaining])
+
+    stderr_reader = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_reader.start()
+    archive_size = 0
+    oversized = False
+    try:
+        while True:
+            read_size = min(_PLUGIN_ARCHIVE_READ_BYTES, _MAX_PLUGIN_ARCHIVE_BYTES - archive_size + 1)
+            chunk = process.stdout.read(read_size)
+            if not chunk:
+                break
+            if archive_size + len(chunk) > _MAX_PLUGIN_ARCHIVE_BYTES:
+                oversized = True
+                try:
+                    proc_ctl.kill_tree(process.pid, proc_ctl.HARD)
+                except OSError:
+                    pass
+                break
+            if archive.write(chunk) != len(chunk):
+                raise OSError("Could not write plugin source archive")
+            archive_size += len(chunk)
+    except BaseException:
+        try:
+            proc_ctl.kill_tree(process.pid, proc_ctl.HARD)
+        except OSError:
+            pass
+        raise
+    finally:
+        process.stdout.close()
+        return_code = process.wait()
+        stderr_reader.join()
+        process.stderr.close()
+
+    if oversized:
+        raise ManifestReviewLimitError(
+            f"Plugin source archive exceeds {_MAX_PLUGIN_ARCHIVE_BYTES} bytes"
+        )
+    if return_code:
+        detail = redact_sensitive_text(
+            diagnostic.decode("utf-8", "replace"),
+            replacement="[REDACTED]",
+            url_replacement="[redacted URL]",
+        ).strip()
+        message = f"Git archive failed (exit {return_code})"
+        raise ValueError(f"{message}: {detail}" if detail else message)
+
+
+def _check_git_archive_file_count(archive: BinaryIO) -> None:
+    """Count archive files before extraction; archive bytes are already bounded."""
+    archive.seek(0)
+    file_count = 0
+    try:
+        with tarfile.open(fileobj=archive, mode="r|") as tar:
+            for member in tar:
+                if member.isdir():
+                    continue
+                file_count += 1
+                if file_count > _MAX_PLUGIN_ARCHIVE_FILES:
+                    raise ManifestReviewLimitError(
+                        f"Plugin source archive exceeds {_MAX_PLUGIN_ARCHIVE_FILES} files"
+                    )
+    except (tarfile.TarError, EOFError) as exc:
+        raise ValueError("Invalid plugin source archive") from exc
 
 
 def resolve_git_commit(url: str, ref: str | None) -> str:
@@ -329,9 +523,14 @@ def stage_git_source(source: str, stage: Path, kollab_version: str) -> dict:
         with tempfile.TemporaryDirectory(prefix=".plugin-clone-", dir=stage.parent) as temporary:
             clone = Path(temporary) / "repo"
             _git("clone", "--no-checkout", "--", url, str(clone))
-            archive = _git("-C", str(clone), "archive", commit)
-            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
-                tar.extractall(stage, filter="data")
+            with tempfile.SpooledTemporaryFile(
+                max_size=_PLUGIN_ARCHIVE_MEMORY_BYTES, mode="w+b"
+            ) as archive:
+                _write_bounded_git_archive(clone, commit, archive)
+                _check_git_archive_file_count(archive)
+                archive.seek(0)
+                with tarfile.open(fileobj=archive, mode="r:") as tar:
+                    tar.extractall(stage, filter="data")
         manifest = validate_manifest(stage, kollab_version)
         return {
             "source": url,
@@ -524,8 +723,11 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expect
             # Leave the journal if recovery itself fails; next startup retries.
             try:
                 _recover_locked(home)
-            except Exception:
-                logger.exception("Plugin installation rollback failed; recovery will retry")
+            except Exception as exc:
+                logger.warning(
+                    "Plugin installation rollback failed; recovery will retry: %s",
+                    redact_sensitive_text(str(exc)),
+                )
             raise
 
 

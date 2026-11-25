@@ -56,6 +56,28 @@ def test_stop_signals_only_verified_target(tmp_path, monkeypatch):
     assert not (run / "two.state").exists()
 
 
+def test_failed_stop_signal_records_retryable_status(tmp_path, monkeypatch):
+    from kollabor_plugins import services
+
+    run = setup(tmp_path, monkeypatch)
+    run.mkdir(parents=True)
+    (run / "one.pid").write_text(json.dumps({"wrapper": {"pid": 123, "start_time": 1, "nonce": "abc"}}))
+    monkeypatch.setattr(services, "_identity_alive", lambda identity, wrapper=False: True)
+    monkeypatch.setattr(services, "_verified_wrapper", lambda identity: True)
+
+    def deny_signal(*args):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(services.os, "kill", deny_signal)
+    with pytest.raises(services.ServiceSignalError):
+        services.control_service("hello", "one", "stop")
+
+    state = json.loads((run / "one.state").read_text())
+    assert state["desired"] == "stopped"
+    assert state["status"] == "stop-failed"
+    assert "denied" not in json.dumps(state), "the OS error text must not reach the stored state"
+
+
 def test_unknown_action_does_not_write(tmp_path, monkeypatch):
     from kollabor_plugins import services
 
