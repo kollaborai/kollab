@@ -6,7 +6,6 @@ import asyncio
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
-
 from kollabor_engine import server
 from kollabor_engine.routes import stream
 
@@ -89,7 +88,7 @@ def test_rows_route_pages_back_to_start_in_chronological_order(monkeypatch):
 
 
 def test_rows_route_returns_an_empty_page(monkeypatch):
-    client, _session = _install_client(
+    client, session = _install_client(
         monkeypatch,
         bypass_auth=True,
         responses={None: {"rows": [], "older": None}},
@@ -99,6 +98,9 @@ def test_rows_route_returns_an_empty_page(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"rows": [], "older": None}
+    assert session.rpc.calls == [
+        ("state.chat_stream.rows", {"before": None, "limit": 50})
+    ]
 
 
 def test_rows_route_returns_409_for_a_stale_cursor_after_compaction(monkeypatch):

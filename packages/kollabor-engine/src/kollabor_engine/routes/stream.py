@@ -11,12 +11,16 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from sse_starlette.sse import EventSourceResponse
 
+from kollabor_events.chat_stream import ROLES, ROW_KINDS
 from kollabor_rpc import RpcError, RpcHandlerError, RpcMethodNotFound
 
 from ..server import get_session_registry
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["chat-stream"])
+_ROW_FIELDS = frozenset(
+    {"id", "seq", "kind", "role", "turn_id", "status", "parts", "created_at"}
+)
 
 
 class InputAttachment(BaseModel):
@@ -115,6 +119,73 @@ async def _read_events(
             status_code=502, detail="The local daemon returned an invalid chat stream."
         )
     return events
+
+
+def _valid_row(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != _ROW_FIELDS:
+        return False
+    seq = value.get("seq")
+    kind = value.get("kind")
+    role = value.get("role")
+    return (
+        isinstance(value.get("id"), str)
+        and bool(value["id"])
+        and isinstance(seq, int)
+        and not isinstance(seq, bool)
+        and seq >= 0
+        and isinstance(kind, str)
+        and kind in ROW_KINDS
+        and isinstance(role, str)
+        and role in ROLES
+        and (value.get("turn_id") is None or isinstance(value["turn_id"], str))
+        and isinstance(value.get("status"), str)
+        and isinstance(value.get("parts"), list)
+        and all(isinstance(part, dict) for part in value["parts"])
+        and isinstance(value.get("created_at"), str)
+    )
+
+
+@router.get("/{session_id}/rows")
+async def older_rows(
+    session_id: str,
+    before: str | None = Query(default=None, max_length=8192),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    """Return an older page in the daemon's chat stream row shape."""
+    result = await _call_daemon(
+        session_id,
+        "state.chat_stream.rows",
+        {"before": before, "limit": limit},
+    )
+    if isinstance(result, dict):
+        error = result.get("error")
+        if isinstance(error, str) and error in {
+            "stale_cursor",
+            "conversation_changed",
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="The conversation changed. Reload recent rows and try again.",
+            )
+        if error == "invalid_cursor":
+            raise HTTPException(status_code=400, detail="Invalid row cursor.")
+        if error == "invalid_request":
+            raise HTTPException(status_code=400, detail="Invalid row request.")
+
+    rows = result.get("rows") if isinstance(result, dict) else None
+    older = result.get("older") if isinstance(result, dict) else None
+    if (
+        not isinstance(rows, list)
+        or any(not _valid_row(row) for row in rows)
+        or (
+            older is not None
+            and (not isinstance(older, str) or not older or len(older) > 8192)
+        )
+    ):
+        raise HTTPException(
+            status_code=502, detail="The local daemon returned invalid chat rows."
+        )
+    return {"rows": rows, "older": older}
 
 
 @router.get("/{session_id}/stream")
