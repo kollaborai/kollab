@@ -171,8 +171,10 @@ async def test_xml_search_reaches_the_active_workspace_executor(project):
     assert len(tools) == 1
     assert tools[0]["type"] == "file_find"
 
+    bus = MagicMock()
+    bus.emit_with_hooks = AsyncMock(return_value=None)
     executor = ToolExecutor(
-        mcp_integration=MagicMock(), event_bus=MagicMock(), workspace=project
+        mcp_integration=MagicMock(), event_bus=bus, workspace=project
     )
     result = await executor.execute_tool(tools[0])
     assert result.success, result.error
