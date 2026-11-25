@@ -201,3 +201,16 @@ async def test_schedule_edit_from_a_stranger_is_refused(network):
     }
     reply = await net["primary"].receive(stranger.encode().hex()[:64], payload)
     assert "error" in reply
+
+
+def test_snapshot_keeps_cached_roster_when_row_is_not_an_object(tmp_path):
+    root = tmp_path / ".kollab"
+    root.mkdir()
+    path = root / "schedules.json"
+    _write_schedules(root, [_row_dict()])
+    builder = SnapshotBuilder(root=root)
+    assert [row["id"] for row in builder.build().schedules] == ["s1"]
+
+    path.write_text("[null]", encoding="utf-8")
+
+    assert [row["id"] for row in builder.build().schedules] == ["s1"]
