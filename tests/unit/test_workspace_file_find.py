@@ -232,3 +232,60 @@ def test_search_refuses_a_directory_moved_out_of_workspace_during_scan(project):
     assert moved
     assert not result["success"]
     assert "workspace" in result["error"].lower()
+
+
+def test_search_refuses_an_outside_directory_moved_out_and_back_during_scan(project):
+    # Make the outside directory the entry opened as ``src``. Move it out
+    # immediately after open, then restore it after scandir but before the
+    # post-recursion ancestry check. The descriptor remains valid throughout.
+    (project / "src").rename(project / "src-local")
+    outside = project.parent / "outside"
+    outside.rename(project / "src")
+    outside_moved = project.parent / "outside-moved"
+    real_open = os.open
+    real_scandir = os.scandir
+    opened_fd = None
+    restored = False
+
+    def open_then_move(path, flags, *args, **kwargs):
+        nonlocal opened_fd
+        fd = real_open(path, flags, *args, **kwargs)
+        if path == "src" and kwargs.get("dir_fd") is not None and opened_fd is None:
+            opened_fd = fd
+            (project / "src").rename(outside_moved)
+        return fd
+
+    def scandir_then_restore(fd):
+        nonlocal restored
+        iterator = real_scandir(fd)
+        if fd != opened_fd:
+            return iterator
+
+        class RestoreAfterScandir:
+            def __enter__(self):
+                return iterator.__enter__()
+
+            def __exit__(self, *args):
+                nonlocal restored
+                try:
+                    return iterator.__exit__(*args)
+                finally:
+                    outside_moved.rename(project / "src")
+                    restored = True
+
+        return RestoreAfterScandir()
+
+    with patch("os.open", side_effect=open_then_move), patch(
+        "os.scandir", new=scandir_then_restore
+    ):
+        with patch.object(
+            os,
+            "supports_fd",
+            set(os.supports_fd) | {scandir_then_restore},
+        ):
+            result = search(project, "*.txt")
+
+    assert opened_fd is not None
+    assert restored
+    assert not result["success"], result
+    assert "workspace" in result["error"].lower()
