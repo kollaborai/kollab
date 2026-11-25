@@ -118,9 +118,8 @@ export async function respondToPermission({
 
 /**
  * Cancels the one pending permission the page shows, on its parent request ID.
- * Lifted from the daemon read and cancel request in runtime.tsx cancelPermission
- * (1401-1435). Without its onStale and importExternalState calls: a stale owner
- * resolves false, and the caller decides what to show.
+ * Lifted from the daemon read and cancel request the retired engine runtime sent.
+ * A stale owner resolves false, and the caller decides what to show.
  */
 export function cancelPendingPermission({
   api,
