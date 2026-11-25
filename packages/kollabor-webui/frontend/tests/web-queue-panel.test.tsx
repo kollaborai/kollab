@@ -1,5 +1,10 @@
+// @vitest-environment jsdom
+import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChatStoreProvider, type ChatSnapshot, type LiveStore } from "@/chat-store";
+import type { ChatRow, InputInfo } from "@/chat-stream";
 import {
   QueuePanel,
   type WebQueueBatchSnapshot,
@@ -219,5 +224,168 @@ describe("QueuePanel", () => {
     ]));
     expect(html).toContain('aria-label="Send Now unavailable: earlier message is already being sent"');
     expect(html).not.toContain('aria-label="Send 1 queued message now"');
+  });
+});
+
+// The panel on the chat store (#1451): it lists the store's queued inputs, and its Remove and Send Now call the store.
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const chatRow = (id: string, text: string): ChatRow => ({
+  id,
+  seq: 1,
+  kind: "input",
+  role: "user",
+  turn_id: null,
+  status: "done",
+  parts: [{ type: "text", text }],
+  created_at: "2026-11-25T00:00:00Z",
+});
+
+const queuedInput = (id: string): InputInfo => ({ id, state: "queued", turn_id: null });
+const joinedInput = (id: string): InputInfo => ({ id, state: "joined", turn_id: "turn-1" });
+
+const chatSnapshot = (
+  rows: ChatRow[],
+  inputs: Record<string, InputInfo>,
+  running = false,
+): ChatSnapshot => ({
+  rows,
+  inputs,
+  running,
+  connection: "live",
+  hasEarlier: false,
+  olderStatus: "idle",
+});
+
+// The fake store from chat-store-provider.test.ts: a snapshot that set() replaces, and spies for each action.
+function fakeChatStore(initial: ChatSnapshot) {
+  let snap = initial;
+  const listeners = new Set<() => void>();
+  const store = {
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getSnapshot: () => snap,
+    send: vi.fn(async () => {}),
+    sendNow: vi.fn(async () => {}),
+    cancel: vi.fn(async () => {}),
+    stop: vi.fn(async () => {}),
+    loadOlder: vi.fn(async () => {}),
+    retry: vi.fn(),
+    start: vi.fn(),
+    dispose: vi.fn(),
+  };
+  return {
+    store,
+    live: store as unknown as LiveStore,
+    set(next: ChatSnapshot) {
+      snap = next;
+      listeners.forEach((listener) => listener());
+    },
+  };
+}
+
+const mounted: Root[] = [];
+afterEach(() => {
+  act(() => mounted.splice(0).forEach((root) => root.unmount()));
+  document.body.innerHTML = "";
+});
+
+function mountOnStore(live: LiveStore): HTMLElement {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  mounted.push(root);
+  act(() => {
+    root.render(
+      <ChatStoreProvider store={live}>
+        <QueuePanel />
+      </ChatStoreProvider>,
+    );
+  });
+  return container;
+}
+
+async function clickButton(container: HTMLElement, selector: string) {
+  const button = container.querySelector<HTMLButtonElement>(selector);
+  expect(button, `${selector} is on screen`).toBeTruthy();
+  await act(async () => {
+    button!.click();
+  });
+}
+
+describe("QueuePanel on the chat store", () => {
+  it("lists each queued input in queue order, with the text of its row", () => {
+    // The inputs are keyed out of queue order on purpose: the order must come from the rows.
+    const { live } = fakeChatStore(chatSnapshot(
+      [chatRow("web-a", "First queued"), chatRow("web-b", "Already running"), chatRow("web-c", "Third queued")],
+      { "web-c": queuedInput("web-c"), "web-b": joinedInput("web-b"), "web-a": queuedInput("web-a") },
+      true,
+    ));
+    const container = mountOnStore(live);
+    const text = container.textContent ?? "";
+    expect(text).toContain("Queued messages · 2");
+    expect(container.querySelectorAll('[data-slot="web-queue-item"]')).toHaveLength(2);
+    expect(text.indexOf("First queued")).toBeGreaterThan(-1);
+    expect(text.indexOf("First queued")).toBeLessThan(text.indexOf("Third queued"));
+    expect(text).not.toContain("Already running");
+  });
+
+  it("lists a queued input that has no row yet", () => {
+    const { live } = fakeChatStore(chatSnapshot([], { "web-x": queuedInput("web-x") }, true));
+    const container = mountOnStore(live);
+    expect(container.textContent).toContain("Queued messages · 1");
+    expect(container.querySelectorAll('[data-slot="web-queue-item"]')).toHaveLength(1);
+  });
+
+  it("Remove cancels that input by its id", async () => {
+    const { store, live } = fakeChatStore(chatSnapshot(
+      [chatRow("web-a", "First"), chatRow("web-c", "Second")],
+      { "web-a": queuedInput("web-a"), "web-c": queuedInput("web-c") },
+    ));
+    const container = mountOnStore(live);
+    await clickButton(container, 'button[aria-label="Remove queued message 2"]');
+    expect(store.cancel).toHaveBeenCalledTimes(1);
+    expect(store.cancel).toHaveBeenCalledWith("web-c");
+  });
+
+  it("Send Now sends the earliest queued input by its id", async () => {
+    const { store, live } = fakeChatStore(chatSnapshot(
+      [chatRow("web-a", "First"), chatRow("web-c", "Second")],
+      { "web-a": queuedInput("web-a"), "web-c": queuedInput("web-c") },
+      true,
+    ));
+    const container = mountOnStore(live);
+    await clickButton(container, '[data-slot="web-queue-send-now"]');
+    expect(store.sendNow).toHaveBeenCalledTimes(1);
+    expect(store.sendNow).toHaveBeenCalledWith("web-a");
+    expect(store.cancel).not.toHaveBeenCalled();
+  });
+
+  it("offers Send Now only while a turn runs", () => {
+    const { live } = fakeChatStore(chatSnapshot([chatRow("web-a", "First")], { "web-a": queuedInput("web-a") }));
+    const container = mountOnStore(live);
+    expect(container.textContent).toContain("Queued messages · 1");
+    expect(container.querySelector('[data-slot="web-queue-send-now"]')).toBeNull();
+  });
+
+  it("shows nothing when no input is queued", () => {
+    const running = fakeChatStore(chatSnapshot(
+      [chatRow("web-a", "Running now")],
+      { "web-a": { id: "web-a", state: "started", turn_id: "turn-1" } },
+      true,
+    ));
+    expect(mountOnStore(running.live).innerHTML).toBe("");
+    const empty = fakeChatStore(chatSnapshot([], {}));
+    expect(mountOnStore(empty.live).innerHTML).toBe("");
+  });
+
+  it("drops an input from the list when the store reports it started", () => {
+    const fake = fakeChatStore(chatSnapshot([chatRow("web-a", "First")], { "web-a": queuedInput("web-a") }, true));
+    const container = mountOnStore(fake.live);
+    expect(container.querySelectorAll('[data-slot="web-queue-item"]')).toHaveLength(1);
+    act(() => fake.set(chatSnapshot([chatRow("web-a", "First")], { "web-a": joinedInput("web-a") }, true)));
+    expect(container.innerHTML).toBe("");
   });
 });
