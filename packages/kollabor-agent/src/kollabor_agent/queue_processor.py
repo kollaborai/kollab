@@ -13,7 +13,7 @@ import sys
 import time
 import uuid
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 from kollabor_agent.execution_context import remote_task_id
@@ -102,6 +102,9 @@ class TaggedInput:
     parent_uuid: str | None = None
     # Authenticated operator words carried to the resulting history message.
     operator_inputs: tuple[dict[str, str], ...] = ()
+    # Exact durable user row created for this queued input, when admission
+    # persisted one. Kept distinct from parent_uuid, which is also a chain link.
+    history_row_uuid: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -152,6 +155,9 @@ class QueuedInput:
     parent_uuid: str | None = None
     # Authenticated operator words carried to the resulting history message.
     operator_inputs: tuple[dict[str, str], ...] = ()
+    # Exact durable user row created for this queued input, when admission
+    # persisted one. Kept distinct from parent_uuid, which is also a chain link.
+    history_row_uuid: str | None = field(default=None, kw_only=True)
 
 
 _UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")

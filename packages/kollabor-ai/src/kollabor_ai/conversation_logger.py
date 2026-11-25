@@ -1085,6 +1085,122 @@ class KollaborConversationLogger:
                 updates,
             )
 
+    async def reorder_native_queue_history(
+        self, rows: list[tuple[str, str]] | tuple[tuple[str, str], ...]
+    ) -> bool:
+        """Project exact durable queue rows in provider dispatch order.
+
+        Queue items carry the UUID of their own durable user row separately
+        from parent_uuid. Match both UUID and content before moving rows among
+        their existing JSONL slots; unrelated conversation records stay put.
+        """
+        if (
+            not isinstance(rows, (list, tuple))
+            or any(
+                not isinstance(row, tuple)
+                or len(row) != 2
+                or not isinstance(row[0], str)
+                or not row[0]
+                or not isinstance(row[1], str)
+                for row in rows
+            )
+            or len({row[0] for row in rows}) != len(rows)
+        ):
+            return False
+        if len(rows) < 2:
+            return True
+
+        async with self._write_lock:
+            path = Path(self.session_file)
+            return await asyncio.to_thread(
+                self._reorder_native_queue_history_with_file_locks,
+                path,
+                tuple(rows),
+            )
+
+    def _reorder_native_queue_history_with_file_locks(
+        self, path: Path, rows: tuple[tuple[str, str], ...]
+    ) -> bool:
+        """Reorder exact queued user rows under the shared file locks."""
+        temp_path: Path | None = None
+        with locked_file(_session_file_rewrite_lock_path(path), "a+", private=True):
+            with locked_file(_session_file_write_lock_path(path), "a+", private=True):
+                if self.session_file != path or not path.is_file():
+                    return False
+                try:
+                    with open(path, "rb") as source:
+                        original = source.readlines()
+                    expected_content = dict(rows)
+                    targets = set(expected_content)
+                    slots: list[int] = []
+                    rows_by_uuid: dict[str, bytes] = {}
+                    for index, raw_line in enumerate(original):
+                        try:
+                            record = json.loads(raw_line)
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        if not isinstance(record, dict):
+                            continue
+                        row_uuid = record.get("uuid")
+                        if not isinstance(row_uuid, str) or row_uuid not in targets:
+                            continue
+                        if record.get("type") != "user":
+                            continue
+                        message = record.get("message")
+                        if (
+                            not isinstance(message, dict)
+                            or message.get("content") != expected_content[row_uuid]
+                        ):
+                            continue
+                        if row_uuid in rows_by_uuid:
+                            return False
+                        rows_by_uuid[row_uuid] = raw_line
+                        slots.append(index)
+
+                    # A concurrently admitted item may not have finished its
+                    # durable append yet. Reorder the exact rows that exist;
+                    # its later append will reconcile the queue again.
+                    ordered = [
+                        row_uuid
+                        for row_uuid, _content in rows
+                        if row_uuid in rows_by_uuid
+                    ]
+                    if len(ordered) < 2:
+                        return True
+                    output = list(original)
+                    for index, row_uuid in zip(slots, ordered):
+                        output[index] = rows_by_uuid[row_uuid]
+                    if output == original:
+                        return True
+
+                    fd, temp_name = tempfile.mkstemp(
+                        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+                    )
+                    temp_path = Path(temp_name)
+                    try:
+                        with os.fdopen(fd, "wb") as target:
+                            target.writelines(output)
+                            target.flush()
+                            os.fsync(target.fileno())
+                        if self.session_file != path:
+                            return False
+                        os.replace(temp_path, path)
+                        temp_path = None
+                        directory_fd = os.open(path.parent, os.O_RDONLY)
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+                    finally:
+                        if temp_path is not None:
+                            temp_path.unlink(missing_ok=True)
+                    return True
+                except OSError:
+                    logger.exception(
+                        "failed to reconcile native queue history order in %s", path
+                    )
+                    return False
+
     def _update_user_message_metadata_with_file_locks(
         self,
         path: Path,

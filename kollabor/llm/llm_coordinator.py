@@ -19,8 +19,8 @@ from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.queue_processor import (
     CancellationOrigin,
-    QueueHandoffInput,
     QueuedInput,
+    QueueHandoffInput,
     QueueProcessor,
     TaggedInput,
     batch_request_ids,
@@ -2616,6 +2616,13 @@ class LLMService:
     async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
         request_ids = batch_request_ids(messages)
+        dispatch_history_rows = tuple(
+            (item.history_row_uuid, content_to_text(item.content))
+            for item in messages
+            if isinstance(item, (QueuedInput, TaggedInput))
+            and isinstance(item.history_row_uuid, str)
+            and item.history_row_uuid
+        )
         # Keep the admission-time capture through the rebatch (#676): the
         # most recent capture, since the pointer today lands on the last row
         # admitted into the batch. Read BEFORE the rebatch so the non-voice
@@ -2697,6 +2704,19 @@ class LLMService:
         # assign it again after the await: an older batch must not restore its
         # ticket over a later batch that started while it was suspended.
         self._continue_serial = batch_serial
+        if len(dispatch_history_rows) > 1:
+            reorder_history = getattr(
+                self.conversation_logger,
+                "reorder_native_queue_history",
+                None,
+            )
+            if (
+                callable(reorder_history)
+                and await reorder_history(dispatch_history_rows) is not True
+            ):
+                logger.error(
+                    "Native queue history could not be reconciled to provider order"
+                )
         batch_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
             current_parent_uuid=batch_parent_uuid,
@@ -3149,6 +3169,7 @@ class LLMService:
         # (publishing None would cut the chain) and the queue item keeps the
         # parent captured at admission.
         admitted_parent_uuid = admission_parent_uuid
+        history_row_uuid: str | None = None
         try:
             user_uuid = await self.conversation_logger.log_user_message(
                 display_text, parent_uuid=admission_parent_uuid
@@ -3165,6 +3186,7 @@ class LLMService:
             # during the logger await. Never re-read mutable
             # current_parent_uuid after yielding.
             admitted_parent_uuid = user_uuid
+            history_row_uuid = user_uuid
 
         # Add to processing queue with overflow handling. Plain input rides a
         # zero-id TaggedInput so the capture travels with the item (#676); a
@@ -3178,6 +3200,7 @@ class LLMService:
                 parent_uuid=admitted_parent_uuid,
                 admission_serial=turn_serial,
                 operator_inputs=operator_inputs,
+                history_row_uuid=history_row_uuid,
             )
             if voice or trusted_origin_context
             else TaggedInput(
@@ -3186,6 +3209,7 @@ class LLMService:
                 parent_uuid=admitted_parent_uuid,
                 admission_serial=turn_serial,
                 operator_inputs=operator_inputs,
+                history_row_uuid=history_row_uuid,
             )
         )
         try:
@@ -3274,6 +3298,7 @@ class LLMService:
                 admission_serial=turn_serial,
                 queue_request_id=queue_handoff.request_id,
                 attempt_id=queue_handoff.attempt_id,
+                history_row_uuid=row_uuid,
             )
             # The reservation and cancellation generation make this
             # synchronous put the native provider-queue custody boundary.

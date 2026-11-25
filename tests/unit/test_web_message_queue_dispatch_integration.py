@@ -242,14 +242,106 @@ async def test_real_send_now_dispatch_uses_one_native_gate_and_keeps_batch_fifo(
 
 
 @pytest.mark.asyncio
+async def test_send_now_dispatch_order_matches_reloaded_native_history(tmp_path):
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    batch_id = queue.new_batch_id()
+    request_id = queue.new_request_id()
+    await queue.enqueue_batch(
+        queue.new_operation_id(),
+        batch_id,
+        (WebMessage(request_id, b'{"text":"Send Now B"}'),),
+    )
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, _request_id: True,
+    )
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    llm.create_background_task = MagicMock()
+    llm.is_processing = True
+    assert await llm.process_user_input("older D", request_id="older-d") == {
+        "status": "queued",
+        "request_id": "older-d",
+    }
+
+    cancellations = []
+    generation = [0]
+
+    def cancel_active(*, origin="human", preserve_queued=False):
+        cancellations.append((origin, preserve_queued))
+        generation[0] = llm._queue_processor.request_cancellation(
+            origin=origin, preserve_queued=preserve_queued
+        )
+        llm.is_processing = False
+        return generation[0]
+
+    async def stop_is_settled(cancel_generation):
+        return cancel_generation == generation[0]
+
+    llm.cancel_current_request = cancel_active
+    llm._await_forced_native_stop = stop_is_settled
+    llm.is_processing = True
+    identity = state.get_conversation_identity()
+    worker = WebMessageQueueWorker(
+        queue,
+        identity,
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+    result = await worker.dispatch_batch(batch_id, send_now=True)
+
+    assert result.status is WorkerStatus.ADMITTED
+    assert cancellations == [("human", True)]
+    assert [item.request_ids for item in llm.processing_queue._queue] == [
+        (request_id,),
+        ("older-d",),
+    ]
+
+    provider_dispatch_order = []
+    process_batch = llm._process_message_batch
+
+    async def capture_provider_dispatch(messages):
+        provider_dispatch_order.extend(item.content for item in messages)
+        return await process_batch(messages)
+
+    async def finish_without_network(
+        user_message_provided,
+        current_parent_uuid,
+        execution_context=None,
+        request_ids=(),
+    ):
+        llm._queue_processor.turn_completed = True
+        return current_parent_uuid
+
+    llm._queue_processor._execute_llm_turn = finish_without_network
+    await llm._queue_processor._drain_queue(
+        None,
+        capture_provider_dispatch,
+        llm._continue_conversation,
+    )
+
+    assert provider_dispatch_order == ["Send Now B", "older D"]
+    llm.conversation_manager.conversations_dir = logger.conversations_dir
+    assert llm.conversation_manager.load_session(logger.session_id)
+    reloaded_user_history = [
+        message["content"]
+        for message in llm.conversation_manager.messages
+        if message["role"] == "user"
+    ]
+    assert reloaded_user_history == provider_dispatch_order
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("later_stop_origin", ("remote_task", "external"))
 async def test_later_nonhuman_stop_between_batch_items_preserves_prefix_without_drain(
     tmp_path, later_stop_origin
 ):
     """An old forced lease cannot erase a newer non-human Stop generation."""
-    from kollabor_agent.queue_processor import QueueHandoffInput
-
     from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+    from kollabor_agent.queue_processor import QueueHandoffInput
 
     queue = WebMessageQueue(scope_id="conversation-scope")
     batch_id = queue.new_batch_id()
