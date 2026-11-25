@@ -62,7 +62,7 @@ import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-
 import { usePendingPermissionCancellation } from "@/permission-cancellation";
 import { imageAttachmentAdapter, toInputAttachments } from "@/image-attachment";
 import { useChatStore, WEB_INPUT_PREFIX, type ConnectionState } from "@/chat-store";
-import { useOlderBanner } from "@/history-banner";
+import { initialHistoryBanner, useOlderBanner } from "@/history-banner";
 import { newInputId, type ChatRow, type InputRequest } from "@/chat-stream";
 import { composerAction, isWaitingRow } from "@/queue-state";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
@@ -273,6 +273,8 @@ const ThreadRoot: FC<{
   const viewportRef = useRef<HTMLDivElement>(null);
   const store = useChatStore();
   const olderBanner = useOlderBanner(store.olderStatus);
+  // Before the first snapshot nothing is on screen: the conversation's load line stands in for the banner.
+  const banner = olderBanner ?? initialHistoryBanner(store.connection, store.rows.length);
   const scrollAnchorRef = useRef<object | null>(null);
 
   const userScrollRef = useRef(false);
@@ -393,20 +395,20 @@ const ThreadRoot: FC<{
             {queuePanel}
             {/* Keep transient status in the sticky footer so its mount/unmount
                 does not change the positions of transcript rows above it. */}
-            {olderBanner ? (
+            {banner ? (
               <div
                 data-slot="history-status"
-                role={olderBanner.kind === "error" ? "alert" : "status"}
-                aria-live={olderBanner.kind === "error" ? "assertive" : "polite"}
+                role={banner.kind === "error" ? "alert" : "status"}
+                aria-live={banner.kind === "error" ? "assertive" : "polite"}
                 className={cn(
                   "mx-auto flex w-full max-w-(--thread-max-width) items-center justify-between gap-3 rounded-md px-3 py-2 text-xs",
-                  olderBanner.kind === "error"
+                  banner.kind === "error"
                     ? "bg-destructive/10 text-destructive"
                     : "text-muted-foreground bg-muted/50",
                 )}
               >
-                <span>{olderBanner.message}</span>
-                {olderBanner.kind === "error" ? (
+                <span>{banner.message}</span>
+                {banner.kind === "error" ? (
                   <Button type="button" size="sm" variant="outline" onClick={() => { void store.loadOlder().catch(() => {}); }}>
                     Retry
                   </Button>

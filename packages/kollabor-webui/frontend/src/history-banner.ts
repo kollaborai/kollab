@@ -4,6 +4,7 @@
 
 import { useState } from "react";
 import type { ChatStore } from "./chat-stream";
+import type { ConnectionState } from "./chat-store";
 
 export type OlderStatus = ChatStore["olderStatus"];
 
@@ -11,10 +12,21 @@ export type HistoryBanner = { kind: "loading" | "error"; message: string };
 
 export const OLDER_LOADING = "Loading older messages…";
 export const OLDER_LOAD_FAILED = "Couldn't load older messages. Scroll up or retry to try again.";
+// The copy the runtime's history status showed while a conversation loaded (#1451).
+export const INITIAL_LOADING = "Loading conversation history…";
 
 // Module-level, so a banner that is already shown keeps its identity.
 const LOADING: HistoryBanner = { kind: "loading", message: OLDER_LOADING };
 const FAILED: HistoryBanner = { kind: "error", message: OLDER_LOAD_FAILED };
+const INITIAL: HistoryBanner = { kind: "loading", message: INITIAL_LOADING };
+
+/**
+ * The line for a chat whose first snapshot is still on its way: it is connecting and nothing is on
+ * screen. Once rows arrive, or the stream opens, the line is gone (#1451).
+ */
+export function initialHistoryBanner(connection: ConnectionState, rowCount: number): HistoryBanner | null {
+  return connection === "connecting" && rowCount === 0 ? INITIAL : null;
+}
 
 /**
  * The banner for the store's olderStatus, given the banner already shown. A failed
