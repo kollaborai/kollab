@@ -3173,7 +3173,11 @@ class LLMService:
         history_row_uuid: str | None = None
         try:
             user_uuid = await self.conversation_logger.log_user_message(
-                display_text, parent_uuid=admission_parent_uuid
+                display_text,
+                parent_uuid=admission_parent_uuid,
+                # The saved row names the sender's id, so it pairs with the input
+                # it admits and with the events that answer that input (#1371).
+                message_metadata={"request_id": request_id} if request_id else None,
             )
         except Exception as exc:
             logger.error("User message not written to history: %s", exc)
