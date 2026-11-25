@@ -43,14 +43,7 @@ import {
   orphanImageNotice,
   stripImageTokens,
   stripLeadingImageTokens,
-  type ComposerAttachmentLike,
 } from "@/composer-restore";
-import {
-  acknowledgeBusyWebMessage,
-  hasUnresolvedBusyWebMessage,
-  type BusyWebMessageComposerRequest,
-  type BusyWebMessageResult,
-} from "@/components/web-queue/submit";
 import { useShallow } from "zustand/shallow";
 import type { ThreadUserMessagePart } from "@assistant-ui/core";
 import {
@@ -147,14 +140,8 @@ export type ThreadProps = {
   attachmentsEnabled?: boolean | undefined;
   /** Per-agent/conversation localStorage key for the unsent composer text. */
   draftKey?: string | null | undefined;
-  /** Engine session owning this daemon queue submission plan. */
-  queueSessionId?: string | null | undefined;
-  /** Current canonical conversation for local queue retry ownership. */
-  queueConversationUid?: string | null | undefined;
   /** Daemon-backed queue shown in the sticky composer footer. */
   queuePanel?: ReactNode | undefined;
-  /** Queue a busy-composer message through the authenticated daemon route. */
-  onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
   /** A harness session takes no Send Now: it steers a message into its running turn. */
   harness?: boolean | undefined;
 };
@@ -201,10 +188,7 @@ export const Thread: FC<ThreadProps> = ({
   onOpenWelcome,
   attachmentsEnabled = true,
   draftKey,
-  queueSessionId,
-  queueConversationUid,
   queuePanel,
-  onQueueBusyMessage,
   harness = false,
 }) => {
   const store = useChatStore();
@@ -229,10 +213,7 @@ export const Thread: FC<ThreadProps> = ({
             onOpenWelcome={onOpenWelcome}
             attachmentsEnabled={attachmentsEnabled}
             draftKey={draftKey}
-            queueSessionId={queueSessionId}
-            queueConversationUid={queueConversationUid}
             queuePanel={queuePanel}
-            onQueueBusyMessage={onQueueBusyMessage}
           />
         </ThreadComponentsContext.Provider>
       </QueuedIdsContext.Provider>
@@ -250,10 +231,7 @@ const ThreadRoot: FC<{
   onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
-  queueSessionId: ThreadProps["queueSessionId"];
-  queueConversationUid: ThreadProps["queueConversationUid"];
   queuePanel: ThreadProps["queuePanel"];
-  onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
 }> = ({
   isEmpty,
   agents,
@@ -264,10 +242,7 @@ const ThreadRoot: FC<{
   onOpenWelcome,
   attachmentsEnabled,
   draftKey,
-  queueSessionId,
-  queueConversationUid,
   queuePanel,
-  onQueueBusyMessage,
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -432,9 +407,6 @@ const ThreadRoot: FC<{
                 onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={attachmentsEnabled}
                 draftKey={draftKey}
-                queueSessionId={queueSessionId}
-                queueConversationUid={queueConversationUid}
-                onQueueBusyMessage={onQueueBusyMessage}
               />
             </div>
           </ThreadPrimitive.ViewportFooter>
@@ -498,10 +470,7 @@ const Composer: FC<{
   onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
-  queueSessionId: ThreadProps["queueSessionId"];
-  queueConversationUid: ThreadProps["queueConversationUid"];
-  onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
-}> = ({ agents, commands, commandCatalogStatus, onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey, queueSessionId, queueConversationUid, onQueueBusyMessage }) => {
+}> = ({ agents, commands, commandCatalogStatus, onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey }) => {
   const aui = useAui();
   // The mic starts the LiveKit room in this browser; /voice (the computer
   // running the agent listens) stays a typed command, and its status line shows.
@@ -541,12 +510,6 @@ const Composer: FC<{
   const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
   const skipEmptyDraftPersist = useRef(false);
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
-  const [queueAdmissionLock, setQueueAdmissionLock] = useState<{
-    draftKey: string | null;
-    locked: boolean;
-  } | null>(null);
-  const queueAdmissionLocked = hasUnresolvedBusyWebMessage(queueSessionId, draftKey, undefined, queueConversationUid) ||
-    (queueAdmissionLock?.locked === true && queueAdmissionLock.draftKey === (draftKey ?? null));
 
   useLayoutEffect(() => {
     let cancelled = false;
@@ -662,12 +625,6 @@ const Composer: FC<{
     saveComposerDraft(key, composerText);
   }, [composerText, draftKey]);
 
-  const lastBusySubmit = useRef<{
-    fingerprint: string;
-    at: number;
-    inFlight: Set<string>;
-  } | null>(null);
-
   // A bare /welcome opens the local guide; panel commands open Settings and post
   // no text. Any other line is sent exactly as typed. Runs on form submit and Send.
   const openPanelFromComposer = (event: { preventDefault: () => void }) => {
@@ -689,105 +646,6 @@ const Composer: FC<{
     event.preventDefault();
     aui.composer.setText("");
     onOpenPanel(request);
-  };
-
-  // Picking a panel command in the slash menu (Enter or click) opens its tab
-  // instead of leaving "/config" in the box for a second Enter.
-  const sendBusyMessage = async (event: {
-    preventDefault: () => void;
-    defaultPrevented?: boolean;
-  }) => {
-    if (!isRunning || event.defaultPrevented) return;
-    const sendsNow = submitSendsNow.current;
-    const state = aui.composer.getState();
-    if (!state.text.trim() && state.attachments.length === 0) return;
-
-    const fingerprint = `${state.text}\u0000${state.attachments
-      .map((attachment) => attachment.id)
-      .join(",")}`;
-    const previous = lastBusySubmit.current;
-    const inFlight = previous?.inFlight ?? new Set();
-    if (inFlight.has(fingerprint)) {
-      event.preventDefault();
-      return;
-    }
-    const now = Date.now();
-    if (
-      previous &&
-      previous.fingerprint === fingerprint &&
-      now - previous.at < 450
-    ) {
-      event.preventDefault();
-      return;
-    }
-    lastBusySubmit.current = { fingerprint, at: now, inFlight };
-    inFlight.add(fingerprint);
-    event.preventDefault();
-    setBusySubmitError(null);
-    setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: true });
-    let admissionConfirmed = false;
-    let exactDraftStillVisible = true;
-    try {
-      const attachments = await Promise.all(
-        state.attachments.map(async (attachment) => {
-          if (attachment.content) return attachment;
-          if (
-            attachment.type === "image" &&
-            attachment.status.type === "requires-action"
-          ) {
-            return imageAttachmentAdapter.send(attachment as PendingAttachment);
-          }
-          throw new Error("Attachment is not ready to send");
-        }),
-      );
-      if (!onQueueBusyMessage) throw new Error("The daemon message queue is unavailable.");
-      const result = await onQueueBusyMessage({
-        draftKey,
-        text: state.text,
-        attachments: attachments as ComposerAttachmentLike[],
-        sendNow: sendsNow,
-      });
-      if (!result.admitted) throw new Error("The daemon did not confirm queue admission.");
-      admissionConfirmed = true;
-      const currentState = aui.composer.getState();
-      const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
-        .map((attachment) => attachment.id)
-        .join(",")}`;
-      exactDraftStillVisible = currentFingerprint === fingerprint;
-      if (currentFingerprint === fingerprint) {
-        if (state.text.length > 0) skipEmptyDraftPersist.current = true;
-        await aui.composer.reset();
-        if (state.text.length > 0) saveComposerDraft(draftKey, "");
-        if (!await acknowledgeBusyWebMessage(result)) {
-          setBusySubmitError("Message was queued, but the local retry guard could not be cleared. Check the queue before reusing this draft.");
-        } else if (sendsNow && result.sendNowStatus !== "accepted") {
-          setBusySubmitError(result.sendNowStatus === "unknown"
-            ? "Message is queued, but Send Now could not be confirmed. Check the queue before retrying."
-            : "Message is queued, but Send Now was not accepted. It remains in the queue.");
-        }
-      }
-      setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: false });
-    } catch (error) {
-      if (lastBusySubmit.current?.fingerprint === fingerprint) {
-        lastBusySubmit.current = {
-          ...lastBusySubmit.current,
-          at: Number.NEGATIVE_INFINITY,
-        };
-      }
-      const unresolved = typeof error === "object" && error !== null &&
-        "requiresExactRetry" in error && error.requiresExactRetry === true;
-      const rejected = typeof error === "object" && error !== null &&
-        "definitelyNotAdmitted" in error && error.definitelyNotAdmitted === true;
-      const keepExactDraft = unresolved || (admissionConfirmed && exactDraftStillVisible);
-      setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: keepExactDraft });
-      setBusySubmitError(unresolved
-        ? "Queue admission may have succeeded. Keep this exact message unchanged and retry to reconcile it safely."
-        : rejected && error instanceof Error
-          ? error.message
-          : "Could not queue this message. Keep it in the composer and retry.");
-    } finally {
-      inFlight.delete(fingerprint);
-    }
   };
 
   const submitBusyMessage = (event: {
@@ -868,6 +726,8 @@ const Composer: FC<{
     sendFromComposer(event);
   };
 
+  // Picking a panel command in the slash menu (Enter or click) opens its tab
+  // instead of leaving "/config" in the box for a second Enter.
   const openPanelForItem = (item: {
     id: string;
     metadata?: Record<string, unknown> | undefined;
@@ -1188,7 +1048,7 @@ const Composer: FC<{
         ) : null}
         <ComposerPrimitive.AttachmentDropzone
           asChild
-          disabled={!attachmentsEnabled || queueAdmissionLocked}
+          disabled={!attachmentsEnabled}
         >
           <div
             data-slot="aui_composer-shell"
@@ -1202,7 +1062,7 @@ const Composer: FC<{
                 {orphanTokenNotice}
               </p>
             ) : null}
-            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} disabled={queueAdmissionLocked} />
+            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
@@ -1211,16 +1071,16 @@ const Composer: FC<{
               className="aui-composer-row flex items-end gap-1.5"
               onKeyDown={handleBusyEnter}
             >
-              {attachmentsEnabled ? <ComposerAddAttachment disabled={queueAdmissionLocked} /> : null}
+              {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
                 placeholder={lock || placeholder}
-                disabled={Boolean(lock) || queueAdmissionLocked}
+                disabled={Boolean(lock)}
                 className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-base leading-6 outline-none pointer-fine:text-sm"
                 rows={1}
                 autoFocus
                 enterKeyHint="send"
                 aria-label="Message input"
-                addAttachmentOnPaste={attachmentsEnabled && !queueAdmissionLocked}
+                addAttachmentOnPaste={attachmentsEnabled}
                 onKeyDown={handleComposerKeyDown}
               />
               <ComposerSlot

@@ -21,7 +21,6 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
-import type { BusyWebMessageComposerRequest, BusyWebMessageResult } from "@/components/web-queue/submit";
 import { Avatar } from "@/components/agents/Avatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { resolveAgentSender, type HubNote } from "@/hub-notes";
@@ -375,10 +374,7 @@ export const Thread: FC<{
   queuePanel?: ReactNode;
   /** A harness session takes no Send Now: it steers a message into its running turn. */
   harness?: boolean;
-  /** Current canonical conversation for local queue retry ownership. */
-  queueConversationUid?: string | null;
-  onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
-}> = ({ agents = [], commands = [], commandCatalogStatus = "ready", onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", queuePanel, queueConversationUid, onQueueBusyMessage, harness = false }) => (
+}> = ({ agents = [], commands = [], commandCatalogStatus = "ready", onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", queuePanel, harness = false }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -406,12 +402,8 @@ export const Thread: FC<{
             onOpenWelcome={onOpenWelcome}
             attachmentsEnabled={attachmentsEnabled}
             draftKey={composerDraftStorageKey(identity, sessionId)}
-            queueSessionId={sessionId}
-            queueConversationUid={queueConversationUid}
-
             queuePanel={queuePanel}
             harness={harness}
-            onQueueBusyMessage={onQueueBusyMessage}
           />
         </ComposerLockContext.Provider>
       </ComposerPlaceholderContext.Provider>
