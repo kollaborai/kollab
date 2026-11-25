@@ -748,6 +748,35 @@ describe("LiveChatStore", () => {
     expect(store.olderStatus).toBe("idle");
   });
 
+  it("only the newest history request can update the rows, cursor, or paging status", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+
+    const respondFirst = holdHistory(request);
+    const firstLoad = store.loadOlder();
+    const respondSecond = holdHistory(request);
+    const secondLoad = store.loadOlder();
+    respondSecond([row("r-1", "newer page")], "c-1");
+    await secondLoad;
+
+    const failThird = holdRequest(request);
+    const thirdLoad = store.loadOlder();
+    respondFirst([row("r0", "stale page")], "c0");
+    await firstLoad;
+    const rowsWhileThirdLoads = store.rows.map((item) => item.id);
+    const statusWhileThirdLoads = store.olderStatus;
+
+    failThird(new Response(null, { status: 500 }));
+    await expect(thirdLoad).rejects.toThrow("history failed: 500");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
+    await store.loadOlder();
+
+    expect(rowsWhileThirdLoads).toEqual(["r-1", "r1"]);
+    expect(statusWhileThirdLoads).toBe("loading");
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c-1&limit=50");
+  });
+
   it("a replace while an older page is in flight drops that page: its rows do not join the replacement window", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
@@ -775,11 +804,11 @@ describe("LiveChatStore", () => {
     expect(store.olderStatus).toBe("idle");
   });
 
-  it("a snapshot without an older field has no earlier page: hasEarlier is false, paging is complete, and loadOlder sends nothing", async () => {
+  it("a snapshot with no older cursor has no earlier page: hasEarlier is false, paging is complete, and loadOlder sends nothing", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
-    // The shared validators do not check `older`, so a snapshot can arrive without it.
-    first.emit(streamEvent(1, "snapshot", { rows: [row("r1")], next_seq: 5, turns: [], inputs: [] }));
+    // The shared contract requires the field, using null when there are no older rows.
+    first.emit(snapshot(5, [row("r1")]));
     expect(store.hasEarlier).toBe(false);
     expect(store.olderStatus).toBe("complete");
     await store.loadOlder();
