@@ -43,9 +43,9 @@ class _State:
         return {"rows": list(self.snapshot_rows), "turns": [], "inputs": []}
 
 
-def _events(stream):
-    first = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
-    replay = stream.subscribe({"after": 0, "conversation_uid": "conversation-a"})[
+def _events(stream, first):
+    cursor = first["data"]["next_seq"] - 1
+    replay = stream.subscribe({"after": cursor, "conversation_uid": "conversation-a"})[
         "events"
     ]
     return [first, *replay]
@@ -64,6 +64,7 @@ async def test_native_queued_input_streams_one_reply_and_ends_after_its_turn():
     state = _State()
     stream = ChatStreamService(state)
     stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
     await _add(stream, "web-native-1", "hello")
 
     _publish(
@@ -88,7 +89,7 @@ async def test_native_queued_input_streams_one_reply_and_ends_after_its_turn():
         stop_reason="end_turn",
     )
 
-    events = _events(stream)
+    events = _events(stream, initial)
     assert sequence_problems(events) == []
     input_rows = [
         event["data"]
@@ -104,6 +105,7 @@ async def test_acp_steered_input_joins_the_current_turn_and_both_inputs_end_once
     state = _State()
     stream = ChatStreamService(state)
     stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
     await _add(stream, "web-acp-1", "start")
     await _add(stream, "web-acp-2", "steer")
 
@@ -135,7 +137,7 @@ async def test_acp_steered_input_joins_the_current_turn_and_both_inputs_end_once
         stop_reason="end_turn",
     )
 
-    events = _events(stream)
+    events = _events(stream, initial)
     assert sequence_problems(events) == []
     joined = [
         event["data"]
@@ -188,6 +190,7 @@ async def test_reload_mid_turn_replays_terminal_events_from_the_snapshot_cursor(
 async def test_compaction_replaces_rows_with_a_marker_and_kept_transcript_ids():
     state = _State()
     stream = ChatStreamService(state)
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
     await _add(stream, "web-compact-1", "kept")
     _publish(
         state,
@@ -217,7 +220,7 @@ async def test_compaction_replaces_rows_with_a_marker_and_kept_transcript_ids():
 
     stream.replace_transcript()
 
-    events = _events(stream)
+    events = _events(stream, initial)
     assert sequence_problems(events) == []
     replacement = next(event for event in events if event["type"] == "replace")
     assert replacement["data"]["rows"][0]["kind"] == "marker"
