@@ -402,19 +402,34 @@ export async function waitForSessionReady(page, {
   clickTarget,
   timeout = 15_000,
 }) {
+  const deadline = Date.now() + timeout;
+  const remainingTimeout = () => Math.max(1, deadline - Date.now());
   const historyResponse = historyPath
     ? page.waitForResponse((response) =>
       response.request().method() === "GET" && new URL(response.url()).pathname === historyPath,
-    { timeout }).then(
+    { timeout: remainingTimeout() }).then(
       (response) => ({ response }),
       (error) => ({ error }),
     )
     : null;
-  if (clickTarget) await clickTarget.click({ timeout });
+  if (clickTarget) await clickTarget.click({ timeout: remainingTimeout() });
   if (historyResponse) {
     const result = await historyResponse;
     if ("error" in result) throw result.error;
-    await result.response.finished();
+    let timer;
+    try {
+      await Promise.race([
+        result.response.finished(),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`history response body timed out for ${historyPath}`)),
+            remainingTimeout(),
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
   await page.waitForFunction(({ title, placeholder, headingText, nameText }) => {
     const activeRow = [...document.querySelectorAll('[data-sidebar="sidebar"] button')].some((button) =>
@@ -433,7 +448,7 @@ export async function waitForSessionReady(page, {
     placeholder: composerPlaceholder,
     headingText: sessionHeading,
     nameText: sessionName,
-  }, { timeout });
+  }, { timeout: remainingTimeout() });
 }
 
 export async function waitForLesson(page, title) {
