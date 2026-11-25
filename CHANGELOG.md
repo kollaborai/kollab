@@ -84,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - web-fetch streams responses within byte limits, bounds its complete output, and keeps browser fallback input within the same cap (#924).
 - The Web UI slash menu distinguishes loading, empty, and unavailable session command catalogs, with retry that preserves the draft (#922).
 - Telegram voice transcription remains local, with private artifact cleanup hardened across failures, timeouts, and cancellation (#931).
-- Model catalog pricing and limits are corrected: dynamic OpenRouter prices stay unknown instead of negative, Solar Pro 4 Contributor's cached-input rate is updated, and four output caps persist across refreshes.
+- Model catalog pricing and limits are corrected: dynamic OpenRouter prices stay unknown instead of negative, a cached-input price is corrected, and four output caps persist across refreshes.
 
 ### Security
 - When a package plugin's Python entry fails while loading, Settings shows a fixed safe message and points to the process log for details; plugin-raised text is not copied into plugin error metadata (#1401).
