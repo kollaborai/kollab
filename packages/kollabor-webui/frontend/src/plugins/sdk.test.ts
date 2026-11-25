@@ -19,14 +19,18 @@ const entry = (id = "hello", extra: Partial<PluginEntry> = {}): PluginEntry => (
     views: [{ id: "peek", label: "Peek" }],
     modals: ["about"],
     slash: ["hello"],
-    renderers: ["hello_tool"],
+    renderers: [{ tool: "hello_tool" }],
   },
   services: [],
   omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
   ...extra,
 });
 
-function harness(id = "hello", declaredSlash = ["hello"], declaredRenderers = ["hello_tool"]) {
+function harness(
+  id = "hello",
+  declaredSlash = ["hello"],
+  declaredRenderers: NonNullable<PluginEntry["contributes"]>["renderers"] = [{ tool: "hello_tool" }],
+) {
   let contributions: Contributions = EMPTY_CONTRIBUTIONS;
   const json = (body: unknown) =>
     new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
@@ -81,6 +85,24 @@ describe("renderer declarations", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("renderer ignored: provide exactly one of tool or tag"));
     expect(warn).toHaveBeenCalledTimes(2);
   });
+
+  it("F1 rejects registration against an untyped declaration", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["hello"], ["hello_tool"]);
+    k.renderer({ tool: "hello_tool", render: Tab });
+
+    expect(current().renderers).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("F6 binds a renderer only to a declaration of the same kind", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["hello"], [{ tool: "hello_tool" }]);
+    k.renderer({ tag: "hello_tool", render: Tab });
+
+    expect(current().renderers).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("contribution points", () => {
@@ -118,7 +140,10 @@ describe("contribution points", () => {
   });
 
   it("keeps tool and tag renderers with the same name as separate claims", () => {
-    const { k, current } = harness();
+    const { k, current } = harness("hello", ["hello"], [
+      { tool: "hello_tool" },
+      { tag: "hello_tool" },
+    ]);
     k.renderer({ tool: "hello_tool", render: Tab });
     k.renderer({ tag: "hello_tool", render: Tab });
 
@@ -130,7 +155,7 @@ describe("contribution points", () => {
 
   it("rejects tag renderer names the message parser cannot match", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { k, current } = harness("hello", ["hello"], ["my.card"]);
+    const { k, current } = harness("hello", ["hello"], [{ tag: "my.card" }]);
     k.renderer({ tag: "my.card", render: Tab });
 
     expect(current().renderers).toEqual([]);

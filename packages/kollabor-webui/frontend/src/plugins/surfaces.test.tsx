@@ -449,3 +449,44 @@ describe("modals", () => {
     }
   });
 });
+
+describe("plugin view icons", () => {
+  it.each(["throws", "suspends"] as const)(
+    "F2 contains a plugin view icon that %s and uses the host fallback icon",
+    async (failure) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      vi.useFakeTimers();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const never = new Promise<void>(() => {});
+      const BrokenIcon = () => {
+        if (failure === "throws") throw new Error("broken view icon");
+        throw never;
+      };
+      put("hello", "Hello", {
+        contributions: contributions({
+          views: [{ id: "peek", label: "Peek", icon: BrokenIcon, render: Body }],
+        }),
+      });
+      const [, , Icon] = pluginViews(pluginRegistry.getSnapshot(), true)[0];
+      const host = document.createElement("div");
+      document.body.append(host);
+      const uncaught = vi.fn();
+      const root = createRoot(host, { onUncaughtError: uncaught });
+
+      try {
+        await act(async () => root.render(<Icon className="size-4" />));
+        if (failure === "suspends") {
+          expect(host.textContent).toContain("Rendering plugin view");
+          await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+        }
+
+        expect(uncaught).not.toHaveBeenCalled();
+        expect(host.querySelector('[data-plugin="hello"] svg')).not.toBeNull();
+        expect(host.textContent).not.toContain("broken view icon");
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+});

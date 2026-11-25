@@ -21,6 +21,10 @@ import pytest
         ("contributes", "contributes"),
         ("multiple-slash-identities", "contributes"),
         ("multiple-renderer-identities", "contributes"),
+        ("renderer-string", "contributes"),
+        ("renderer-id", "contributes"),
+        ("renderer-name", "contributes"),
+        ("renderer-invalid-tag", "contributes"),
         ("multiple-menu-identities", "contributes"),
     ],
 )
@@ -68,6 +72,14 @@ def test_manifest_checks(change, message, tmp_path, monkeypatch):
         manifest["contributes"] = {"slash": [{"id": "deploy", "name": "review"}]}
     elif change == "multiple-renderer-identities":
         manifest["contributes"] = {"renderers": [{"tool": "shell", "tag": "card"}]}
+    elif change == "renderer-string":
+        manifest["contributes"] = {"renderers": ["shell"]}
+    elif change == "renderer-id":
+        manifest["contributes"] = {"renderers": [{"id": "shell"}]}
+    elif change == "renderer-name":
+        manifest["contributes"] = {"renderers": [{"name": "shell"}]}
+    elif change == "renderer-invalid-tag":
+        manifest["contributes"] = {"renderers": [{"tag": "my.card"}]}
     elif change == "multiple-menu-identities":
         manifest["contributes"] = {
             "menu": [{"id": "home", "name": "other", "label": "Home", "open": {"view": "home"}}]

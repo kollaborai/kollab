@@ -159,6 +159,7 @@ function record(id: string, commands: CommandSpec[], withK = true, enableOrder?:
     id,
     name: id,
     entry: {
+      web: { entry: "web/dist/index.js", style: null, hash: "test" },
       ...(enableOrder === undefined ? {} : { enable_order: enableOrder }),
       contributes: { slash: commands.map(({ name }) => name) },
     } as PluginRecord["entry"],
@@ -256,6 +257,15 @@ describe("pluginCommandEntries", () => {
         winnerName: "alpha",
       },
     ]);
+  });
+
+  it("F4 lets the next web-capable plugin own a slash command", () => {
+    const noWeb = record("alpha", [command("publish")], false, 1);
+    noWeb.entry = { ...noWeb.entry, web: null };
+    const capable = record("beta", [command("publish")], true, 2);
+
+    expect(pluginCommandEntries([noWeb, capable], new Set()).map(({ pluginId }) => pluginId)).toEqual(["beta"]);
+    expect(pluginCommandConflicts([noWeb, capable], new Set())).toEqual([]);
   });
 
   it("preserves API order when enable order is missing", () => {
@@ -437,7 +447,10 @@ function putThreadCommand(name: string, run = () => {}, toast = vi.fn()) {
   pluginRegistry.put({
     id: "punctuation",
     name: "Punctuation",
-    entry: { contributes: { slash: [name] } } as PluginEntry,
+    entry: {
+      web: { entry: "web/dist/index.js", style: null, hash: "test" },
+      contributes: { slash: [name] },
+    } as PluginEntry,
     status: "ready",
     error: null,
     retries: 0,

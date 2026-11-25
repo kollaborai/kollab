@@ -23,6 +23,7 @@ const record = (extra: Partial<PluginRecord> = {}): PluginRecord => {
     entry: extra.entry ?? ({
       id: "hello",
       name: "Hello",
+      web: { entry: "web/dist/index.js", style: null, hash: "test" },
       contributes: {
         renderers: contributions.renderers.map((renderer) =>
           "tool" in renderer ? { tool: renderer.tool } : { tag: renderer.tag },
@@ -104,6 +105,80 @@ describe("PluginMount", () => {
       });
       if (kind.endsWith("suspend")) expect(host.textContent).toContain("Rendering plugin view");
       else expect(host.textContent).toContain("Hello Failed to Render");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("F3 keeps the first suspension deadline through resetKey updates and resets on Retry", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const never = new Promise<void>(() => {});
+    const Suspends = () => { throw never; };
+    const view = (resetKey: string) => (
+      <PluginMount record={record()} renderer="tag:status" resetKey={resetKey}>
+        <Suspends />
+      </PluginMount>
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(view("chunk-1")));
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      await act(async () => root.render(view("chunk-2")));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(host.textContent).toContain("Hello Failed to Render");
+
+      await act(async () => root.render(view("chunk-3")));
+      expect(host.textContent).toContain("Hello Failed to Render");
+      await act(async () => host.querySelector("button")?.click());
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(host.textContent).toContain("Hello Failed to Render");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("F3 restarts the suspension deadline after content commits", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const never = new Promise<void>(() => {});
+    const Toggle = ({ suspended }: { suspended: boolean }) => {
+      if (suspended) throw never;
+      return <p>ready</p>;
+    };
+    const view = (suspended: boolean, resetKey: string) => (
+      <PluginMount record={record()} renderer="view:peek" resetKey={resetKey}>
+        <Toggle suspended={suspended} />
+      </PluginMount>
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(view(true, "first")));
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      await act(async () => root.render(view(false, "committed")));
+      expect(host.textContent).toContain("ready");
+      await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
+      expect(host.textContent).toContain("ready");
+
+      await act(async () => root.render(view(true, "second")));
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(host.textContent).toContain("Hello Failed to Render");
     } finally {
       await act(async () => root.unmount());
       host.remove();

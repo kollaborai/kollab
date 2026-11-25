@@ -191,7 +191,11 @@ def _over_limit_inventory_entry(surface):
             for index in range(257)
         ]
     else:
-        items = [f"declaration-{index}" for index in range(257)]
+        items = (
+            [{"tool": f"declaration-{index}"} for index in range(257)]
+            if kind == "renderers"
+            else [f"declaration-{index}" for index in range(257)]
+        )
     return {"id": "example-plugin", "contributes": {kind: items}}
 
 
@@ -308,6 +312,30 @@ def test_plugin_inventory_normalizer_accepts_internal_underscores_in_renderer_na
         {"tag": "status_card"},
     ]
     assert entry["omitted"]["contributions"] == 0
+
+
+def test_plugin_inventory_omits_untyped_and_unmatchable_renderer_declarations():
+    """F1 F5: renderer declarations must be typed and SDK-matchable."""
+    entry = _normalize_plugin_entry(
+        {
+            "id": "example-plugin",
+            "contributes": {
+                "renderers": [
+                    "shell",
+                    {"id": "shell"},
+                    {"name": "shell"},
+                    {"tool": "shell", "tag": "status"},
+                    {"tool": "shell"},
+                    {"tag": "status-card"},
+                    {"tag": "my.card"},
+                ],
+            },
+        }
+    )
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == [{"tool": "shell"}, {"tag": "status-card"}]
+    assert entry["omitted"]["contributions"] == 5
 
 
 @pytest.mark.parametrize(

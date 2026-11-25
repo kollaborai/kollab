@@ -24,6 +24,7 @@ function record(id: string, renderers: RendererSpec[], withK = true, enableOrder
     id,
     name: id,
     entry: {
+      web: { entry: "web/dist/index.js", style: null, hash: "test" },
       ...(enableOrder === undefined ? {} : { enable_order: enableOrder }),
       contributes: {
         renderers: renderers.map((renderer) =>
@@ -96,6 +97,27 @@ describe("findToolRenderer", () => {
 
     expect(findToolRenderer(plugins, "shell")?.spec).toBe(zuluTool);
     expect(findTagRenderer(plugins, "status-card")?.spec).toBe(zuluTag);
+  });
+
+  it("F1 does not let an untyped renderer declaration claim both kinds", () => {
+    const first = record("alpha", [{ tool: "shared", render: Render }]);
+    const untyped = {
+      ...first,
+      entry: { ...first.entry, contributes: { renderers: ["shared"] } },
+    };
+    const laterTag = record("beta", [{ tag: "shared", render: Render }]);
+
+    expect(findTagRenderer([untyped, laterTag], "shared")?.record.id).toBe("beta");
+    expect(tagRendererNames([untyped, laterTag])).toEqual(["shared"]);
+  });
+
+  it("F4 lets the next web-capable plugin own a renderer", () => {
+    const noWeb = record("alpha", [{ tag: "shared", render: Render }], false, 1);
+    noWeb.entry = { ...noWeb.entry, web: null };
+    const capable = record("beta", [{ tag: "shared", render: Render }], true, 2);
+
+    expect(findTagRenderer([noWeb, capable], "shared")?.record.id).toBe("beta");
+    expect(tagRendererNames([noWeb, capable])).toEqual(["shared"]);
   });
 
   it("does not give a later loaded plugin a renderer declared by an earlier loading plugin", () => {
