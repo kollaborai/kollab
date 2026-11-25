@@ -64,12 +64,24 @@ describe("chat recorder analysis", () => {
       status: "idle",
       latestEventStatus: "idle",
       replaced: false,
+      runtime: "native",
     })).toBe(false);
     expect(isCompactionComplete({
       sawStart: true,
       status: "idle",
       latestEventStatus: "idle",
       replaced: true,
+      runtime: "native",
+    })).toBe(true);
+  });
+
+  it("accepts successful ACP compaction without a transcript replacement", () => {
+    expect(isCompactionComplete({
+      sawStart: true,
+      status: "idle",
+      latestEventStatus: "idle",
+      replaced: false,
+      runtime: "codex-cli",
     })).toBe(true);
   });
 
