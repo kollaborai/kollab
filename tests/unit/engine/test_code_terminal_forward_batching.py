@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("fastapi")
 
 from kollabor_engine.routes import code  # noqa: E402
+from kollabor.code_service import terminal  # noqa: E402
 
 
 class _Ws:
@@ -65,3 +66,27 @@ def test_other_messages_keep_their_order_between_inputs():
         "ab",
         "c",
     ]
+
+
+def test_multibyte_inputs_that_fit_the_daemon_limit_are_not_merged_over_it():
+    chunks = ["界" * 11000, "界" * 11000]
+    raws = [json.dumps({"type": "input", "data": chunk}) for chunk in chunks]
+    merged = [json.loads(raw)["data"] for raw in code._coalesce(raws)]
+
+    assert merged == chunks
+
+    class _TerminalSession:
+        exited = False
+        closed = False
+
+        def __init__(self):
+            self.received = []
+
+        def write_input(self, raw):
+            self.received.append(raw)
+            return True
+
+    terminal_session = _TerminalSession()
+    link = type("Link", (), {"session": terminal_session})()
+    assert [terminal._input_message({"data": chunk}, link) for chunk in merged] == [[], []]
+    assert terminal_session.received == [chunk.encode("utf-8") for chunk in chunks]
