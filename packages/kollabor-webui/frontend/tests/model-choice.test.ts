@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyModelChoice, choiceLabel, matchesChoice, PickError } from "../src/components/shell/model-choice.ts";
+import { startingChoice } from "../src/components/shell/starting-choice.ts";
 
 const codexLunaMax = { profile: "codex-cli", provider: "acp", model: "gpt-6-luna", effort: "max" };
 const oauthLuna = { profile: "openai-oauth", provider: "openai_responses", model: "gpt-6-luna", effort: "" };
@@ -209,4 +210,73 @@ test("a refused pick with no message names what it asked for and what the sessio
   );
   assert.match(error.message, /codex-cli refused gpt-6-luna · max\. It now runs gpt-6-luna · medium\./);
   assert.deepEqual([error.session.model, error.session.effort], ["gpt-6-luna", "medium"]);
+});
+
+test("New Session uses the last completed model when the saved model is unavailable", () => {
+  const profile = {
+    name: "codex-oauth",
+    provider: "openai",
+    model: "unsupported-model",
+    last_completed_turn: {
+      model: "working-model",
+      effort: "high",
+      completed_at: "2026-11-17T12:00:00Z",
+    },
+    unavailable_models: ["unsupported-model"],
+  };
+
+  assert.deepEqual(startingChoice([profile], profile.name, null), {
+    profile: profile.name,
+    provider: profile.provider,
+    model: "working-model",
+    effort: "high",
+  });
+});
+
+test("New Session keeps the default loadout ahead of the last completed model", () => {
+  const profile = {
+    name: "codex-oauth",
+    provider: "openai",
+    model: "saved-model",
+    last_completed_turn: {
+      model: "working-model",
+      effort: "high",
+      completed_at: "2026-11-17T12:00:00Z",
+    },
+  };
+  const loadout = {
+    name: "fast",
+    profile: profile.name,
+    provider: profile.provider,
+    model: "loadout-model",
+    effort: "low",
+  };
+
+  assert.deepEqual(startingChoice([profile], profile.name, loadout), {
+    profile: profile.name,
+    provider: profile.provider,
+    model: "loadout-model",
+    effort: "low",
+  });
+});
+
+test("New Session ignores a last completed model that is now unavailable", () => {
+  const profile = {
+    name: "codex-oauth",
+    provider: "openai",
+    model: "saved-model",
+    last_completed_turn: {
+      model: "working-model",
+      effort: "high",
+      completed_at: "2026-11-17T12:00:00Z",
+    },
+    unavailable_models: ["working-model"],
+  };
+
+  assert.deepEqual(startingChoice([profile], profile.name, null), {
+    profile: profile.name,
+    provider: "",
+    model: "",
+    effort: "",
+  });
 });

@@ -370,6 +370,14 @@ class LoadoutManager:
         rows: List[Dict[str, str]] = []
         for profile in profiles:
             provider = (profile.get_provider() or "").lower()
+            unavailable_getter = getattr(
+                self.profile_manager, "get_unavailable_models", None
+            )
+            unavailable = (
+                set(unavailable_getter(profile.name) or [])
+                if callable(unavailable_getter)
+                else set()
+            )
             if provider == "acp":
                 reported = (acp_options or {}).get(profile.name) or {}
                 seen = reported.get("efforts_by_model") or {}
@@ -385,6 +393,8 @@ class LoadoutManager:
                     said = (found.get(m) or []) if accepted is None else accepted
                     levels[m] = [e for e in said if e in EFFORT_LEVELS]
             for model in models:
+                if model in unavailable:
+                    continue
                 efforts = levels[model]
                 if provider != "acp" or not efforts:
                     efforts = [""] + efforts

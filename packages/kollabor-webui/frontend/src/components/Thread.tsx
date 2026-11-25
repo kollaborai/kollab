@@ -321,6 +321,8 @@ const HUB_SEND_TOOL_UIS = ["hub_msg", "hub_reply", "hub_broadcast"].map((toolNam
 export const Thread: FC<{
   agents?: readonly AgentPoolEntry[];
   commands?: readonly SlashCommand[];
+  commandCatalogStatus?: "loading" | "ready" | "empty" | "unavailable" | "fallback";
+  onRetryCommands?: () => void;
   onOpenPanel?: (request: PanelOpenRequest) => void;
   onOpenWelcome?: () => void;
   /** False when the session's model cannot read images. */
@@ -346,7 +348,7 @@ export const Thread: FC<{
   onLoadOlder?: () => Promise<boolean | void>;
   onRetryHistory?: () => void;
   historyStartIndex?: number;
-}> = ({ agents = [], commands = [], onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0 }) => (
+}> = ({ agents = [], commands = [], commandCatalogStatus = "ready", onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0 }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -368,6 +370,8 @@ export const Thread: FC<{
             components={{ Welcome, ComposerLeading: ComposerGem, ToolGroup, SystemMessage: HubNoteMessage }}
             agents={agents}
             commands={commands}
+            commandCatalogStatus={commandCatalogStatus}
+            onRetryCommands={onRetryCommands}
             onOpenPanel={onOpenPanel}
             onOpenWelcome={onOpenWelcome}
             attachmentsEnabled={attachmentsEnabled}

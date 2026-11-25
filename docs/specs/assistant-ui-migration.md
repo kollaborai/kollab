@@ -130,24 +130,34 @@ dead: every subsequent message returns `"turn already in flight"` forever.
 Map it onto assistant-ui's human-in-the-loop:
 
 1. On `permission_request`, emit a tool call named something like
-   `request_permission`, with the prompt payload as its args (`tool_id`, `tool_name`,
-   `risk_level`, `risk_reason`, `input`).
+   `request_permission`, with the prompt payload as its args (`tool_id`, `permission_id`,
+   `tool_name`, `risk_level`, `risk_reason`, `input`).
 2. Render it with a custom tool UI (`makeAssistantToolUI`) showing approve/deny.
-3. The user's choice comes back as an `add-tool-result` command.
-4. Translate that into `await session.resolve_permission(tool_id, decision, scope)`.
+3. For a live tool call, the user's choice comes back as an `add-tool-result` command and
+   carries the same `permission_id`. A pending row rebuilt from `pending_prompts` has no
+   live tool-result transport to consume it; send its explicit choice directly to the
+   authenticated permission endpoint so it can unblock while a later request stays open.
+4. Resolve with both `tool_id` and `permission_id`. The engine checks that exact pair with
+   the daemon; tool IDs alone are not an owner, because they can be reused.
 
 `decision` is `"approve"` or `"deny"`. `scope` is one of `once | session | project |
 always_edits | trust_tool`. The mapping onto the daemon's `ConfirmationResponse` names
-lives in `session.py::_confirmation_response_name` and **fails closed** — anything
-unrecognized denies, an unknown scope narrows to `APPROVE_ONCE`. Keep that property;
-there is a test on it (`tests/unit/test_permission_tool_metadata.py`).
+lives in `session.py::_confirmation_response_name`. The permission HTTP body requires
+`tool_id` and `permission_id`; a stale owner receives HTTP 409. The daemon's
+`permission.respond_owned` RPC settles only that exact pair. Missing or mismatched owner
+identity fails closed and never auto-approves. The scope mapping fails closed — anything
+unrecognized denies, an unknown scope narrows to `APPROVE_ONCE`. Keep that property; there
+is a test on it (`tests/unit/test_permission_tool_metadata.py`).
 
 ### Reload recovery is mandatory
 
 `GET /sessions/{id}/permissions` returns `pending_prompts` — full prompt payloads for
 anything still blocking. On mount, if a session has pending prompts you must re-render
 them and follow `GET /sessions/{id}/events` to pick the turn back up. The daemon will
-**not** re-send the request.
+**not** re-send the request. Each prompt includes its `permission_id`, and pending rows
+are distinct by `(tool_id, permission_id)` so a reused tool ID cannot replace or answer a
+different prompt. Repeated refreshes must not duplicate a row; resolved or stale rows must
+be removed and must not remain answerable after changing sessions.
 
 This is already implemented in the old UI (`restorePendingPermissions` in `app.js`) —
 read it before you delete it, then port the behaviour.

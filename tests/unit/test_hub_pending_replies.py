@@ -1,10 +1,12 @@
 import asyncio
+import json
 from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from plugins.hub import task_ledger as task_ledger_module
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.task_ledger import TaskLedger
 
@@ -25,6 +27,83 @@ def test_task_assignment_creates_expected_reply(tmp_path):
     assert len(pending) == 1
     assert pending[0]["task_id"] == "review-agent-hud"
     assert pending[0]["assignee"] == "lapis"
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    ["bad", float("nan"), float("inf"), float("-inf"), True],
+    ids=["string", "nan", "positive-infinity", "negative-infinity", "boolean"],
+)
+def test_pending_replies_prunes_invalid_timestamps(tmp_path, monkeypatch, created_at):
+    now = 100.0
+    monkeypatch.setattr(
+        task_ledger_module, "time", SimpleNamespace(time=lambda: now)
+    )
+    ledger = TaskLedger(str(tmp_path))
+    path = tmp_path / "_pending_replies.json"
+    path.write_text(
+        json.dumps(
+            {
+                "expected_replies": [
+                    {
+                        "task_id": "bad-timestamp",
+                        "message_id": "bad",
+                        "status": "pending",
+                        "created_at": created_at,
+                    },
+                    {
+                        "task_id": "valid-neighbor",
+                        "message_id": "valid",
+                        "status": "pending",
+                        "created_at": now,
+                    },
+                ]
+            },
+            allow_nan=True,
+        ),
+        encoding="utf-8",
+    )
+
+    pending = ledger.pending_replies()
+
+    assert [item["message_id"] for item in pending] == ["valid"]
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert [
+        item["message_id"] for item in persisted["expected_replies"]
+    ] == ["valid"]
+
+
+def test_pending_reply_reader_keeps_only_allowlisted_fields(tmp_path, monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(
+        task_ledger_module, "time", SimpleNamespace(time=lambda: now)
+    )
+    ledger = TaskLedger(str(tmp_path))
+    (tmp_path / "_pending_replies.json").write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "legacy-list-entry",
+                    "message_id": "msg-1",
+                    "status": "pending",
+                    "created_at": now,
+                    "unexpected": "ignored",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pending = ledger.pending_replies()
+
+    assert pending == [
+        {
+            "task_id": "legacy-list-entry",
+            "message_id": "msg-1",
+            "status": "pending",
+            "created_at": now,
+        }
+    ]
 
 
 def test_task_loader_recovers_valid_prefix_after_old_corruption(tmp_path):

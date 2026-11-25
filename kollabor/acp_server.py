@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import sys
 import uuid
@@ -46,6 +47,9 @@ from .llm.acp_state import ACPClientSessionStore
 from .state.interface import ACP_CONVERSATION_BUSY, ACP_HARNESS_UNAVAILABLE
 from .version import __version__
 
+logger = logging.getLogger(__name__)
+_PERMISSION_RESPONSE_RPC_METHOD = "permission.respond_owned"
+
 
 @dataclass
 class ClientSession:
@@ -54,7 +58,7 @@ class ClientSession:
     workspace: str
     attached: bool
     requests: list[str] = field(default_factory=list)
-    permission_tasks: dict[tuple[str, str], asyncio.Task] = field(default_factory=dict)
+    permission_tasks: dict[tuple[str, str, str], asyncio.Task] = field(default_factory=dict)
 
 
 @dataclass
@@ -332,7 +336,9 @@ class KollabACPAgent:
         if session_id in self.sessions:
             if self._session(session_id).workspace != os.path.realpath(cwd):
                 raise RequestError.invalid_params({"reason": "workspace differs"})
-            return ResumeSessionResponse(modes=None if self.attach else self._modes(self._session(session_id).engine.approval_mode))
+            return ResumeSessionResponse(
+                modes=None if self.attach else self._modes(self._session(session_id).engine.approval_mode)
+            )
         # Resume suppresses replay; load is the explicit replaying operation.
         if self.attach:
             raise RequestError.invalid_params({"reason": "attached session is not owned by this connection"})
@@ -386,7 +392,9 @@ class KollabACPAgent:
                     await self._text(session_id, event.get("text") or "")
                 elif kind in {"thinking", "thought"}:
                     await self.connection.session_update(session_id, AgentThoughtChunk(
-                        sessionUpdate="agent_thought_chunk", content=TextContentBlock(type="text", text=str(event.get("text") or ""))))
+                        sessionUpdate="agent_thought_chunk",
+                        content=TextContentBlock(type="text", text=str(event.get("text") or "")),
+                    ))
                 elif kind == "tool_start":
                     wire_id = tool_ids.resolve(str(event.get("tool_id") or ""), start=True)
                     await self.connection.session_update(session_id, self._tool_start(dict(event, tool_id=wire_id)))
@@ -396,10 +404,18 @@ class KollabACPAgent:
                 elif kind == "permission_request":
                     tool_id = str(event.get("tool_id") or "")
                     wire_id = tool_ids.resolve(tool_id, permission=True)
+                    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+                    permission_id = str(event.get("permission_id") or details.get("permission_id") or "")
                     task = asyncio.create_task(self._permission(session, event, wire_tool_id=wire_id))
-                    session.permission_tasks[(request_id, tool_id)] = task
+                    session.permission_tasks[(request_id, tool_id, permission_id)] = task
                 elif kind in {"permission_granted", "permission_denied", "permission_cancelled"}:
-                    task = session.permission_tasks.pop((request_id, str(event.get("tool_id") or "")), None)
+                    tool_id = str(event.get("tool_id") or "")
+                    permission_id = str(event.get("permission_id") or "")
+                    task = (
+                        session.permission_tasks.pop((request_id, tool_id, permission_id), None)
+                        if permission_id
+                        else None
+                    )
                     if task and not task.done():
                         task.cancel()
                 elif kind == "acp_update":
@@ -424,7 +440,11 @@ class KollabACPAgent:
             session.engine.unsubscribe(events)
             if request_id in session.requests:
                 session.requests.remove(request_id)
-            pending = [session.permission_tasks.pop(key) for key in tuple(session.permission_tasks) if key[0] == request_id]
+            pending = [
+                session.permission_tasks.pop(key)
+                for key in tuple(session.permission_tasks)
+                if key[0] == request_id
+            ]
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
@@ -455,7 +475,10 @@ class KollabACPAgent:
 
     @staticmethod
     def _tool_result(event: dict[str, Any]) -> ToolCallProgress:
-        content = [{"type": "content", "content": {"type": "text", "text": str(event.get("output") or event.get("error") or "")}}]
+        content = [{
+            "type": "content",
+            "content": {"type": "text", "text": str(event.get("output") or event.get("error") or "")},
+        }]
         diffs = (event.get("metadata") or {}).get("diffs", [])
         for diff in diffs:
             if isinstance(diff, dict) and diff.get("path"):
@@ -468,37 +491,87 @@ class KollabACPAgent:
     async def _permission(self, session: ClientSession, event: dict[str, Any],
                           *, wire_tool_id: str | None = None) -> None:
         tool_id = str(event.get("tool_id") or "")
+        details = event.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        permission_id = str(event.get("permission_id") or details.get("permission_id") or "")
+        request_id = str(event.get("request_id") or "")
+
+        async def respond(payload: dict[str, Any]) -> bool:
+            if not tool_id or not permission_id:
+                await self._text(
+                    session.id,
+                    "Cannot safely answer this permission prompt because its owner identity is missing. "
+                    "Update and reload Kollab.",
+                )
+                if request_id:
+                    with contextlib.suppress(Exception):
+                        await session.engine.daemon.rpc.call("state.acp_cancel", {"request_id": request_id})
+                return False
+            try:
+                result = await session.engine.daemon.rpc.call(
+                    _PERMISSION_RESPONSE_RPC_METHOD,
+                    {"tool_id": tool_id, "permission_id": permission_id, **payload},
+                )
+            except Exception as exc:
+                logger.warning("ACP permission response failed for %s: %s", tool_id, exc)
+                await self._text(
+                    session.id,
+                    "Permission response could not reach the running agent. "
+                    "Update or restart Kollab, then try again.",
+                )
+                if request_id:
+                    with contextlib.suppress(Exception):
+                        await session.engine.daemon.rpc.call("state.acp_cancel", {"request_id": request_id})
+                return False
+            if isinstance(result, dict) and result.get("ok") is True:
+                return True
+            logger.warning("ACP permission response rejected for %s: %s", tool_id, result)
+            await self._text(
+                session.id,
+                "Permission response was rejected as stale or unsupported. "
+                "Reload the session before answering again.",
+            )
+            if request_id:
+                with contextlib.suppress(Exception):
+                    await session.engine.daemon.rpc.call("state.acp_cancel", {"request_id": request_id})
+            return False
+
         options = [PermissionOption(optionId="once", name="Allow Once", kind="allow_once"),
                    PermissionOption(optionId="deny", name="Deny Once", kind="reject_once")]
         if not session.attached:
-            options.append(PermissionOption(optionId="session", name=f"Allow {event.get('tool_name') or 'this operation'} for this session", kind="allow_always"))
-        details = event.get("details") or {}
+            options.append(PermissionOption(
+                optionId="session",
+                name=f"Allow {event.get('tool_name') or 'this operation'} for this session",
+                kind="allow_always",
+            ))
         vendor_options = details.get("acp_options") or []
         vendor_request = details.get("source") == "acp" or "acp_options" in details
         if vendor_request:
             options = [PermissionOption.model_validate(option) for option in vendor_options
                        if not session.attached or option.get("kind") not in {"allow_always", "reject_always"}]
             if not options:
-                await session.engine.daemon.rpc.call("permission.respond", {"tool_id": tool_id, "control": "CANCEL"})
+                await respond({"control": "CANCEL"})
                 return
         try:
             response = await asyncio.wait_for(self.connection.request_permission(
                 session_id=session.id, tool_call=ToolCallUpdate(toolCallId=wire_tool_id or tool_id,
-                    title=str(event.get("tool_name") or "Tool permission"), status="pending", rawInput=event.get("input") or {}),
+                    title=str(event.get("tool_name") or "Tool permission"), status="pending",
+                    rawInput=event.get("input") or {}),
                 options=options,
             ), timeout=300)
             outcome = response.outcome
             selection = getattr(outcome, "optionId", None)
             if selection not in {option.optionId for option in options}:
-                payload = {"tool_id": tool_id, "control": "CANCEL"}
+                payload = {"control": "CANCEL"}
             elif vendor_request:
-                payload = {"tool_id": tool_id, "option_id": selection}
+                payload = {"option_id": selection}
             else:
                 control = {"once": "APPROVE_ONCE", "deny": "DENY", "session": "APPROVE_SESSION"}[selection]
-                payload = {"tool_id": tool_id, "control": control}
-            await session.engine.daemon.rpc.call("permission.respond", payload)
+                payload = {"control": control}
+            await respond(payload)
         except asyncio.TimeoutError:
-            await session.engine.daemon.rpc.call("permission.respond", {"tool_id": tool_id, "control": "DENY"})
+            await respond({"control": "DENY"})
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         session = self._session(session_id)

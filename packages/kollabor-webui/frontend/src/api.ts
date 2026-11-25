@@ -97,7 +97,13 @@ export type UpdateRelease = { version: string; tag_name: string; name: string; u
 export type UpdateCheckResponse = {
   current_version: string;
   available: boolean;
+  status: "current" | "available" | "disabled" | "failed";
   release: UpdateRelease | null;
+  checked_at: number | null;
+  last_successful_check: number | null;
+  retry_after_seconds: number | null;
+  retry_at: number | null;
+  retry_reason: "retry" | "rate_limit" | null;
   notes: Array<{ version: string; date: string; sections: Array<{ title: string; items: string[] }> }>;
 };
 export type UpdateApplyResponse = { success: boolean; changed: boolean; message: string; method: string };
@@ -199,6 +205,8 @@ export function stripAgentHud(text: string): string {
 export type PermissionPrompt = {
   type?: "permission_request";
   tool_id: string;
+  permission_id?: string;
+  request_id?: string;
   tool_name: string;
   tool_type?: string;
   input?: Record<string, unknown>;
@@ -242,6 +250,12 @@ export type Profile = {
   streaming?: boolean;
   supports_tools?: boolean;
   supports_vision?: boolean;
+  last_completed_turn?: {
+    model: string;
+    effort: string;
+    completed_at: string;
+  } | null;
+  unavailable_models?: string[];
 };
 
 /** One provider profile x model x effort a session can run on (`GET /profiles/choices`). */
@@ -544,10 +558,9 @@ export type SlashCommand = {
   subcommands?: SlashSubcommand[];
 };
 
-// Keep the first paint useful when the browser is connected to an older
-// engine that does not expose GET /sessions/{id}/commands yet. A current
-// engine replaces this compatibility catalog with its complete core + plugin
-// registry as soon as the request resolves.
+// Compatibility catalog for older engines that return 404 for
+// GET /sessions/{id}/commands. RuntimeShell uses it only for that unsupported
+// endpoint response and labels it as a fallback; transport failures stay visible.
 export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   {
     name: "help",
@@ -695,6 +708,8 @@ export type SessionEvent = {
   type?: string;
   session_id?: string;
   tool_id?: string;
+  permission_id?: string;
+  request_id?: string;
   tool_name?: string;
   scope?: string;
   message?: string;
@@ -859,12 +874,14 @@ export type PanelWizardStep = {
   id: string;
   title: string;
   fields: PanelField[];
+  actions?: PanelAction[];
 };
 
 export type PanelWizard = PanelBase & {
   kind: "wizard";
   steps: PanelWizardStep[];
   actions?: PanelAction[];
+  context?: Record<string, unknown>;
 };
 
 export type PanelDescription = PanelForm | PanelPicker | PanelWizard;
@@ -1180,8 +1197,9 @@ export class EngineApi {
   }
 
 
-  async checkForUpdate() {
-    const response = await fetch("/api/update/check", { cache: "no-store" });
+  async checkForUpdate(refresh = false) {
+    const query = refresh ? "?refresh=true" : "";
+    const response = await fetch(`/api/update/check${query}`, { cache: "no-store" });
     if (!response.ok) throw new ApiError(`Update check failed: ${response.status}`, response.status, undefined);
     return (await response.json()) as UpdateCheckResponse;
   }
@@ -1441,16 +1459,27 @@ export class EngineApi {
    * it answers): an event that fired earlier is gone, so a caller that may
    * have missed one reloads then.
    */
-  async streamEvents(
+  streamEvents(
     sessionId: string,
     signal?: AbortSignal,
     onEvent?: (event: SessionEvent) => void,
     onOpen?: () => void,
   ): Promise<void> {
-    const response = await this.request(
-      `/sessions/${encodeURIComponent(sessionId)}/events`,
-      { method: "GET", signal },
-    );
+    return this.streamSse<SessionEvent>(`/sessions/${encodeURIComponent(sessionId)}/events`, signal, onEvent, onOpen);
+  }
+
+  /**
+   * Reads an engine SSE stream (`path`), calling `onEvent` with each frame's JSON `data`; resolves when the
+   * stream ends. Shared by the session stream above and the plugin streams (`GET /plugins/events`,
+   * `GET /plugins/{id}/events`). onOpen runs once the engine answered, after it holds the subscription.
+   */
+  async streamSse<T = unknown>(
+    path: string,
+    signal?: AbortSignal,
+    onEvent?: (event: T) => void,
+    onOpen?: () => void,
+  ): Promise<void> {
+    const response = await this.request(path, { method: "GET", signal });
     if (!response.body) throw new Error("event stream response has no body");
     onOpen?.();
     const reader = response.body.getReader();
@@ -1471,7 +1500,7 @@ export class EngineApi {
             .join("\n");
           if (!data) continue;
           try {
-            onEvent?.(JSON.parse(data) as SessionEvent);
+            onEvent?.(JSON.parse(data) as T);
           } catch {
             // Ignore keepalive/non-JSON frames while preserving the stream.
           }
@@ -1486,7 +1515,7 @@ export class EngineApi {
           .join("\n");
         if (data) {
           try {
-            onEvent?.(JSON.parse(data) as SessionEvent);
+            onEvent?.(JSON.parse(data) as T);
           } catch {
             // Ignore a partial trailing frame.
           }
@@ -1500,6 +1529,7 @@ export class EngineApi {
   respondPermission(
     sessionId: string,
     toolId: string,
+    permissionId: string,
     decision: "approve" | "deny",
     scope = "once",
   ) {
@@ -1507,7 +1537,7 @@ export class EngineApi {
       `/sessions/${encodeURIComponent(sessionId)}/permission`,
       {
         method: "POST",
-        body: JSON.stringify({ tool_id: toolId, decision, scope }),
+        body: JSON.stringify({ tool_id: toolId, permission_id: permissionId, decision, scope }),
       },
     );
   }

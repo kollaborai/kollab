@@ -26,7 +26,7 @@ class ConversationsAltView(AltView):
             author="Kollabor",
             category="system",
             icon="[HST]",
-            aliases=["convos", "sessions"],
+            aliases=["convos"],
             supports_named_sessions=False,
             supports_background=False,
         )

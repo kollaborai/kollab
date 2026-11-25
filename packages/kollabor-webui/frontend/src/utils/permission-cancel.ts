@@ -1,4 +1,4 @@
-export type PendingPermission = { toolId: string; requestId?: string; source?: string };
+export type PendingPermission = { toolId: string; requestId?: string; source?: string; parked?: boolean };
 
 type PermissionMessage = {
   status?: { type: string };
@@ -12,12 +12,17 @@ type PermissionMessage = {
 
 export function permissionOwner(payload: unknown): PendingPermission | null {
   if (!payload || typeof payload !== "object") return null;
-  const args = payload as { tool_id?: unknown; details?: { request_id?: unknown; source?: unknown } };
+  const args = payload as {
+    tool_id?: unknown;
+    request_id?: unknown;
+    details?: { source?: unknown; parked?: unknown };
+  };
   if (typeof args.tool_id !== "string" || !args.tool_id) return null;
   return {
     toolId: args.tool_id,
-    requestId: typeof args.details?.request_id === "string" && args.details.request_id ? args.details.request_id : undefined,
+    requestId: typeof args.request_id === "string" && args.request_id ? args.request_id : undefined,
     source: typeof args.details?.source === "string" ? args.details.source : undefined,
+    ...(typeof args.details?.parked === "boolean" ? { parked: args.details.parked } : {}),
   };
 }
 
@@ -48,12 +53,21 @@ export async function cancelPendingPermission({
   readPending: () => Promise<readonly PendingPermission[]>;
   cancel: (requestId: string) => Promise<{ cancelled?: boolean }>;
 }): Promise<boolean> {
-  if (!expected.length || !samePendingPermission(expected, current())) return false;
+  if (expected.length !== 1 || expected[0].parked !== false) return false;
+  const selected = expected[0];
+  const beforeRead = current();
+  if (!samePermissionOwner(selected, beforeRead)) return false;
   const daemon = await readPending();
-  const owner = expected.find((candidate) =>
-    samePendingPermission([candidate], daemon) && samePendingPermission([candidate], current()));
-  if (!owner?.requestId) return false;
-  return (await cancel(owner.requestId)).cancelled !== false;
+  const afterRead = current();
+  const daemonOwner = daemon.find((candidate) => samePermissionOwner(selected, [candidate]));
+  if (!selected.requestId || !samePermissionOwner(selected, afterRead) || daemonOwner?.parked !== false) return false;
+  return (await cancel(selected.requestId)).cancelled === true;
+}
+
+function samePermissionOwner(expected: PendingPermission, candidates: readonly PendingPermission[]): boolean {
+  return candidates.some((candidate) => candidate.toolId === expected.toolId &&
+    candidate.requestId === expected.requestId && candidate.source === expected.source &&
+    candidate.parked === expected.parked);
 }
 
 type ShownMessage = { id?: unknown; status?: { type?: string }; content: unknown };

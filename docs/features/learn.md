@@ -105,6 +105,12 @@ Session Options > Model before starting a session, or Manage Profiles to inspect
 and copy a connection. Keep API keys in Kollab's supported sign-in or environment flow, never
 in a prompt or Hub message.
 
+New Session starts with an applicable default loadout when one is set; otherwise it uses
+the active profile's last completed model and effort when that choice is still
+available. A model rejected as unsupported is skipped for that profile until a
+refreshed provider catalog lists it again. When there is no usable completed
+choice, the profile's saved model remains the fallback.
+
 Example: keep one profile for quick everyday questions and a second profile with
 higher reasoning effort for a difficult code review.
 

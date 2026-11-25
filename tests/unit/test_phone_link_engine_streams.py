@@ -21,6 +21,7 @@ from kollabor_engine.phone_link import (
     decode_phone_frame,
     encode_phone_frame,
 )
+from kollabor_engine.routes import messages
 
 from tests.unit.test_phone_link import secure_phone
 from tests.unit.test_phone_link import setup_link as setup_link
@@ -526,7 +527,15 @@ async def test_stream_loss_releases_real_assistant_callback_without_stopping_wor
         await probe.packet(op="cancel", id=assistant)
     else:
         await probe.manager.revoke(probe.link[1]["id"])
-    await until(lambda: not probe.session.queues and exchange.task.done())
+    if action == "revoke":
+        await until(lambda: not probe.session.queues and exchange.task.done())
+    else:
+        # A lost stream keeps an accepted, unfinished send's queue in the
+        # bounded handover ledger so a reconnect can resume it (#1368).
+        await until(exchange.task.done)
+        ledger = messages._assistant_handover_ledger(probe.session)
+        assert len(ledger) == 1
+        assert list(probe.session.queues) == [next(iter(ledger.values()))["queue"]]
     assert not probe.manager.exchanges
     assert probe.session.stops == 0
 

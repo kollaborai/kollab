@@ -10,12 +10,20 @@ pending promises, last command, and focus file.
 
 import json
 import logging
+import math
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from kollabor_config.atomic_write import write_text_atomic
+from kollabor_config.file_lock import locked_file
+
 logger = logging.getLogger(__name__)
+
+
+class SessionStateError(RuntimeError):
+    """Raised when session state cannot be read or safely updated."""
 
 
 class SessionState:
@@ -63,6 +71,62 @@ class SessionState:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionState":
         """Deserialize state from a dict."""
+        if not isinstance(data, dict):
+            raise ValueError("Session state must be an object")
+
+        allowed_fields = {
+            "identity",
+            "open_files",
+            "investigation_notes",
+            "claimed_lanes",
+            "pending_promises",
+            "last_command",
+            "focus_file",
+            "saved_at",
+            "saved_at_human",
+        }
+        if set(data).difference(allowed_fields):
+            raise ValueError("Session state has unknown fields")
+
+        for key in (
+            "identity",
+            "investigation_notes",
+            "last_command",
+            "focus_file",
+            "saved_at_human",
+        ):
+            if key in data and not isinstance(data[key], str):
+                raise ValueError(f"Session state field {key} must be text")
+
+        for key in ("open_files", "claimed_lanes"):
+            value = data.get(key, [])
+            if not isinstance(value, list) or any(
+                not isinstance(item, str) for item in value
+            ):
+                raise ValueError(f"Session state field {key} must be a list of text")
+
+        promises = data.get("pending_promises", [])
+        if not isinstance(promises, list) or any(
+            not isinstance(item, dict)
+            or any(
+                not isinstance(name, str) or not isinstance(value, str)
+                for name, value in item.items()
+            )
+            for item in promises
+        ):
+            raise ValueError("Session state field pending_promises is invalid")
+
+        saved_at = data.get("saved_at", 0.0)
+        if isinstance(saved_at, bool) or not isinstance(saved_at, (int, float)):
+            raise ValueError("Session state field saved_at must be a finite number")
+        try:
+            if not math.isfinite(saved_at):
+                raise ValueError("Session state field saved_at must be a finite number")
+        except OverflowError as e:
+            raise ValueError(
+                "Session state field saved_at must be a finite number"
+            ) from e
+
         state = cls(
             identity=data.get("identity", ""),
             open_files=data.get("open_files", []),
@@ -198,6 +262,69 @@ class SessionStateManager:
         """Get the state file path for a vault directory."""
         return vault_dir / "session_state.json"
 
+    def _state_lock_path(self, state_path: Path) -> Path:
+        """Get the stable sidecar lock path used by all state writers."""
+        return state_path.with_name(f".{state_path.name}.lock")
+
+    def _load_state_unlocked(self, path: Path) -> Optional[SessionState]:
+        """Read and validate state without changing the saved file."""
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except UnicodeError as e:
+            logger.warning("Session state load error: %s", type(e).__name__)
+            raise SessionStateError(
+                "Session state is malformed; the original file was preserved. "
+                "Back it up, then explicitly repair or remove it before retrying."
+            ) from e
+        except OSError as e:
+            logger.warning("Session state load error: %s", type(e).__name__)
+            raise SessionStateError(
+                "Session state could not be read and was not treated as empty. "
+                "Check access to the state file, then retry."
+            ) from e
+
+        try:
+            data = json.loads(raw)
+            state = SessionState.from_dict(data)
+        except (
+            json.JSONDecodeError,
+            RecursionError,
+            TypeError,
+            ValueError,
+            OverflowError,
+        ) as e:
+            logger.warning("Session state validation error: %s", type(e).__name__)
+            raise SessionStateError(
+                "Session state is malformed or invalid; the original file was "
+                "preserved. Back it up, then explicitly repair or remove it "
+                "before retrying."
+            ) from e
+
+        logger.debug("Session state loaded for %s", state.identity)
+        return state
+
+    def _save_state_unlocked(self, path: Path, state: SessionState) -> bool:
+        """Atomically save validated state while the caller owns the lock."""
+        saved_at = time.time()
+        saved_at_human = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            data = state.to_dict()
+            data["saved_at"] = saved_at
+            data["saved_at_human"] = saved_at_human
+            validated_state = SessionState.from_dict(data)
+            serialized = json.dumps(validated_state.to_dict(), indent=2)
+            write_text_atomic(path, serialized)
+        except Exception as e:
+            logger.warning("Session state save error: %s", type(e).__name__)
+            return False
+
+        state.saved_at = saved_at
+        state.saved_at_human = saved_at_human
+        logger.debug("Session state saved for %s", state.identity)
+        return True
+
     def save_state(
         self,
         vault_dir: Path,
@@ -212,18 +339,14 @@ class SessionStateManager:
         Returns:
             True if save succeeded.
         """
-        state.saved_at = time.time()
-        state.saved_at_human = time.strftime("%Y-%m-%d %H:%M:%S")
-
         try:
             path = self._state_path(vault_dir)
             with self._write_lock:
-                with open(path, "w") as f:
-                    json.dump(state.to_dict(), f, indent=2)
-            logger.debug(f"Session state saved for {state.identity}")
-            return True
+                with locked_file(self._state_lock_path(path), private=True):
+                    self._load_state_unlocked(path)
+                    return self._save_state_unlocked(path, state)
         except Exception as e:
-            logger.warning(f"Session state save error: {e}")
+            logger.warning("Session state save error: %s", type(e).__name__)
             return False
 
     def load_state(self, vault_dir: Path) -> Optional[SessionState]:
@@ -234,21 +357,11 @@ class SessionStateManager:
 
         Returns:
             SessionState if found, None otherwise.
+
+        Raises:
+            SessionStateError: If saved state is unreadable, malformed, or invalid.
         """
-        try:
-            path = self._state_path(vault_dir)
-            if not path.exists():
-                return None
-            with open(path) as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return None
-            state = SessionState.from_dict(data)
-            logger.debug(f"Session state loaded for {state.identity}")
-            return state
-        except Exception as e:
-            logger.warning(f"Session state load error: {e}")
-            return None
+        return self._load_state_unlocked(self._state_path(vault_dir))
 
     def clear_state(self, vault_dir: Path) -> bool:
         """Clear session state from disk.
@@ -261,19 +374,21 @@ class SessionStateManager:
         """
         try:
             path = self._state_path(vault_dir)
-            if path.exists():
-                with self._write_lock:
-                    path.unlink()
+            with self._write_lock:
+                with locked_file(self._state_lock_path(path), private=True):
+                    path.unlink(missing_ok=True)
+            return True
+        except FileNotFoundError:
             return True
         except Exception as e:
-            logger.warning(f"Session state clear error: {e}")
+            logger.warning("Session state clear error: %s", type(e).__name__)
             return False
 
     def update_state(
         self,
         vault_dir: Path,
         updates: Dict[str, Any],
-    ) -> Optional[SessionState]:
+    ) -> SessionState:
         """Load existing state and apply partial updates.
 
         Merges updates into the existing state on disk.
@@ -284,24 +399,47 @@ class SessionStateManager:
             updates: Dict of fields to update.
 
         Returns:
-            Updated SessionState, or None on error.
+            Updated SessionState.
+
+        Raises:
+            SessionStateError: If the existing state is unreadable or the update
+                cannot be persisted safely.
         """
-        state = self.load_state(vault_dir)
-        if state is None:
-            state = SessionState()
+        if not isinstance(updates, dict):
+            raise SessionStateError("Session state updates must be a JSON object.")
 
-        for key, value in updates.items():
-            if hasattr(state, key):
-                setattr(state, key, value)
+        path = self._state_path(vault_dir)
+        try:
+            with self._write_lock:
+                with locked_file(self._state_lock_path(path), private=True):
+                    state = self._load_state_unlocked(path)
+                    if state is None:
+                        state = SessionState()
 
-        if self.save_state(vault_dir, state):
-            return state
-        return None
+                    for key, value in updates.items():
+                        if hasattr(state, key):
+                            setattr(state, key, value)
+
+                    if not self._save_state_unlocked(path, state):
+                        raise SessionStateError(
+                            "Session state could not be saved; the update was "
+                            "not applied."
+                        )
+                    return state
+        except SessionStateError:
+            raise
+        except Exception as e:
+            logger.warning("Session state update error: %s", type(e).__name__)
+            raise SessionStateError(
+                "Session state could not be updated safely; no success was "
+                "reported. Check vault access, then retry."
+            ) from e
 
     def get_injection_prompt(self, vault_dir: Path) -> str:
         """Load state and format it for system prompt injection.
 
-        Returns empty string if no state exists.
+        Returns an empty string if no state exists. Raises SessionStateError if
+        the state cannot be read safely.
 
         Args:
             vault_dir: The agent's vault directory.

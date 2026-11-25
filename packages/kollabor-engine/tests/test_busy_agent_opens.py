@@ -63,7 +63,7 @@ def registry():
 async def test_permissions_answer_from_the_engine_while_the_agent_is_busy(registry):
     session = EngineSession(session_id="lapis@far-box", profile=None, approval_mode="confirm_all")
     session.daemon = _daemon(BusyState())
-    session._pending_permissions["t1"] = PROMPT  # the daemon already pushed it
+    session._pending_permissions[("t1", "")] = PROMPT  # an ownerless legacy event from the daemon
     registry[session.session_id] = session
 
     answer = await asyncio.wait_for(permissions_route.get_permissions("lapis@far-box"), timeout=1)

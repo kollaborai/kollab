@@ -2619,6 +2619,52 @@ async def test_real_local_rpc_uses_single_workspace_owner_and_preserves_identity
 
 
 @pytest.mark.asyncio
+async def test_unauthorized_enrollment_offer_reason_survives_local_owner_rpc(monkeypatch):
+    from types import SimpleNamespace
+
+    from plugins.hub import relay_agent
+    from plugins.hub.enrollment_client import EnrollmentProtocolError
+    from plugins.hub.relay_agent import RelayAgentBridge
+
+    error = EnrollmentProtocolError("unauthorized")
+    error.source = "relay"
+
+    async def refuse(_domain):
+        raise error
+
+    owner = RelayAgentBridge.__new__(RelayAgentBridge)
+    owner._require_human_network_context = lambda *_args: None
+    owner.commands = object()
+    owner._local_agent = lambda _agent_id: None
+    owner._admit_refusal = lambda: None
+    owner._ensure_enrollment_issuer = lambda: SimpleNamespace(create_offer=refuse)
+
+    async def local_rpc(_socket_path, method, params, **_kwargs):
+        assert method == "relay.enrollment_offer"
+        return await owner._rpc_enrollment_offer(params)
+
+    monkeypatch.setattr(relay_agent, "local_relay_rpc", local_rpc)
+    viewer = RelayAgentBridge.__new__(RelayAgentBridge)
+    viewer._require_human_network_context = lambda *_args: None
+
+    async def ensure_owner():
+        return None
+
+    viewer._ensure_owner = ensure_owner
+    viewer.commands = None
+    viewer.plugin = SimpleNamespace(_identity=SimpleNamespace(agent_id="owner-agent"))
+    viewer.owner = SimpleNamespace(owner=lambda: {"socket_path": "/tmp/relay-owner.sock"})
+    viewer._auth = lambda: {}
+
+    result = await viewer.create_enrollment_offer("kollabor.ai")
+
+    assert result == {
+        "error": "connect offer could not be created",
+        "reason": "Relay denied authorization. Reconnect the network owner.",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "frame",
     [

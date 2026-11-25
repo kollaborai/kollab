@@ -1,1 +1,2 @@
-/* Step-one static fixture; web UI support is delivered in step three. */
+[data-plugin=hello] .hello-example{justify-items:start;gap:.75rem;padding:1rem;display:grid}
+/*$vite$:1*/

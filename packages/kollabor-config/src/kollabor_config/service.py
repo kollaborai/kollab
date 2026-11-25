@@ -1,11 +1,14 @@
 """Configuration service providing high-level configuration operations."""
 
 import asyncio
+import json
 import logging
+import os
+import stat
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from .atomic_write import keep_unreadable_copy, write_text_atomic
+from .atomic_write import write_bytes_atomic, write_text_atomic
 from .config_utils import (
     ProjectStateLocationError,
     get_global_config_path,
@@ -78,6 +81,10 @@ class ConfigService:
                 complete_config = self.config_loader.load_complete_config()
                 self.config_manager.config = complete_config
                 self._cached_config = complete_config.copy()
+                if self.config_loader.config_load_error:
+                    self._config_error = self.config_loader.config_load_error
+                    logger.warning("Configuration loaded with saves paused: %s", self._config_error)
+                    return
                 self._config_error = None
                 self._migrate_config_if_needed()
                 self._cached_config = self.config_manager.config.copy()
@@ -87,10 +94,14 @@ class ConfigService:
                 complete_config = self.config_loader.load_complete_config()
                 self.config_manager.config = complete_config
                 self._cached_config = complete_config.copy()
-                self.config_loader.save_merged_config(complete_config)
+                if not self.config_loader.save_merged_config(complete_config):
+                    self._config_error = self.config_loader.config_load_error or (
+                        "The configuration could not be saved. Check permissions and retry."
+                    )
+                    return
                 self._migrate_config_if_needed()
                 self._cached_config = self.config_manager.config.copy()
-                self._config_error = None
+                self._config_error = self.config_loader.config_load_error
                 logger.info("Created new configuration file")
         except ProjectStateLocationError:
             raise
@@ -115,8 +126,6 @@ class ConfigService:
         version so new releases can add missing keys without rewriting a
         user's chosen settings.
         """
-        import json
-
         from kollabor_events.dict_utils import safe_get, safe_set
 
         try:
@@ -124,21 +133,12 @@ class ConfigService:
         except Exception:
             app_version = "unknown"
 
-        missing = object()
         # This service's own file: reading and rewriting the global one would stamp (or replace) the
         # real config from a service built on some other path (#967).
         save_path = self.config_manager.config_path
-        try:
-            if save_path.exists():
-                raw = json.loads(save_path.read_text(encoding="utf-8"))
-                if not isinstance(raw, dict):
-                    raw = {}
-            else:
-                raw = {}
-        except Exception as e:
-            logger.warning("Could not read config for migration: %s", e)
-            keep_unreadable_copy(save_path)
-            raw = {}
+        if self.config_loader.config_load_error:
+            self._config_error = self.config_loader.config_load_error
+            return
 
         additive_defaults = {
             "plugins.hub.enabled": True,
@@ -157,31 +157,52 @@ class ConfigService:
             },
         }
 
-        changed = False
-        for key_path, default_value in additive_defaults.items():
-            if safe_get(raw, key_path, missing) is missing:
-                safe_set(raw, key_path, default_value)
-                safe_set(self.config_manager.config, key_path, default_value)
-                changed = True
-
-        if safe_get(raw, "config_version", None) != app_version:
-            safe_set(raw, "config_version", app_version)
-            safe_set(self.config_manager.config, "config_version", app_version)
-            changed = True
-        if safe_get(raw, "last_app_version", None) != app_version:
-            safe_set(raw, "last_app_version", app_version)
-            safe_set(self.config_manager.config, "last_app_version", app_version)
-            changed = True
-
-        if not changed:
-            return
-
         try:
+            from .file_lock import locked_file
+
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            write_text_atomic(save_path, json.dumps(raw, indent=2, ensure_ascii=False))
+            with locked_file(save_path.with_name(save_path.name + ".lock"), private=True):
+                allowed, raw = self.config_loader._check_file_for_write(save_path)
+                if not allowed:
+                    self._config_error = self.config_loader.config_load_error
+                    logger.warning("Config migration refused: %s", self._config_error)
+                    return
+
+                missing = object()
+                changed = False
+                for key_path, default_value in additive_defaults.items():
+                    if safe_get(raw, key_path, missing) is missing:
+                        safe_set(raw, key_path, default_value)
+                        safe_set(self.config_manager.config, key_path, default_value)
+                        changed = True
+
+                if safe_get(raw, "config_version", None) != app_version:
+                    safe_set(raw, "config_version", app_version)
+                    safe_set(self.config_manager.config, "config_version", app_version)
+                    changed = True
+                if safe_get(raw, "last_app_version", None) != app_version:
+                    safe_set(raw, "last_app_version", app_version)
+                    safe_set(self.config_manager.config, "last_app_version", app_version)
+                    changed = True
+
+                if not changed:
+                    return
+
+                write_text_atomic(save_path, json.dumps(raw, indent=2, ensure_ascii=False))
+                if not self.config_loader._record_file_snapshot(save_path):
+                    self._config_error = self.config_loader.config_load_error or (
+                        "The configuration could not be verified after migration. Reload before saving."
+                    )
+                    return
+                self._note_own_write(save_path)
             logger.info("Migrated config defaults for app version %s", app_version)
         except Exception as e:
-            logger.error("Failed to write migrated config: %s", e)
+            if self.config_loader.config_load_error is None:
+                self.config_loader.config_load_error = (
+                    "The configuration could not be migrated safely. Check permissions and retry."
+                )
+            self._config_error = self.config_loader.config_load_error
+            logger.error("Failed to migrate config (%s)", type(e).__name__)
 
     def get(self, key_path: str, default: Any = None) -> Any:
         """Get a configuration value using dot notation.
@@ -237,11 +258,15 @@ class ConfigService:
             self.config_manager.config, save_target=save_target
         )
         if success:
+            self._config_error = self.config_loader.config_load_error
             if self._mtimes:
                 self._mtimes = self._stat_mtimes()  # our write is not news
             logger.debug("Configuration saved to disk")
             return True
 
+        self._config_error = self.config_loader.config_load_error or (
+            "The configuration could not be saved. Check permissions and retry."
+        )
         logger.error("Failed to save configuration to disk")
         return False
 
@@ -295,18 +320,10 @@ class ConfigService:
             with locked_file(save_path.with_name(save_path.name + ".lock"), private=True):
                 if strict and save_path.is_symlink():
                     raise ValueError("Config file cannot be a symlink")
-                existing: Dict[str, Any] = {}
-                if save_path.exists():
-                    try:
-                        with open(save_path) as f:
-                            existing = json.load(f)
-                    except (json.JSONDecodeError, UnicodeError, OSError) as e:
-                        if strict:
-                            raise ValueError("Cannot read config file") from e
-                        logger.warning(f"Could not read {save_path}, starting fresh: {e}")
-                        keep_unreadable_copy(save_path)
-                if strict and not isinstance(existing, dict):
-                    raise ValueError("Config file must contain an object")
+                allowed, existing = self.config_loader._check_file_for_write(save_path)
+                if not allowed:
+                    self._config_error = self.config_loader.config_load_error
+                    return False
                 for key_path, value in changes.items():
                     if strict:
                         node = existing
@@ -319,13 +336,20 @@ class ConfigService:
                     if not safe_set(existing, key_path, value):
                         raise ValueError("Invalid config path")
                 write_text_atomic(save_path, json.dumps(existing, indent=2, ensure_ascii=False))
+                if not self.config_loader._record_file_snapshot(save_path):
+                    self._config_error = self.config_loader.config_load_error
+                    return False
                 for key_path, value in changes.items():
                     safe_set(self.config_manager.config, key_path, value)
                 self._note_own_write(save_path)
+            self._config_error = self.config_loader.config_load_error
             logger.info("Saved %d config key(s) to %s", len(changes), save_path)
             return True
         except Exception as e:
-            logger.error("Failed to save config keys to %s: %s", save_path, e)
+            self._config_error = self.config_loader.config_load_error or (
+                "The configuration could not be saved. Check permissions and retry."
+            )
+            logger.error("Failed to save config keys (%s)", type(e).__name__)
             return False
 
     def reload(self) -> bool:
@@ -336,6 +360,10 @@ class ConfigService:
         """
         try:
             complete_config = self.config_loader.load_complete_config()
+            if self.config_loader.config_load_error:
+                self._config_error = self.config_loader.config_load_error
+                logger.warning("Configuration reload refused: %s", self._config_error)
+                return False
 
             # Validate the new configuration
             old_config = self.config_manager.config
@@ -376,6 +404,10 @@ class ConfigService:
             True if update successful, False otherwise.
         """
         updated = self.config_loader.update_with_plugins()
+        if self.config_loader.config_load_error:
+            self._config_error = self.config_loader.config_load_error
+        elif updated:
+            self._config_error = None
         if self._mtimes:
             self._mtimes = self._stat_mtimes()  # our write is not news
         return updated
@@ -459,24 +491,31 @@ class ConfigService:
         Returns:
             Path to backup file if successful, None otherwise.
         """
-        if not self.config_manager.config_path.exists():
-            logger.warning("Cannot backup non-existent config file")
-            return None
-
         try:
-            backup_path = self.config_manager.config_path.with_suffix(
-                self.config_manager.config_path.suffix + backup_suffix
-            )
+            from .file_lock import locked_file
+            config_path = self.config_manager.config_path
+            backup_path = config_path.with_suffix(config_path.suffix + backup_suffix)
 
             import shutil
 
-            shutil.copy2(self.config_manager.config_path, backup_path)
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            with locked_file(config_path.with_name(config_path.name + ".lock"), private=True):
+                if not config_path.exists():
+                    logger.warning("Cannot back up a missing config file")
+                    return None
+                candidate = backup_path
+                index = 1
+                while candidate.exists() or candidate.is_symlink():
+                    candidate = backup_path.with_name(f"{backup_path.name}.{index}")
+                    index += 1
+                shutil.copy2(config_path, candidate)
 
-            logger.info(f"Configuration backed up to: {backup_path}")
+            logger.info("Configuration backup created")
+            backup_path = candidate
             return backup_path
 
         except Exception as e:
-            logger.error(f"Failed to backup configuration: {e}")
+            logger.error("Failed to back up configuration (%s)", type(e).__name__)
             return None
 
     def restore_from_backup(self, backup_path: Path) -> bool:
@@ -488,20 +527,64 @@ class ConfigService:
         Returns:
             True if restore successful, False otherwise.
         """
-        if not backup_path.exists():
-            logger.error(f"Backup file does not exist: {backup_path}")
-            return False
-
         try:
-            import shutil
+            from .file_lock import locked_file
 
-            shutil.copy2(backup_path, self.config_manager.config_path)
+            if not backup_path.is_file():
+                self._config_error = "The selected configuration backup is missing or unreadable."
+                return False
+            with backup_path.open("rb") as backup_file:
+                before = os.fstat(backup_file.fileno())
+                backup_bytes = backup_file.read()
+                after = os.fstat(backup_file.fileno())
+            version_before = (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+            )
+            version_after = (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_size,
+                after.st_mtime_ns,
+            )
+            if len(backup_bytes) != after.st_size or version_before != version_after:
+                self._config_error = "The selected configuration backup changed while it was read. Retry restoration."
+                return False
+
+            backup_config = json.loads(backup_bytes.decode("utf-8"))
+            if not isinstance(backup_config, dict):
+                self._config_error = "The selected configuration backup is not a JSON object."
+                return False
+            backup_mode = stat.S_IMODE(after.st_mode)
+
+            config_path = self.config_manager.config_path
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            with locked_file(config_path.with_name(config_path.name + ".lock"), private=True):
+                allowed, _ = self.config_loader._check_file_for_write(
+                    config_path, allow_unreadable_current=True
+                )
+                if not allowed:
+                    self._config_error = self.config_loader.config_load_error
+                    return False
+                write_bytes_atomic(config_path, backup_bytes)
+                os.chmod(config_path, backup_mode)
+                if not self.config_loader._record_file_snapshot(config_path):
+                    self._config_error = self.config_loader.config_load_error
+                    return False
+                self._note_own_write(config_path)
 
             # Reload configuration after restore
             return self.reload()
 
         except Exception as e:
-            logger.error(f"Failed to restore from backup: {e}")
+            self._config_error = self.config_loader.config_load_error or (
+                "The configuration backup could not be restored safely. Check the file and retry."
+            )
+            logger.error("Failed to restore configuration backup (%s)", type(e).__name__)
             return False
 
     def _watched_paths(self) -> list[Path]:

@@ -316,6 +316,10 @@ Removed. Each prints its redirect for one release instead of running:
   `used   press c for a new code`, and when it expires it reads
   `expired   press c for a new code`; `c` creates a new one. If the relay is
   unreachable the line says so and the rest still renders.
+- If authorization blocks code creation, the screen explains whether this
+  local Connect session is not authorized or the relay rejected it, and gives
+  the matching next step. Relay health alone does not prove that the session
+  can create an offer.
 - Requests and the roster refresh about every two seconds. With more than one
   request, Up and Down select a row; `a` accepts and `r` rejects it. Accepting
   prints what it queued for the device: the request's profile settings and one
@@ -509,6 +513,7 @@ fully migrated (works in attach mode):
   /permissions (all subcommands)
   /mcp show /mcp list /mcp servers /mcp enable /mcp disable /mcp test /mcp tools /mcp reload
   /resume <id>                    (one-shot resume by id)
+  /branch <id> <msg_idx>          (saved-session branch via StateService RPC)
   /save (all formats)
   /hub status /hub whoami /hub work
   /hub msg /hub broadcast          (StateService RPC)
@@ -523,13 +528,14 @@ client-only in attach mode (safe):
   /hub feed /hub console          altview modals, ui-only
   /hub on/off/user               config preferences
   /hub notify /hub bridge         local task mgmt
-  /fork modal                     ui-only (modal picker)
+  /sessions (no args)             ui-only conversation picker
 
 deferred or client-local:
   /hub stop/spawn/org             orchestrator control is not a StateService RPC
   /terminal view/attach           needs streaming transport
   /sub completion notifications   MessageInjector rewrite
-  /resume modal/search/branch     needs list/search rpcs
+  /resume modal/search             needs list/search rpcs
+  /branch modal selection          needs list/search rpcs; execution uses state.branch_conversation
   /login                          OAuth browser split
 
 
@@ -642,12 +648,17 @@ type / in the input box to open the command menu.
 
     phase 4.5: one-shot /resume <id> migrated through state_service
 
+  /sessions [search <query>]      browse, search, and resume conversations
+    alias: /history
+    (no args)                     show the conversation picker
+
   /fork                           browse and fork conversations
-    aliases: /history, /conversations
-    modal picker, client-only (deferred to 4.6)
+    aliases: /forks, /conversations
 
   /branch [session_id [msg_idx]]  fork from specific message
-    deferred to 4.6 (needs state.branch_conversation rpc)
+    <id> <msg_idx>                 branch a saved session through state_service
+    select a conversation and message to branch from
+    modal selection                client-side until list/search rpcs are available
 
   /compact [now|status|preview]   context compaction
     (no args)                     ask the model what to keep; it answers with
@@ -1063,7 +1074,9 @@ grant (see below).
     - sends shutdown signal to hub peer(s) via socket
     - "all" stops only the peers your session started; peers launched by
       other lanes or the operator are immune (issue #669)
-    - equivalent to /hub stop from slash commands
+    - same as /hub stop <name>; /hub stop all typed by a person stops every
+      agent in that session's folder (issue #1408); the tool keeps the
+      caller-owned scope
     - works for org-launched agents and any mesh peer
 
   example:
@@ -1285,12 +1298,17 @@ these run shell commands in managed terminal sessions.
 
   with options:
     <terminal background="true" name="session-name">long running command</terminal>
-    <terminal timeout="5m" cwd="/path/to/dir">command</terminal>
+    <terminal timeout="30s" cwd="/path/to/dir">command</terminal>
 
   how it works:
     - runs the command in a managed subprocess session
     - background="true" runs it detached with a name for later capture
-    - timeout sets max execution time (default varies)
+    - timeout sets the maximum runtime (30s, 5m, 1h); foreground requests may
+      shorten but cannot exceed the configured terminal timeout, and excessive
+      or invalid values are rejected before execution. Voice calls may have a
+      stricter policy limit. For background sessions, timeout schedules an
+      auto-kill. Without it, foreground uses the configured limit and background
+      sessions have no automatic timeout.
     - cwd sets working directory for the command
 
 #### <terminal-status> - check session status

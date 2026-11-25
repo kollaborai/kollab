@@ -33,6 +33,7 @@ async def test_phone_allows_remote_plugin_routes(tmp_path, method, path):
 @pytest.mark.parametrize(("method", "path"), [
     ("POST", "/plugins/install"),
     ("GET", "/plugins/jobs/123"),
+    ("DELETE", "/plugins/jobs/123"),
     ("POST", "/plugins/jobs/123/confirm"),
     ("POST", "/plugins/hello/update"),
     ("PUT", "/plugins/hello/settings"),

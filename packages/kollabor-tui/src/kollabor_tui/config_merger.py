@@ -26,9 +26,10 @@ class ConfigMerger:
 
             from kollabor_plugins.settings import apply_config_changes
 
-            widget_changes = apply_config_changes(widget_changes)
+            plugin_errors = []
+            widget_changes = apply_config_changes(widget_changes, failures=plugin_errors)
             if not widget_changes:
-                return True
+                return not plugin_errors
 
             # Create backup before making changes
             backup_path = config_service.backup_config(".pre-modal-changes")
@@ -70,6 +71,10 @@ class ConfigMerger:
 
             # Notify plugins using existing event system
             ConfigMerger.notify_plugins_config_changed(config_service, list(widget_changes.keys()))
+
+            if plugin_errors:
+                logger.error(f"Plugin config actions failed: {plugin_errors}")
+                return False
 
             return True
 

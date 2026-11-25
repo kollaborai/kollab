@@ -123,7 +123,11 @@ class GoalCommandHandler(BaseCommandHandler):
                 SubcommandInfo("", "<objective>", "Create a goal and start"),
                 SubcommandInfo("show", "", "Show the active goal in full"),
                 SubcommandInfo("pause", "", "Pause at the next safe boundary"),
-                SubcommandInfo("resume", "[--budget N] [--turns N]", "Resume after a stop"),
+                SubcommandInfo(
+                    "resume",
+                    "[--budget N] [--turns N] [--time N]",
+                    "Resume after a stop",
+                ),
                 SubcommandInfo("clear", "", "Stop and keep as history"),
                 SubcommandInfo("history", "[N]", "Recent finished goals"),
                 SubcommandInfo("pending", "", "List image requests awaiting retry"),
@@ -543,6 +547,7 @@ class GoalCommandHandler(BaseCommandHandler):
 
         budget = None
         turn_limit = None
+        time_limit = None
         while rest:
             parts = rest.split(" ", 1)
             flag = parts[0]
@@ -567,6 +572,22 @@ class GoalCommandHandler(BaseCommandHandler):
                         message="--turns requires a whole number",
                         display_type="error",
                     )
+            elif flag == "--time":
+                if not value_rest:
+                    return CommandResult(
+                        success=False,
+                        message="--time requires a whole number of seconds",
+                        display_type="error",
+                    )
+                try:
+                    time_limit = int(value_rest.split(" ", 1)[0])
+                    rest = value_rest.split(" ", 1)[1] if " " in value_rest else ""
+                except ValueError:
+                    return CommandResult(
+                        success=False,
+                        message="--time requires a whole number of seconds",
+                        display_type="error",
+                    )
             elif flag.startswith("--"):
                 return CommandResult(
                     success=False,
@@ -580,7 +601,12 @@ class GoalCommandHandler(BaseCommandHandler):
             return CommandResult(
                 success=False, message=capability_error, display_type="error"
             )
-        if record.status == "active" and budget is None and turn_limit is None:
+        if (
+            record.status == "active"
+            and budget is None
+            and turn_limit is None
+            and time_limit is None
+        ):
             # A driver can stop after a persistence error without saving the
             # paused state. Scheduling is idempotent while a driver is active.
             self._schedule_goal_turn(record)
@@ -591,7 +617,10 @@ class GoalCommandHandler(BaseCommandHandler):
             )
         try:
             updated = self.service.resume(
-                record.goal_id, token_budget=budget, auto_turn_limit=turn_limit
+                record.goal_id,
+                token_budget=budget,
+                auto_turn_limit=turn_limit,
+                auto_time_limit_s=time_limit,
             )
         except GoalError as exc:
             return CommandResult(success=False, message=str(exc), display_type="error")

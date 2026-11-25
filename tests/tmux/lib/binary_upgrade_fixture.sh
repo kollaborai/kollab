@@ -1,5 +1,5 @@
 #!/bin/bash
-# binary_upgrade_fixture.sh <dir>: an opted-in kollab binary with a newer release waiting.
+# [NIGHTLY=1] binary_upgrade_fixture.sh <dir>: an opted-in kollab binary with a newer release waiting.
 #
 # Builds two binaries from this checkout (run it from the repo root):
 #   <dir>/bin/kollab      this version, installed, with automatic updates on
@@ -18,6 +18,15 @@ touch "$D/home/.kollab/connect-guide-seen"
 PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 OLD=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
 NEW=$(python3 -c "v = '$OLD'.split('.'); v[-1] = str(int(v[-1]) + 1); print('.'.join(v))")
+# NIGHTLY=1: the newer build is a nightly (#1349), offered only in the release
+# list under a nightly- tag, and the install follows nightlies.
+NIGHTLY=${NIGHTLY:-0}
+if [ "$NIGHTLY" = 1 ]; then
+    NEW=$(python3 "$R/scripts/nightly_version.py")
+    TAG="nightly-$NEW"
+else
+    TAG="v$NEW"
+fi
 echo "$NEW" > "$D/new-version"
 
 # The workspace packages as this checkout builds them; the kollab wheel is rebuilt below.
@@ -33,9 +42,11 @@ from pathlib import Path
 src, port, new = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 updater = src / "kollabor/updates/auto_update.py"
 text = updater.read_text()
-old = 'LATEST_RELEASE = "https://api.github.com/repos/kollaborai/kollab/releases/latest"'
-assert text.count(old) == 1, "LATEST_RELEASE moved; update this fixture"
-updater.write_text(text.replace(old, f'LATEST_RELEASE = "http://127.0.0.1:{port}/latest"'))
+for name, path in (("LATEST_RELEASE", "releases/latest"), ("RELEASES", "releases?per_page=30")):
+    old = f'{name} = "https://api.github.com/repos/kollaborai/kollab/{path}"'
+    assert text.count(old) == 1, f"{name} moved; update this fixture"
+    text = text.replace(old, f'{name} = "http://127.0.0.1:{port}/{name.lower()}"')
+updater.write_text(text)
 (src / "new-version.txt").write_text(new)
 PY
 (cd "$D/src" && uv build --package kollab --wheel --out-dir "$D/old-wheels" >/dev/null 2>&1)
@@ -57,28 +68,32 @@ for binary in "$D"/www/kollab-*; do
 done
 cp "$D/old/$ASSET" "$D/bin/kollab"
 
-python3 - "$D/www" "$PORT" "$NEW" "$ASSET" <<'PY'
+python3 - "$D/www" "$PORT" "$TAG" "$ASSET" "$NIGHTLY" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-www, port, new, asset = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+www, port, tag, asset, nightly = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1"
 base = f"http://127.0.0.1:{port}/"
 names = [asset, f"{asset}.sha256"]
-release = {"tag_name": f"v{new}", "assets": [{"name": n, "browser_download_url": base + n} for n in names]}
-(www / "latest").write_text(json.dumps(release))
+release = {"tag_name": tag, "prerelease": nightly,
+           "assets": [{"name": n, "browser_download_url": base + n} for n in names]}
+# /releases/latest never returns a prerelease; the release list holds every release.
+if not nightly:
+    (www / "latest_release").write_text(json.dumps(release))
+(www / "releases").write_text(json.dumps([release]))
 PY
 (python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$D/www" >/dev/null 2>&1 & echo $! > "$D/server.pid")
 
 ("$R/.venv/bin/python" "$R/tests/tmux/lib/fake_llm.py" "$D/home/fake.port" >/dev/null 2>&1 & echo $! > "$D/home/fake.pid")
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$D/home/fake.port" ] && break; sleep 0.3; done
-python3 - "$D/home" "$(cat "$D/home/fake.port")" "$NEW" <<'PY'
+python3 - "$D/home" "$(cat "$D/home/fake.port")" "$NEW" "$TAG" "$NIGHTLY" <<'PY'
 import json
 import sys
 import time
 from pathlib import Path
 
-home, port, new = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+home, port, new, tag, nightly = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1"
 config = {
     "application": {"setup_completed": True},
     "kollabor": {
@@ -87,13 +102,16 @@ config = {
             "base_url": f"http://127.0.0.1:{port}/v1", "api_key": "not-a-real-key"}}},
         "updates": {
             "auto_update_enabled": True,
+            "include_prereleases": nightly,
+            # A cache from the other channel is refetched, so it records its own.
+            "cached_include_prereleases": nightly,
             "last_check_timestamp": int(time.time()),
             "cached_latest_version": new,
-            "cached_release_url": f"https://github.com/kollaborai/kollab/releases/tag/v{new}",
-            "cached_release_name": f"v{new}",
+            "cached_release_url": f"https://github.com/kollaborai/kollab/releases/tag/{tag}",
+            "cached_release_name": tag,
         },
     },
 }
 (home / ".kollab" / "config.json").write_text(json.dumps(config))
 PY
-echo "fixture ready: v$OLD installed, v$NEW released on port $PORT"
+echo "fixture ready: v$OLD installed, $TAG released on port $PORT"

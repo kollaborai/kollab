@@ -7,7 +7,10 @@
  * thread shows, by message id, and skips it while its own run streams.
  */
 export function refreshesOnEvent(type: string): boolean {
-  return ["hub_message", "history_updated", "user_message", "turn_complete", "turn_cancelled", "error", "permission_request"].includes(type);
+  return [
+    "hub_message", "history_updated", "user_message", "turn_complete", "turn_cancelled", "error",
+    "permission_request", "permission_parked", "permission_granted", "permission_denied", "permission_cancelled",
+  ].includes(type);
 }
 
 /** Request ids whose events can add visible assistant output to the live turn. */

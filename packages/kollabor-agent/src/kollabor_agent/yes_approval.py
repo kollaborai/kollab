@@ -112,18 +112,41 @@ class YesApprovals:
         self._approved: set[str] = set()
         self._note = ""
         self._conversation: str | None = None
-        self._cards: dict[str, str] = {}  # parked prompt's call id -> approval key
-        # Closes a parked prompt's card: (call id, approve / deny / None cancel).
-        self.close_card: Callable[[str, bool | None], None] | None = None
+        self._cards: dict[tuple[str, str], tuple[str, str | None]] = {}  # (call id, permission owner) -> approval key
+        self._unclaimed_cards: dict[str, list[tuple[str, str]]] = {}
+        self._replying_cards: dict[str, set[tuple[str, str]]] = {}
+        self._asked_cards: dict[str, set[tuple[str, str]]] = {}
+        # Closes a parked prompt's card with its exact permission owner.
+        self.close_card: Callable[[str, str | None, bool | None], None] | None = None
 
     def ask(self, tool_data: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> None:
         """Keep a call that needs the user's OK for the reply being written."""
         turn = None
         if is_voice_origin(context):
             if context.get("voice_hidden") is True:
+                key = approval_key(tool_data)
+                call_id = str(tool_data.get("id") or "")
+                unclaimed = self._unclaimed_cards.get(key, [])
+                for index in range(len(unclaimed) - 1, -1, -1):
+                    if unclaimed[index][0] == call_id:
+                        unclaimed.pop(index)
+                        break
+                if not unclaimed:
+                    self._unclaimed_cards.pop(key, None)
                 return  # the greeting: the user has not said anything yet
             turn = str(context.get("turn_id") or "")
-        self._replying[approval_key(tool_data)] = (_describe(tool_data), turn)
+        key = approval_key(tool_data)
+        self._replying[key] = (_describe(tool_data), turn)
+        call_id = str(tool_data.get("id") or "")
+        unclaimed = self._unclaimed_cards.get(key, [])
+        for index in range(len(unclaimed) - 1, -1, -1):
+            card = unclaimed[index]
+            if card[0] == call_id:
+                unclaimed.pop(index)
+                self._replying_cards.setdefault(key, set()).add(card)
+                break
+        if not unclaimed:
+            self._unclaimed_cards.pop(key, None)
 
     def on_reply_done(self) -> None:
         """The agent's reply is finished: what it asked for, or nothing, is what a yes answers now."""
@@ -131,6 +154,10 @@ class YesApprovals:
         self._replying.clear()
         self._cut.clear()
         self._asked = {key: what for key, (what, _) in asks.items()}
+        self._asked_cards = {
+            key: set(self._replying_cards.get(key, set())) for key in asks
+        }
+        self._replying_cards.clear()
         spoken = any(turn is not None for _, turn in asks.values())
         self._asked_until = time.monotonic() + ASK_OPEN_SECONDS if spoken else 0.0
 
@@ -138,6 +165,7 @@ class YesApprovals:
         """A talk-over cut a voice reply short: the user never heard its ask whole."""
         self._cut.add(turn)  # on_reply_done drops its asks, late ones too
         self._asked.clear()
+        self._asked_cards.clear()
 
     def has_open_ask(self) -> bool:
         """The agent's last reply asked for an OK that a yes would still answer."""
@@ -155,32 +183,61 @@ class YesApprovals:
         self._approved.discard(key)
         return True
 
-    def park(self, tool_data: Mapping[str, Any]) -> None:
+    def park(self, tool_data: Mapping[str, Any], permission_id: str | None = None) -> None:
         """Its approval prompt stays open past its turn: its card answers it too."""
-        self._cards[str(tool_data.get("id"))] = approval_key(tool_data)
+        card = (str(tool_data.get("id")), str(permission_id or ""))
+        key = approval_key(tool_data)
+        self._cards[card] = (key, permission_id)
+        self._unclaimed_cards.setdefault(key, []).append(card)
 
-    def answered_on_card(self, tool_data: Mapping[str, Any], allowed: bool | None) -> str:
+    def _forget_card(self, card: tuple[str, str]) -> tuple[str, str | None] | None:
+        owner = self._cards.pop(card, None)
+        if owner is None:
+            return None
+        key, _permission_id = owner
+        unclaimed = self._unclaimed_cards.get(key)
+        if unclaimed is not None:
+            self._unclaimed_cards[key] = [candidate for candidate in unclaimed if candidate != card]
+            if not self._unclaimed_cards[key]:
+                self._unclaimed_cards.pop(key, None)
+        for associations in (self._replying_cards, self._asked_cards):
+            cards = associations.get(key)
+            if cards is not None:
+                cards.discard(card)
+                if not cards:
+                    associations.pop(key, None)
+        return owner
+
+    def answered_on_card(
+        self,
+        tool_data: Mapping[str, Any],
+        allowed: bool | None,
+        permission_id: str | None = None,
+    ) -> str:
         """A parked prompt was answered on its card: what to run now, or "".
 
         Allow approves that call once and Deny drops the ask; a prompt that closed
         unanswered (None) leaves it open. A card the user's typed answer already
         closed does nothing.
         """
-        key = self._cards.pop(str(tool_data.get("id")), None)
-        if key is None or allowed is None:
+        if not permission_id:
             return ""
+        card = (str(tool_data.get("id")), permission_id)
+        owner = self._forget_card(card)
+        if owner is None or allowed is None:
+            return ""
+        key, _permission_id = owner
         self._asked.pop(key, None)
         if not allowed:
             return ""
         self._approved.add(key)
         return _describe(tool_data)
 
-    def _close_cards(self, keys: set[str], allowed: bool | None) -> None:
-        for card, key in list(self._cards.items()):
-            if key in keys:
-                del self._cards[card]
-                if self.close_card is not None:
-                    self.close_card(card, allowed)
+    def _close_cards(self, cards: set[tuple[str, str]], allowed: bool | None) -> None:
+        for card in cards:
+            owner = self._forget_card(card)
+            if owner is not None and self.close_card is not None:
+                self.close_card(card[0], owner[1], allowed)
 
     def on_human_input(self, text: str, conversation: str | None = None, *, talk_over: bool = False) -> None:
         """The user's own message (never another agent's or the model's).
@@ -190,14 +247,17 @@ class YesApprovals:
         self._approved.clear()
         self._note = ""
         self._replying.clear()  # said before that reply was done: it answers none of it
+        self._replying_cards.clear()
         if conversation != self._conversation:
             if self._conversation is not None:
                 # /resume or a new chat: what the agent asked is not in this one.
                 self._asked.clear()
-                self._close_cards(set(self._cards.values()), None)
+                self._asked_cards.clear()
+                self._close_cards(set(self._cards), None)
             self._conversation = conversation
         if self._asked_until and time.monotonic() > self._asked_until:
             self._asked.clear()
+            self._asked_cards.clear()
         answer = human_answer(text) if self._asked and not talk_over else None
         if answer == "yes":
             self._approved = set(self._asked)
@@ -208,8 +268,10 @@ class YesApprovals:
             )
         if answer:
             logger.info(f"The user's {answer} answered {len(self._asked)} asked call(s)")
-            self._close_cards(set(self._asked), answer == "yes")
+            cards = set().union(*(self._asked_cards.get(key, set()) for key in self._asked))
+            self._close_cards(cards, answer == "yes")
         self._asked.clear()  # a yes answers only the reply just before it; its card stays open
+        self._asked_cards.clear()
 
     def take_note(self) -> str:
         """The one-shot note that tells the model what the user's yes approved."""

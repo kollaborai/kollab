@@ -66,7 +66,9 @@ async def test_native_admission_keeps_the_request_id_and_echoes_it():
             ("r1",),
             parent_uuid="parent-2",
             admission_serial=1,
-            operator_inputs=({"source": "state_rpc", "timestamp": ANY, "text": "hi"},),
+            # The saved row names the send it carries, so a page tells its own
+            # send from another sender's identical words (#1359).
+            operator_inputs=({"source": "state_rpc", "timestamp": ANY, "text": "hi", "request_id": "r1"},),
         )
     )
 

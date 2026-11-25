@@ -11,8 +11,9 @@ from ..tool_registry import get_registry
 git_tool = ToolDefinition(
     name="git",
     description=(
-        "Git version control operations. Executed via terminal. "
-        "Provides workflow guidance for commits, branches, diffs."
+        "Read-only Git inspection via terminal. A Git-only bundle grant "
+        "allows status, diff, log, and show commands; writes and shell "
+        "commands require the separate terminal grant."
     ),
     category="file_ops",
     risk_level="medium",
@@ -31,13 +32,14 @@ git_tool = ToolDefinition(
     examples=[
         "<terminal>git status</terminal>",
         "<terminal>git diff</terminal>",
-        "<terminal>git add -A && git commit -m 'descriptive message'</terminal>",
+        "<terminal>git log --oneline -5</terminal>",
     ],
     expose_native=False,
-    result_format="Standard git command output via terminal.",
+    result_format="Read-only Git output via the terminal read-only command policy.",
     notes=(
-        "Git operations use the terminal tool. This is a doc-only "
-        "tool definition that maps to terminal for bundle scoping."
+        "This doc-only tool maps to terminal for bundle scoping. A git "
+        "grant is limited to read-only Git inspection; terminal access "
+        "must be granted separately for shell commands or Git writes."
     ),
 )
 

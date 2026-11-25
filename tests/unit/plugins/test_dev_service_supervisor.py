@@ -31,6 +31,15 @@ def test_dev_service_start_and_autostart(tmp_path, monkeypatch):
     assert cli.main(["dev", str(source)]) == 0
     launches = []
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: launches.append(args[0]))
+    run = tmp_path / ".kollab" / "plugin-data" / "hello@dev" / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    state_target = tmp_path / "service-state.json"
+    state_target.write_text(json.dumps({"desired": "running", "status": "starting"}))
+    state_path = run / "worker.state"
+    state_path.symlink_to(state_target)
+    services.supervisor_tick()
+    assert launches == []
+    state_path.unlink()
     services.supervisor_tick()
     assert len(launches) == 1
     assert launches[0][-3:-1] == ["hello@dev", "worker"]

@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from kollabor_events.permissions_models import ConfirmationResponse
+from kollabor_tui.turn_context import current_turn
 
 logger = logging.getLogger(__name__)
 
-PERMISSION_RESPONSE_RPC_METHOD = "permission.respond"
+PERMISSION_RESPONSE_RPC_METHOD = "permission.respond_owned"
+LEGACY_PERMISSION_RESPONSE_RPC_METHOD = "permission.respond"
 DEFAULT_VISIBLE_CLIENT_GRACE_SECONDS = 2.0
 
 # An approving response and the scope the engine's permission_granted event
@@ -33,9 +35,11 @@ def resolution_event(
     """Resolve the offered choice without losing its explicit turn owner."""
     event = _permission_resolution(tool_id, response, details)
     if details:
-        for key in ("request_id", "turn_id", "input_source", "generation", "thread_id", "parked"):
+        for key in ("permission_id", "request_id", "turn_id", "input_source", "generation", "thread_id"):
             if details.get(key) is not None:
                 event[key] = details[key]
+        if details.get("parked") is True:
+            event["parked"] = True
     return event
 
 
@@ -101,17 +105,18 @@ class AttachPermissionBridge:
     """Routes daemon permission prompts to the visible attach client."""
 
     def __init__(self) -> None:
-        self._pending: Dict[str, asyncio.Future[ConfirmationResponse | str]] = {}
-        self._pending_option_ids: Dict[str, set[str]] = {}
-        self._pending_details: Dict[str, dict[str, Any]] = {}
-        self._pending_taps: Dict[str, Any] = {}
+        self._pending: Dict[tuple[str, str], asyncio.Future[ConfirmationResponse | str]] = {}
+        self._pending_option_ids: Dict[tuple[str, str], set[str]] = {}
+        self._pending_details: Dict[tuple[str, str], dict[str, Any]] = {}
+        self._pending_request_ids: Dict[tuple[str, str], str | None] = {}
+        self._pending_taps: Dict[tuple[str, str], Any] = {}
         self._registered_rpc_servers: set[int] = set()
         # Attach-client side: one prompt on screen at a time, and the prompts
         # (shown or queued) that another window answered first.
         self._prompt_lock = asyncio.Lock()
-        self._showing: Optional[str] = None
-        self._queued: set[str] = set()
-        self._answered_elsewhere: set[str] = set()
+        self._showing: Optional[tuple[str, str]] = None
+        self._queued: set[tuple[str, str]] = set()
+        self._answered_elsewhere: set[tuple[str, str]] = set()
 
     def register_response_handler(self, rpc_server: Any) -> None:
         """Register the daemon-side RPC handler that resolves prompts."""
@@ -121,6 +126,8 @@ class AttachPermissionBridge:
 
         async def _respond(params: dict[str, Any]) -> dict[str, Any]:
             tool_id = str(params.get("tool_id") or "")
+            permission_id = str(params.get("permission_id") or "")
+            key = (tool_id, permission_id)
             option_id = params.get("option_id")
             control_name = params.get("control")
             response_field = params.get("response")
@@ -130,9 +137,13 @@ class AttachPermissionBridge:
             )
             if selector_count != 1:
                 return {"ok": False, "error": f"mixed permission response for {tool_id}"}
-            future = self._pending.get(tool_id)
-            offered_ids = self._pending_option_ids.get(tool_id, set())
-            details = self._pending_details.get(tool_id, {})
+            if not permission_id:
+                return {"ok": False, "error": "permission_id is required; refresh the prompt"}
+            future = self._pending.get(key)
+            offered_ids = self._pending_option_ids.get(key, set())
+            details = self._pending_details.get(key, {})
+            if details.get("permission_id") != permission_id:
+                return {"ok": False, "error": f"stale permission owner for {tool_id}"}
             if option_id is not None:
                 response_name = str(option_id)
                 if response_name not in offered_ids:
@@ -147,24 +158,30 @@ class AttachPermissionBridge:
                     return {"ok": False, "error": f"unoffered control for {tool_id}"}
             if future is None or future.done():
                 return {"ok": False, "error": f"no pending prompt for {tool_id}"}
-            if not self.try_settle_response(tool_id, response):
+            if not self.try_settle_response(tool_id, permission_id, response):
                 return {"ok": False, "error": f"no pending prompt for {tool_id}"}
             return {"ok": True}
 
-        try:
-            rpc_server.register(PERMISSION_RESPONSE_RPC_METHOD, _respond)
-            self._registered_rpc_servers.add(server_id)
-        except ValueError:
-            self._registered_rpc_servers.add(server_id)
+        for method in (PERMISSION_RESPONSE_RPC_METHOD, LEGACY_PERMISSION_RESPONSE_RPC_METHOD):
+            try:
+                rpc_server.register(method, _respond)
+            except ValueError:
+                # The bridge can be wired by both the foreground app and the
+                # permission manager. The first handler owns both names.
+                pass
+        self._registered_rpc_servers.add(server_id)
 
-    def try_settle_response(self, tool_id: str, response: Any) -> bool:
-        """Atomically settle one offered response from any surface."""
-        future = self._pending.get(tool_id)
+    def try_settle_response(self, tool_id: str, permission_id: str, response: Any) -> bool:
+        """Atomically settle one response for the exact pending permission."""
+        key = (tool_id, permission_id)
+        future = self._pending.get(key)
         if future is None or future.done():
             return False
-        details = self._pending_details.get(tool_id, {})
+        details = self._pending_details.get(key, {})
+        if not permission_id or details.get("permission_id") != permission_id:
+            return False
         if isinstance(response, str):
-            if response not in self._pending_option_ids.get(tool_id, set()):
+            if response not in self._pending_option_ids.get(key, set()):
                 return False
         elif isinstance(response, ConfirmationResponse):
             if not self._native_response_allowed(details, response, response.name):
@@ -174,19 +191,33 @@ class AttachPermissionBridge:
         future.set_result(response)
         return True
 
-    def cancel_pending(self) -> None:
-        """Answer every open prompt cancelled: an ACP Stop is ending its turn."""
-        for tool_id in list(self._pending):
-            self.try_settle_response(tool_id, ConfirmationResponse.CANCEL)
+    def cancel_pending(self, request_id: str | None = None) -> None:
+        """Cancel only prompts owned by this request; an unknown owner is a no-op."""
+        if not isinstance(request_id, str) or not request_id:
+            return
+        for (tool_id, permission_id), owner in list(self._pending_request_ids.items()):
+            if owner == request_id:
+                self.try_settle_response(tool_id, permission_id, ConfirmationResponse.CANCEL)
 
-    def park(self, tool_id: str) -> None:
+    def cancel_all_pending(self) -> None:
+        """Answer every open prompt cancelled during explicit application shutdown."""
+        for tool_id, permission_id in list(self._pending):
+            self.try_settle_response(tool_id, permission_id, ConfirmationResponse.CANCEL)
+
+    def park(self, tool_id: str, permission_id: str) -> None:
         """Its turn went on unanswered: terminals close the prompt, its card stays open."""
-        details = self._pending_details.get(tool_id)
-        tap = self._pending_taps.get(tool_id)
+        key = (tool_id, permission_id)
+        details = self._pending_details.get(key)
+        tap = self._pending_taps.get(key)
         if details is None or tap is None or details.get("parked"):
             return
         details["parked"] = True
-        tap.publish({"type": "permission_parked", "tool_id": tool_id})
+        tap.publish({
+            "type": "permission_parked",
+            "tool_id": tool_id,
+            "permission_id": permission_id,
+            **({"request_id": details["request_id"]} if details.get("request_id") else {}),
+        })
 
     async def request_confirmation(
         self,
@@ -204,11 +235,22 @@ class AttachPermissionBridge:
         self.register_response_handler(rpc_server)
         tool_id = str(details.get("tool_id") or uuid.uuid4().hex)
         details["tool_id"] = tool_id
+        permission_id = str(details.get("permission_id") or uuid.uuid4().hex)
+        details["permission_id"] = permission_id
+        details.setdefault("parked", False)
+        request_id = details.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            context_request_id = current_turn.get().get("request_id")
+            request_id = context_request_id if isinstance(context_request_id, str) and context_request_id else None
+        if request_id:
+            details["request_id"] = request_id
+        key = (tool_id, permission_id)
         future = asyncio.get_running_loop().create_future()
-        self._pending[tool_id] = future
-        self._pending_details[tool_id] = details
-        self._pending_taps[tool_id] = display_tap
-        self._pending_option_ids[tool_id] = {
+        self._pending[key] = future
+        self._pending_details[key] = details
+        self._pending_request_ids[key] = request_id
+        self._pending_taps[key] = display_tap
+        self._pending_option_ids[key] = {
             str(option.get("optionId"))
             for option in details.get("acp_options", ())
             if isinstance(option, dict) and option.get("optionId")
@@ -224,22 +266,27 @@ class AttachPermissionBridge:
                         raise
                     except Exception:
                         logger.exception("local ACP permission prompt failed for %s", tool_id)
-                        self.try_settle_response(tool_id, ConfirmationResponse.CANCEL)
+                        self.try_settle_response(tool_id, permission_id, ConfirmationResponse.CANCEL)
                         return
-                    self.try_settle_response(tool_id, candidate)
+                    self.try_settle_response(tool_id, permission_id, candidate)
                 local_task = asyncio.create_task(local_answer())
             display_tap.publish({"type": "permission_request", "details": details})
             if details.get("parked"):  # asked while its turn stopped
-                display_tap.publish({"type": "permission_parked", "tool_id": tool_id})
+                display_tap.publish({
+                    "type": "permission_parked",
+                    "tool_id": tool_id,
+                    "permission_id": permission_id,
+                })
             try:
                 response = await asyncio.wait_for(future, timeout=timeout)
             except asyncio.TimeoutError:
                 response = ConfirmationResponse.DENY
         finally:
-            self._pending.pop(tool_id, None)
-            self._pending_option_ids.pop(tool_id, None)
-            self._pending_details.pop(tool_id, None)
-            self._pending_taps.pop(tool_id, None)
+            self._pending.pop(key, None)
+            self._pending_option_ids.pop(key, None)
+            self._pending_details.pop(key, None)
+            self._pending_request_ids.pop(key, None)
+            self._pending_taps.pop(key, None)
             if not details.pop("_acp_resolution_published", False):
                 display_tap.publish(resolution_event(tool_id, response, details))
             if local_task is not None:
@@ -256,6 +303,7 @@ class AttachPermissionBridge:
         layout_manager: Any,
         event: dict[str, Any],
         wait_for_rpc_reply: bool = True,
+        on_response_failure: Callable[[str], None] | None = None,
     ) -> None:
         """Show a permission_request event locally and send the answer back.
 
@@ -266,28 +314,39 @@ class AttachPermissionBridge:
         if not isinstance(details, dict):
             details = {}
         tool_id = str(details.get("tool_id") or "")
+        permission_id = str(details.get("permission_id") or event.get("permission_id") or "")
+        if not tool_id or not permission_id:
+            message = (
+                "Cannot safely answer this permission prompt because its owner identity is missing. "
+                "Update and reload Kollab."
+            )
+            logger.error("refusing permission prompt without owner identity: %s", tool_id or "<missing tool id>")
+            if on_response_failure is not None:
+                on_response_failure(message)
+            return
+        key = (tool_id, permission_id)
         if details.get("parked"):
             return  # asked while its turn stopped: only its card shows
 
-        self._queued.add(tool_id)
+        self._queued.add(key)
         try:
             async with self._prompt_lock:
-                self._queued.discard(tool_id)
-                if tool_id in self._answered_elsewhere:
-                    self._answered_elsewhere.discard(tool_id)
+                self._queued.discard(key)
+                if key in self._answered_elsewhere:
+                    self._answered_elsewhere.discard(key)
                     return
-                self._showing = tool_id
+                self._showing = key
                 try:
                     response = await layout_manager.show_permission_prompt(details)
                 finally:
                     self._showing = None
-                if tool_id in self._answered_elsewhere:
-                    self._answered_elsewhere.discard(tool_id)
+                if key in self._answered_elsewhere:
+                    self._answered_elsewhere.discard(key)
                     return
         finally:
-            self._queued.discard(tool_id)
+            self._queued.discard(key)
         response_name = getattr(response, "name", None)
-        response_params = {"tool_id": details.get("tool_id")}
+        response_params = {"tool_id": tool_id, "permission_id": permission_id}
         if response_name is not None:
             response_params["control"] = response_name
         else:
@@ -299,7 +358,12 @@ class AttachPermissionBridge:
             timeout=10,
         )
         if wait_for_rpc_reply:
-            await response_call
+            reply = await response_call
+            if not isinstance(reply, dict) or reply.get("ok") is not True:
+                message = "Permission response was rejected as stale; reload this chat before answering again."
+                logger.error("permission response rejected for %s: %s", tool_id, reply)
+                if on_response_failure is not None:
+                    on_response_failure(message)
             return
 
         task = asyncio.create_task(response_call)
@@ -310,13 +374,24 @@ class AttachPermissionBridge:
             if done_task.cancelled():
                 return
             try:
-                done_task.result()
+                reply = done_task.result()
             except Exception as exc:
                 logger.warning(
                     "attach permission response rpc failed: %s",
                     exc,
                     exc_info=True,
                 )
+                if on_response_failure is not None:
+                    on_response_failure(
+                        "Permission response could not reach the daemon. "
+                        "Update or restart Kollab, then reload this chat."
+                    )
+                return
+            if not isinstance(reply, dict) or reply.get("ok") is not True:
+                message = "Permission response was rejected as stale; reload this chat before answering again."
+                logger.error("permission response rejected for %s: %s", tool_id, reply)
+                if on_response_failure is not None:
+                    on_response_failure(message)
 
         task.add_done_callback(_log_response_error)
 
@@ -327,13 +402,15 @@ class AttachPermissionBridge:
         window's own answer finds neither and does nothing.
         """
         tool_id = str(event.get("tool_id") or "")
-        if not tool_id:
+        permission_id = str(event.get("permission_id") or "")
+        if not tool_id or not permission_id:
             return
-        if tool_id == self._showing:
-            self._answered_elsewhere.add(tool_id)
+        key = (tool_id, permission_id)
+        if key == self._showing:
+            self._answered_elsewhere.add(key)
             layout_manager.cancel_permission_prompt()
-        elif tool_id in self._queued:
-            self._answered_elsewhere.add(tool_id)
+        elif key in self._queued:
+            self._answered_elsewhere.add(key)
 
     def has_visible_attach_client(self, display_tap: Any) -> bool:
         """Return true when at least one attach client can answer prompts."""

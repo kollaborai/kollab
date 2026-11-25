@@ -5,11 +5,12 @@ import { useEditorStore } from "../../src/components/code/editor-store";
 import "../../src/styles.css";
 
 const pane = useEditorStore.getState().activePaneId;
+const daemonNotice = { notice: null, fallbackName: "agent", busy: false, onRestart: () => {} };
 useEditorStore.getState().openFile(pane, "/fixture/.diffs/abcd.diff", "abcd.diff", ".diff", "real file");
 useEditorStore.getState().pinFile("/fixture/.diffs/abcd.diff");
 createRoot(document.getElementById("root")!).render(
   <div style={{ display: "flex", width: 1100, height: 700 }}>
-    <div style={{ width: 350 }}><GitPanel sessionId="fixture" workspace="/fixture" onOpenFile={() => {}} onOpenDiff={() => {}} /></div>
+    <div style={{ width: 350 }}><GitPanel sessionId="fixture" workspace="/fixture" daemonNotice={daemonNotice} onOpenFile={() => {}} onOpenDiff={() => {}} /></div>
     <div style={{ flex: 1 }}><EditorPane paneId={pane} rootPath="/fixture" /></div>
   </div>,
 );

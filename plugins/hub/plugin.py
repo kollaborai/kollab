@@ -26,7 +26,7 @@ from urllib.parse import quote
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
 from kollabor.user_input_source import UserInputSource
-from kollabor_agent.runtime import AgentLifecycle, AgentRuntime
+from kollabor_agent.runtime import AgentLifecycle, AgentRuntime, process_start_token
 from kollabor_ai.message_content import content_to_text
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.models import (
@@ -67,6 +67,8 @@ from .messaging_bridge import (
 from .messenger import (
     AgentMessenger,
     AgentSocketServer,
+    InboxCapacityError,
+    InboxMessageIdConflictError,
     _coerce_line_count,
     _is_durable_control,
 )
@@ -101,7 +103,7 @@ from .rosters import (
 )
 from .schedules import RunLog, ScheduleStore, ScheduleTimer
 from .scratchpad import Scratchpad
-from .session_state import SessionState, SessionStateManager
+from .session_state import SessionState, SessionStateError, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .supervisor import (
     DEFAULT_ALERT_COOLDOWN,
@@ -4753,7 +4755,15 @@ class HubPlugin(BasePlugin):
             )
 
         content = tool_data.get("content", "")
-        self._scratchpad.write(content)
+        try:
+            self._scratchpad.write(content)
+        except (OSError, UnicodeError):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad",
+                success=False,
+                error="scratchpad write failed",
+            )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="scratchpad",
@@ -4774,7 +4784,15 @@ class HubPlugin(BasePlugin):
             )
 
         content = tool_data.get("content", "")
-        self._scratchpad.append(content)
+        try:
+            self._scratchpad.append(content)
+        except (OSError, UnicodeError):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad_append",
+                success=False,
+                error="scratchpad append failed",
+            )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="scratchpad_append",
@@ -4794,7 +4812,15 @@ class HubPlugin(BasePlugin):
                 error="scratchpad not initialized",
             )
 
-        self._scratchpad.clear()
+        try:
+            self._scratchpad.clear()
+        except OSError:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad_clear",
+                success=False,
+                error="scratchpad clear failed",
+            )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="scratchpad_clear",
@@ -4817,7 +4843,15 @@ class HubPlugin(BasePlugin):
         # Scratchpad files survive longer than their intended session scope.
         # Treat old reminder/task prose as archived evidence on read so a
         # fresh agent cannot revive it through the tool path.
-        content = sanitize_rebirth_text(self._scratchpad.get())
+        try:
+            content = sanitize_rebirth_text(self._scratchpad.get())
+        except (OSError, UnicodeError):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad_get",
+                success=False,
+                error="scratchpad read failed",
+            )
         preview = content[:200] if content else "(empty)"
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -4842,7 +4876,7 @@ class HubPlugin(BasePlugin):
         json_str = tool_data.get("json_str", "")
         try:
             if state is not None:
-                updates = {"state": state}
+                updates = {"investigation_notes": state}
             else:
                 updates = json.loads(json_str)
             self._session_state_mgr.update_state(self._vault._vault_dir, updates)
@@ -4852,12 +4886,19 @@ class HubPlugin(BasePlugin):
                 success=True,
                 output=f"saved: {list(updates.keys())}",
             )
-        except json.JSONDecodeError as e:
+        except SessionStateError as e:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="state_update",
                 success=False,
-                error=f"invalid json: {e}",
+                error=str(e)[:240],
+            )
+        except json.JSONDecodeError:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="state_update",
+                success=False,
+                error="invalid json input",
             )
 
     async def _handle_task_checkpoint_tool(self, tool_data: dict):
@@ -6038,14 +6079,11 @@ class HubPlugin(BasePlugin):
                             f"Force-claiming '{preferred}': holder "
                             f"pid={holder.pid} failed async ping"
                         )
-                        # Remove stale presence + socket so it doesn't
-                        # interfere with future discovery either
-                        from .presence import get_presence_dir
-
-                        stale_file = get_presence_dir() / f"{holder.agent_id}.json"
-                        stale_file.unlink(missing_ok=True)
-                        PresenceManager._cleanup_agent_socket(holder)
-                        taken = [t for t in taken if t != preferred]
+                        # A same-id replacement can publish while this stale
+                        # holder is being checked; cleanup revalidates its
+                        # complete generation under the presence-file lock.
+                        if self._presence.cleanup_agent(holder):
+                            taken = [t for t in taken if t != preferred]
                     elif explicit_as:
                         # Spawn guard (issue #38): caller explicitly requested
                         # this identity via --as, but a live process already
@@ -6739,7 +6777,7 @@ class HubPlugin(BasePlugin):
         started = self._locally_started_agent_count() > 0
         help_lines = []
         if started:
-            help_lines.append("To stop all agents you started, submit: /hub stop all")
+            help_lines.append("To stop every agent in this folder, submit: /hub stop all")
         help_lines.append(f"Tip: {choose_startup_tip(include_stop_all=started)}")
         help_lines.append(f"New features:\n{new_features}")
         operator_help = "\n".join(help_lines)
@@ -6968,10 +7006,23 @@ class HubPlugin(BasePlugin):
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
                         max_replay=self._mailbox_replay_cap(INBOX_MAX_REPLAY),
+                        consume=False,
                     )
                     if messages:
-                        await self._deliver_inbox_batch(messages)
-            except asyncio.CancelledError:
+                        acknowledged = await self._deliver_inbox_batch(messages)
+                        AgentMessenger.acknowledge_mailboxes(
+                            [self._identity.agent_id, self._identity.identity],
+                            acknowledged,
+                            persist_receipt=True,
+                        )
+            except asyncio.CancelledError as exc:
+                acknowledged = getattr(exc, "acknowledged_message_ids", set())
+                if acknowledged and self._identity:
+                    AgentMessenger.acknowledge_mailboxes(
+                        [self._identity.agent_id, self._identity.identity],
+                        acknowledged,
+                        persist_receipt=True,
+                    )
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
@@ -7017,7 +7068,7 @@ class HubPlugin(BasePlugin):
             logger.debug("mailbox replay cap check failed: %s", exc)
         return cap
 
-    async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
+    async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> set[str]:
         """Deliver a batch of offline inbox messages.
 
         When the batch starts with an inbox_summary (bounded replay), ordinary
@@ -7028,23 +7079,119 @@ class HubPlugin(BasePlugin):
         normal per-message _on_message_received path so existing live-delivery
         behaviour is preserved.
         """
-        if messages and messages[0].action == "inbox_summary":
-            await self._inject_inbox_replay(messages)
-        else:
+        acknowledged: set[str] = set()
+        try:
+            if messages and messages[0].action == "inbox_summary":
+                return await self._inject_inbox_replay(messages, acknowledged)
             for msg in messages:
-                await self._deliver_inbox_message(msg)
+                if await self._deliver_inbox_message(msg):
+                    acknowledged.add(msg.id)
+                    self._acknowledge_inbox_delivery({msg.id})
+            return acknowledged
+        except asyncio.CancelledError as exc:
+            acknowledged.update(
+                getattr(exc, "acknowledged_message_ids", set())
+            )
+            exc.acknowledged_message_ids = acknowledged.copy()
+            raise
 
-    async def _deliver_inbox_message(self, msg: HubMessage) -> None:
-        """Deliver one mailbox message; a refusal puts its file back (#581).
+    def _acknowledge_inbox_delivery(
+        self, message_ids: set[str], fallback_agent_keys: Optional[List[str]] = None
+    ) -> None:
+        """Persist each accepted mailbox delivery before yielding control."""
+        identity = getattr(self, "_identity", None)
+        if not message_ids:
+            return
+        agent_keys = (
+            [identity.agent_id, identity.identity]
+            if identity is not None
+            else (fallback_agent_keys or [])
+        )
+        AgentMessenger.acknowledge_mailboxes(
+            agent_keys, message_ids, persist_receipt=True
+        )
 
-        The mailbox read already deleted the file, so a message the ACP retry
-        queue refused would be lost here. It goes back for the next poll, and
-        the mailbox's own age and size limits still apply to it.
-        """
-        if await self._on_message_received(msg) is False and self._identity:
-            await AgentMessenger.send_to_file(self._identity.identity, msg)
+    async def _deliver_inbox_message(self, msg: HubMessage) -> bool:
+        """Deliver one mailbox message; refusal leaves its file unacknowledged."""
+        if (msg.metadata or {}).get("_mailbox_delivery_uncertain") is True:
+            logger.error(
+                "Mailbox delivery %s has an uncertain outcome; preserving it "
+                "without automatic replay",
+                msg.id,
+            )
+            return False
+        identity = getattr(self, "_identity", None)
+        agent_keys = (
+            [identity.agent_id, identity.identity]
+            if identity is not None
+            else [msg.to]
+        )
+        if not AgentMessenger.mark_mailbox_delivery_uncertain(agent_keys, {msg.id}):
+            logger.error(
+                "Could not persist mailbox delivery claim for %s; leaving it queued",
+                msg.id,
+            )
+            return False
+        delivery = asyncio.create_task(self._on_message_received(msg))
+        try:
+            accepted = await asyncio.shield(delivery) is not False
+            if not accepted:
+                AgentMessenger.clear_mailbox_delivery_uncertain(
+                    agent_keys, {msg.id}
+                )
+            return accepted
+        except asyncio.CancelledError as exc:
+            task = asyncio.current_task()
+            accepted = False
+            refused = False
+            if task is not None and task.cancelling() > 0:
+                # Cancellation of the poll must not interrupt a receiver after
+                # it has begun applying the message. Let that delivery settle,
+                # then persist its acknowledgment before propagating cancel.
+                while not delivery.done():
+                    try:
+                        await asyncio.shield(delivery)
+                    except asyncio.CancelledError:
+                        if delivery.done():
+                            break
+                    except Exception:
+                        break
+                if delivery.done() and not delivery.cancelled():
+                    try:
+                        result = delivery.result()
+                        accepted = result is not False
+                        refused = result is False
+                    except Exception as delivery_error:
+                        logger.warning(
+                            "Mailbox delivery failed for %s (%s); leaving it queued for retry",
+                            msg.id,
+                            type(delivery_error).__name__,
+                        )
+            if accepted:
+                # Persist its receipt before propagating cancellation so a
+                # restart does not replay the effect.
+                self._acknowledge_inbox_delivery({msg.id}, [msg.to])
+                exc.acknowledged_message_ids = {msg.id}
+            elif refused:
+                # The poll was cancelled, but the shielded receiver settled
+                # with an explicit refusal. Its claim is safe to release just
+                # as it is on the ordinary completion path.
+                AgentMessenger.clear_mailbox_delivery_uncertain(
+                    agent_keys, {msg.id}
+                )
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Mailbox delivery failed for %s (%s); preserving it without "
+                "automatic replay",
+                msg.id,
+                type(exc).__name__,
+            )
+            return False
 
-    async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
+    async def _inject_inbox_replay(
+        self, messages: List[HubMessage], acknowledged: Optional[set[str]] = None
+    ) -> set[str]:
         """Coalesce a bounded inbox replay into a single injected block.
 
         messages[0] must be the inbox_summary; messages[1:] are the replayed
@@ -7063,14 +7210,25 @@ class HubPlugin(BasePlugin):
         # task-cron reminders are explicitly acknowledged when stale. Do not
         # duplicate controls in the coalesced HUD block or fallback delivery.
         control_msgs = [
-            msg for msg in replay_msgs if _is_durable_control(msg.to_dict())
+            msg
+            for msg in replay_msgs
+            if _is_durable_control(msg.to_dict())
+            and (msg.metadata or {}).get("_mailbox_delivery_uncertain") is not True
         ]
-        ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
+        ordinary_msgs = [
+            msg
+            for msg in replay_msgs
+            if msg not in control_msgs
+            and (msg.metadata or {}).get("_mailbox_delivery_uncertain") is not True
+        ]
+        acknowledged = acknowledged if acknowledged is not None else set()
         for msg in control_msgs:
-            await self._deliver_inbox_message(msg)
+            if await self._deliver_inbox_message(msg):
+                acknowledged.add(msg.id)
+                self._acknowledge_inbox_delivery({msg.id})
 
         if not ordinary_msgs:
-            return
+            return acknowledged
 
         llm = None
         if self.event_bus is not None:
@@ -7083,8 +7241,10 @@ class HubPlugin(BasePlugin):
         # (#581); a coalesced block would hide that from it. Deliver one by one.
         if self._agent_dispatch_mode(llm) == "acp":
             for msg in ordinary_msgs:
-                await self._deliver_inbox_message(msg)
-            return
+                if await self._deliver_inbox_message(msg):
+                    acknowledged.add(msg.id)
+                    self._acknowledge_inbox_delivery({msg.id})
+            return acknowledged
 
         lines: List[str] = [summary.content, ""]
         for msg in ordinary_msgs:
@@ -7099,21 +7259,54 @@ class HubPlugin(BasePlugin):
         block = "\n".join(lines)
 
         if llm is not None and hasattr(llm, "inject_system_message"):
+            identity = getattr(self, "_identity", None)
+            agent_keys = (
+                [identity.agent_id, identity.identity]
+                if identity is not None
+                else []
+            )
+            ordinary_ids = {msg.id for msg in ordinary_msgs}
+            if not AgentMessenger.mark_mailbox_delivery_uncertain(
+                agent_keys, ordinary_ids
+            ):
+                logger.error(
+                    "Could not persist mailbox replay claim for %d message(s)",
+                    len(ordinary_ids),
+                )
+                return acknowledged
             try:
                 await llm.inject_system_message(block, subtype="inbox_replay")
+                acknowledged.update(ordinary_ids)
+                self._acknowledge_inbox_delivery(
+                    ordinary_ids
+                )
                 logger.info(
                     "Injected inbox replay block: %d message(s) shown "
                     "(%s total queued)",
                     len(ordinary_msgs),
                     summary.metadata.get("total", "?"),
                 )
-                return
+                return acknowledged
+            except asyncio.CancelledError as exc:
+                # Cancellation says nothing about whether injection applied
+                # its effect. Keep the pre-effect claim and payload for
+                # inspection, exactly as for individual receiver failures.
+                exc.acknowledged_message_ids = acknowledged.copy()
+                raise
             except Exception as exc:
-                logger.debug("inbox replay injection failed: %s", exc)
+                logger.warning(
+                    "Inbox replay injection failed after its delivery claim; "
+                    "preserving messages for inspection (%s)",
+                    type(exc).__name__,
+                )
+                return acknowledged
 
         # Fallback: individual delivery (no inject_system_message)
         for msg in ordinary_msgs:
-            await self._deliver_inbox_message(msg)
+            if await self._deliver_inbox_message(msg):
+                acknowledged.add(msg.id)
+                self._acknowledge_inbox_delivery({msg.id})
+        return acknowledged
 
     async def _dreaming_loop(self) -> None:
         """Periodically dream when agent is idle -- distill stream into insights.
@@ -7374,13 +7567,11 @@ class HubPlugin(BasePlugin):
         Runs every 5 minutes on the coordinator only. Three jobs:
         1. Remove dead presence files (PID no longer running).
         2. Trigger pending_replies() auto-expiry (entries >24h old).
-        3. Sweep offline inbox dirs whose session has no living
-           presence file and whose messages are older than INBOX_TTL_SECS.
+        3. Remove empty offline inbox directories. Populated mailboxes are
+           owned by the reader/writer TTL and size policies, not this sweep.
 
         Scans ALL project hub directories, not just the current project.
         """
-        import shutil
-
         from kollabor_config.config_utils import get_config_directory
 
         while True:
@@ -7445,53 +7636,32 @@ class HubPlugin(BasePlugin):
                     except Exception as e:
                         logger.debug(f"pending_replies sweep error: {e}")
 
-                # --- Step 3: Sweep orphaned offline inbox dirs ---
-                # Remove inbox dirs whose messages are all older than
-                # INBOX_TTL_SECS and whose session has no living presence
-                # file. This reclaims disk from crashed/offline agents
-                # that will never reconnect to consume their inbox.
-                from .messenger import INBOX_TTL_SECS
+                # --- Step 3: Remove empty offline inbox dirs ---
+                # A directory scan cannot authorize recursive deletion: a
+                # queued control or a new arrival may still need delivery.
+                # rmdir is the filesystem's atomic empty-directory check.
+                from .file_lock import locked_file
 
-                now = time.time()
                 inboxes_removed = 0
 
                 if projects_root.exists():
                     for messages_root in projects_root.glob("*/hub/messages"):
                         if not messages_root.is_dir():
                             continue
-                        for inbox_dir in messages_root.iterdir():
-                            if not inbox_dir.is_dir():
-                                continue
-                            try:
-                                files = list(inbox_dir.glob("*.json"))
-                                if not files:
-                                    # Empty dir — remove if no presence
-                                    inbox_dir.rmdir()
+                        with locked_file(messages_root / ".delivery.lock", private=True):
+                            for inbox_dir in messages_root.iterdir():
+                                if not inbox_dir.is_dir():
                                     continue
-
-                                # Check if all messages are stale
-                                all_stale = True
-                                for mf in files:
-                                    try:
-                                        with open(mf) as f:
-                                            data = json.load(f)
-                                        ts = float(data.get("timestamp", 0) or 0)
-                                        if ts and (now - ts) < INBOX_TTL_SECS:
-                                            all_stale = False
-                                            break
-                                    except Exception:
-                                        pass  # keep dirs with unreadable files
-
-                                if all_stale:
-                                    shutil.rmtree(inbox_dir)
+                                try:
+                                    inbox_dir.rmdir()
                                     inboxes_removed += 1
-                            except Exception as e:
-                                logger.debug(f"inbox sweep: error on {inbox_dir}: {e}")
+                                except OSError:
+                                    pass  # populated or inaccessible: preserve it
 
                 if inboxes_removed:
                     logger.info(
                         f"presence sweep: removed {inboxes_removed} "
-                        f"stale offline inbox dirs"
+                        f"empty offline inbox dirs"
                     )
 
             except asyncio.CancelledError:
@@ -10944,7 +11114,10 @@ class HubPlugin(BasePlugin):
         # Active tasks (compaction-proof: they live on disk and are injected
         # every user turn, so they survive any compaction)
         if self._identity and self._task_ledger:
-            my_tasks = self._task_ledger.get_active_for(self._identity.identity)
+            read_errors: List[str] = []
+            my_tasks = self._task_ledger.get_active_for(
+                self._identity.identity, read_errors=read_errors
+            )
             if my_tasks:
                 task_lines = ["", "--- active tasks (DO NOT FORGET) ---"]
                 for task in my_tasks:
@@ -10991,6 +11164,13 @@ class HubPlugin(BasePlugin):
                 )
                 task_lines.append("--- end tasks ---")
                 roster_block += "\n" + "\n".join(task_lines)
+            if read_errors:
+                unreadable_count = len(read_errors)
+                card_label = "card" if unreadable_count == 1 else "cards"
+                roster_block += (
+                    "\nWARNING: Task ledger is incomplete; "
+                    f"{unreadable_count} task {card_label} could not be read."
+                )
 
         # Scratchpad and session state are intentionally not injected here.
         # They are mutable operational notes that can outlive their task and
@@ -12607,9 +12787,26 @@ class HubPlugin(BasePlugin):
             )
             return [("mesh", decision.reason)]
         if decision.mode == "quarantine":
-            self._trace_delivery(message, "quarantined", detail=decision.reason)
-            await self._quarantine_hub_message(message, decision.reason)
-            return [("mesh", decision.reason)]
+            try:
+                await self._quarantine_hub_message(message, decision.reason)
+            except InboxCapacityError:
+                reason = f"{decision.reason}; quarantine mailbox capacity reached"
+            except InboxMessageIdConflictError:
+                reason = (
+                    f"{decision.reason}; quarantine message ID conflicts with "
+                    "existing content"
+                )
+            except OSError as exc:
+                reason = (
+                    f"{decision.reason}; quarantine mailbox write failed "
+                    f"({type(exc).__name__})"
+                )
+            else:
+                self._trace_delivery(message, "quarantined", detail=decision.reason)
+                return [("mesh", decision.reason)]
+
+            self._trace_delivery(message, "rejected", detail=reason)
+            return [("mesh", reason)]
         if decision.trace_level == "warning":
             logger.warning(
                 "Message from %s allowed with warning: %s",
@@ -12620,7 +12817,38 @@ class HubPlugin(BasePlugin):
         for agent in agents:
             if agent.agent_id == my_id:
                 continue
-            delivered = await self._deliver_to_agent(agent, message)
+            try:
+                delivered = await self._deliver_to_agent(agent, message)
+            except InboxCapacityError as exc:
+                reason = str(exc)
+                rejections.append((agent.identity, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=agent.identity,
+                    detail=reason,
+                )
+                continue
+            except InboxMessageIdConflictError as exc:
+                reason = str(exc)
+                rejections.append((agent.identity, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=agent.identity,
+                    detail=reason,
+                )
+                continue
+            except OSError as exc:
+                reason = f"durable mailbox write failed ({type(exc).__name__})"
+                rejections.append((agent.identity, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=agent.identity,
+                    detail=reason,
+                )
+                continue
             if not delivered:
                 # Build a reason string for the rejection
                 cooldown_remaining = (
@@ -12638,10 +12866,40 @@ class HubPlugin(BasePlugin):
             message, delivered_identities
         )
         if queue_offline:
+            try:
+                await AgentMessenger.send_to_file(message.to, message)
+            except InboxCapacityError as exc:
+                rejections.append((message.to, str(exc)))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=message.to,
+                    detail=str(exc),
+                )
+                return rejections
+            except InboxMessageIdConflictError as exc:
+                reason = str(exc)
+                rejections.append((message.to, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=message.to,
+                    detail=reason,
+                )
+                return rejections
+            except OSError as exc:
+                reason = f"durable mailbox write failed ({type(exc).__name__})"
+                rejections.append((message.to, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=message.to,
+                    detail=reason,
+                )
+                return rejections
             queued_for = list((message.metadata or {}).get("_queued_for", []))
             if message.to not in queued_for:
                 message.metadata["_queued_for"] = [*queued_for, message.to]
-            await AgentMessenger.send_to_file(message.to, message)
             # A successful durable enqueue is accepted delivery; remove the
             # waiting rejection so the dispatch ledger will not allow replay.
             rejections = [
@@ -14174,7 +14432,10 @@ class HubPlugin(BasePlugin):
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
             return {"error": "invalid connect offer request"}
-        from .enrollment_client import EnrollmentProtocolError
+        from .enrollment_client import (
+            EnrollmentProtocolError,
+            connect_offer_unauthorized_refusal,
+        )
 
         try:
             if self._identity is None or self._rpc_server is None:
@@ -14185,13 +14446,17 @@ class HubPlugin(BasePlugin):
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
         except EnrollmentProtocolError as exc:
-            # The issuer refused before any relay request; say why (#693).
-            logger.warning("connect offer refused: %s", exc.refusal or exc.code)
-            return self._offer_failed(exc.refusal)
+            source = exc.source if exc.source in {"local", "relay"} else "local"
+            refusal = exc.refusal
+            if exc.code == "unauthorized" and not refusal:
+                refusal = connect_offer_unauthorized_refusal(source)
+            log_reason = f"{exc.code}: {refusal}" if refusal else exc.code
+            logger.warning("connect offer refused (%s): %s", source, log_reason)
+            return self._offer_failed(refusal)
         except Exception:
             return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
-            return self._offer_failed()
+            return self._offer_failed(result.get("reason", "") if isinstance(result, dict) else "")
         offer_id = result.get("offer_id")
         expires_at = result.get("expires_at")
         code = result.get("code")
@@ -14379,7 +14644,8 @@ class HubPlugin(BasePlugin):
         elif subcmd == "capture":
             return await self._handle_capture_command(rest)
         elif subcmd == "stop":
-            return await self._handle_stop_command(rest)
+            # Typed in this session's chat, so the operator (#1408).
+            return await self._handle_stop_command(rest, operator=True)
         elif subcmd == "agents":
             return await self._handle_agents_command()
         elif subcmd == "cron":
@@ -14737,9 +15003,12 @@ class HubPlugin(BasePlugin):
         if socket_path_override:
             dial_target, dial_auth = socket_path_override, None
         elif not peer.socket_path:
-            if self._presence:
-                self._presence.cleanup_agent(peer)
-            message = f"agent '{peer.identity}' has no socket path, cleaned up"
+            cleaned = bool(self._presence and self._presence.cleanup_agent(peer))
+            message = (
+                f"agent '{peer.identity}' has no socket path, cleaned up"
+                if cleaned
+                else f"agent '{peer.identity}' has no socket yet (still starting)"
+            )
             return _CaptureOutcome(message, error=message)
         else:
             dial_target, dial_auth = self._resolve_dial_target(
@@ -15504,14 +15773,126 @@ class HubPlugin(BasePlugin):
         lines.append("reject: /hub reject <identity> [reason]")
         return "\n".join(lines)
 
-    async def _handle_stop_command(self, rest: str) -> str:
+    def _under_hub_agent(self) -> bool:
+        """True when another hub agent started this session, e.g. a terminal
+        tool ran `printf '/hub stop all' | kollab`: its typed stop all is not
+        the operator's and keeps the #669 scope (#1408).
+
+        The same deny-only signals the CLI checks: tool-shell markers, then
+        any parent process (never this one) that is a hub agent. Unreadable
+        context fails closed.
+        """
+        from .network_halt import TOOL_SHELL_VARS
+
+        if any(os.environ.get(var) for var in TOOL_SHELL_VARS):
+            return True
+        try:
+            parents = self._parent_pids()
+            agent_pids = {
+                getattr(agent, "pid", 0) for agent in self._presence.scan_machine_presence()
+            }
+        except Exception as exc:  # noqa: BLE001 - uncertainty must not grant a sweep
+            logger.warning(f"cannot verify /hub stop all caller ancestry: {exc}")
+            return True
+        return bool(parents & agent_pids)
+
+    @staticmethod
+    def _parent_pids() -> set:
+        import psutil
+
+        return {process.pid for process in psutil.Process().parents()}
+
+    async def _operator_stop_all(self) -> str:
+        """`/hub stop all` typed by the operator (#1408).
+
+        Stops every live agent in this folder's hub through the same per-agent
+        stop as `/hub stop <name>`, and names live agents in other folders
+        (left running) with the terminal command that stops them too.
+        """
+        # include_busy: a live agent whose socket stopped answering (stuck on
+        # a turn) is the one most worth stopping. The sync scan blocks on
+        # socket checks, so it runs off the event loop.
+        here = await asyncio.to_thread(
+            self._presence.discover_agents, include_solo=True, include_busy=True
+        )
+        here_ids = {agent.agent_id for agent in here}
+        managed = self._locally_managed_sessions()
+        sessions = []
+        skipped = []
+        for agent in list(here):
+            if self._pid_recycled(agent):
+                # A dead agent whose pid another process took: not stopped,
+                # not counted (discovery trusts a fresh heartbeat's pid).
+                here.remove(agent)
+                continue
+            session = managed.get(getattr(agent, "pid", None))
+            # A tracked child keeps its lock-guarded escalation; a pid this
+            # session tracks under another process generation is not the row's
+            # process, so leave it alone. Everything else takes the named-stop
+            # path, as `/hub stop <name>` does.
+            if session is not None and not (
+                getattr(session, "is_alive", True)
+                and self._presence_generation_matches(session, agent)
+            ):
+                here.remove(agent)
+                skipped.append(agent.identity)
+                continue
+            sessions.append(session)
+        results = await asyncio.gather(
+            *[
+                self._stop_peer_agent(
+                    agent, reason=f"stopped by {self._identity.identity}", session=session
+                )
+                for agent, session in zip(here, sessions)
+            ]
+        )
+        if here:
+            lines = [
+                f"stopping {len(here)} agent(s) in this folder "
+                f"({self._identity.identity} keeps running):"
+            ]
+            lines += [f"  {a.identity}: {r}" for a, r in zip(here, results)]
+        else:
+            lines = ["no other agents in this folder"]
+        if skipped:
+            lines.append(
+                f"skipped (process changed since it registered): {', '.join(skipped)}"
+            )
+
+        elsewhere: dict = {}
+        for agent in self._presence.scan_machine_presence():
+            # A quiet heartbeat is not death (#575): a live, unrecycled pid counts.
+            if (
+                agent.agent_id in here_ids
+                or not pid_alive(getattr(agent, "pid", 0))
+                or self._pid_recycled(agent)
+            ):
+                continue
+            folder = getattr(agent, "project", "") or "unknown folder"
+            elsewhere.setdefault(folder, []).append(agent.identity)
+        if elsewhere:
+            import shlex
+
+            count = sum(len(names) for names in elsewhere.values())
+            lines.append(f"\nstill running: {count} agent(s) in other folders")
+            for folder, names in sorted(elsewhere.items()):
+                lines.append(f"  {folder}: {', '.join(sorted(names))}")
+                lines.append(
+                    "    stop those too: KOLLAB_PROJECT_ROOT={} kollab --hub stop all".format(
+                        shlex.quote(folder)
+                    )
+                )
+        return "\n".join(lines)
+
+    async def _handle_stop_command(self, rest: str, operator: bool = False) -> str:
         """Handle /hub stop <name|all>.
 
-        Sends shutdown signals via hub sockets. `stop all` is scoped to
-        the agents the CALLER started (agent_orchestrator-managed
-        sessions matched by PID, issue #669): peers launched by other
-        lanes or the operator are immune. The mesh-wide stop is the
-        operator CLI, `kollab --hub stop all`.
+        Sends shutdown signals via hub sockets. ``operator`` is the person
+        typing `/hub stop all` in this session: every agent in this folder's
+        hub stops (#1408). Otherwise (the agent `hub_stop` tool) `stop all`
+        is scoped to the agents the CALLER started (agent_orchestrator-managed
+        sessions matched by PID, issue #669): peers launched by other lanes
+        or the operator are immune.
         """
         target = rest.strip()
         if not target:
@@ -15522,6 +15903,9 @@ class HubPlugin(BasePlugin):
 
         if not self._presence or not self._identity:
             return "hub not active"
+
+        if target.lower() == "all" and operator and not self._under_hub_agent():
+            return await self._operator_stop_all()
 
         if target.lower() == "all":
             # Scan machine-wide so owned agents are found even if they're
@@ -15628,10 +16012,6 @@ class HubPlugin(BasePlugin):
                 available = [a.identity for a in all_agents]
                 return f"agent '{target}' not found. online: {', '.join(available) or 'none'}"
 
-            if not agent.socket_path:
-                self._presence.cleanup_agent(agent)
-                return f"agent '{target}' has no socket path, cleaned up"
-
             result = await self._stop_peer_agent(
                 agent,
                 reason=f"stopped by {self._identity.identity}",
@@ -15649,13 +16029,44 @@ class HubPlugin(BasePlugin):
         """
         return session is None or bool(getattr(session, "is_alive", False))
 
+    def _may_signal(self, agent, session) -> bool:
+        """``_signal_allowed``, and a raw-PID signal only to a proven process:
+        a session-less stop signals only while the pid's kernel start still
+        equals the row's ``start_token``. A recycled pid, a row without a
+        token or an unreadable start gets no SIGTERM/SIGKILL (#1408)."""
+        if not self._signal_allowed(session):
+            return False
+        if session is not None:
+            return True
+        recorded = getattr(agent, "start_token", None)
+        return bool(recorded) and process_start_token(getattr(agent, "pid", 0)) == recorded
+
+    def _withhold_signal(self, agent, session, guard: str) -> str:
+        """No signal may reach ``agent``'s pid. A session-less row whose pid
+        still runs and is not proven to be another process keeps its presence
+        and socket: the agent may still be running (#1408)."""
+        pid = getattr(agent, "pid", 0)
+        if session is None and not self._pid_recycled(agent) and self._agent_pid_alive(pid):
+            return f"not stopped: pid {pid} cannot be proven to be this agent, so no signal was sent"
+        self._cleanup_stopped_peer(agent, session)
+        return guard
+
+    @staticmethod
+    def _pid_recycled(agent) -> bool:
+        """True when the row's pid now runs another process: its kernel start
+        differs from the row's ``start_token``. No token or no readable start
+        proves nothing."""
+        recorded = getattr(agent, "start_token", None)
+        current = process_start_token(getattr(agent, "pid", 0)) if recorded else None
+        return current is not None and current != recorded
+
     def _cleanup_stopped_peer(self, agent, session) -> bool:
         """Clean up a stopped peer without crossing its selected generation.
 
-        Named operator stops have no tracked session and retain the existing
-        presence-plus-socket cleanup. Caller-owned stop-all defers cleanup to
-        normal presence discovery; it cannot atomically compare-and-unlink a
-        presence row or identity-named socket that may have been replaced.
+        Named operator stops have no tracked session and use the same
+        generation-checked presence-row cleanup. Shared socket paths are left
+        for stale-socket cleanup because a replacement may already have bound
+        the same path. Caller-owned stop-all defers cleanup to presence discovery.
         """
         if not self._presence:
             return False
@@ -15755,13 +16166,21 @@ class HubPlugin(BasePlugin):
             self._cleanup_stopped_peer(agent, session)
             return guard
 
-        if not getattr(agent, "socket_path", ""):
+        socket_path = getattr(agent, "socket_path", "")
+        # A session-less agent whose process runs with no socket yet is still
+        # starting: stop its proven pid below instead of dropping its row (#1408).
+        if not socket_path and (
+            session is not None or not self._agent_pid_alive(getattr(agent, "pid", 0))
+        ):
             cleaned = self._cleanup_stopped_peer(agent, session)
             if session is not None and not cleaned:
                 return "no socket; presence cleanup deferred"
             return "no socket, cleaned up"
 
         try:
+            # Name the selected generation, so a new agent that took over this
+            # socket refuses a stop meant for the old one (#1408). A tracked
+            # child must name it; a session-less row names it when it can.
             generation = (
                 {
                     "expected_agent_id": getattr(agent, "agent_id", None),
@@ -15769,13 +16188,21 @@ class HubPlugin(BasePlugin):
                     "expected_started_at": getattr(agent, "started_at", None),
                 }
                 if session is not None
-                else {}
+                else AgentMessenger.shutdown_generation(
+                    getattr(agent, "agent_id", None),
+                    getattr(agent, "pid", None),
+                    getattr(agent, "started_at", None),
+                )
             )
-            success = await AgentMessenger.signal_shutdown(
-                agent.socket_path,
-                reason=reason,
-                timeout=3.0,
-                **generation,
+            # A session-less row that cannot name its process sends nothing a
+            # replacement on the same socket would also accept (#1408).
+            success = bool(socket_path) and (session is not None or bool(generation)) and await (
+                AgentMessenger.signal_shutdown(
+                    socket_path,
+                    reason=reason,
+                    timeout=3.0,
+                    **generation,
+                )
             )
         except Exception as e:
             success = False
@@ -15786,9 +16213,8 @@ class HubPlugin(BasePlugin):
                 self._cleanup_stopped_peer(agent, session)
                 return "stopped"
 
-            if not self._signal_allowed(session):
-                self._cleanup_stopped_peer(agent, session)
-                return guard
+            if not self._may_signal(agent, session):
+                return self._withhold_signal(agent, session, guard)
 
             killed = self._escalate_agent(agent, session, signal.SIGTERM)
             if session is not None and not killed:
@@ -15801,9 +16227,8 @@ class HubPlugin(BasePlugin):
             ):
                 self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGTERM after graceful timeout)"
-            if not self._signal_allowed(session):
-                self._cleanup_stopped_peer(agent, session)
-                return guard
+            if not self._may_signal(agent, session):
+                return self._withhold_signal(agent, session, guard)
 
             killed = self._escalate_agent(agent, session, signal.SIGKILL)
             if session is not None and not killed:
@@ -15816,9 +16241,8 @@ class HubPlugin(BasePlugin):
                 return "killed (SIGKILL — was unresponsive)"
             return "stop timed out (pid survived SIGKILL)"
 
-        if not self._signal_allowed(session):
-            self._cleanup_stopped_peer(agent, session)
-            return guard
+        if not self._may_signal(agent, session):
+            return self._withhold_signal(agent, session, guard)
 
         killed = self._escalate_agent(agent, session, signal.SIGTERM)
         if session is not None and not killed:
@@ -15834,9 +16258,8 @@ class HubPlugin(BasePlugin):
                 return "already dead; presence cleanup deferred"
             return "already dead, cleaned up"
 
-        if not self._signal_allowed(session):
-            self._cleanup_stopped_peer(agent, session)
-            return guard
+        if not self._may_signal(agent, session):
+            return self._withhold_signal(agent, session, guard)
 
         killed = self._escalate_agent(agent, session, signal.SIGKILL)
         if session is not None and not killed:
@@ -16102,11 +16525,12 @@ class HubPlugin(BasePlugin):
         """List all tasks."""
         if self._task_ledger is None:
             return "task system not available"
-        all_tasks = self._task_ledger.get_all()
-        if not all_tasks:
+        read_errors: List[str] = []
+        all_tasks = self._task_ledger.get_all(read_errors=read_errors)
+        if not all_tasks and not read_errors:
             return "no tasks"
 
-        lines = [f"tasks: {len(all_tasks)} total"]
+        lines = [f"tasks: {len(all_tasks)} total"] if all_tasks else []
         for card in sorted(all_tasks, key=lambda c: -c.priority):
             status_icon = {
                 "active": ">>",
@@ -16125,6 +16549,13 @@ class HubPlugin(BasePlugin):
                 f" {card.elapsed_str()}"
             )
             lines.append(f"       {card.directive[:70]}")
+        if read_errors:
+            unreadable_count = len(read_errors)
+            card_label = "card" if unreadable_count == 1 else "cards"
+            lines.append(
+                "WARNING: Task ledger is incomplete; "
+                f"{unreadable_count} task {card_label} could not be read."
+            )
         return "\n".join(lines)
 
     def _tasks_mine(self) -> str:
@@ -16133,11 +16564,14 @@ class HubPlugin(BasePlugin):
             return "not connected to hub"
         if not self._task_ledger:
             return "task ledger not available"
-        my_tasks = self._task_ledger.get_active_for(self._identity.identity)
-        if not my_tasks:
+        read_errors: List[str] = []
+        my_tasks = self._task_ledger.get_active_for(
+            self._identity.identity, read_errors=read_errors
+        )
+        if not my_tasks and not read_errors:
             return "no active tasks assigned to you"
 
-        lines = [f"your tasks: {len(my_tasks)}"]
+        lines = [f"your tasks: {len(my_tasks)}"] if my_tasks else []
         for card in my_tasks:
             lines.append(
                 f"  [{card.id}] p{card.priority}"
@@ -16153,6 +16587,13 @@ class HubPlugin(BasePlugin):
                 )
             if card.status == "qa_review":
                 lines.append("    status: awaiting QA review")
+        if read_errors:
+            unreadable_count = len(read_errors)
+            card_label = "card" if unreadable_count == 1 else "cards"
+            lines.append(
+                "WARNING: Task ledger is incomplete; "
+                f"{unreadable_count} task {card_label} could not be read."
+            )
         return "\n".join(lines)
 
     def _tasks_assign(self, args: str) -> str:
@@ -18517,7 +18958,10 @@ class HubPlugin(BasePlugin):
                     last_command="",
                     focus_file=getattr(self._identity, "current_task", ""),
                 )
-                self._session_state_mgr.save_state(self._vault._vault_dir, state)
+                if not self._session_state_mgr.save_state(
+                    self._vault._vault_dir, state
+                ):
+                    logger.error("Session state save on shutdown failed")
             except Exception as e:
                 logger.error(f"Session state save on shutdown failed: {e}")
 

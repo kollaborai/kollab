@@ -9,12 +9,15 @@ from kollabor_events.dict_utils import safe_get, safe_set
 from kollabor_events.error_utils import safe_execute
 
 from .atomic_write import write_text_atomic
+from .file_lock import locked_file
 
 logger = logging.getLogger(__name__)
 
 # Configuration version tracking
 CONFIG_VERSION = 2  # Current version
 VERSION_KEY = "_config_version"
+_UNTRACKED_CONFIG = object()
+_UNREADABLE_CONFIG = object()
 
 
 class ConfigurationVersionError(Exception):
@@ -37,6 +40,7 @@ class ConfigManager:
         """
         self.config_path = config_path
         self.config: Dict[str, Any] = {}
+        self._loaded_config_snapshot: bytes | None | object = _UNTRACKED_CONFIG
         logger.info(f"Config manager initialized: {config_path}")
 
     def get_config_version(self) -> int:
@@ -112,20 +116,28 @@ class ConfigManager:
         Returns:
             Configuration dictionary from file, or empty dict if load fails.
         """
-        if not self.config_path.exists():
+        try:
+            contents = self.config_path.read_bytes()
+        except FileNotFoundError:
+            self._loaded_config_snapshot = None
             logger.debug(f"Config file does not exist: {self.config_path}")
             return {}
+        except OSError as e:
+            self._loaded_config_snapshot = _UNREADABLE_CONFIG
+            logger.warning(
+                "Could not read configuration file (%s)", type(e).__name__
+            )
+            return {}
 
-        def load_json():
-            with open(self.config_path, "r") as f:
-                return json.load(f)
-
-        config: Dict[str, Any] = safe_execute(
-            load_json,
-            f"loading config from {self.config_path}",
-            default={},
-            logger_instance=logger,
-        )
+        self._loaded_config_snapshot = contents
+        try:
+            config = json.loads(contents.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            logger.warning("Could not parse configuration file (%s)", type(e).__name__)
+            return {}
+        if not isinstance(config, dict):
+            logger.warning("Configuration file has an invalid shape")
+            return {}
 
         if config:
             # Store config in instance variable
@@ -149,7 +161,66 @@ class ConfigManager:
         """
 
         def save_json():
-            write_text_atomic(self.config_path, json.dumps(config, indent=2))
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self.config_path.with_name(self.config_path.name + ".lock")
+            with locked_file(lock_path, private=True):
+                expected = self._loaded_config_snapshot
+                if expected is _UNREADABLE_CONFIG:
+                    logger.warning(
+                        "Refusing to overwrite configuration that could not be read"
+                    )
+                    return False
+                try:
+                    current = self.config_path.read_bytes()
+                except FileNotFoundError:
+                    current = None
+                except OSError as e:
+                    logger.warning(
+                        "Refusing to overwrite unreadable configuration (%s)",
+                        type(e).__name__,
+                    )
+                    return False
+
+                if expected is not _UNTRACKED_CONFIG and current != expected:
+                    logger.warning(
+                        "Refusing to overwrite configuration changed since it was loaded"
+                    )
+                    return False
+                if current is not None:
+                    try:
+                        existing = json.loads(current.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                        logger.warning(
+                            "Refusing to overwrite unreadable configuration (%s)",
+                            type(e).__name__,
+                        )
+                        return False
+                    if not isinstance(existing, dict):
+                        logger.warning(
+                            "Refusing to overwrite configuration with an invalid shape"
+                        )
+                        return False
+
+                contents = json.dumps(config, indent=2)
+                try:
+                    latest = self.config_path.read_bytes()
+                except FileNotFoundError:
+                    latest = None
+                except OSError as e:
+                    logger.warning(
+                        "Refusing to overwrite unreadable configuration (%s)",
+                        type(e).__name__,
+                    )
+                    return False
+                if latest != current:
+                    logger.warning(
+                        "Refusing to overwrite configuration changed during save"
+                    )
+                    return False
+
+                write_text_atomic(self.config_path, contents)
+                self._loaded_config_snapshot = contents.encode("utf-8")
+                return True
 
         success = safe_execute(
             save_json,

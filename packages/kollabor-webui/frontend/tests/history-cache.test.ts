@@ -38,6 +38,24 @@ function page(start: number, end: number, errorIndex?: number): HistoryPage {
 const outputId = (message: HistoryMessage) => String(message.content);
 
 describe("bounded history cache and paging", () => {
+  it("a window that holds the first message has nothing older after a refresh (#1359)", () => {
+    // The whole chat is loaded. A turn ends and the refresh brings its new
+    // rows as a slice that starts mid-chat, so the slice says older messages
+    // exist and carries a cursor for them. The window still starts at the
+    // first message: a scroll to the top must not ask for older messages,
+    // which the engine answers with rows the window holds, a failed load.
+    const cached = page(0, 33);
+    const merged = mergeRecentHistoryPage(cached, page(33, 35));
+    expect([merged.start_index, merged.end_index]).toEqual([0, 35]);
+    expect(merged.has_more_older).toBe(false);
+    expect(merged.older_cursor).toBeNull();
+    // A window that starts later keeps the way to its older messages.
+    const later = mergeRecentHistoryPage(page(60, 100), page(100, 104));
+    expect(later.start_index).toBeGreaterThan(0);
+    expect(later.has_more_older).toBe(true);
+    expect(later.older_cursor).not.toBeNull();
+  });
+
   it("reopens by requesting only messages after the cached newest cursor", async () => {
     const cache = new MemoryHistoryPageCache();
     const cached = page(50, 100);
@@ -662,5 +680,56 @@ describe("restoreSlimmedHistoryMetadata", () => {
     const metadata = result[0].metadata as Record<string, unknown>;
     expect(metadata.acp_updates_dropped).toBe(3);
     expect("acp_updates" in metadata).toBe(false);
+  });
+});
+
+describe("restore truncated text messages", () => {
+  it("renders full assistant and user text while leaving tool output deferred", async () => {
+    const marker = "[Showing the first 4 KB of this message.]";
+    const preview = `${"x".repeat(4_096)}\n\n${marker}`;
+    const assistantText = `${"a".repeat(4_096)}\nassistant reply tail 🌵`;
+    const userText = `${"u".repeat(4_096)}\nuser message tail 🌵`;
+    const outputByReference = new Map([
+      ["assistant-ref", assistantText],
+      ["user-ref", userText],
+    ]);
+    const api = {
+      getHistoryMetadata: vi.fn(),
+      getHistoryOutput: vi.fn(async (sessionId: string, reference: string) => ({
+        session_id: sessionId,
+        content: outputByReference.get(reference),
+      })),
+    };
+    const truncatedMessage = (
+      role: "assistant" | "user" | "tool",
+      reference: string,
+    ): HistoryMessage => ({
+      role,
+      content: preview,
+      metadata: {
+        history_output_truncated: true,
+        history_output_bytes: 8_200,
+        history_output_ref: reference,
+      },
+    });
+    const history: HistoryMessage[] = [
+      truncatedMessage("assistant", "assistant-ref"),
+      truncatedMessage("user", "user-ref"),
+      truncatedMessage("tool", "tool-ref"),
+    ];
+
+    const restored = await restoreSlimmedHistoryMetadata("session-1", api, history);
+    const messages = buildInitialState("session-1", [], restored).messages;
+
+    expect(messages.find((message) => message.role === "assistant")?.content)
+      .toContain("assistant reply tail 🌵");
+    expect(messages.find((message) => message.role === "user")?.content)
+      .toContain("user message tail 🌵");
+    expect(messages.filter((message) => message.role === "assistant")[0]?.content)
+      .not.toContain(marker);
+    expect(restored[2].content).toBe(preview);
+    expect(api.getHistoryOutput).toHaveBeenCalledTimes(2);
+    expect(api.getHistoryOutput).toHaveBeenNthCalledWith(1, "session-1", "assistant-ref");
+    expect(api.getHistoryOutput).toHaveBeenNthCalledWith(2, "session-1", "user-ref");
   });
 });

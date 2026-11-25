@@ -46,7 +46,7 @@ def owner_bridge(tmp_path, monkeypatch):
 
     rpc = SimpleNamespace(call=AsyncMock(side_effect=scoped_rpc))
     session.daemon = SimpleNamespace(alive=True, rpc=rpc, state=state, fan_out=Mock(), mark_cancelled=Mock())
-    session._pending_permissions["first-tool"] = {
+    session._pending_permissions[("first-tool", "")] = {
         "tool_id": "first-tool", "details": {"request_id": "first-owner"},
     }
     registry = {session.session_id: session}

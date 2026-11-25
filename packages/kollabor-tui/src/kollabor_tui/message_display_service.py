@@ -192,6 +192,13 @@ class MessageDisplayService:
         Args:
             message: System message to display
         """
+        if message in {
+            "Conversation history not saved for this message.",
+            "Conversation history not saved for this reply.",
+        }:
+            from .display_tap import publish_semantic
+
+            publish_semantic(self.renderer, "notice", message=message)
         message_sequence: list[tuple[str, str, dict]] = [("system", message, {})]
         self.message_coordinator.display_message_sequence(message_sequence)
         logger.debug(f"Displayed system message: {message[:50]}...")

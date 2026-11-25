@@ -56,6 +56,20 @@ def test_the_target_is_never_half_written(tmp_path, replaced):
     assert list(tmp_path.iterdir()) == [target]
 
 
+def test_binary_atomic_write_preserves_exact_bytes(tmp_path):
+    from kollabor_config.atomic_write import write_bytes_atomic
+
+    target = tmp_path / "config.json"
+    target.write_bytes(b"old")
+    contents = b'{"key":"value"}\r\n\xff'
+
+    write_bytes_atomic(target, contents)
+
+    assert target.read_bytes() == contents
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert list(tmp_path.iterdir()) == [target]
+
+
 def test_a_failed_write_keeps_the_old_file(tmp_path, monkeypatch):
     target = tmp_path / "config.json"
     target.write_text("old")
@@ -110,28 +124,36 @@ def test_the_startup_migration_writes_whole(home, replaced):
     service.shutdown()
 
 
-def test_a_config_that_cannot_be_read_at_startup_is_kept_aside(home):
+def test_a_malformed_config_is_preserved_at_startup(home):
     path = home / ".kollab" / "config.json"
-    path.write_text('{"kollabor": {"llm": {"profiles": ')  # a hand edit gone wrong
+    original = b'{"kollabor": {"llm": {"profiles": '
+    path.write_bytes(original)  # a hand edit gone wrong
+    os.chmod(path, 0o640)
 
     service = ConfigService(path, fast_mode=True)
 
-    kept = home / ".kollab" / "config.json.corrupt"
-    assert kept.read_text() == '{"kollabor": {"llm": {"profiles": '
-    json.loads(path.read_text())  # and the config in use is whole
+    assert path.read_bytes() == original
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert service.has_config_error()
+    assert not path.with_name("config.json.corrupt").exists()
     service.shutdown()
 
 
-def test_a_config_that_goes_bad_is_kept_aside_when_a_key_is_saved(home):
+def test_a_malformed_config_changed_after_load_is_preserved_on_save(home):
     path = home / ".kollab" / "config.json"
     service = ConfigService(path, fast_mode=True)
-    path.write_text('{"kollabor": ')
+    original = b'{"api_key":"DO_NOT_ECHO",'
+    path.write_bytes(original)
+    os.chmod(path, 0o640)
 
-    assert service.save_key("terminal.render_fps", 7, "global")
+    assert service.save_key("terminal.render_fps", 7, "global") is False
 
-    assert (home / ".kollab" / "config.json.corrupt").read_text() == '{"kollabor": '
-    assert json.loads(path.read_text())["terminal"]["render_fps"] == 7
-    service.shutdown()
+    assert path.read_bytes() == original
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert not path.with_name("config.json.corrupt").exists()
+    error = service.get_config_error()
+    assert error and "changed" in error.lower()
+    assert "DO_NOT_ECHO" not in error
     service.shutdown()
 
 

@@ -53,6 +53,7 @@ export function emptyLiveTurn(): LiveTurn {
 type EventLike = {
   type?: string;
   request_id?: unknown;
+  request_ids?: unknown;
   cancelled?: unknown;
   text?: unknown;
   update?: unknown;
@@ -63,6 +64,7 @@ type EventLike = {
   success?: unknown;
   output?: unknown;
   error?: unknown;
+  message?: unknown;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -95,6 +97,23 @@ function applyHarnessUpdate(part: LiveToolPart, update: Record<string, unknown>)
 }
 
 /**
+ * The request a turn's event names. An ACP turn names its one request
+ * (`request_id`); any other turn names the requests of its sends
+ * (`request_ids`), and the first stays first when a later send is steered in.
+ * With it a turn the page only watches keeps its words through its end, until
+ * the saved reply takes their place (#1359).
+ */
+const eventRequestId = (event: EventLike): string => {
+  if (typeof event.request_id === "string") return event.request_id;
+  const first = Array.isArray(event.request_ids) ? event.request_ids[0] : undefined;
+  return typeof first === "string" ? first : "";
+};
+
+/** Whether an event names `requestId`: as its one request, or among its turn's sends. */
+export const eventNamesRequest = (event: EventLike, requestId: string): boolean =>
+  event.request_id === requestId || (Array.isArray(event.request_ids) && event.request_ids.includes(requestId));
+
+/**
  * Fold one session-stream event into the live turn. Returns the same object
  * when the event carries nothing renderable, so callers can skip the import.
  */
@@ -103,7 +122,7 @@ export function applyLiveEvent(current: LiveTurn, event: EventLike): LiveTurn {
   // by the engine: it belongs to a turn that already ended.
   if (event.cancelled) return current;
   const type = String(event.type ?? "");
-  const requestId = typeof event.request_id === "string" ? event.request_id : "";
+  const requestId = eventRequestId(event);
   const newer = !!requestId && !!current.requestId && requestId !== current.requestId;
   if (newer && current.settled && current.settled !== "replaced") {
     return { ...current, held: [...(current.held ?? []), event] };
@@ -114,18 +133,46 @@ export function applyLiveEvent(current: LiveTurn, event: EventLike): LiveTurn {
     if (newer) return current;
     // Not an ACP turn (no request id): the reload this event triggers brings
     // its reply at once.
-    if (!current.requestId) return emptyLiveTurn();
+    if (!current.requestId) {
+      const hasHistoryNotice = current.parts.some(
+        (part) => part.type === "text" && part.text.includes("ℹ Conversation history not saved for this "),
+      );
+      if (!hasHistoryNotice) return emptyLiveTurn();
+      return {
+        ...current,
+        settled: type === "error" ? "error" : type === "turn_cancelled" ? "cancelled" : "complete",
+      };
+    }
     // An ACP turn gets one terminal event of its own after the engine's
     // turn_cancelled, which fires the moment a stop is asked, before the daemon
     // stored the reply. Keep the text until the history brings it.
     if (current.settled) return current;
+    // Nothing left to wait for (history already shows every part): a turn
+    // settled with no parts would hold the next one back for good.
+    if (!current.parts.length) return { parts: [], requestId: current.requestId, settled: "replaced" };
     return { ...current, settled: type === "turn_cancelled" ? "cancelled" : type === "error" ? "error" : "complete" };
   }
   // A settled turn shows nothing more; a newer request starts its own.
-  if (current.settled && !newer) return current;
-  const turn: LiveTurn = newer ? { parts: [], requestId } : current;
+  const settledNotice = current.settled === "complete" && current.parts.some(
+    (part) => part.type === "text" && part.text.includes("ℹ Conversation history not saved for this "),
+  );
+  if (current.settled && !newer && !settledNotice) return current;
+  const turn: LiveTurn = newer || settledNotice ? { parts: [], requestId } : current;
   const id = turn.requestId || requestId;
   const grown = (parts: LivePart[]): LiveTurn => (id ? { parts, requestId: id } : { parts });
+  if (type === "notice") {
+    const message = typeof event.message === "string" ? event.message : "";
+    if (!message || !/^Conversation history not saved for this (message|reply)\.$/.test(message)) return current;
+    const parts = [...turn.parts];
+    const last = parts.at(-1);
+    const notice = `ℹ ${message}`;
+    if (last?.type === "text") {
+      parts[parts.length - 1] = { type: "text", text: `${last.text}\n\n${notice}` };
+    } else {
+      parts.push({ type: "text", text: `${notice}\n\n` });
+    }
+    return grown(parts);
+  }
   if (type === "token") {
     const delta = typeof event.text === "string" ? event.text : "";
     if (!delta) return current;
@@ -204,7 +251,7 @@ const SETTLED_STATUS: Record<string, NonNullable<ThreadMessageLike["status"]>> =
   error: { type: "incomplete", reason: "error" },
 };
 
-type HistoryRow = { role?: string; metadata?: { custom?: Record<string, unknown> } };
+type HistoryRow = { role?: string; content?: unknown; metadata?: { custom?: Record<string, unknown> } };
 
 /**
  * Whether newly appended history rows carry the reply the live turn showed.
@@ -225,12 +272,97 @@ export function historyReplacesLiveTurn(turn: LiveTurn, tail: ReadonlyArray<Hist
   });
 }
 
+const SAVE_NOTICE = /^ℹ Conversation history not saved for this (message|reply)\.$/;
+const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+/**
+ * Whether a saved assistant row can be the live turn's. A row that names a
+ * request or a voice turn is the turn's under that id only: another turn's
+ * row can repeat a call id or read alike. A row that names none (the daemon's
+ * own turns save theirs unnamed) is left to the caller, which passes only the
+ * rows saved after the turn's message where it knows that message's place.
+ */
+const savedByTurn = (turn: LiveTurn, row: HistoryRow): boolean => {
+  const requestId = row.metadata?.custom?.requestId;
+  const voiceTurnId = row.metadata?.custom?.voiceTurnId;
+  if (typeof requestId !== "string" && typeof voiceTurnId !== "string") return true;
+  return !!turn.requestId && (requestId === turn.requestId || voiceTurnId === turn.requestId);
+};
+
+/**
+ * The live turn without the parts its saved rows now show: a tool call one of
+ * them holds, words one of them contains. A page that watches a turn draws it
+ * from its events and from the history that lands while it runs; without this
+ * both showed every tool call until the turn ended (#1359). `rows` are the
+ * assistant rows a sync added; the ones another turn saved take nothing (see
+ * savedByTurn). A save notice stays: no row holds it. A settled turn with
+ * nothing left is replaced (see replacedLiveTurn). Returns the same object
+ * when nothing goes.
+ */
+export function withoutSavedParts(turn: LiveTurn, rows: ReadonlyArray<HistoryRow>): LiveTurn {
+  if (!turn.parts.length || turn.settled === "replaced") return turn;
+  const calls = new Set<string>();
+  const words: string[] = [];
+  for (const row of rows) {
+    if (row.role !== "assistant" || !savedByTurn(turn, row)) continue;
+    if (typeof row.content === "string") { words.push(oneLine(row.content)); continue; }
+    if (!Array.isArray(row.content)) continue;
+    for (const part of row.content as Array<{ type?: unknown; text?: unknown; toolCallId?: unknown }>) {
+      if (part?.type === "tool-call" && typeof part.toolCallId === "string") calls.add(part.toolCallId);
+      else if (part?.type === "text" && typeof part.text === "string") words.push(oneLine(part.text));
+    }
+  }
+  const saved = words.join(" ");
+  if (!calls.size && !saved) return turn;
+  let changed = false;
+  const parts = turn.parts.flatMap((part): LivePart[] => {
+    if (part.type === "tool-call") {
+      if (!calls.has(part.toolCallId)) return [part];
+      changed = true;
+      return [];
+    }
+    const lines = part.text.split("\n\n");
+    const notices = lines.filter((line) => SAVE_NOTICE.test(line));
+    const said = oneLine(lines.filter((line) => !SAVE_NOTICE.test(line)).join("\n\n"));
+    if (!said || !saved.includes(said)) return [part];
+    changed = true;
+    return notices.length ? [{ type: "text", text: notices.join("\n\n") }] : [];
+  });
+  if (!changed) return turn;
+  const next = { ...turn, parts };
+  // Only save notices left, if anything: the history holds the turn.
+  const left = parts.some((part) => part.type === "tool-call" ||
+    !part.text.split("\n\n").every((line) => !line.trim() || SAVE_NOTICE.test(line)));
+  return turn.settled && !left ? replacedLiveTurn(next) : next;
+}
+
 /**
  * The live turn after history replaced it: its late events stay ignored, and
  * the queued turn it held back starts from its first event.
  */
-export const replacedLiveTurn = (turn: LiveTurn): LiveTurn =>
-  (turn.held ?? []).reduce(applyLiveEvent, { parts: [], requestId: turn.requestId, settled: "replaced" });
+export const replacedLiveTurn = (turn: LiveTurn): LiveTurn => {
+  const notices = turn.parts.flatMap((part) =>
+    part.type === "text"
+      ? part.text
+          .split("\n\n")
+          .filter((line) => /^ℹ Conversation history not saved for this (message|reply)\.$/.test(line))
+          .map((text) => ({ type: "text" as const, text }))
+      : [],
+  );
+  if (turn.held?.length) {
+    const queued = turn.held.reduce(applyLiveEvent, {
+      parts: [],
+      requestId: turn.requestId,
+      settled: "replaced",
+    });
+    return notices.length ? { ...queued, parts: [...notices, ...queued.parts] } : queued;
+  }
+  return {
+    parts: notices,
+    requestId: turn.requestId,
+    settled: notices.length ? "complete" : "replaced",
+  };
+};
 
 /**
  * The ephemeral assistant message, or null while nothing has streamed.
@@ -250,12 +382,16 @@ export function liveMessage(turn: LiveTurn): ThreadMessageLike | null {
     (part) => (part.type === "text" && part.text) || part.type === "tool-call",
   );
   if (!parts.length) return null;
+  const standaloneNotice = !turn.requestId && parts.every(
+    (part) => part.type === "text" &&
+      /^ℹ Conversation history not saved for this (message|reply)\.$/.test(part.text.trim()),
+  );
   return {
     id: turn.requestId ? `${LIVE_MESSAGE_ID}:${turn.requestId}` : LIVE_MESSAGE_ID,
     role: "assistant",
     content: parts,
-    status: SETTLED_STATUS[turn.settled ?? ""] ?? { type: "running" },
-    metadata: { isOptimistic: true },
+    status: SETTLED_STATUS[turn.settled ?? ""] ?? (standaloneNotice ? SETTLED_STATUS.complete : { type: "running" }),
+    metadata: { isOptimistic: true, ...(turn.requestId ? { custom: { requestId: turn.requestId } } : {}) },
   };
 }
 

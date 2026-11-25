@@ -114,6 +114,14 @@ TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
 RULE_SELECTION_RE = re.compile(
     r"--(?:extend-)?(?:select|ignore)(?:=|\s+)['\"]?([A-Z]+\d*(?:,[A-Z]+\d*)*)"
 )
+# Ruff's pyflakes rule codes (`ruff rule --all`, linter Pyflakes, ruff 0.15.20).
+# Verdicts quote ruff output (six E501, I001, F841), so these exact tokens are
+# lint rules wherever they appear, never findings (#1407). Every other id counts.
+PYFLAKES_CODES = frozenset(
+    "F401 F402 F403 F404 F405 F406 F407 F501 F502 F503 F504 F505 F506 F507 F508"
+    " F509 F521 F522 F523 F524 F525 F541 F601 F602 F621 F622 F631 F632 F633 F634"
+    " F701 F702 F704 F706 F707 F722 F811 F821 F822 F823 F841 F842 F901".split()
+)
 
 
 class ConfigError(Exception):
@@ -455,12 +463,14 @@ def _mentions_finding(content: str, finding: str) -> bool:
 
 
 def _finding_matches(pattern: re.Pattern[str], body: str) -> list[re.Match[str]]:
-    """Finding-id matches in body, outside lint flag rule selections (#1024)."""
+    """Finding-id matches in body, outside lint flag rule selections (#1024)
+    and ruff's pyflakes rule codes (#1407)."""
     selections = [run.span(1) for run in RULE_SELECTION_RE.finditer(body)]
     return [
         match
         for match in pattern.finditer(body)
-        if not any(start <= match.start() < end for start, end in selections)
+        if match.group(0) not in PYFLAKES_CODES
+        and not any(start <= match.start() < end for start, end in selections)
     ]
 
 

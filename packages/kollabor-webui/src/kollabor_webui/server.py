@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import ipaddress
 import logging
+import mimetypes
 import os
 import posixpath
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
+from email.utils import formatdate
 from pathlib import Path
 
 import anyio
@@ -43,12 +48,42 @@ _HOP_BY_HOP = {
     "trailer", "transfer-encoding", "upgrade", "host", "content-length", "date", "server",
 }
 logger = logging.getLogger(__name__)
+# The build writes exactly this tag (vite.config.ts, kollabPluginRuntime); no other inline script is allowed.
+_IMPORT_MAP = re.compile(rb'<script type="importmap">(.*?)</script>', re.S)
 NO_STORE_HEADERS = {
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
     "Expires": "0",
     "X-Content-Type-Options": "nosniff",
 }
+
+
+class _UpdateConfig:
+    """Per-app in-memory settings and successful update-check cache."""
+
+    SETTING_DEFAULTS = {
+        "kollabor.updates.check_enabled": True,
+        "kollabor.updates.check_interval_hours": 24,
+        "kollabor.updates.github_repo": "kollaborai/kollab",
+        "kollabor.updates.timeout_seconds": 5,
+        "kollabor.updates.include_prereleases": False,
+    }
+    SETTING_KEYS = tuple(SETTING_DEFAULTS)
+
+    def __init__(self, settings: Mapping[str, object] | None = None):
+        self.values: dict[str, object] = {}
+        self.settings = {
+            key: settings[key]
+            for key in self.SETTING_KEYS
+            if settings is not None and key in settings
+        }
+
+    def get(self, key: str, default=None):
+        return self.values.get(key, self.settings.get(key, default))
+
+    def save_key(self, key: str, value, **_kwargs) -> bool:
+        self.values[key] = value
+        return True
 
 
 def _is_local(request: Request) -> bool:
@@ -119,6 +154,7 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     *,
     bind_hosts: Sequence[str] | None = None,
+    update_settings: Mapping[str, object] | None = None,
 ) -> FastAPI:
     # Refuse an invalid explicit selection before allocating clients or serving
     # any page; it must never become permission to use an older bundle.
@@ -133,9 +169,15 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
+        update_service = getattr(app.state, "update_service", None)
+        if update_service:
+            await update_service.shutdown()
         await engine.aclose()
 
     app = FastAPI(title="Kollab WebUI", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app.state.update_check_config = _UpdateConfig(update_settings)
+    app.state.update_service = None
+    app.state.update_service_lock = asyncio.Lock()
 
 
     @app.middleware("http")
@@ -191,31 +233,26 @@ def create_app(
         return response
 
 
-    class _UpdateConfig:
-        """The web server keeps no update cache: every check asks GitHub."""
-
-        def get(self, key: str, default=None):
-            return default
-
-        def save_key(self, key: str, value, **_kwargs) -> bool:
-            return False
-
     @app.get("/api/update/check")
-    async def check_update():
+    async def check_update(refresh: bool = False):
         """Return the latest release and local changelog notes, if available."""
         from kollabor.updates import VersionCheckService
         from kollabor.updates.release_notes import load_recent_release_notes
         from kollabor.version import __version__
 
-        service = VersionCheckService(_UpdateConfig(), __version__)
-        await service.initialize()
-        try:
-            release = await service.check_for_updates()
-        finally:
-            await service.shutdown()
+        async with app.state.update_service_lock:
+            service = app.state.update_service
+            if service is None:
+                service = VersionCheckService(
+                    app.state.update_check_config, __version__
+                )
+                app.state.update_service = service
+        result = await service.check_status(force=refresh)
+        release = result.release
         return {
             "current_version": __version__,
-            "available": release is not None,
+            "status": result.status,
+            "available": result.status == "available",
             "release": ({
                 "version": release.version,
                 "tag_name": release.tag_name,
@@ -223,6 +260,11 @@ def create_app(
                 "url": release.url,
                 "is_prerelease": release.is_prerelease,
             } if release else None),
+            "checked_at": result.checked_at,
+            "last_successful_check": result.last_successful_check,
+            "retry_after_seconds": result.retry_after_seconds,
+            "retry_at": result.retry_at,
+            "retry_reason": result.retry_reason,
             "notes": [
                 {"version": item.version, "date": item.date,
                  "sections": [{"title": s.title, "items": s.items} for s in item.sections]}
@@ -231,8 +273,14 @@ def create_app(
         }
 
     @app.post("/api/update/apply")
-    async def apply_update():
+    async def apply_update(request: Request):
         """Run the existing safe updater without blocking the web server."""
+        if not _is_local(request):
+            return JSONResponse(
+                {"detail": "Updates are available only on the computer running Kollab."},
+                status_code=403,
+                headers=NO_STORE_HEADERS,
+            )
         from kollabor.updates import run_auto_update
         result = await asyncio.to_thread(run_auto_update)
         return {"success": result.success, "changed": result.changed,
@@ -365,7 +413,18 @@ def create_app(
     def page(directory: Path) -> FileResponse:
         # Always revalidated: a cached entry page keeps loading the previous
         # build's hashed assets after a rebuild. The assets themselves can cache.
-        return FileResponse(directory / "index.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
+        index = directory / "index.html"
+        headers = {"Cache-Control": "no-cache"}
+        # The import map that gives web plugins the app's React is the page's one inline
+        # script; the policy allows exactly that text by its hash (#1028).
+        try:
+            found = _IMPORT_MAP.search(index.read_bytes())
+        except OSError:
+            found = None
+        if found:
+            digest = base64.b64encode(hashlib.sha256(found.group(1)).digest()).decode()
+            headers["Content-Security-Policy"] = f"script-src 'self' 'sha256-{digest}'"
+        return FileResponse(index, media_type="text/html", headers=headers)
 
     @app.get("/")
     async def index():
@@ -373,7 +432,7 @@ def create_app(
 
     @app.get("/plugins/{plugin_id}/web/{asset_path:path}")
     async def plugin_asset(plugin_id: str, asset_path: str):
-        from kollabor_plugins.packages import _ID, _read_registry
+        from kollabor_plugins.packages import _ID, _read_registry, files_sha256_with_asset_snapshot
 
         missing = JSONResponse({"detail": "Not found"}, status_code=404)
         is_dev = plugin_id.endswith("@dev")
@@ -399,8 +458,14 @@ def create_app(
                 if not isinstance(record, dict) or not record.get("enabled") or base_id in registry["dev"]:
                     return missing
                 installed_root = (home / "plugins").resolve()
-                root = (installed_root / base_id).resolve()
+                plugin_root = installed_root / base_id
+                if plugin_root.is_symlink():
+                    return missing
+                root = plugin_root.resolve()
                 if root.parent != installed_root:
+                    return missing
+                approved_hash = record.get("files_sha256")
+                if not isinstance(approved_hash, str) or not approved_hash:
                     return missing
             web = root / "web"
             dist = web / "dist"
@@ -411,6 +476,29 @@ def create_app(
                 relative = asset.relative_to(dist.resolve())
                 if any(part.startswith(".") for part in relative.parts) or asset.suffix not in extensions:
                     return missing
+                if not is_dev:
+                    # Hash the package and capture the served bytes in one traversal, off the event loop.
+                    last_modified = asset.stat().st_mtime
+                    digest, contents = await anyio.to_thread.run_sync(
+                        files_sha256_with_asset_snapshot, root, asset
+                    )
+                    if digest != approved_hash:
+                        contents.close()
+                        return missing
+                    media_type = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
+
+                    def body():
+                        try:
+                            while chunk := contents.read(64 * 1024):
+                                yield chunk
+                        finally:
+                            contents.close()
+
+                    return StreamingResponse(
+                        body(),
+                        media_type=media_type,
+                        headers={"ETag": f'"{approved_hash}"', "Last-Modified": formatdate(last_modified, usegmt=True)},
+                    )
         except (OSError, ValueError, RuntimeError):
             return missing
         return FileResponse(asset) if asset is not None else missing

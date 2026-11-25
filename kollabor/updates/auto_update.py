@@ -22,12 +22,14 @@ from pathlib import Path
 from ..binary import app_launcher, running_binary
 from . import git_update
 from .git_update import _current_source_root, pip_command, run_source_update
-from .version_comparator import is_newer_version
+from .version_comparator import is_newer_version, newest_release, release_version
 
 logger = logging.getLogger(__name__)
 
 # What a binary upgrades to; /releases/latest skips drafts and prereleases.
 LATEST_RELEASE = "https://api.github.com/repos/kollaborai/kollab/releases/latest"
+# With kollabor.updates.include_prereleases on, the newest of these, nightlies included (#1349).
+RELEASES = "https://api.github.com/repos/kollaborai/kollab/releases?per_page=30"
 
 
 @dataclass
@@ -162,6 +164,36 @@ def _open(url: str, timeout: float, headers: dict | None = None):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+def _include_prereleases() -> bool:
+    """kollabor.updates.include_prereleases in the global config: the nightly channel (#1349).
+
+    A plain read: /upgrade runs this inside the app, where a second ConfigService
+    would migrate, create or poll the file the app's own service owns.
+    """
+    from kollabor_config.config_utils import get_config_directory
+
+    try:
+        config = json.loads((get_config_directory() / "config.json").read_text(encoding="utf-8"))
+        return config.get("kollabor", {}).get("updates", {}).get("include_prereleases") is True
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, AttributeError) as exc:  # unreadable: keep the stable channel
+        logger.info(f"Could not read the update channel, using stable releases: {exc}")
+        return False
+
+
+def _release_to_install() -> dict:
+    """The release an upgrade installs: the latest stable one, or the newest including nightlies."""
+    if not _include_prereleases():
+        with _open(LATEST_RELEASE, 30) as response:
+            return json.load(response)
+    with _open(RELEASES, 30) as response:
+        release = newest_release(json.load(response))
+    if release is None:
+        raise ValueError("GitHub lists no published kollab release")
+    return release
+
+
 def _in_app() -> bool:
     """True when the running app called us from a worker thread.
 
@@ -258,7 +290,7 @@ def _download_with_progress(response, out, digest) -> None:
 
 
 def _upgrade_binary(binary: Path) -> AutoUpdateResult:
-    """Swap the running kollab binary for the latest release's build for this machine.
+    """Swap the running kollab binary for this machine's build of _release_to_install().
 
     The download must match the release's SHA-256 and start as the new version
     before it replaces anything, so a failed upgrade leaves the old binary working.
@@ -274,9 +306,8 @@ def _upgrade_binary(binary: Path) -> AutoUpdateResult:
             False, f"Cannot write {target.parent}; reinstall kollab with install.sh into a folder you own.", "binary"
         )
     try:
-        with _open(LATEST_RELEASE, 30) as response:
-            release = json.load(response)
-        latest = str(release["tag_name"]).removeprefix("v")
+        release = _release_to_install()
+        latest = release_version(str(release["tag_name"]))
         if not is_newer_version(current, latest):
             return AutoUpdateResult(True, f"Kollab is already up to date (v{current}).", "binary", changed=False)
         asset = f"kollab-{name}"

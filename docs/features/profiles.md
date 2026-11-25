@@ -263,6 +263,12 @@ and works for oauth profiles like `openai-oauth` (phase 4.5 fix).
 log example when persisted profile is activated:
   Activated persisted profile: openai-oauth
 
+### Removing a saved profile
+
+If Kollab cannot write the config change while deleting a saved profile, deletion
+fails and the profile remains registered. Resolve the config write problem before
+retrying so the in-memory profile list stays aligned with the saved config.
+
 ## OpenAI OAuth
 
 Use your ChatGPT Plus/Pro subscription without an API key:

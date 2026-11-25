@@ -41,7 +41,7 @@ from .session_context import SessionReadContext
 
 logger = logging.getLogger(__name__)
 
-PERMISSION_RESPONSE_RPC_METHOD = "permission.respond"
+PERMISSION_RESPONSE_RPC_METHOD = "permission.respond_owned"
 
 # The profile a POST /sessions builds from request credentials. No saved
 # profile has this name, so the daemon builds it from KOLLAB_APP_INLINE_* vars
@@ -275,7 +275,7 @@ class EngineSession:
         self.acp_turn_usage: Dict[str, Any] = {}
         self._acp_usage_display_turn: tuple[str, int] | None = None
 
-        self._pending_permissions: Dict[str, Dict[str, Any]] = {}
+        self._pending_permissions: Dict[tuple[str, str], Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
         self._event_task: Optional[asyncio.Task] = None
         self._facts_task: Optional[asyncio.Task] = None
@@ -1182,20 +1182,25 @@ class EngineSession:
     # === permissions ===
 
     async def resolve_permission(
-        self, tool_id: str, decision: str, scope: str = "once", option_id: str | None = None
+        self,
+        tool_id: str,
+        decision: str,
+        scope: str = "once",
+        option_id: str | None = None,
+        permission_id: str | None = None,
     ) -> bool:
         """Answer a permission prompt the daemon is blocked on.
 
         The HTTP surface speaks decision+scope; the daemon speaks
         ``ConfirmationResponse`` names, so translate at this boundary.
         """
-        if self.daemon is None or self.daemon.rpc is None:
+        if self.daemon is None or self.daemon.rpc is None or not permission_id:
             return False
 
         response = _confirmation_response_name(decision, scope)
-        payload = {"tool_id": tool_id, "control": response}
+        payload = {"tool_id": tool_id, "permission_id": permission_id, "control": response}
         if option_id is not None:
-            payload = {"tool_id": tool_id, "option_id": option_id}
+            payload = {"tool_id": tool_id, "permission_id": permission_id, "option_id": option_id}
         try:
             result = await self.daemon.rpc.call(
                 PERMISSION_RESPONSE_RPC_METHOD,
@@ -1204,8 +1209,10 @@ class EngineSession:
         except Exception as e:
             logger.warning("permission response failed for %s: %s", tool_id, e)
             return False
-        self._pending_permissions.pop(tool_id, None)
-        return bool(isinstance(result, dict) and result.get("ok"))
+        accepted = isinstance(result, dict) and result.get("ok") is True
+        if accepted:
+            self._pending_permissions.pop((tool_id, permission_id), None)
+        return accepted
 
     # === event tracking ===
 
@@ -1300,15 +1307,19 @@ class EngineSession:
                     # re-render it, and the daemon will not re-send it.
                     tool_id = str(event.get("tool_id") or "")
                     if tool_id:
-                        self._pending_permissions[tool_id] = event
+                        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+                        permission_id = str(event.get("permission_id") or details.get("permission_id") or "")
+                        self._pending_permissions[(tool_id, permission_id)] = event
                 elif etype == "permission_parked":
                     # Its turn ended and left the prompt open (a Stop, or 5 min
                     # unanswered): a window that loads it now must know.
                     tool_id = str(event.get("tool_id") or "")
-                    stored = self._pending_permissions.get(tool_id)
+                    permission_id = str(event.get("permission_id") or "")
+                    key = (tool_id, permission_id)
+                    stored = self._pending_permissions.get(key)
                     if stored is not None:
                         details = {**(stored.get("details") or {}), "parked": True}
-                        self._pending_permissions[tool_id] = {**stored, "details": details}
+                        self._pending_permissions[key] = {**stored, "details": details}
                 elif etype == "acp_waiting":
                     self.acp_waiting = bool(event.get("waiting"))
                 elif etype == "plan":
@@ -1317,7 +1328,9 @@ class EngineSession:
                     self.acp_usage = dict(event.get("payload") or {})
 
                 elif etype in ("permission_granted", "permission_denied", "permission_cancelled"):
-                    self._pending_permissions.pop(str(event.get("tool_id") or ""), None)
+                    tool_id = str(event.get("tool_id") or "")
+                    event_id = str(event.get("permission_id") or "")
+                    self._pending_permissions.pop((tool_id, event_id), None)
                 elif etype == "acp_session":
                     self.acp_plan = {}
                     self.acp_usage = {}

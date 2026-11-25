@@ -21,8 +21,10 @@ browser  ->  engine  /sessions/{id}/code/*   ->  session.state.code_call(op, par
   the daemon's working directory or another folder selected on the daemon's computer. A `workspace` field in a request is ignored; `codeRoot` is validated as an existing absolute directory on each request. Every file path is
   resolved and must sit inside that folder (closed-prefix check, symlinks followed; anything else is 403).
 - RPC: `state.code_call` (`kollabor/state/handlers.py`), answered like every other state call, local or remote.
-- A daemon older than this change answers `RpcMethodNotFound`; the engine turns that into 502 `daemon_outdated` ("This agent runs older code. Restart it to use Code, Git and Terminal.")
-  (never exception text). Restart the agent to pick up the code.
+- A daemon older than this change answers `RpcMethodNotFound`; the engine turns that into 502 `daemon_outdated` (never
+  exception text). Terminal, Code and Git use the chat's recovery notice (also when the folder-list request that opens Code and Git is the one refused): an agent with no published version gets the
+  stop-and-start instruction; a versioned agent gets Restart Agent when `kollabor.updates.restart_agents` is on or
+  `/restart` when it is off. Terminal hides Retry for `daemon_outdated` because retrying the same daemon cannot work.
 
 | surface | frontend | daemon op |
 |---|---|---|
@@ -55,7 +57,10 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
   Closing, idle reaping, or daemon shutdown signals terminal jobs and escalates survivors after a bounded grace period.
   On Linux, a per-terminal subreaper owns and reaps descendants even when they detach. On macOS, captured descendants
   and processes holding the terminal slave are tracked by process identity; a job that detaches and closes all PTY
-  descriptors between scans can escape. Process inspection permissions are required to discover macOS jobs.
+  descriptors between scans can escape. Reserving an inherited descriptor cannot guarantee ownership because a job
+  can close it too. The launcher reserves no extra descriptor and preserves inherited file-descriptor limits.
+  Process inspection permissions are required to discover macOS jobs. Guaranteed teardown of macOS jobs that lose
+  both ancestry and PTY evidence is outside this contract and remains unresolved in #1025.
   Teardown waits are bounded; if inspection or reaping times out, jobs can survive and the daemon logs a warning.
   `enabled` refuses every call, `terminal.enabled` opens no shells, `read_only` refuses terminal input
   (`code-shell-settings.md`).

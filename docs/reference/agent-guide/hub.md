@@ -18,6 +18,7 @@ Peer-to-peer agent mesh with persistent identity.
 - `dns/` - Agent DNS: discovery, Ed25519 identity, trust, capabilities (AID/ARDP/ANS-aligned)
 - `dns/endpoint.py` - Off-box A2A endpoint: TLS listener + federation bootstrap (well-known fetch/import)
 - `messaging_bridge.py` - Telegram bridge: long-poll inbox + send. It runs on `plugins.hub.bridge_target_agent` (empty = coordinator), like the email watcher (`_runs_inbox`), so a chat message wakes that agent and its replies go back through its own bridge; a bridge turned on in another agent (`/hub bridge enable`) sends what it receives on with `_route_message`. A reply to a bridge message goes out whole (`_answers_bridge_message`), anything else is mirrored cut to 500 chars (`_bridge_forward`). `tests/tmux/lib/fake_telegram.py` is a local Bot API for specs
+- `voice_transcription.py` - Telegram CLI transcription owner on Linux: a standalone child subreaper, launched with `python3`, owns one private artifact directory and waits for kernel-confirmed child exhaustion before reading output or deleting files. Cancellation and timeout kill and reap adopted descendants, including detached writers. It requires `/proc`. Other platforms do not use it: `messaging_bridge.py` `_transcribe_unsupervised` runs `whisper` directly, kills and reaps only that process, and removes its private directory after it exits. A missing `whisper` makes the owner exit 127, which the bridge names in the log. Do not replace the Linux ownership with pipe EOF or sampled process trees.
 - `email_bridge.py` - Email wake: IMAP IDLE (stdlib) on one inbox, read-only with `BODY.PEEK`; mail that arrives after start becomes a direct hub message that wakes `plugins.hub.email_target_agent` (empty = coordinator). That agent runs the watcher itself (`_email_inbox_loop`, `_runs_email_watch`); it shares `_run_bridge_inbox` and `BridgePollLock` with the Telegram bridge. Guide `docs/guides/email-wake-setup.md`
 - `network_attach.py` - Open an agent on another device of the network as a full chat: its own socket over the sealed device channel. The device running it decides by its trust, as for messages (`RelayAgentBridge.attach_target`: `open` every member device, `agents` only the agents that device may message, `manual` none); the engine opens `agent@device` session ids through it (`kollabor_engine/remote_attach.py`)
 - `vault.py` - Three-tier persistent memory (stream, working, crystallized)
@@ -34,6 +35,12 @@ Peer-to-peer agent mesh with persistent identity.
 - First agent becomes coordinator via `flock()` on `hub.lock`
 - Designations come from the folder's roster (`plugins.hub.roster`, default `gems`: lapis, peridot, ruby with color castes); a persona is a name, look, agent bundle, role and prompt, and `kollab --as [roster/]name` takes one from any roster. Teams are reporting chains of personas; the engine serves `GET /rosters`, `GET /teams`, `POST /teams/{name}/launch`
 - Open channel: all agents see all messages (like Slack)
+- Mailbox delivery claims every source record under the mailbox root's shared
+  file lock before invoking a receiver. Callback cancellation or failure holds
+  the original payload for inspection; it never proves acceptance or permits
+  an automatic retry. Refusal releases the claim, and successful delivery
+  removes the record or atomically replaces it with a receipt. The orphan
+  sweep removes empty directories only. See `docs/specs/hub-message-flow.md`.
 - Off-box mesh: `plugins.hub.endpoint_enabled` binds a TCP/TLS listener sharing the
   same `_handle_connection` handler; remote agents complete the same Ed25519 handshake.
   Default OFF (unix socket only). The endpoint always forces auth and refuses to bind
@@ -66,6 +73,8 @@ Peer-to-peer agent mesh with persistent identity.
 - `<scratchpad_append>content</scratchpad_append>` - Append
 - `<scratchpad_get/>` - Read back
 - `<scratchpad_clear/>` - Wipe
+- A missing note reads as `(empty)`; storage failures return a failed tool result.
+- Scratchpad notes survive compaction and remain available through `<scratchpad_get/>`; they are not automatically injected during rebirth.
 
 **CRITICAL: How `kollab --hub msg` actually works:**
 - `kollab --hub msg <name> <text>` BROADCASTS to ALL online agents, not just the named target
@@ -98,10 +107,17 @@ kollab --hub help                # full command list
 kollab --attach lapis@devbox     # attach over ssh: `where` on devbox + ssh -L (kollabor/attach_remote.py)
 ```
 
+Stop-all scope (#669, #875, #1408): `/hub stop all` typed in a session stops every agent in that
+session's hub folder and lists live agents in other folders; the agent `hub_stop` tool stops only
+agents its caller started. The hub folder is `/tmp/kollabor-hub/<hash>/`, keyed by `KOLLAB_PROJECT_ROOT`
+or the git root, so a test rig with its own root has its own hub.
+
 **Starting/stopping agents:**
 ```bash
 kollab --agent koordinator --detached   # start detached
 kollab --hub stop koordinator                    # stop (socket + SIGTERM fallback)
+kollab --hub stop all                            # this folder's hub; names live agents in other folders
+kollab --hub stop all --everywhere               # every folder on this machine (#1408)
 kollab --hub status                              # verify
 kollab service install                           # this folder's agent under systemd/launchd (kollabor/service.py)
 ```
@@ -115,6 +131,21 @@ kollab service install                           # this folder's agent under sys
 2. LLM emits `<hub_msg>` -> `_parse_hub_messages` -> route + strip tags
 3. Agent receives via socket/mailbox -> display + inject + trigger LLM
 4. Event pipeline: PRE -> MAIN -> POST phase data propagation
+
+Offline task assignments and task-cron controls are kept in a bounded durable
+mailbox until receive classification. If its control capacity is full, Hub
+rejects the new control with a retryable delivery failure instead of deleting
+an earlier accepted control. Ordinary offline messages use a separate limit
+and may be evicted oldest-first when that limit is exceeded.
+If receive refuses a durable control, it stays on disk and continues to count
+against control capacity until a later receive classifies it.
+Admission, pruning and replay share one validated record reader. Only recognized
+ordinary messages permit automatic eviction or consumption. Unreadable files,
+malformed or non-object JSON, and invalid message fields remain on disk and
+consume retained capacity until repaired or explicitly resolved. Even a consuming
+read preserves durable controls until receive classification and acknowledgment.
+Identical durable retries ignore mutable routing evidence and persisted delivery
+claims; different content under the same ID returns a delivery rejection.
 
 The web UI reloads stored Hub notes when they arrive, including observed notes
 that do not wake the receiving agent.
@@ -132,6 +163,9 @@ that do not wake the receiving agent.
 - response_parser runs on ALL responses regardless of native tool presence
 - Plugin tags (hub_msg, scratchpad, etc) are registered via `register_plugin_tag()` and executed via `register_plugin_handler()` -- real tools, not regex hacks on LLM_RESPONSE_POST
 - 43 hub pipeline tags registered (hub_msg, hub_broadcast, hub_stop, hub_status, scratchpad*, state_update, task_*, change feed, agent ops, vault_write, hub_ask_ctx)
+- `state_update` preserves malformed or unreadable saved state and reports
+  persistence failures. Back up and explicitly repair or remove invalid state
+  before retrying.
 - A native call the model writes into its reply as text (`<functions.NAME>{json}</functions.NAME>`, `<tool_call>{"name": ...}</tool_call>`) parses as an MCP call by name; `resolve_text_tool_call` (`kollabor_agent/tool_call_contract.py`) sends it to the built-in or plugin tool it names before scope and permission checks, as `normalize_native_tool_call` does for real native calls. Its result returns in the XML batch, never as a provider tool result (the provider never issued that call id). Beside real native calls such a block only echoes them and never runs (`is_text_written_call`); a `<tool_call>` with no name is a `malformed_tool`, never a tool named "unknown"
 - See `docs/specs/unified-tool-pipeline.md` for full design
 
@@ -201,10 +235,11 @@ When a user reports a hub bug, do not guess. Run this loop:
    completed`, the task was delivered but the model never called a tool.
    That's a prompt/model issue, not a delivery bug.
 
-5. **Vault rebirth is not a bug.** Agents load
-   `~/.kollab/hub/vaults/<identity>/` (stream + working_memory +
-   crystallized + scratchpad) on startup. Spawning lapis after lapis has
-   3 prior sessions of work means lapis will reference that work in its
+5. **Vault rebirth is not a bug.** Startup context includes the stream,
+   working memory, and crystallized notes. Scratchpad notes persist across
+   compaction but are read explicitly through `<scratchpad_get/>`, not
+   automatically injected on startup. Spawning lapis after lapis has 3 prior
+   sessions of work means lapis will reference that rebirth context in its
    first reply. For clean smoke tests, use a gem with a thinner vault
    (`sapphire`, `peridot`) or `rm -rf ~/.kollab/hub/vaults/<name>`
    first (only with explicit user permission).

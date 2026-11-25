@@ -2,6 +2,8 @@
 
 The web UI's **Settings → Prompts** tab builds each role's system prompt from shared sections.
 
+If the prompt library cannot load, the page shows the error and a **Retry** button. The prompt editor stays hidden until loading succeeds.
+
 ## Libraries
 
 - **Defaults** is the shipped `bundles/agents/_base/sections` set. An edit here reaches every role that sends the section. **Revert to Shipped** drops the edit.

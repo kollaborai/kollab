@@ -1,0 +1,39 @@
+name: PR throughput KPI
+
+on:
+  schedule:
+    - cron: "17 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  actions: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Generate PR throughput report
+        run: >-
+          python .github/scripts/pr_throughput_kpi.py
+          --config .github/pr-throughput-kpi.json
+          --json-out kpi.json
+          --markdown-out kpi.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Upload PR throughput report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-throughput-kpi
+          path: |
+            kpi.json
+            kpi.md

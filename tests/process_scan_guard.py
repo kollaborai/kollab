@@ -25,11 +25,33 @@ HOST_PROCESS_SCAN_SKIP_REASON = "host-wide process scans run only in a sanctione
 # These exact tests exercise real ACP lifecycles or host-wide process-table scans.
 # Keep them visible so collection can fail closed if a test loses its marker.
 HOST_PROCESS_SCAN_TESTS = {
+    "unit/code_service/test_terminal.py": frozenset(
+        {
+            "test_teardown_ends_background_job_after_shell_exits",
+            "test_teardown_stops_fast_detached_descendant",
+        }
+    ),
     "unit/test_acp_bridge.py": frozenset(
         {
+            "test_group_anchor_keeps_group_identity_after_adapter_exits",
             "test_close_recovers_fast_detached_orphan_and_preserves_other_session_process",
-            "test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit",
+            "test_setsid_orphan_lost_before_a_tree_sample_is_recovered",
+            "test_orphan_is_recovered_where_os_getsid_is_missing",
+            "test_startup_refusal_preserves_public_message_code_and_cleans_process",
+            "test_close_after_started_worker_releases_queue_and_is_repeatable",
+            "test_adapter_runs_outside_the_parent_session",
+            "test_close_lets_group_descendants_finish_their_sigterm_handler",
+            "test_adapter_tree_keeps_default_sigpipe",
+            "test_queued_turn_after_cancel_rebases_generation",
+            "test_queued_turn_keeps_first_generation_updates",
+            "test_compliant_cancel_preserves_process_session_and_single_consumer",
+            "test_ignored_cancel_kills_old_process_and_restarts_before_queue",
+            "test_runner_uses_sdk_agent_for_streams_answer_and_closes_process",
+            "test_admission_accepts_exactly_ten_waiting_turns",
+            "test_prepare_cancel_holds_queue_for_delayed_owner",
             "test_private_process_group_cleans_orphan_without_session_lookup",
+            "test_close_checks_only_recent_same_user_process_markers",
+            "test_group_cleanup_without_owner_marker_never_reads_process_environments",
             "test_orphan_fixture_defers_cleanup_when_runner_close_raises",
             "test_startup_orphan_fixture_defers_when_product_cleanup_is_broken",
             "test_startup_failure_cleans_same_group_orphan_after_root_exits",

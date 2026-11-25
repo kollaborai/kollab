@@ -28,6 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
+from kollabor_plugins.redaction import redact_sensitive_text
 from kollabor_plugins.tokens import PluginTokenFiles
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class PluginEventHub:
         self._lock = threading.Lock()
         self._subscribers: dict[str | None, dict[asyncio.Queue, asyncio.AbstractEventLoop]] = {}
         self._heartbeats: dict[tuple[str, str], float] = {}
+        self.heartbeat_monitor_since = time.time()
 
     def subscribe(self, plugin_id: str | None) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -139,18 +141,28 @@ def _event_response(hub: PluginEventHub, plugin_id: str | None) -> EventSourceRe
 
 @router.get("")
 def list_plugins(request: Request):
-    from kollabor_plugins.registry import plugin_entries
+    from kollabor_plugins.registry import _finite_service_number, _normalize_plugin_entry, plugin_entries
 
     entries = plugin_entries()
     for entry in entries:
+        if not isinstance(entry, dict):
+            continue
         plugin_id = entry.get("id")
         error = request.app.state.plugin_dispatcher.errors.get(plugin_id)
         if error and entry.get("state") == "ok":
-            entry["state"], entry["error"] = "error", error
+            entry["state"] = "error"
+            entry["error"] = "Python entry failed while loading; see the process log for details."
         for service in entry.get("services", []):
             if isinstance(service, dict) and isinstance(service.get("name"), str):
-                service["heartbeat"] = request.app.state.plugin_events.heartbeat(plugin_id, service["name"])
-    return {"schema": 1, "plugins": entries}
+                service["heartbeat"] = _finite_service_number(
+                    request.app.state.plugin_events.heartbeat(plugin_id, service["name"])
+                )
+                service["heartbeat_monitor_since"] = _finite_service_number(
+                    request.app.state.plugin_events.heartbeat_monitor_since
+                )
+    normalized = [_normalize_plugin_entry(entry) for entry in entries]
+    server_time = _finite_service_number(time.time())
+    return {"schema": 1, "plugins": [entry for entry in normalized if entry is not None], "server_time": server_time}
 
 
 @router.get("/events")
@@ -175,6 +187,11 @@ async def install_plugin(request: Request, body: InstallPluginRequest):
 @router.get("/jobs/{job_id}")
 async def get_plugin_job(request: Request, job_id: str):
     return request.app.state.plugin_jobs.get(job_id)
+
+
+@router.delete("/jobs/{job_id}")
+async def cancel_plugin_job(request: Request, job_id: str):
+    return await request.app.state.plugin_jobs.cancel(job_id)
 
 
 @router.post("/jobs/{job_id}/confirm")
@@ -326,14 +343,25 @@ def _engine_context(plugin_id: str, hub: PluginEventHub):
 
 
 @router.get("/{plugin_id}/settings")
-def get_plugin_settings(plugin_id: str):
+def get_plugin_settings(plugin_id: str, kind: str | None = None):
     """Read package settings or the public fields of a built-in plugin."""
-    context = _package_context(plugin_id)
+    if kind not in {None, "built-in", "installed", "dev"}:
+        raise HTTPException(status_code=422, detail="Invalid plugin kind")
+    if kind == "dev" and not plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    if kind in {"installed", "built-in"} and plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    context = None if kind == "built-in" else _package_context(plugin_id)
+    if kind in {"installed", "dev"} and context is None:
+        raise HTTPException(status_code=404, detail="Plugin not found")
     if context is not None:
         try:
             return context.settings.get()
         except (OSError, UnicodeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail="Cannot read plugin settings") from exc
+
+    if kind in {"installed", "dev"}:
+        raise HTTPException(status_code=404, detail="Plugin not found")
 
     from kollabor_plugins.registry import plugin_entries
 
@@ -353,17 +381,30 @@ def get_plugin_settings(plugin_id: str):
 
 
 @router.put("/{plugin_id}/settings")
-def put_plugin_settings(request: Request, plugin_id: str, values: dict[str, Any]):
-    context = _package_context(plugin_id)
+def put_plugin_settings(
+    request: Request,
+    plugin_id: str,
+    values: dict[str, Any],
+    kind: str | None = None,
+):
+    if kind not in {None, "built-in", "installed", "dev"}:
+        raise HTTPException(status_code=422, detail="Invalid plugin kind")
+    if kind == "dev" and not plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    if kind in {"installed", "built-in"} and plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    context = None if kind == "built-in" else _package_context(plugin_id)
     if context is None:
         # Verify that this is an actual built-in before invoking the shared writer.
-        get_plugin_settings(plugin_id)
+        get_plugin_settings(plugin_id, kind=kind)
+        if kind in {"installed", "dev"}:
+            raise HTTPException(status_code=404, detail="Plugin not found")
     try:
         if context is None:
             from kollabor_plugins.settings import save
 
-            save(plugin_id, values)
-            saved = get_plugin_settings(plugin_id)
+            save(plugin_id, values, kind=kind, allow_secrets=True)
+            saved = get_plugin_settings(plugin_id, kind=kind)
         else:
             context.settings.save(values)
             saved = context.settings.get()
@@ -391,6 +432,8 @@ def _service_context(plugin_id: str, service_name: str):
 
 @router.post("/{plugin_id}/services/{service_name}/{action}")
 async def plugin_service_action(request: Request, plugin_id: str, service_name: str, action: str):
+    from kollabor_plugins.services import ServiceSignalError
+
     if action not in {"start", "stop", "restart"}:
         raise HTTPException(status_code=404, detail="Plugin service action not found")
     context = _service_context(plugin_id, service_name)
@@ -398,6 +441,10 @@ async def plugin_service_action(request: Request, plugin_id: str, service_name: 
         pending = await request.app.state.plugin_service_controls.control(context, service_name, action)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="Cannot change plugin service state") from exc
+    except ServiceSignalError as exc:
+        request.app.state.plugin_events.publish_change()
+        logger.warning("Cannot signal plugin service %s/%s: %s", plugin_id, service_name, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Cannot stop plugin service; check its status and retry") from exc
     except OSError as exc:
         logger.warning("Cannot control plugin service %s/%s: %s", plugin_id, service_name, type(exc).__name__)
         raise HTTPException(status_code=503, detail="Cannot control plugin service") from exc
@@ -563,20 +610,38 @@ class RemovePluginOptions(BaseModel):
     confirm_purge: bool = False
 
 
+
+async def _publish_partial_disable(request: Request, plugin_id: str) -> None:
+    """Revoke live resources and notify clients after the registry was disabled."""
+    try:
+        await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
+    finally:
+        try:
+            await request.app.state.plugin_dispatcher.invalidate(plugin_id)
+        finally:
+            request.app.state.plugin_events.publish_change()
+
+
 @router.post("/{plugin_id}/enable")
 @router.post("/{plugin_id}/disable")
-async def set_plugin_enabled(request: Request, plugin_id: str):
-    from kollabor_plugins.services import supervisor_tick
+async def set_plugin_enabled(request: Request, plugin_id: str, kind: str | None = None):
+    from kollabor_plugins.services import ServiceStopError, supervisor_tick
 
-    context = _package_context(plugin_id)
+    if kind not in {None, "built-in", "installed", "dev"}:
+        raise HTTPException(status_code=422, detail="Invalid plugin kind")
+    if kind == "dev" and not plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    if kind in {"installed", "built-in"} and plugin_id.endswith("@dev"):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    context = None if kind == "built-in" else _package_context(plugin_id)
     if context is None:
-        get_plugin_settings(plugin_id)  # Reject unknown IDs before changing config.
+        get_plugin_settings(plugin_id, kind=kind)  # Reject unknown IDs before changing config.
     enabled = request.scope["path"].rstrip("/").endswith("/enable")
     try:
         if context is None:
             from kollabor_plugins.settings import set_enabled
 
-            await asyncio.to_thread(set_enabled, plugin_id, enabled)
+            await asyncio.to_thread(set_enabled, plugin_id, enabled, kind=kind)
             request.app.state.plugin_events.publish_change()
             return {"enabled": enabled}
         await asyncio.to_thread(_set_package_enabled, context, enabled)
@@ -593,6 +658,9 @@ async def set_plugin_enabled(request: Request, plugin_id: str):
         else:
             await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
             await request.app.state.plugin_dispatcher.invalidate(plugin_id)
+    except ServiceStopError as exc:
+        await _publish_partial_disable(request, plugin_id)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OSError as exc:
@@ -604,6 +672,8 @@ async def set_plugin_enabled(request: Request, plugin_id: str):
 
 @router.post("/{plugin_id}/remove")
 async def remove_plugin(request: Request, plugin_id: str, options: RemovePluginOptions = RemovePluginOptions()):
+    from kollabor_plugins.services import ServiceStopError
+
     context = _package_context(plugin_id)
     if context is None:
         raise HTTPException(status_code=404, detail="Plugin not found")
@@ -615,6 +685,9 @@ async def remove_plugin(request: Request, plugin_id: str, options: RemovePluginO
         if await request.app.state.plugin_dispatcher.invalidate(plugin_id):
             raise ValueError("Plugin requests are still running; retry removal when they finish")
         await asyncio.to_thread(_remove_package_checked, context, options.purge)
+    except ServiceStopError as exc:
+        await _publish_partial_disable(request, plugin_id)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         await request.app.state.plugin_dispatcher.invalidate(plugin_id)
         request.app.state.plugin_events.publish_change()
@@ -831,12 +904,16 @@ def get_plugin_usage(plugin_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="Invalid plugin usage data") from exc
     except OSError as exc:
-        logger.warning("Cannot update plugin usage for %s: %s", plugin_id, exc)
+        logger.warning(
+            "Cannot update plugin usage for %s: %s",
+            plugin_id,
+            redact_sensitive_text(str(exc)),
+        )
         raise HTTPException(status_code=503, detail="Cannot update plugin usage") from exc
     return {"date": today, "total": total, "cap": cap, "remaining": max(0, cap - total)}
 
 
-def _plugin_token_target(method: str, path: str) -> str | None:
+def _plugin_token_target(method: str, path: str, query: bytes | str = b"") -> str | None:
     """Return the own-plugin id only for routes that accept a plugin token."""
     from kollabor_plugins.settings import _valid_data_id
 
@@ -849,6 +926,16 @@ def _plugin_token_target(method: str, path: str) -> str | None:
         return None
     tail = parts[2:]
     method = method.upper()
+    if tail == ["settings"]:
+        from urllib.parse import parse_qs
+
+        try:
+            query_text = query.decode("ascii") if isinstance(query, bytes) else query
+            kinds = parse_qs(query_text, keep_blank_values=True).get("kind", [])
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if len(kinds) > 1 or (kinds and kinds != ["installed"]):
+            return None
     allowed = (
         (len(tail) >= 2 and tail[0] == "api")
         or (tail == ["events"] and method in {"GET", "POST"})
@@ -865,10 +952,12 @@ def _plugin_token_target(method: str, path: str) -> str | None:
 class PluginTokenStore(PluginTokenFiles):
     """Authorize scoped engine requests using the shared private token file."""
 
-    def authorize(self, token: str, method: str, path: str, hub: PluginEventHub) -> bool:
+    def authorize(
+        self, token: str, method: str, path: str, hub: PluginEventHub, query: bytes | str = b""
+    ) -> bool:
         from kollabor_plugins.packages import _read_registry
 
-        plugin_id = _plugin_token_target(method, path)
+        plugin_id = _plugin_token_target(method, path, query)
         if plugin_id is None:
             return False
         try:
@@ -1021,23 +1110,20 @@ class PluginServiceControls:
         return True
 
     async def _finish_restart(self, context, service_name: str) -> None:
-        from kollabor_plugins.services import _recorded_process_alive, control_service
+        from kollabor_plugins import services
+        from kollabor_plugins.packages import stop_timeout
 
-        service = context.manifest["services"][service_name]
-        timeout = service.get("stop_timeout_s", 10)
-        if type(timeout) is not int or timeout < 0:
-            timeout = 10
-        deadline = time.monotonic() + timeout + 5
+        deadline = time.monotonic() + stop_timeout(context.manifest["services"][service_name]) + 5
         pid = context.data / "run" / f"{service_name}.pid"
         try:
-            while await asyncio.to_thread(_recorded_process_alive, pid):
+            while await asyncio.to_thread(services._recorded_process_alive, pid):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Service did not stop before the restart deadline")
                 await asyncio.sleep(0.25)
             async with self._lock:
                 options = {"engine_url": self.engine_url} if self.engine_url else {}
                 operation = asyncio.create_task(
-                    asyncio.to_thread(control_service, context.id, service_name, "start", **options)
+                    asyncio.to_thread(services.control_service, context.id, service_name, "start", **options)
                 )
                 try:
                     await asyncio.shield(operation)
@@ -1189,7 +1275,7 @@ class PluginDispatcher:
                 except Exception as exc:
                     message = redact_log(str(exc).strip())[:500] or type(exc).__name__
                     self.errors[plugin_id] = message
-                    logger.warning("Plugin %s engine failed to load: %s", plugin_id, type(exc).__name__)
+                    logger.warning("Plugin %s engine failed to load: %s", plugin_id, message)
                     raise HTTPException(status_code=503, detail="Plugin engine failed to load") from exc
                 self._loaded[plugin_id] = loaded
             self.errors.pop(plugin_id, None)

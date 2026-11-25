@@ -205,21 +205,16 @@ def _login_of(profile: Any) -> Optional[str]:
 _ASKED_AS: ContextVar[Optional[List[str]]] = ContextVar("model_catalog_asked_as", default=None)
 
 
-def cached_provider_models(
-    profile: Any, max_age: float = CACHE_TTL_SECONDS
-) -> List[Dict[str, Any]]:
-    """Cached catalog for a profile. Never fetches, never blocks, never raises.
-
-    This is what synchronous callers (loadout synthesis, name resolution) read.
-    Returns an empty list when nothing has been cached yet.
-    """
+def _cached_provider_models_entry(
+    profile: Any, max_age: float
+) -> Optional[Dict[str, Any]]:
     key = _profile_key(profile)
     if not key:
-        return []
+        return None
 
     login = _login_of(profile)
     if login == "":
-        return []  # no login: no list is known to be its
+        return None  # no login: no list is known to be its
 
     def usable(entry: Any) -> bool:
         return _fresh(entry, max_age) and entry.get("login") == login and _same_source(entry, profile)
@@ -230,8 +225,33 @@ def cached_provider_models(
         if usable(entry):
             _MEMORY_CACHE[key] = entry  # type: ignore[assignment]
         else:
-            return []
-    return list(entry.get("models", []))  # type: ignore[union-attr]
+            return None
+    return entry
+
+
+def cached_provider_models(
+    profile: Any, max_age: float = CACHE_TTL_SECONDS
+) -> List[Dict[str, Any]]:
+    """Cached catalog for a profile. Never fetches, never blocks, never raises.
+
+    This is what synchronous callers (loadout synthesis, name resolution) read.
+    Returns an empty list when nothing has been cached yet.
+    """
+    entry = _cached_provider_models_entry(profile, max_age)
+    return list(entry.get("models", [])) if entry else []
+
+
+def cached_provider_models_updated_at(
+    profile: Any, max_age: float = float("inf")
+) -> float:
+    """Timestamp of the latest matching cached provider catalog, or zero."""
+    entry = _cached_provider_models_entry(profile, max_age)
+    if not entry:
+        return 0.0
+    try:
+        return float(entry.get("timestamp", 0.0))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def _store(profile: Any, models: List[Dict[str, Any]], login: Optional[str] = None) -> None:

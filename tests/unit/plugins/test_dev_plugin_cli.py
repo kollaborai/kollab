@@ -36,17 +36,21 @@ def test_dev_registration_copies_settings_once_and_detaches(tmp_path, monkeypatc
     registry_path = home / "plugins.json"
     registry = json.loads(registry_path.read_text())
     assert registry["dev"]["hello"] == str(source.resolve())
+    first_order = registry["enable_order"]["hello@dev"]
     dev_values = home / "plugin-data" / "hello@dev" / "values.json"
     assert json.loads(dev_values.read_text()) == {"count": 2}
     dev_values.write_text('{"count": 3}')
     assert main(["dev", str(source)]) == 0
     assert json.loads(dev_values.read_text()) == {"count": 3}
+    assert json.loads(registry_path.read_text())["enable_order"]["hello@dev"] == first_order
     assert main(["dev", "off", "hello"]) == 0
     assert json.loads(registry_path.read_text())["dev"] == {}
+    assert "hello@dev" not in json.loads(registry_path.read_text())["enable_order"]
     assert not dev_values.exists()
     assert json.loads((installed_data / "values.json").read_text()) == {"count": 2}
     assert main(["dev", str(source)]) == 0
     assert json.loads(dev_values.read_text()) == {"count": 2}
+    assert json.loads(registry_path.read_text())["enable_order"]["hello@dev"] > first_order
 
 
 def test_dev_confirmation_does_not_disclose_secret_names(tmp_path, monkeypatch, capsys):

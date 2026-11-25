@@ -62,7 +62,12 @@ open; these instructions are not a live provider test.
 The harness owns its model, login, tools and context. Kollab owns the Hub name,
 windows, transcript, permission UI and routing. Provider API keys are stripped
 from the child environment unless the portable profile explicitly lists them
-in `pass_env`. Executables are resolved independently on each device.
+in `pass_env`. Executables are resolved independently on each device. For
+cleanup, each adapter also receives a fresh random owner marker; shutdown can
+recover same-user descendants that call `setsid` before tree tracking sees them,
+then rechecks their PID and birth identity before signalling. This is process
+tracking, not OS containment: a child that removes the marker, changes user, or
+cannot be inspected can escape recovery.
 
 Custom profile example:
 

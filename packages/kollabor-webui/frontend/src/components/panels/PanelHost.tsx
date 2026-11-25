@@ -31,6 +31,7 @@ import { NetworkPanel, type NetworkSection } from "./NetworkPanel";
 import { PickerList } from "./PickerList";
 import { PromptsPage } from "@/components/prompts/PromptsPage";
 import { PromptsApi } from "@/prompts-api";
+import { PluginsSettings } from "@/plugins/settings";
 import { SessionSettings } from "./SessionSettings";
 import { PanelDialogSurface } from "./PanelDialogSurface";
 import {
@@ -209,11 +210,15 @@ export function PanelHost({
   const promptsApi = useMemo(() => new PromptsApi(api), [api]);
   const [tabs, setTabs] = useState<TabMap>(freshTabs);
   const [busy, setBusy] = useState(false);
+  const [pluginDraftCount, setPluginDraftCount] = useState(0);
   const [reveal, setReveal] = useState<Reveal | null>(null);
   const [poll, setPoll] = useState<Poll | null>(null);
   const [networkSection, setNetworkSection] = useState<"overview" | "access">("overview");
   // Bumped on close: answers that arrive for an older window are dropped.
   const epoch = useRef(0);
+  const setupStartSequence = useRef(0);
+  const pendingSetupStart = useRef<number | null>(null);
+  const canceledSetupStarts = useRef(new Set<number>());
   const inflight = useRef<Partial<Record<PanelTab, Promise<void>>>>({});
   const openingKnocks = useRef<Promise<void> | null>(null);
   const consumed = useRef(0);
@@ -288,6 +293,7 @@ export function PanelHost({
       tab !== "prompts" &&
       tab !== "phonelink" &&
       tab !== "cron" &&
+      tab !== "plugins" &&
       tabs[tab].status === "idle"
     ) {
       void loadRoot(tab);
@@ -346,7 +352,7 @@ export function PanelHost({
         }
         views[views.length - 1] = {
           ...top,
-          panel: result.ok && result.panel ? result.panel : top.panel,
+          panel: result.panel ?? top.panel,
           draft: settled?.draft ?? (result.ok && reset ? {} : top.draft),
           step: result.ok && reset ? 0 : step,
           errors,
@@ -388,9 +394,20 @@ export function PanelHost({
       opts: { reset?: boolean; poll?: boolean; submitted?: PanelControlSubmission } = {},
     ) => {
       const mine = epoch.current;
+      const setupStartId = name === "setup" && action === "oauth_start"
+        ? ++setupStartSequence.current
+        : null;
+      if (setupStartId !== null) pendingSetupStart.current = setupStartId;
       if (!opts.poll) setBusy(true);
       try {
         const result = await api.panelAction(sessionId, name, action, payload);
+        if (setupStartId !== null && canceledSetupStarts.current.delete(setupStartId)) {
+          const flowId = String(result.panel?.context?.oauth_flow_id ?? "");
+          if (flowId) {
+            void api.panelAction(sessionId, "setup", "oauth_cancel", { flow_id: flowId }).catch(() => {});
+          }
+          return;
+        }
         if (mine !== epoch.current) return;
         applyResult(target, name, result, Boolean(opts.reset), opts.submitted);
         if (result.ok && !result.panel && !result.open && !result.poll) {
@@ -411,6 +428,10 @@ export function PanelHost({
         }));
         setPoll(null);
       } finally {
+        if (setupStartId !== null) {
+          canceledSetupStarts.current.delete(setupStartId);
+          if (pendingSetupStart.current === setupStartId) pendingSetupStart.current = null;
+        }
         if (!opts.poll && mine === epoch.current) setBusy(false);
       }
     },
@@ -476,7 +497,7 @@ export function PanelHost({
     (total, state) =>
       total +
       state.views.reduce((n, view) => n + Object.keys(view.draft).length, 0),
-    0,
+    pluginDraftCount,
   );
   const handleOpenChange = (next: boolean) => {
     if (
@@ -488,6 +509,22 @@ export function PanelHost({
     ) {
       return;
     }
+    if (!next && top?.panel.panel === "setup" && top.panel.kind === "wizard") {
+      const flowId = String(top.panel.context?.oauth_flow_id ?? "");
+      if (flowId) {
+        void api.panelAction(sessionId, "setup", "oauth_cancel", { flow_id: flowId }).catch(() => {});
+        setPoll(null);
+        patchTop(tab as PanelTab, (view) => ({
+          ...view,
+          step: 0,
+          panel: view.panel.kind === "wizard"
+            ? { ...view.panel, context: {} }
+            : view.panel,
+        }));
+      } else if (pendingSetupStart.current !== null) {
+        canceledSetupStarts.current.add(pendingSetupStart.current);
+      }
+    }
     onOpenChange(next);
   };
   const changeTab = (next: string) => {
@@ -495,14 +532,27 @@ export function PanelHost({
     onTabChange(next as SettingsTab);
   };
 
-  const state = tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "cron" ? null : tabs[tab];
+  const state =
+    tab === "session" ||
+    tab === "prompts" ||
+    tab === "phonelink" ||
+    tab === "plugins" ||
+    tab === "cron"
+      ? null
+      : tabs[tab];
   const top = state?.views[state.views.length - 1];
   const activeTab =
     SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0];
   const message = top?.message ?? null;
 
   const refresh = async () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "cron") return;
+    if (
+      tab === "session" ||
+      tab === "prompts" ||
+      tab === "phonelink" ||
+      tab === "plugins" ||
+      tab === "cron"
+    ) return;
     if (tab === "network" && top?.panel.panel === "connect-knocks") {
       const mine = epoch.current;
       setBusy(true);
@@ -526,10 +576,22 @@ export function PanelHost({
     ) {
       return;
     }
+    if (top?.panel.panel === "setup" && top.panel.kind === "wizard") {
+      const flowId = String(top.panel.context?.oauth_flow_id ?? "");
+      if (flowId) {
+        await api.panelAction(sessionId, "setup", "oauth_cancel", { flow_id: flowId }).catch(() => {});
+      }
+    }
     patchTab(tab, () => IDLE);
   };
   const back = () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "cron") return;
+    if (
+      tab === "session" ||
+      tab === "prompts" ||
+      tab === "phonelink" ||
+      tab === "plugins" ||
+      tab === "cron"
+    ) return;
     setReveal(null);
     patchTab(tab, (current) => ({
       ...current,
@@ -558,7 +620,14 @@ export function PanelHost({
   };
 
   const panelBody = () => {
-    if (!state || tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "cron") return null;
+    if (
+      !state ||
+      tab === "session" ||
+      tab === "prompts" ||
+      tab === "phonelink" ||
+      tab === "plugins" ||
+      tab === "cron"
+    ) return null;
     if (state.status === "error") {
       return (
         <div className="flex flex-col items-start gap-3 px-4 py-4 sm:px-6">
@@ -721,17 +790,58 @@ export function PanelHost({
             step={top.step}
             errors={top.errors}
             busy={busy}
-            onDraftChange={(draft) => patchTop(tab, (view) => ({ ...view, draft }))}
-            onStepChange={(step) => patchTop(tab, (view) => ({ ...view, step }))}
-            onAction={(action, step) =>
-              void runAction(
+            onDraftChange={(draft) => {
+              const providerField = panel.steps.flatMap((item) => item.fields).find((field) => field.path === "provider");
+              const previous = String(top.draft.provider ?? providerField?.value ?? "");
+              const next = String(draft.provider ?? previous);
+              const flowId = String(panel.context?.oauth_flow_id ?? "");
+              if (
+                name === "setup" && flowId &&
+                previous.toLowerCase().includes("sign in with chatgpt") &&
+                !next.toLowerCase().includes("sign in with chatgpt")
+              ) {
+                void runAction(tab, name, "oauth_cancel", { flow_id: flowId });
+              }
+              patchTop(tab, (view) => ({ ...view, draft }));
+            }}
+            onStepChange={(step) => {
+              patchTop(tab, (view) => ({ ...view, step }));
+              const providerField = panel.steps.flatMap((item) => item.fields).find((field) => field.path === "provider");
+              const provider = String(top.draft.provider ?? providerField?.value ?? "");
+              if (
+                name === "setup" && step === 1 &&
+                provider.toLowerCase().includes("sign in with chatgpt") &&
+                !panel.context?.oauth_flow_id
+              ) {
+                void runAction(tab, name, "oauth_start", {
+                  values: wizardValues(panel, top.draft),
+                  step: "oauth_sign_in",
+                });
+              }
+            }}
+            onAction={(action, step) => {
+              const request = runAction(
                 tab,
                 name,
                 action.id,
-                { values: wizardValues(panel, top.draft), step: step.id },
+                {
+                  values: wizardValues(panel, top.draft),
+                  step: step.id,
+                  ...(panel.context?.oauth_flow_id
+                    ? {
+                        oauth_flow_id: panel.context.oauth_flow_id,
+                        flow_id: panel.context.oauth_flow_id,
+                      }
+                    : {}),
+                },
                 { reset: action.id === "finish" },
-              )
-            }
+              );
+              if (action.id === "oauth_cancel") {
+                void request.then(() =>
+                  patchTop(tab, (view) => ({ ...view, step: 0 })),
+                );
+              }
+            }}
           />
         ) : (
           <p className="text-muted-foreground px-4 py-4 text-sm sm:px-6">
@@ -764,13 +874,13 @@ export function PanelHost({
       >
         <TabsList
           aria-label="Settings sections"
-          className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 md:h-9 md:flex-nowrap md:overflow-x-auto [&::-webkit-scrollbar]:hidden"
+          className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 [&::-webkit-scrollbar]:hidden"
         >
           {SETTINGS_TABS.filter((item) => sessionId || sessionlessTabs(!!session.workspace).includes(item.id)).map((item) => (
             <TabsTrigger
               key={item.id}
               value={item.id}
-              className="h-9 flex-none px-2.5 sm:px-3 md:h-full"
+              className="h-9 flex-none px-2.5 sm:px-3 pointer-coarse:min-h-11"
             >
               {item.label}
             </TabsTrigger>
@@ -805,6 +915,16 @@ export function PanelHost({
           >
             {sessionId ? <PromptsPage api={promptsApi} /> : null}
           </div>
+          <div
+            role="tabpanel"
+            aria-label="Plugins"
+            className={cn(
+              "min-h-0 flex-1 flex-col",
+              tab === "plugins" ? "flex" : "hidden",
+            )}
+          >
+            <PluginsSettings api={api} onDirtyChange={setPluginDraftCount} />
+          </div>
           {tab === "phonelink" && open ? (
             <div role="tabpanel" aria-label="PhoneLink" className="flex min-h-0 w-full flex-1 flex-col">
               <PhoneLinkPanel api={api} onOpenNetwork={() => changeTab("network")} />
@@ -815,7 +935,7 @@ export function PanelHost({
               <CronJobsPanel api={api} />
             </div>
           ) : null}
-          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" && tab !== "cron" ? (
+          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" && tab !== "plugins" && tab !== "cron" ? (
             <div
               role="tabpanel"
               aria-label={activeTab.label}

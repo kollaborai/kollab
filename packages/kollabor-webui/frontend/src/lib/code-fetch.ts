@@ -17,15 +17,28 @@ const api = new EngineApi();
 
 /** Shown in place of the error when a session's daemon predates Code, Git and Terminal. No version or code in it. */
 export const OUTDATED_NOTICE = "This agent runs older code. Restart it to use Code, Git and Terminal.";
+export const DAEMON_OUTDATED_EVENT = "kollab:daemon-outdated";
+export const CODE_REQUEST_SUCCEEDED_EVENT = "kollab:code-request-succeeded";
 
 // The session the open Code Editor view belongs to. One view is shown at a time and it sets this while it renders,
 // before any of its children fetch, so the many call sites keep mentiko's single-argument codeFetch.
 let activeCodeSession = "";
 let activeCodeRoot = "";
+let activeCodeGeneration = 0;
 export function setCodeRoot(root: string): void { activeCodeRoot = root; }
 
-export function setCodeSession(sessionId: string): void {
+export function setCodeSession(sessionId: string, advanceGeneration = false): number {
+  if (sessionId !== activeCodeSession || advanceGeneration) activeCodeGeneration += 1;
   activeCodeSession = sessionId;
+  return activeCodeGeneration;
+}
+
+export function isCurrentCodeSessionGeneration(sessionId: string, generation: unknown): boolean {
+  return sessionId === activeCodeSession && generation === activeCodeGeneration;
+}
+
+export function getCodeSessionGeneration(sessionId: string): number | null {
+  return sessionId === activeCodeSession ? activeCodeGeneration : null;
 }
 
 export function codeBase(sessionId: string = activeCodeSession): string {
@@ -48,9 +61,35 @@ export function codeRequestUrl(url: string, context?: { sessionId: string; root:
   return target;
 }
 
+function isDaemonOutdatedPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const error = (payload as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return false;
+  return (error as { code?: unknown }).code === "daemon_outdated";
+}
+
+function announceDaemonOutdated(sessionId: string, generation: number | null): void {
+  if (!sessionId || typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(DAEMON_OUTDATED_EVENT, { detail: { sessionId, generation } }));
+}
+
+function announceCodeRequestSucceeded(sessionId: string, generation: number): void {
+  if (!sessionId || typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(CODE_REQUEST_SUCCEEDED_EVENT, { detail: { sessionId, generation } }));
+}
+
 export async function codeFetch(url: string, init: RequestInit = {}, context?: { sessionId: string; root: string }): Promise<Response> {
+  // Capture the target before awaiting: the editor can switch sessions while a request is in flight.
+  const sessionId = context?.sessionId ?? activeCodeSession;
+  const generation = sessionId === activeCodeSession ? activeCodeGeneration : null;
   try {
-    return await api.request(codeRequestUrl(url, context), init);
+    const response = await api.request(codeRequestUrl(url, context), init);
+    // A successful active-session request proves this daemon handles code calls; fence older in-flight errors.
+    if (response.ok && sessionId === activeCodeSession && generation === activeCodeGeneration) {
+      activeCodeGeneration += 1;
+      announceCodeRequestSucceeded(sessionId, activeCodeGeneration);
+    }
+    return response;
   } catch (error) {
     // EngineApi.request throws on non-2xx; hand the response shape back so mentiko-style
     // `if (!res.ok)` call sites keep working.
@@ -61,6 +100,7 @@ export async function codeFetch(url: string, init: RequestInit = {}, context?: {
       body && typeof body === "object" && "success" in (body as object)
         ? body
         : { success: false, error: { code: "request_failed", message } };
+    if (isDaemonOutdatedPayload(payload)) announceDaemonOutdated(sessionId, generation);
     return new Response(JSON.stringify(payload), {
       status,
       headers: { "Content-Type": "application/json" },

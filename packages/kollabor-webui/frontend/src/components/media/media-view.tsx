@@ -19,6 +19,7 @@ type LoadImage = (path: string) => Promise<string | null>;
 const MediaImageContext = createContext<LoadImage | null>(null);
 
 const SessionMediaContext = createContext<MediaEntry[] | null>(null);
+type SessionMediaSnapshot = { api: EngineApi; sessionId: string; media: MediaEntry[] | null };
 
 /** Loads the active session's complete image list so chat thumbnails share the Gallery viewer order. */
 export function MediaSessionProvider({
@@ -30,22 +31,22 @@ export function MediaSessionProvider({
   sessionId: string;
   children: ReactNode;
 }) {
-  const [media, setMedia] = useState<MediaEntry[] | null>(null);
+  const [snapshot, setSnapshot] = useState<SessionMediaSnapshot | null>(null);
   useEffect(() => {
     let current = true;
-    setMedia(null);
     void api.listMedia(sessionId).then(
       (response) => {
-        if (current) setMedia(response.media);
+        if (current) setSnapshot({ api, sessionId, media: response.media });
       },
       () => {
-        if (current) setMedia(null);
+        if (current) setSnapshot({ api, sessionId, media: null });
       },
     );
     return () => {
       current = false;
     };
   }, [api, sessionId]);
+  const media = snapshot?.api === api && snapshot.sessionId === sessionId ? snapshot.media : null;
   return <SessionMediaContext.Provider value={media}>{children}</SessionMediaContext.Provider>;
 }
 

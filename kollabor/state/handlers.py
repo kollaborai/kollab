@@ -99,6 +99,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.clear_project_approvals (phase 4.5 step 7 write)
         state.list_project_approvals  (phase 4.5 step 7 read)
         state.resume_conversation     (phase 4.5 step 7 write)
+        state.branch_conversation     (saved-session branch write)
         state.hub_enroll              (private typed enrollment submission)
         state.hub_enroll_status       (where a submitted join request stands)
         state.hub_connect_snapshot    (Connect screen data for an attached window)
@@ -470,6 +471,20 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         except ValueError as e:
             return {"error": str(e)}
 
+    async def _branch_conversation(params: dict[str, Any]) -> dict[str, Any]:
+        session_id = params.get("session_id", "")
+        branch_index = params.get("branch_index")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return {"error": "session_id is required"}
+        if isinstance(branch_index, bool) or not isinstance(branch_index, int):
+            return {"error": "branch_index must be an integer"}
+        try:
+            return await state_service.branch_conversation(
+                session_id.strip(), branch_index
+            )
+        except ValueError as e:
+            return {"error": str(e)}
+
     async def _get_hub_status_text(params: dict[str, Any]) -> dict[str, Any]:
         try:
             text = await state_service.get_hub_status_text()
@@ -829,6 +844,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.list_project_approvals": _list_project_approvals,
         # Phase 4.5 step 7: resume
         "state.resume_conversation": _resume_conversation,
+        "state.branch_conversation": _branch_conversation,
         # Phase 4.5 step 8: hub reads (cheap wins)
         "state.get_hub_status_text": _get_hub_status_text,
         "state.get_hub_whoami_text": _get_hub_whoami_text,

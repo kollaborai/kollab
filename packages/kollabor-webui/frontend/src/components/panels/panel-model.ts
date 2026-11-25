@@ -9,9 +9,13 @@ export type SettingsTab =
   | "network"
   | "phonelink"
   | "voice"
+  | "plugins"
   | "prompts"
   | "cron";
-export type PanelTab = Exclude<SettingsTab, "session" | "phonelink" | "cron">;
+export type PanelTab = Exclude<
+  SettingsTab,
+  "session" | "phonelink" | "plugins" | "cron"
+>;
 
 /** A step to run once the tab is ready: `/connect code`, `/connect knocks`. */
 export type PanelIntent = "new_code" | "knocks" | "halt";
@@ -48,6 +52,7 @@ export const SETTINGS_TABS: readonly {
   { id: "network", label: "Network", scope: "This device's agent network" },
   { id: "phonelink", label: "PhoneLink", scope: "Open this computer’s Kollab on your phone" },
   { id: "voice", label: "Voice", scope: "Saved for every chat on the device running Kollab" },
+  { id: "plugins", label: "Plugins", scope: "Plugins installed on this computer" },
   {
     id: "prompts",
     label: "Prompts",
@@ -285,5 +290,5 @@ export function sessionlessPanelName(tab: PanelTab, haltFolder: string): string 
 
 /** The tabs a sessionless Settings mount offers. */
 export function sessionlessTabs(haltedFolder: boolean): readonly SettingsTab[] {
-  return haltedFolder ? ["network"] : ["setup", "network"];
+  return haltedFolder ? ["network", "plugins"] : ["setup", "network", "plugins"];
 }

@@ -7,7 +7,7 @@ from pathlib import Path
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
 
-from .packages import _ID, _read_registry, _recover_locked, _within, _write_json
+from .packages import _ID, _read_registry, _recover_locked, _set_enable_order, _within, _write_json
 
 
 def _read_json(path: Path) -> dict:
@@ -32,7 +32,7 @@ def _validate(widget: dict, value: object) -> None:
             valid = widget.get("min_value", float("-inf")) <= value <= widget.get("max_value", float("inf"))
     elif kind == "dropdown":
         valid = value in widget.get("options", [])
-    elif kind in {"text_input", "text"}:
+    elif kind in {"text_input", "text", "textarea"}:
         valid = isinstance(value, str)
     else:
         valid = False
@@ -148,24 +148,38 @@ def _save_builtin(
 
 def save(
     plugin_id: str, values: dict, *, allow_secrets: bool = False,
-    config_service=None, save_target: str = "global",
+    config_service=None, save_target: str = "global", kind: str | None = None,
 ) -> None:
     """Serialize validation and saving with install, update, detach and removal.
 
-    ``allow_secrets`` is reserved for the local config panel, which already
-    provides masked secret editing. Remote/plugin callers use the default.
+    ``allow_secrets`` is reserved for local UI writers, which provide masked
+    secret editing. Remote/plugin callers use the default.
     """
     if not isinstance(plugin_id, str):
         raise ValueError("Invalid plugin id")
+    if kind not in {None, "built-in"}:
+        raise ValueError("Invalid plugin kind")
     home = Path.home() / ".kollab"
     home.mkdir(parents=True, exist_ok=True)
     # Discovery can itself recover installs under plugins.json.lock; do it first.
     registry = _read_registry(home / "plugins.json")
-    entry = None if plugin_id in registry["plugins"] or plugin_id.endswith("@dev") else _builtin(plugin_id)
+    entry = (
+        _builtin(plugin_id)
+        if kind == "built-in"
+        or (plugin_id not in registry["plugins"] and not plugin_id.endswith("@dev"))
+        else None
+    )
     with locked_file(home / "plugins.json.lock", private=True):
         _recover_locked(home)
         registry = _read_registry(home / "plugins.json")
-        if entry is not None and plugin_id not in registry["plugins"]:
+        if kind == "built-in":
+            if entry is None:
+                raise ValueError("Built-in plugin not found")
+            _save_builtin(
+                entry, values, allow_secrets=allow_secrets,
+                config_service=config_service, save_target=save_target,
+            )
+        elif entry is not None and plugin_id not in registry["plugins"]:
             _save_builtin(
                 entry, values, allow_secrets=allow_secrets,
                 config_service=config_service, save_target=save_target,
@@ -217,21 +231,27 @@ def _save_locked(plugin_id: str, values: dict) -> None:
         write_text_atomic(path, json.dumps(current, indent=2, ensure_ascii=False) + "\n")
 
 
-def set_enabled(plugin_id: str, enabled: bool, *, config_service=None, save_target: str = "global") -> None:
+def set_enabled(
+    plugin_id: str, enabled: bool, *, config_service=None, save_target: str = "global", kind: str | None = None
+) -> None:
     """Set a plugin's enabled state, capturing PATH for packages on enable."""
     if not isinstance(plugin_id, str):
         raise ValueError("Invalid plugin id")
     if type(enabled) is not bool:
         raise ValueError("Enabled state must be a boolean")
+    if kind not in {None, "built-in"}:
+        raise ValueError("Invalid plugin kind")
     home = Path.home() / ".kollab"
     home.mkdir(parents=True, exist_ok=True)
     registry = _read_registry(home / "plugins.json")
-    entry = None if plugin_id in registry["plugins"] else _builtin(plugin_id)
+    entry = _builtin(plugin_id) if kind == "built-in" else (
+        None if plugin_id in registry["plugins"] else _builtin(plugin_id)
+    )
     with locked_file(home / "plugins.json.lock", private=True):
         _recover_locked(home)
         path = home / "plugins.json"
         registry = _read_registry(path)
-        record = registry["plugins"].get(plugin_id)
+        record = None if kind == "built-in" else registry["plugins"].get(plugin_id)
         if entry is not None and record is None:
             _save_builtin(
                 entry, {f"plugins.{plugin_id}.enabled": enabled}, enable=True,
@@ -242,17 +262,27 @@ def set_enabled(plugin_id: str, enabled: bool, *, config_service=None, save_targ
             raise ValueError("Invalid plugin id")
         if not isinstance(record, dict):
             raise ValueError("Plugin is not installed")
+        if enabled and not record.get("enabled"):
+            from .services import _recorded_process_alive
+
+            run_dir = home / "plugin-data" / plugin_id / "run"
+            if any(pid.is_symlink() or _recorded_process_alive(pid) for pid in run_dir.glob("*.pid")):
+                raise ValueError("Plugin is stopping or still has a running service; wait before enabling it")
+        if bool(record.get("enabled")) != enabled:
+            _set_enable_order(registry, plugin_id, enabled)
         record["enabled"] = enabled
         if enabled:
             record["enabled_path"] = os.environ.get("PATH", os.defpath)
         _write_json(path, registry)
     if not enabled:
-        from .services import stop_services
+        from .services import ServiceStopError, stop_services
 
-        stop_services(plugin_id)
+        failures = stop_services(plugin_id)
+        if failures:
+            raise ServiceStopError("Could not stop background processes. The plugin is off; retry stopping them.")
 
 
-def apply_config_changes(changes: dict) -> dict:
+def apply_config_changes(changes: dict, *, failures: list[Exception] | None = None) -> dict:
     """Write installed-plugin rows and return the ordinary configuration changes.
 
     The UI uses namespaced paths to distinguish the plugin's own settings from
@@ -290,15 +320,24 @@ def apply_config_changes(changes: dict) -> dict:
             raise ValueError("Invalid plugin configuration path")
         else:
             ordinary[path] = value
+
+    def apply(operation, *args):
+        try:
+            operation(*args)
+        except Exception as exc:
+            if failures is None:
+                raise
+            failures.append(exc)
+
     for plugin_id, plugin_values in values.items():
-        save(plugin_id, plugin_values)
+        apply(save, plugin_id, plugin_values)
     for plugin_id, value in enabled.items():
-        set_enabled(plugin_id, value)
+        apply(set_enabled, plugin_id, value)
     if controls:
         from .services import control_service
 
         for plugin_id, service_name, action in controls:
-            control_service(plugin_id, service_name, action)
+            apply(control_service, plugin_id, service_name, action)
     return ordinary
 
 

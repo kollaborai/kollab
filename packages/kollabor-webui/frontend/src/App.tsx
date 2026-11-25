@@ -1,4 +1,4 @@
-import { sameVersionBase } from "./engine-version";
+import { compareBuildIdentity } from "./engine-version";
 import { refreshesOnEvent, tracksStreamedRequest } from "./live-follow";
 import type { SessionEvent } from "./api";
 import { createHistoryReconciliation } from "./history-reconciliation";
@@ -6,7 +6,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
-import { ComposerKeeper } from "./components/assistant-ui/composer-keeper";
+import { ComposerKeeper, forgetComposerText } from "./components/assistant-ui/composer-keeper";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 
 // Monaco and xterm are large: each view loads the first time it is opened, not with the main bundle.
@@ -50,6 +50,7 @@ import {
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, prepareRemoteOpen, targetsOn } from "@/components/shell/agent-network";
 import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
+import type { DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
@@ -77,6 +78,7 @@ import {
 } from "@/components/ui/sidebar";
 import {
   EngineApi,
+  ApiError,
 
   HISTORY_PAGE_SIZE,
   type HistoryPage,
@@ -96,6 +98,16 @@ import {
 } from "./api";
 import { applyModelChoice, pickLabel, runningKey, stateAfterPick } from "@/components/shell/model-choice";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
+import { setPluginHost, startPluginRuntime } from "@/plugins/loader";
+import { usePlugins } from "@/plugins/registry";
+import {
+  PluginModalHost,
+  PluginNotices,
+  PluginPage,
+  PluginViewHost,
+  pluginViewAvailable,
+  pluginViewGone,
+} from "@/plugins/surfaces";
 import {
   EngineRuntimeProvider,
   buildInitialState,
@@ -115,6 +127,7 @@ import {
   storeHistoryPageIfCurrent,
   clearHistoryPagesIfCurrent,
 } from "./history-cache";
+import { olderLoadFailed, olderLoadRunning, type HistoryStatus } from "./history-status";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { reuseIfEqual } from "@/utils/state-snapshot";
 import { createSessionRefreshGate } from "@/utils/session-refresh";
@@ -196,6 +209,8 @@ function RuntimeShell({
   agents,
   liveAgents,
   remoteAgents,
+  agentIsCurrent,
+  daemonNotice,
   onSessionUpdated,
   onOpenSettings,
   onOpenWelcome,
@@ -218,6 +233,8 @@ function RuntimeShell({
   agents: AgentPoolEntry[];
   /** Every running agent, one per process: the chat reads its own by its instance, never by name. */
   liveAgents: LiveAgent[];
+  agentIsCurrent: boolean;
+  daemonNotice: DaemonNoticeProps;
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
@@ -247,8 +264,20 @@ function RuntimeShell({
   const [status, setStatus] = useState<string | null>(null);
   const [panelSheetOpen, setPanelSheetOpen] = useState(false);
   const workspace = session.workspace ?? "";
-  // Code Editor, Git and Terminal work in the chat's folder; a chat without one shows Chat.
-  const shown: SessionView = !workspace && (view === "code" || view === "git" || view === "terminal") ? "chat" : view;
+  const plugins = usePlugins();
+  // Code Editor, Git and Terminal work in the chat's folder; a chat without one shows Chat. So does a chat on
+  // a plugin tab that is gone (its plugin turned off) or needs a folder this chat lacks.
+  const shown: SessionView =
+    !workspace && (view === "code" || view === "git" || view === "terminal")
+      ? "chat"
+      : view.startsWith("plugin:") && !pluginViewAvailable(plugins, view, Boolean(workspace))
+        ? "chat"
+        : view;
+  // A plugin tab that is gone for good (plugin off or failed) moves the chat to Chat, so Chat is the tab marked.
+  const viewGone = pluginViewGone(plugins, view);
+  useEffect(() => {
+    if (viewGone) setView("chat");
+  }, [viewGone, setView]);
   const [visited, setVisited] = useState({ editor: false, terminal: false });
   useEffect(() => {
     // Code and Git are one editor (same tabs and panes) with a different sidebar
@@ -303,9 +332,20 @@ function RuntimeShell({
     }
     wasRunning.current = running;
   }, [running, lastPrompt, onHistoryCleared]);
-  const [commands, setCommands] = useState<SlashCommand[]>(
-    DEFAULT_SLASH_COMMANDS,
-  );
+  const [commandCatalog, setCommandCatalog] = useState<{
+    sessionId: string;
+    status: "loading" | "ready" | "empty" | "unavailable" | "fallback";
+    commands: SlashCommand[];
+  }>({ sessionId: "", status: "loading", commands: [] });
+  const [commandCatalogRetry, setCommandCatalogRetry] = useState(0);
+  const catalogIsCurrent = commandCatalog.sessionId === session.session_id;
+  const commandCatalogStatus = catalogIsCurrent ? commandCatalog.status : "loading";
+  const welcomeCommand = DEFAULT_SLASH_COMMANDS.find((command) => command.name === "welcome");
+  const catalogIsAuthoritative = catalogIsCurrent &&
+    (commandCatalog.status === "ready" || commandCatalog.status === "fallback");
+  const commands = catalogIsAuthoritative
+    ? commandCatalog.commands
+    : welcomeCommand ? [welcomeCommand] : [];
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
@@ -319,30 +359,40 @@ function RuntimeShell({
 
   useEffect(() => {
     let mounted = true;
-    setCommands(DEFAULT_SLASH_COMMANDS);
+    setCommandCatalog({ sessionId: session.session_id, status: "loading", commands: [] });
     void api
       .listCommands(session.session_id)
       .then((result) => {
         if (!mounted) return;
-        const source = result.commands?.length
-          ? result.commands
-          : DEFAULT_SLASH_COMMANDS;
-        const welcome = DEFAULT_SLASH_COMMANDS.find(
-          (command) => command.name === "welcome",
-        );
-        setCommands([
-          ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
-          ...(welcome ? [welcome] : []),
-        ]);
+        const source = result.commands ?? [];
+        const hasCommands = source.length > 0;
+        setCommandCatalog({
+          sessionId: session.session_id,
+          status: hasCommands ? "ready" : "empty",
+          commands: hasCommands
+            ? [
+                ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
+                ...(welcomeCommand ? [welcomeCommand] : []),
+              ]
+            : [],
+        });
       })
-      .catch(() => {
-        // Keep the first-paint compatibility catalog when an older daemon does
-        // not expose the live registry yet.
+      .catch((error: unknown) => {
+        if (!mounted) return;
+        if (error instanceof ApiError && error.status === 404 && error.message === "Not Found") {
+          setCommandCatalog({
+            sessionId: session.session_id,
+            status: "fallback",
+            commands: DEFAULT_SLASH_COMMANDS,
+          });
+          return;
+        }
+        setCommandCatalog({ sessionId: session.session_id, status: "unavailable", commands: [] });
       });
     return () => {
       mounted = false;
     };
-  }, [session.session_id]);
+  }, [session.session_id, commandCatalogRetry]);
 
   return (
     <MediaSessionProvider api={api} sessionId={session.session_id}>
@@ -387,6 +437,8 @@ function RuntimeShell({
               <Thread
                 agents={targets.agents}
                 commands={commands}
+                commandCatalogStatus={commandCatalogStatus}
+                onRetryCommands={() => setCommandCatalogRetry((retry) => retry + 1)}
                 onOpenPanel={onOpenSettings}
                 onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={
@@ -410,6 +462,8 @@ function RuntimeShell({
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
             ) : shown === "gallery" ? (
               <GalleryView api={api} sessionId={session.session_id} />
+            ) : shown.startsWith("plugin:") ? (
+              <PluginViewHost viewKey={shown} session={session} />
             ) : null}
             {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
             {workspace && visited.editor ? (
@@ -420,6 +474,8 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
+                    daemonNotice={daemonNotice}
                     mode={shown === "git" ? "git" : "code"} />
                 </Suspense>
               </div>
@@ -432,6 +488,8 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
+                    daemonNotice={daemonNotice}
                   />
                 </Suspense>
               </div>
@@ -466,6 +524,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [pageRoute, setPageRoute] = useState(() => readMainPageRoute(window.location));
   const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
   const whatsNewActive = pageRoute.kind === "whats-new";
+  const pluginPage = pageRoute.kind === "plugin" ? pageRoute : null;
   const pageOpen = pageRoute.kind !== "chat";
   const previousPageOpenRef = useRef(pageOpen);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -603,11 +662,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const initialStateRef = useRef(initialState);
   initialStateRef.current = initialState;
 
-  const [historyStatus, setHistoryStatus] = useState<{
-    sessionId: string;
-    kind: "loading" | "loading-older" | "error" | "empty";
-    message: string;
-  } | null>(null);
+  const [historyStatus, setHistoryStatus] = useState<HistoryStatus>(null);
   const historyPagesRef = useRef(new Map<string, HistoryPage>());
   const historyRefreshVersion = useRef(0);
   const retryHistoryReconciliationRef = useRef<((sessionId: string) => boolean) | null>(null);
@@ -886,7 +941,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     };
     olderLoadRef.current.add(sessionId);
     if (!prefetch && activeIdRef.current === sessionId) {
-      setHistoryStatus({ sessionId, kind: "loading-older", message: "Loading older messages…" });
+      setHistoryStatus((status) => olderLoadRunning(status, sessionId));
     }
     try {
       const older = await loadOlderHistoryPage(
@@ -1013,11 +1068,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       }
       console.warn("Failed to load older history", error);
       if (!prefetch && activeIdRef.current === sessionId && stillCurrent()) {
-        setHistoryStatus({
-          sessionId,
-          kind: "error",
-          message: "Couldn't load older messages. Scroll up or retry to try again.",
-        });
+        setHistoryStatus((status) => olderLoadFailed(status, sessionId));
       }
       return false;
     } finally {
@@ -1334,9 +1385,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   // A page served from an older (or newer) bundle than the running engine can
   // hit renamed API fields. Warn instead of failing; reload clears it.
-  const [versionMismatch, setVersionMismatch] = useState<{ page: string; engine: string } | null>(null);
+  const [versionMismatch, setVersionMismatch] = useState<{ page: string; pageBuild: string; engine: string } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<Awaited<ReturnType<EngineApi["checkForUpdate"]>> | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateCheckBusy, setUpdateCheckBusy] = useState(false);
+  const [updateCheckError, setUpdateCheckError] = useState(false);
+  const [updateRetryFailed, setUpdateRetryFailed] = useState(false);
+  const [updateRetryWaiting, setUpdateRetryWaiting] = useState(false);
   // The engine's own version (GET /version): what a chat's agent is compared with.
   const [engineVersion, setEngineVersion] = useState("");
   // One restart asked for from a chat's notice, until that agent publishes the engine's version.
@@ -1346,9 +1401,65 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   useEffect(() => {
     let active = true;
-    void api.checkForUpdate().then((result) => { if (active && result.available) setUpdateInfo(result); }).catch(() => {});
+    void api.checkForUpdate().then((result) => {
+      if (active) setUpdateInfo(result);
+    }).catch(() => {
+      if (active) {
+        setUpdateCheckError(true);
+        setUpdateInfo((previous) => previous ? { ...previous, status: "failed", available: false } : previous);
+      }
+    });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    const retryAt = updateInfo?.retry_at;
+    if (!retryAt) {
+      setUpdateRetryWaiting(false);
+      return;
+    }
+    const delay = retryAt * 1000 - Date.now();
+    if (delay <= 0) {
+      setUpdateRetryWaiting(false);
+      return;
+    }
+    setUpdateRetryWaiting(true);
+    const timer = window.setTimeout(() => setUpdateRetryWaiting(false), delay);
+    return () => window.clearTimeout(timer);
+  }, [updateInfo?.retry_at]);
+
+  const retryUpdateCheck = async () => {
+    setUpdateCheckBusy(true);
+    setUpdateRetryFailed(false);
+    try {
+      const result = await api.checkForUpdate(true);
+      setUpdateInfo(result);
+      setUpdateCheckError(false);
+      setUpdateRetryFailed(result.status === "failed");
+    } catch {
+      setUpdateCheckError(true);
+      setUpdateInfo((previous) => previous ? { ...previous, status: "failed", available: false } : previous);
+      setUpdateRetryFailed(true);
+    } finally {
+      setUpdateCheckBusy(false);
+    }
+  };
+
+  const updateStatus = updateInfo?.status ?? (updateCheckError ? "failed" : null);
+  const updateRetryBlocked = updateCheckBusy
+    || updateRetryWaiting
+    || Boolean(updateInfo?.retry_at && Date.now() < updateInfo.retry_at * 1000);
+  const updateNoticeMessage = updateCheckBusy
+    ? "Checking for updates…"
+    : updateStatus === "available"
+      ? `Kollab ${updateInfo?.release?.version ?? "update"} is available.`
+      : updateStatus === "current"
+        ? `Kollab is up to date.${updateInfo?.last_successful_check ? ` Last successful check: ${new Date(updateInfo.last_successful_check * 1000).toLocaleString()}.` : ""}`
+        : updateStatus === "disabled"
+          ? "Update checks are off."
+          : updateStatus === "failed"
+            ? `${updateRetryFailed ? "Update check failed again." : "Couldn't check for updates."}${updateInfo?.retry_reason === "rate_limit" && updateInfo.retry_at ? ` GitHub is rate limiting checks. Try again after ${new Date(updateInfo.retry_at * 1000).toLocaleTimeString()}.` : updateInfo?.retry_reason === "retry" && updateInfo.retry_at ? ` Try again after ${new Date(updateInfo.retry_at * 1000).toLocaleTimeString()}.` : ""}${updateInfo?.last_successful_check ? ` Last successful check: ${new Date(updateInfo.last_successful_check * 1000).toLocaleString()}.` : ""}`
+            : "";
 
   const applyAvailableUpdate = async () => {
     setUpdateBusy(true);
@@ -1367,6 +1478,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // The open chat's agent against the engine: older code gets a line above the chat (#968).
   const activeAgent = activeSession ? liveAgentOf(activeSession, liveAgents) : undefined;
   const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents });
+  const agentIsCurrent = Boolean(activeAgent && engineVersion && activeAgent.version === engineVersion);
   const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
   const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
   const restartActiveAgent = async () => {
@@ -1379,6 +1491,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     } catch (error) {
       setAgentRestart({ sessionId, waiting: false, failure: errorText(error), tooOld: isAgentTooOld(error) });
     }
+  };
+  const daemonNotice: DaemonNoticeProps = {
+    notice: versionNotice,
+    busy: Boolean(restartHere) && !restartHere?.failure,
+    waiting: restartHere?.waiting ?? false,
+    failure: restartHere?.failure ?? "",
+    tooOld: restartHere?.tooOld ?? false,
+    onRestart: () => void restartActiveAgent(),
   };
   // Once the agent runs the engine's version (or is gone from presence) the ask is over.
   useEffect(() => {
@@ -1393,11 +1513,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const bundle = __APP_VERSION__;
         const engine = (config?.engine_version || "").trim();
         setEngineVersion(engine);
-        // Source checkouts report a PEP 440 local version segment (+<sha8>, or
-        // +unknown without git metadata); compare base versions so a matching
-        // build does not flag a mismatch (#684).
-        if (!engine || !bundle || sameVersionBase(engine, bundle)) return;
-        setVersionMismatch({ page: bundle, engine });
+        const identity = compareBuildIdentity(engine, bundle, __KOLLAB_BUILD_SHA__);
+        if (identity !== "mismatch") return;
+        const buildSha = __KOLLAB_BUILD_SHA__;
+        const pageBuild = /^[0-9a-f]{8,}$/i.test(buildSha) ? buildSha.slice(0, 8) : "unknown";
+        setVersionMismatch({ page: bundle, pageBuild, engine: engine.slice(0, 80) });
       } catch {
         // The session bootstrap effect surfaces WebUI host/origin denials.
       }
@@ -1634,6 +1754,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     setBusyMessage("Stopping session…");
     try {
       await api.deleteSession(sessionId);
+      forgetComposerText(sessionId);
       const result = await loadSessions();
       await refreshAgentPool();
       if (operation !== operationRef.current) return;
@@ -1803,6 +1924,22 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   const aliveKey = agents.filter((agent) => agent.active).map((agent) => agent.name).join(",");
 
+  // Web plugins (docs/specs/plugins.md): loaded once per page; they reach the chat's views and chats through the host.
+  useEffect(() => startPluginRuntime(api), []);
+  useEffect(() =>
+    setPluginHost({
+      // A plugin tab shows in the chat, so a plugin page that opens one gives way to the chat.
+      openView: (key) => {
+        returnToChat();
+        setSessionView(key);
+      },
+      openSession: (sessionId) => {
+        returnToChat();
+        void selectSession(sessionId);
+      },
+    }),
+  );
+
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
@@ -1913,6 +2050,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onSeeAllChanges={navigateToWhatsNew}
         />
         <PrChainDialog api={api} open={prChainOpen} onOpenChange={setPrChainOpen} />
+        <PluginModalHost />
         {activeSession ? (
           <AppsDialog
             api={api}
@@ -1956,7 +2094,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           className={`${contained ? "h-[calc(100%-1rem)] max-h-[calc(100%-1rem)]" : "h-[calc(100svh-1rem)] max-h-[calc(100svh-1rem)]"} min-h-0 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
         >
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
-          <div className={whatsNewActive ? "hidden" : "contents"}>
+          {pluginPage ? <PluginPage pluginId={pluginPage.plugin} pageId={pluginPage.page} onExit={returnToChat} /> : null}
+          <div className={whatsNewActive || pluginPage ? "hidden" : "contents"}>
           {welcomeGuideNotice ? (
             <NoticeBar onDismiss={() => setWelcomeGuideNotice(false)}>
               {WELCOME_GUIDE_DISMISSED_NOTICE}
@@ -1964,11 +2103,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           ) : null}
           {versionMismatch ? (
             <NoticeBar
-              detail={`Page v${versionMismatch.page} · engine v${versionMismatch.engine}`}
+              detail={`Page v${versionMismatch.page} · build ${versionMismatch.pageBuild} · engine v${versionMismatch.engine}`}
               actions={<NoticeAction onClick={() => window.location.reload()}>Reload</NoticeAction>}
               onDismiss={() => setVersionMismatch(null)}
             >
-              This page and Kollab are on different versions. Reload once the update finishes.
+              This page does not match the running build. Reload to use the current Web UI.
             </NoticeBar>
           ) : null}
           {versionNotice && !dismissedVersionNotices.has(versionNoticeKey) ? (
@@ -1995,22 +2134,39 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               {`Couldn't switch to ${pickLabel(pickFailure.pick)}. ${pickFailure.reason}`}
             </NoticeBar>
           ) : null}
-          {updateInfo?.release ? (
+          {updateStatus ? (
             <NoticeBar
-              actions={
-                <>
-                  <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
-                    Release notes
-                  </a>
-                  <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
-                    {updateBusy ? "Updating…" : "Update Now"}
-                  </NoticeAction>
-                </>
+              detail={
+                updateStatus === "disabled"
+                  ? "Change kollabor.updates.check_enabled in your Kollab configuration."
+                  : updateStatus === "available" && updateInfo?.release
+                    ? `Kollab ${updateInfo.release.version} is available.`
+                    : undefined
               }
-              onDismiss={() => setUpdateInfo(null)}
-              detail={`Kollab ${updateInfo.release.version} is available.`}
+              actions={updateStatus === "disabled" ? undefined : (
+                <>
+                  <NoticeAction disabled={updateRetryBlocked} onClick={() => void retryUpdateCheck()}>
+                    {updateCheckBusy ? "Checking…" : updateStatus === "failed" ? "Try Again" : "Check Again"}
+                  </NoticeAction>
+                  {updateStatus === "available" && updateInfo?.release ? (
+                    <>
+                      <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
+                        Release notes
+                      </a>
+                      <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
+                        {updateBusy ? "Updating…" : "Update Now"}
+                      </NoticeAction>
+                    </>
+                  ) : null}
+                </>
+              )}
+              onDismiss={() => {
+                setUpdateInfo(null);
+                setUpdateCheckError(false);
+                setUpdateRetryFailed(false);
+              }}
             >
-              A Kollab update is available.
+              {updateStatus === "available" ? "A Kollab update is available." : updateNoticeMessage}
             </NoticeBar>
           ) : null}
           {contextCompactionStatus ? (
@@ -2027,6 +2183,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               ) : null}
             </NoticeBar>
           ) : null}
+          <PluginNotices />
           {activeSession?.halted ? (
             <>
               <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 lg:hidden">
@@ -2047,6 +2204,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 api={api}
                 sessionId={activeSession.session_id}
                 agentIdentity={activeSession.identity}
+                harness={Boolean(activeSession.harness)}
                 initialState={initialState}
                 onStale={(stillCurrent) => resetThread(activeSession.session_id, stillCurrent)}
                 liveEvents={liveEventsRef}
@@ -2056,6 +2214,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   profiles={profiles}
                   agents={agents}
                   liveAgents={liveAgents}
+                  agentIsCurrent={agentIsCurrent}
+                  daemonNotice={daemonNotice}
                   remoteAgents={network.remote}
                   refreshSignal={refreshSignal}
                   supervisorEvents={supervisorEvents}
@@ -2103,7 +2263,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     label={agentName(nextGem.name, nextGem.display_name)}
                   />
                 ) : (
-                  <KollabLogo mist className="text-foreground/80 mb-2 h-10 w-auto" />
+                  <KollabLogo glass className="text-foreground/80 mb-2 h-10 w-auto" />
                 )}
                 <h1 className="text-2xl font-semibold tracking-tight">
                   {nextGem ? agentName(nextGem.name, nextGem.display_name) : "Start a Session"}

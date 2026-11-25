@@ -46,6 +46,14 @@ def test_terminal_guard_blocks_argparse_spellings(command):
 
 
 @pytest.mark.parametrize('option', ['-a', '--ag', '-d', '--det', '--agent', '--detached'])
-def test_cli_guard_blocks_launch_options(option, monkeypatch):
+def test_cli_guard_blocks_launch_options_when_opted_in(option, monkeypatch):
     monkeypatch.setenv('KOLLAB_TOOL_SHELL', '1')
+    monkeypatch.setattr('kollabor.cli._block_kollab_terminal_spawn_enabled', lambda: True)
     assert _is_tool_shell_agent_launch(['kollab', option, 'x'])
+
+
+@pytest.mark.parametrize('option', ['-a', '--ag', '-d', '--det', '--agent', '--detached'])
+def test_cli_guard_allows_launch_options_by_default(option, monkeypatch):
+    monkeypatch.setenv('KOLLAB_TOOL_SHELL', '1')
+    monkeypatch.setattr('kollabor.cli._block_kollab_terminal_spawn_enabled', lambda: False)
+    assert not _is_tool_shell_agent_launch(['kollab', option, 'x'])

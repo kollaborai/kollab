@@ -164,10 +164,11 @@ def apply_config_changes(
     if not changes:
         return True
     builtin_changes = {}
+    plugin_errors = []
     try:
         from kollabor_plugins.settings import apply_config_changes as apply_plugin_changes
 
-        changes = apply_plugin_changes(dict(changes))
+        changes = apply_plugin_changes(dict(changes), failures=plugin_errors)
         if route_builtin and any(key.startswith("plugins.") for key in changes):
             from kollabor_plugins.registry import plugin_entries
             from kollabor_plugins.settings import save, set_enabled
@@ -198,14 +199,19 @@ def apply_config_changes(
             for plugin_id, values in builtin_values.items():
                 save(
                     plugin_id, values, allow_secrets=True,
-                    config_service=config_service, save_target=target,
+                    config_service=config_service, save_target=target, kind="built-in",
                 )
             for plugin_id, value in enabled.items():
-                set_enabled(plugin_id, value, config_service=config_service, save_target=target)
+                set_enabled(
+                    plugin_id, value, config_service=config_service, save_target=target, kind="built-in",
+                )
     except Exception as exc:
         logger.error("plugin settings save failed: %s", exc)
         return False
     if not changes and not builtin_changes:
+        if plugin_errors:
+            logger.error("plugin config actions failed: %s", plugin_errors)
+            return False
         return True
     if not atomic:
         for path, value in {**changes, **builtin_changes}.items():
@@ -227,6 +233,9 @@ def apply_config_changes(
             notify()
         except Exception as exc:
             logger.warning("reload notify after config save failed: %s", exc)
+    if plugin_errors:
+        logger.error("plugin config actions failed: %s", plugin_errors)
+        return False
     return True
 
 
@@ -360,10 +369,25 @@ class ConfigPanel:
         service = _config_service(ctx)
         managed, global_settings = read_managed_state()
         sections = build_config_sections(service, managed, global_settings)
+        plugin_paths = ("plugins.", "plugin-values.", "plugin-registry.", "plugin-service.")
+        sections = [
+            {
+                **section,
+                "widgets": [
+                    row
+                    for row in section["widgets"]
+                    if not str(row.get("config_path", "")).startswith(plugin_paths)
+                ],
+            }
+            for section in sections
+            if section.get("title") != "Plugin Settings"
+        ]
+        sections = [section for section in sections if section["widgets"]]
         return {
             "panel": self.name,
             "kind": self.kind,
             "title": TITLE,
+            "notice": getattr(service, "get_config_error", lambda: None)(),
             "sections": [
                 {
                     "id": f"s{index}",
@@ -397,8 +421,11 @@ class ConfigPanel:
             return error_result("Some settings were not saved", errors)
 
         changes = _whole_numbers(fields, changes)
-        if not apply_config_changes(_config_service(ctx), changes, target):
-            return error_result("Could not write the settings file")
+        service = _config_service(ctx)
+        if not apply_config_changes(service, changes, target):
+            get_error = getattr(service, "get_config_error", None)
+            message = get_error() if callable(get_error) else None
+            return error_result(message or "Could not write the settings file")
         where = current["save_targets"][target]
         noun = "setting" if len(changes) == 1 else "settings"
         return ok_result(

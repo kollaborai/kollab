@@ -6,7 +6,6 @@ Shared sections that agents compose from. No agent duplicates these; they includ
 
 ```
 sections/
-├── 00-header.md                    # Generic identity (agents override locally)
 ├── 01-session-context.md           # Environment detection (git, docker, python, etc.)
 ├── tool-reference/                          # Built-in tool reference sections
 │   ├── terminal.md                 # <terminal> usage + subprocess sessions
@@ -42,6 +41,9 @@ sections/
 ```
 
 ## How Agents Use These
+
+The base has no identity header: each agent's own `sections/00-header.md` is the
+only "i am" line in its prompt, and `system_prompt.md` includes it first.
 
 Each agent's `system_prompt.md` includes sections via trender paths:
 

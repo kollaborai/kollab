@@ -3,7 +3,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException  # type: ignore[import-not-found]
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..server import get_session_registry
 
@@ -13,6 +13,7 @@ router = APIRouter(prefix="/sessions", tags=["permissions"])
 
 class PermissionResponseRequest(BaseModel):
     tool_id: str
+    permission_id: str = Field(min_length=1)
     decision: str  # "approve" | "deny"
     option_id: str | None = None
     scope: str = (
@@ -37,11 +38,12 @@ async def respond_to_permission(session_id: str, body: PermissionResponseRequest
         decision=body.decision,
         scope=body.scope,
         option_id=body.option_id,
+        permission_id=body.permission_id,
     )
     if not resolved:
         raise HTTPException(
-            status_code=404,
-            detail=f"No pending permission for tool_id '{body.tool_id}'",
+            status_code=409,
+            detail=f"Permission owner is stale or no longer pending for tool_id '{body.tool_id}'",
         )
 
     return {"ok": True, "tool_id": body.tool_id, "decision": body.decision}
@@ -65,7 +67,7 @@ async def get_permissions(session_id: str):
     return {
         "session_id": session_id,
         "approval_mode": session.approval_mode,
-        "pending": list(session._pending_permissions.keys()),
+        "pending": list(dict.fromkeys(prompt.get("tool_id") for prompt in session._pending_permissions.values())),
         # Full prompt payloads so a client that reloaded mid-prompt can
         # re-render it. The daemon is still blocked waiting for an answer and
         # will not re-send the request.

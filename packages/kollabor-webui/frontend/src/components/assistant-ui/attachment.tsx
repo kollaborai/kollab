@@ -40,7 +40,7 @@ import {
 } from "@/components/ui/avatar";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
-import { stripManagedTokens } from "./managed-tokens";
+import { synchronizeComposerImageTokens } from "./managed-tokens";
 
 const useFileSrc = (file: File | undefined) => {
   const [src, setSrc] = useState<string | undefined>(undefined);
@@ -270,7 +270,9 @@ export const UserMessageAttachments: FC = () => {
   );
 };
 
-const ComposerImageTokenSynchronizer: FC = () => {
+const ComposerImageTokenSynchronizer: FC<{
+  draftRestoreSnapshot: { key: string | null; text: string } | null;
+}> = ({ draftRestoreSnapshot }) => {
   const aui = useAui();
   const imageAttachmentKey = useAuiState(
     useShallow((s) =>
@@ -280,36 +282,46 @@ const ComposerImageTokenSynchronizer: FC = () => {
         .join("\u0000"),
     ),
   );
-  const managedTokens = useRef<string[]>([]);
+  const composerText = useAuiState((s) => s.composer.text);
+  const previousImageAttachmentKey = useRef(imageAttachmentKey);
+  const lastRestoredDraft = useRef<{ key: string | null; text: string } | null>(null);
 
-  // Only an attachment change rewrites the text. Running on every keystroke
-  // trimmed the space being typed (it is always trailing) and wrote stale
-  // text back over fast typing.
+  // Attachment changes own token changes; ordinary text edits do not.
   useEffect(() => {
+    if (previousImageAttachmentKey.current === imageAttachmentKey) return;
+    previousImageAttachmentKey.current = imageAttachmentKey;
     const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
-    const nextTokens = imageIds.map((_, index) => `[image${index + 1}]`);
     const text = aui.composer.getState().text;
-    // Escape-aware (#1124 P2a): managed-token stripping must not eat the
-    // inside of a typed [[imageN]] literal.
-    const textWithoutManagedTokens = stripManagedTokens(text, managedTokens.current)
-      .replace(/^\s+/, "")
-      .replace(/\n{3,}/g, "\n\n");
-
-    const nextText = [
-      ...nextTokens,
-      ...(textWithoutManagedTokens ? [textWithoutManagedTokens] : []),
-    ].join("\n");
-    managedTokens.current = nextTokens;
+    const nextText = synchronizeComposerImageTokens(text, imageIds.length);
     if (nextText !== text) aui.composer.setText(nextText);
   }, [aui, imageAttachmentKey]);
+
+  // The runtime can publish its own restored copy after the parent stripped
+  // stale tokens. Only normalize that exact saved snapshot, once per draft.
+  useEffect(() => {
+    if (!draftRestoreSnapshot || composerText !== draftRestoreSnapshot.text) return;
+    if (
+      lastRestoredDraft.current?.key === draftRestoreSnapshot.key &&
+      lastRestoredDraft.current.text === draftRestoreSnapshot.text
+    ) {
+      return;
+    }
+    lastRestoredDraft.current = draftRestoreSnapshot;
+    const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
+    const text = aui.composer.getState().text;
+    const nextText = synchronizeComposerImageTokens(text, imageIds.length);
+    if (nextText !== text) aui.composer.setText(nextText);
+  }, [aui, composerText, draftRestoreSnapshot, imageAttachmentKey]);
 
   return null;
 };
 
-export const ComposerAttachments: FC = () => {
+export const ComposerAttachments: FC<{
+  draftRestoreSnapshot: { key: string | null; text: string } | null;
+}> = ({ draftRestoreSnapshot }) => {
   return (
     <>
-      <ComposerImageTokenSynchronizer />
+      <ComposerImageTokenSynchronizer draftRestoreSnapshot={draftRestoreSnapshot} />
       <div className="aui-composer-attachments flex w-full flex-row items-center gap-2 overflow-x-auto empty:hidden">
         <ComposerPrimitive.Attachments>
           {() => <AttachmentUI />}

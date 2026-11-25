@@ -24,7 +24,12 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { formatContent } from "@/utils/format-content";
-import { askedForOk, humanizeToolName, summarizeToolCall } from "@/utils/tool-summary";
+import {
+  askedForOk,
+  humanizeToolName,
+  normalizeHubMcpToolName,
+  summarizeToolCall,
+} from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
 
 import { EngineApi } from "@/api";
@@ -801,7 +806,20 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   respondToApproval,
 }) => {
   const card = harnessCard(result);
-  const kind = typeof card?.kind === "string" ? humanizeToolName(card.kind) : undefined;
+  const cardTitle =
+    typeof card?.title === "string" && card.title.trim() ? card.title.trim() : undefined;
+  const normalizedToolName = normalizeHubMcpToolName(cardTitle ?? toolName).replaceAll(
+    "-",
+    "_",
+  );
+  const isHubTool = ["hub_msg", "hub_reply", "hub_broadcast"].includes(
+    normalizedToolName,
+  );
+  const rawKind = typeof card?.kind === "string" ? card.kind : undefined;
+  const kind = rawKind ? humanizeToolName(rawKind) : undefined;
+  const displayKind = isHubTool && rawKind?.trim().toLowerCase() === "other"
+    ? undefined
+    : kind;
   const cardStatus = typeof card?.status === "string" ? card.status : undefined;
   const unfinished = cardStatus === "pending" || cardStatus === "in_progress";
   const parentEnded = status?.type === "complete" || status?.type === "incomplete";
@@ -813,7 +831,11 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
         unfinished && parentEnded ? { type: "incomplete", reason: "other" } :
           unfinished ? { type: "running" } : status;
   const displayTitle = card
-    ? typeof card.title === "string" && card.title.trim() ? card.title : kind || "Tool"
+    ? cardTitle
+      ? isHubTool
+        ? humanizeToolName(cardTitle)
+        : cardTitle
+      : displayKind || "Tool"
     : undefined;
   const lastStatus = cardStatus ? harnessStatusLabels[cardStatus] : undefined;
   const turnEnded = status?.type === "incomplete" && status.reason === "cancelled"
@@ -821,11 +843,21 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   let routeDetail = "";
   try {
     const parsed = argsText ? JSON.parse(argsText) as Record<string, unknown> : {};
-    const replyTo = parsed.reply_to ?? parsed.replyTo;
-    const threadId = parsed.thread_id ?? parsed.thread;
-    routeDetail = [threadId ? `Thread ${String(threadId)}` : "", replyTo ? `Replied-to ${String(replyTo)}` : ""].filter(Boolean).join(" · ");
+    if (isHubTool) {
+      const recipient = [parsed.to, parsed.target, parsed.recipient, parsed.agent].find(
+        (value): value is string => typeof value === "string" && value.trim() !== "",
+      );
+      routeDetail = recipient ? `To ${recipient.trim()}` : "";
+    } else {
+      const replyTo = parsed.reply_to ?? parsed.replyTo;
+      const threadId = parsed.thread_id ?? parsed.thread;
+      routeDetail = [
+        threadId ? `Thread ${String(threadId)}` : "",
+        replyTo ? `Replied-to ${String(replyTo)}` : "",
+      ].filter(Boolean).join(" · ");
+    }
   } catch { /* malformed tool args remain presentation-only */ }
-  const detail = [kind, routeDetail, unfinished && parentEnded
+  const detail = [displayKind, routeDetail, unfinished && parentEnded
     ? `${turnEnded} · Last reported: ${lastStatus}` : lastStatus].filter(Boolean).join(" · ");
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";

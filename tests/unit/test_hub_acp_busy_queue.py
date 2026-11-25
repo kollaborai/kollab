@@ -686,6 +686,9 @@ async def test_departure_after_steering_send_waits_for_real_admission_result():
     runner = ACPRunner.__new__(ACPRunner)
     runner.initialize_metadata = {"steering": {"supported": True}}
     runner.capabilities = {}
+    # The production constructor initializes this field before any turn runs.
+    # This lightweight __new__ fake must provide the active-turn invariant too.
+    runner._active_generation = 1
     runner._active_turn_id = 1
     runner._active_context = SimpleNamespace(
         thread_id=message.thread_id,

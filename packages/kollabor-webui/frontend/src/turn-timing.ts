@@ -79,15 +79,18 @@ function parseFrame(raw: string): Frame | null {
  * transport runtime drops every text delta (the thread only renders
  * `state.messages`, written once at turn end), so the wire frames are the only
  * place the stream's real timing exists. Cancelled or failed runs never
- * finish, so they record nothing.
+ * finish, so they record nothing. `stop` ends the reading: a clone that is
+ * still read keeps its request open.
  */
 export async function observeRun(
   response: Response,
   turn: TurnClock,
   runStart: number,
+  stop?: AbortSignal,
 ): Promise<void> {
   const reader = response.body?.getReader();
   if (!reader) return;
+  stop?.addEventListener("abort", () => void reader.cancel().catch(() => undefined), { once: true });
 
   const decoder = new TextDecoder();
   const partKinds = new Map<string, string | undefined>();

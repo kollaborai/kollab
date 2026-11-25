@@ -134,8 +134,8 @@ Permissions:
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/sessions/{session_id}/permissions` | current approval mode and pending prompts, from the engine (never waits on the agent) |
-| `POST` | `/sessions/{session_id}/permission` | approve or deny a pending tool |
+| `GET` | `/sessions/{session_id}/permissions` | current approval mode and full pending prompts, each with its `permission_id`, from the engine (never waits on the agent) |
+| `POST` | `/sessions/{session_id}/permission` | approve or deny one prompt; requires its `tool_id` and `permission_id`, and returns 409 for a stale owner |
 | `POST` | `/sessions/{session_id}/permissions/mode` | set approval mode |
 
 Profiles, MCP, and hub routes:

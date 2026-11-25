@@ -951,6 +951,45 @@ def test_regression_test_counts_a_rule_list_quoted_in_prose_1024(tmp_path: Path)
     )
 
 
+def test_regression_test_ignores_ruff_pyflakes_codes_1407(tmp_path: Path) -> None:
+    # #1407: verdicts on #1277 and #1124 quote ruff output; F841, F401 and F811
+    # there are ruff's pyflakes rule codes, not review findings.
+    cfg = regression_cfg(tmp_path)
+    for body in (
+        "ruff check -> 8 diagnostics, all on unchanged lines (six E501, I001, F841)",
+        "ruff check --no-cache -> 9 diagnostics; 7 E501, I001, and F841 are on unchanged lines",
+        "Ruff on the added tests reported I001/F401/F811 at this line",
+    ):
+        report = pr_gates_dod.evaluate(
+            cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+        )
+        assert "regression_test" not in report.failed_names(), (
+            body,
+            report.detail_for("regression_test"),
+        )
+
+
+def test_regression_test_keeps_findings_that_are_not_pyflakes_codes_1407(
+    tmp_path: Path,
+) -> None:
+    # Review rounds on #1409: every other finding id still counts, declared or in
+    # prose, short or numbered F100 and up.
+    cfg = regression_cfg(tmp_path)
+    for body, ids in (
+        ("Finding IDs: F84 and E501", "F84"),
+        ("F12 and E501 are separate findings", "F12"),
+        ("ruff: E501, F841 on unchanged lines. F3: the retry loop never stops", "F3"),
+        ("F100 and F250: both still open", "F100, F250"),
+        ("F1000: the cache never expires", "F1000"),
+    ):
+        report = pr_gates_dod.evaluate(
+            cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+        )
+        assert report.detail_for("regression_test") == (
+            f"no changed test text references finding id(s): {ids} under tests/"
+        ), body
+
+
 # --- report shape -----------------------------------------------------------
 
 

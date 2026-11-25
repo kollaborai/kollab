@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-20
+
+### Added
+- The bundled model directory refreshes from models.dev and the OpenRouter public catalog during release preparation, and model lookups resolve supported vendor-prefixed IDs such as `openai/gpt-6-luna` to their catalog capabilities (#1177)
+- Web UI: the Kollab logo in the sidebar and on the Start a Session screen now carries an animated electric mist (static mark under reduced motion) (#1125)
+- The web UI greets a release with a What's New dialog on the first load of a
+  version this browser has not seen: the release's Added and Changed entries
+  from the packaged changelog (up to six lines, then "And N more."), fixes as
+  a count, See All Changes opens the full What's New page, and Got It or the
+  close button records the version so it shows once per release. It stays
+  away on a first run (the guided setup owns that moment) and on releases
+  with no Added or Changed entries (#1106).
+- Add terminal plugin package management, per-plugin settings, and supervised background services (#1028).
+- Add plugin engine routes, scoped service credentials, remote-management safeguards, and confined web assets (#1028).
+- Pull request overlap checks flag likely duplicate work on both PRs and ask Koordinator to review before dispatch (#719).
+
+### Changed
+- Clarify the macOS terminal teardown boundary: jobs that detach and close all PTY descriptors between scans may survive terminal close (#1025).
+- Agents can run Kollab commands from terminals by default; the new `tools.block_kollab_terminal_spawn` setting (default off) opts in to blocking agent launches, stop-all, and background Kollab commands, and its refusal explains the foreground alternative (#1147).
+- Bundled team personas are shown by their role instead of a person's name, and each one is a furry gem with hair in a contrasting shade and no hat; the look is fixed per agent (#1129)
+- Require independent current-head review for finding-linked regression tests, retain reference checks, and report red-first execution as a reviewer responsibility rather than inferring it from contributor metadata (#721).
+
+### Fixed
+- Each bundled agent now introduces itself once, as itself, at the top of its system prompt. The shared base no longer adds a second "i am kollabor" line, and the creative-writer, tech-dude and technical-writer prompts describe their scope, working method and limits (#1301).
+- Hub task views warn when unreadable ledger cards make their results partial (#1288).
+- Context compaction removes the obsolete placeholder from previously saved task excerpts (#1281).
+- Recovery summaries now report how many live task messages were omitted when the 24-message preservation cap is reached (#1254).
+- The setup guide fully covers the staged action row beneath it on phone screens (#1234).
+- Profile deletion now keeps the profile available when its config update fails (#1229).
+- Pipe mode preserves fractional timeout durations instead of truncating them to zero (#1212).
+- Reopen a dismissed Web UI welcome guide with `/welcome` (#1207).
+- The scroll-to-bottom action button now uses the standard control radius (#1195).
+- Keep the thread scroll-to-bottom control below the message region so it does not cover the last line (#1189).
+- Updated ACP integration tests to find live daemons in the project-scoped Hub presence directory (#1188).
+- Opening a resolved setup-guide step advances from the step shown (#1186).
+- Foreground terminal commands honor requested timeouts within the configured limit and reject excessive or invalid values before execution (#1168).
+- Model fallback now suggests explicit loadout selection instead of automatically changing shared routing or saved profiles; same-model targets are reported without retrying (#1166).
+- Clean shutdowns identify real task failures, suppress cancellation noise, skip raw-mode restoration for detached daemons, and preserve late Hub messages for the next start (#1162).
+- Clip over-range synthesized audio before voice framing while rejecting non-finite samples, and flag active voice services from older installs as stale (#1160).
+- Remote agent directories keep working when newer peers add descriptor fields, and skip malformed rows (#1156).
+- Text file operations report directory and filesystem errors accurately and reject non-regular files before probing content (#1155).
+- Raw API log retention now applies globally across project folders, and matching turn histories are stored as linked deltas (#1154).
+- Bundled default model pricing ships with Kollab's wheel and single-file binary (#1153).
+- Background terminal commands run through the configured shell on POSIX (#1152).
+- Messages an agent sends back to its spawner (completion wakes and spawn offers) reach the conversation again; hook results no longer replace the injected message (#1151).
+- Stop the agent terminal guard from rejecting ordinary search and file-existence commands as encoded launches (#1143).
+- Keep the Web UI reading position while older history loads and context compaction updates the transcript. (#1142)
+- Long team member labels wrap on narrow screens instead of being cut off (#1134).
+- Engine session requested MCP servers are enabled only in that daemon's memory (#1127).
+- Sent image bindings stay aligned across failed slots; escaped tokens stay literal, unresolved tokens preserve their spelling, and only positive ASCII image tokens consume slots (#1124).
+- Starting a session no longer changes the saved approval mode; only changing it yourself does (#1111).
+- ACP chats: `/compact` and the automatic compaction trigger now ask the harness to compact its own context with the `/compact` command it advertises, instead of rewriting kollab's copy of the history. With `ask_model_first` on, the harness is first asked what to keep and its notes become the focus of that command. A harness that advertises no compaction command gets a plain message (#1104).
+- An explicit `token_threshold_k` (the global setting, or a loadout's `compaction_threshold_k`) now wins over the automatic ratio and the 272K cap, and never exceeds the model's context window (#1104).
+- Pasted images in the web UI composer now survive switching agents and reloading the page: image attachments are retained in memory per draft key and in IndexedDB across reloads, then re-attached so their thumbnails and synchronized `[imageN]` tokens return together. If an attachment cannot be restored, the orphan token is removed and the user is asked to paste the image again. (#1103)
+- The guided setup opens by itself on a first run again: the guide no longer writes its storage record until the tour is engaged or dismissed, so startup's first-run check sees a clean browser.
+  Browsers already affected by the mount-write record also get the guide back; engaged tours and dismissals still survive reloads (#1098).
+- The guided setup footer no longer shows Skip when there is nothing left to skip: the final step shows Finish alone, and steps without an action keep their header escape hatch (#1092).
+- Size the guided setup panel to its content while keeping it within the viewport (#1092)
+- The arrival notice for a new agent names its agent bundle and that bundle's description, and reports the model and effort an ACP harness runs. Values the notice does not know are left out instead of shown as unknown or default (#1087).
+- Goal driver failures are shown in the session, and active goals can be resumed after a storage error (#1085).
+- `/goal resume --time N` raises a goal's total active-time ceiling after it reaches the cap (#1049).
+- ACP session cleanup stops descendants that detach with `setsid` before they are observed (#1044).
+- OpenAI device-code sign-in logs its first "still pending" line and its first network warning right away, even on a machine that booted less than a minute ago (#1041).
+- The conversation browser is now `/sessions` (`/history`); use `/branch` to create a branch from a message in a saved conversation (#1034).
+- The update notice uses version-free visible text, keeps the version in its hover detail, and labels the action `Update Now` (#965).
+- Hub session updates preserve unreadable state and report persistence failures instead of claiming success (#950).
+- Scratchpad tools report storage failures and preserve saved notes when updates fail (#949).
+- Engine handover state stays aligned with replaced manifests, and logs flag uncertain directory-sync durability (#948).
+- Emergency context rollover keeps actionable excerpts from oversized active tasks and directs agents to ask their assigner to resend omitted text (#942).
+- The Web UI compares release and build identity before asking for a reload (#921).
+- MCP stdio readers validate JSON-RPC frames before dispatch and reject unsupported server requests clearly (#920).
+- Prevent verbose MCP servers from blocking requests when their stderr pipe fills (#918).
+- DNS registry and capability-index updates retain unrelated concurrent records and preserve unreadable data for recovery (#915).
+- Pending images are preserved when sending during an active turn, and duplicate submits are suppressed while image conversion is pending (#898).
+- Built-in tools remain available on the first request when MCP discovery is slow (#897).
+- Web UI API alerts show the server message while retaining the HTTP status, and prompt library load errors remain visible without empty-library counts (#853).
+- The web UI now shows when a conversation message or reply could not be saved (#847).
+- Keep an in-flight OAuth refresh from overwriting the credentials or account headers of a newer profile (#844).
+- Terminal status, output, and kill operations follow the agent's `terminal` tool scope (#842).
+- Setting `plugins.tmux.enabled` to `false` prevents the tmux plugin from loading (#841).
+- Warn when a global skill differs from a same-named bundled skill and mark the active copy in skill lists (#823).
+- Web UI peer windows show observed Hub notes when they arrive (#665).
+- The Web UI no longer loses a followed turn's output that arrives while you send a message from the same window: what the other turn says in that moment now appears when your send finishes, instead of leaving a gap in its text (#593)
+- Shell and ACP orphan tests use bounded PID-and-birth checks; surviving
+  detached helpers defer to the ephemeral CI runner after cleanup failures
+  or interruption (#570).
+- ACP shutdown cleans same-group descendants through the private process group
+  recorded when the adapter starts, without scanning the host process table
+  (#570).
+- On Windows, ACP shutdown retains descendants of the directly owned adapter
+  so cleanup can terminate them without relying on POSIX process groups (#570).
+- The process-scan guard preserves Windows paths, rejects malformed command
+  quoting, and checks nested `cmd /c` and `cmd /k` payloads. PowerShell scripts
+  fail closed unless their exact payload is allowlisted as benign, including
+  encoded commands; WMIC allows only explicit benign targets and WQL classes.
+  PowerShell allowlisting requires `-NoProfile`; unhandled PowerShell-family
+  executable variants are opaque. This blocks process-table enumeration paths
+  (#570).
+- On POSIX, the ACP adapter starts in its own session with no controlling
+  terminal, so a tool that prompts on /dev/tty fails at once instead of
+  hanging. A small anchor process in that session keeps the adapter's process
+  group id from being reused; cleanup never signals the group once the anchor
+  is gone, and close gives every group member its SIGTERM grace before SIGKILL.
+  The adapter keeps the default SIGPIPE, and a failed adapter start reports
+  the operating system's error (#570).
+- Remove provider profiles from `/llm` or web Settings → Loadouts when one config file needs updating; refuse multi-config removals to avoid partial changes, and retain saved keys another project may reference (#445).
+
+### Security
+- Plugin confirmation screens no longer display declared service secret names (#1028).
+- Generated coverage now exercises process enumeration variants, and ACP child scans continue after per-process races (#711).
+
 ## [0.22.1] - 2026-11-15
 
 ### Added

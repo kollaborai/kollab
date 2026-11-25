@@ -104,8 +104,12 @@ trusted_reviewers = ["owner-login"]
 - `regression_test`: every finding id (per
   `regression_profile.finding_id_pattern`) mentioned in review comments must
   appear in a changed test file under `test_paths` (#721). Every occurrence is
-  gate-relevant by default, including free text and test summaries. There is no
-  prose heuristic. A trusted reviewer may suppress one exact incidental
+  gate-relevant by default, including free text and test summaries, except
+  the code list a lint flag selects or ignores (`ruff check --select
+  E9,F63,F7,F82`, #1024) and ruff's 43 pyflakes rule codes (`F401`, `F811`,
+  `F841`, ...), which verdicts quote from ruff output (#1407). A finding
+  numbered like one of those codes is not recognized. There is no prose
+  heuristic. A trusted reviewer may suppress one exact incidental
   occurrence or accept a non-testable finding by posting a marker-only PR issue
   comment while holding the latest
   `APPROVED` review on the current head. The reviewer must be listed in

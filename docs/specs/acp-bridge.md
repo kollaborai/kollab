@@ -239,12 +239,14 @@ tools. Then it opens a session with the folder as `cwd` and `kollab mcp hub` in
   MCP servers running.
 - **Shutdown** closes the session and stdin. The runner retains observed
   descendants by PID and birth identity, including children that later use
-  `setsid`. A fresh inherited process marker also recovers same-user children
-  that detach between observations. After 5 s it sends those owned processes
-  SIGTERM, and SIGKILL after 5 more; cleanup fails explicitly if an owned
-  identity survives. `kollab mcp hub` is in that tree. This is process ownership
-  tracking, not OS containment: an unseen child that removes the marker or
-  changes user identity can escape recovery.
+  `setsid`. The runner adds a fresh random owner marker to each adapter
+  environment and checks it only on same-user processes born during that run,
+  so a child that detaches before a tree sample remains identifiable. Before
+  signalling, it rechecks each owned PID and birth identity. After 5 s it
+  sends those owned processes SIGTERM, and SIGKILL after 5 more; cleanup fails
+  explicitly if an owned identity survives. `kollab mcp hub` is in that tree.
+  This is process ownership tracking, not OS containment: a child that removes
+  the marker, changes user identity, or cannot be inspected can escape recovery.
   Closing before worker creation, after startup failure or more than once
   leaves no unused queue sentinel. Active and queued owners, including an
   admission racing teardown, are settled before close finishes; a completed

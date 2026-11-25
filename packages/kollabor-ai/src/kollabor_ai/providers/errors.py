@@ -1074,3 +1074,36 @@ def map_anthropic_error(error: Exception, provider: str = "anthropic") -> Provid
         authentication_safe_message="Invalid Anthropic API key. Please check your API key.",
         not_found_safe_message="Model or endpoint not found. Check your configuration.",
     )
+
+
+def is_model_not_supported_error(exc: BaseException, model: str) -> bool:
+    """Match a typed model rejection without treating generic request errors as one."""
+    if not isinstance(model, str) or not model.strip():
+        return False
+    info = structured_error_info(exc)
+    if info.error_code in {
+        "model_not_supported",
+        "unsupported_model",
+        "model_not_found",
+    }:
+        return True
+    if info.error_class != "invalid_request":
+        return False
+
+    message = str(exc)[:4096]
+    exact_model = model.strip()
+    if exact_model not in message:
+        return False
+    message = message.replace(exact_model, "<model>")
+    model_ref = r"""[`"']?<model>[`"']?"""
+    patterns = (
+        rf"{model_ref}\s+model\s+(?:is\s+)?not\s+supported\b",
+        rf"\bmodel\s+{model_ref}\s+(?:is\s+)?not\s+supported\b",
+        rf"\bunsupported\s+model\s*[:=]?\s*{model_ref}",
+        rf"{model_ref}\s+(?:is\s+)?unsupported\b",
+        rf"\bmodel\s+{model_ref}\s+(?:is\s+)?unsupported\b",
+        rf"{model_ref}\s+(?:model\s+)?(?:was\s+)?not\s+found\b",
+        rf"\bmodel\s+{model_ref}\s+(?:was\s+)?not\s+found\b",
+        rf"{model_ref}\s+does\s+not\s+exist\b",
+    )
+    return any(re.search(pattern, message, re.IGNORECASE) for pattern in patterns)
