@@ -42,7 +42,7 @@ function ErrorAlerts({ errors }: { errors: [string, string][] }) {
         <p
           key={agent}
           role="alert"
-          className="text-amber-600 dark:text-amber-400 text-sm"
+          className="text-amber-700 dark:text-amber-400 text-sm wrap-anywhere"
         >
           <AlertTriangle className="mr-1 inline size-4 align-[-3px]" />
           {agent}: {msg}
@@ -69,7 +69,7 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
             : "No live agent on this machine has a hub cron job. Schedule one from an agent's terminal: /hub cron add"}
         </p>
         {view.agents_unavailable.length > 0 ? (
-          <p className="mt-2">
+          <p className="mt-2 wrap-anywhere">
             Not answering: {view.agents_unavailable.join(", ")}
           </p>
         ) : null}
@@ -126,7 +126,7 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
         {view.jobs.map((job: HubCronJob) => (
           <div key={`${job.agent}:${job.id}`} className="rounded-lg border p-3 text-sm">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="font-medium">
+              <span className="min-w-0 font-medium wrap-anywhere">
                 {job.agent}{" "}
                 <span className="text-muted-foreground text-xs">
                   {shortId(job.id)}
@@ -134,19 +134,19 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
               </span>
               <span className="text-muted-foreground text-xs">{job.mode}</span>
             </div>
-            <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+            <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
               <dt className="text-muted-foreground">Schedule</dt>
               <dd>{job.interval}</dd>
               <dt className="text-muted-foreground">Target</dt>
-              <dd className="break-words">{job.target}</dd>
+              <dd className="min-w-0 wrap-anywhere">{job.target}</dd>
               <dt className="text-muted-foreground">Message</dt>
-              <dd className="break-words">{job.message}</dd>
+              <dd className="min-w-0 wrap-anywhere">{job.message}</dd>
               <dt className="text-muted-foreground">Next fire</dt>
               <dd>{inSeconds(job.next_in_seconds)}</dd>
               {job.last_error ? (
                 <>
                   <dt className="text-destructive">Error</dt>
-                  <dd className="text-destructive break-words">{job.last_error}</dd>
+                  <dd className="text-destructive min-w-0 wrap-anywhere">{job.last_error}</dd>
                 </>
               ) : null}
             </dl>
