@@ -795,7 +795,35 @@ class FileOperationsExecutor:
         truncated = False
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
-        def visit(directory_fd: int, prefix: str, depth: int) -> None:
+        def is_beneath_workspace(directory_fd: int, workspace_fd: int) -> bool:
+            """Check the opened directory's current ancestry reaches the root."""
+            workspace_stat = os.fstat(workspace_fd)
+            current_fd = os.dup(directory_fd)
+            try:
+                for _ in range(1024):
+                    current_stat = os.fstat(current_fd)
+                    if (current_stat.st_dev, current_stat.st_ino) == (
+                        workspace_stat.st_dev,
+                        workspace_stat.st_ino,
+                    ):
+                        return True
+                    parent_fd = os.open("..", flags, dir_fd=current_fd)
+                    parent_stat = os.fstat(parent_fd)
+                    if (parent_stat.st_dev, parent_stat.st_ino) == (
+                        current_stat.st_dev,
+                        current_stat.st_ino,
+                    ):
+                        os.close(parent_fd)
+                        return False
+                    os.close(current_fd)
+                    current_fd = parent_fd
+                return False
+            finally:
+                os.close(current_fd)
+
+        def visit(
+            directory_fd: int, prefix: str, depth: int, workspace_fd: int
+        ) -> None:
             nonlocal scanned, output_chars, truncated
             with os.scandir(directory_fd) as entries:
                 for entry in entries:
@@ -820,7 +848,12 @@ class FileOperationsExecutor:
                     # is_dir check. A race or a permission error fails visibly.
                     child_fd = os.open(entry.name, flags, dir_fd=directory_fd)
                     try:
-                        visit(child_fd, relative + "/", depth + 1)
+                        visit(child_fd, relative + "/", depth + 1, workspace_fd)
+                        if not is_beneath_workspace(child_fd, workspace_fd):
+                            raise OSError(
+                                errno.EXDEV,
+                                "Directory moved outside the active workspace during search",
+                            )
                     finally:
                         os.close(child_fd)
 
@@ -836,7 +869,7 @@ class FileOperationsExecutor:
                 child_fd = os.open(component, flags, dir_fd=directory_fd)
                 os.close(directory_fd)
                 directory_fd = child_fd
-            visit(directory_fd, "", 0)
+            visit(directory_fd, "", 0, directory_fd)
         finally:
             os.close(directory_fd)
         return {
