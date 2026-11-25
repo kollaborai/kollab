@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createElement, type ReactNode } from "react";
+import { createElement, type ComponentType, type ReactNode } from "react";
 import type { ThreadMessage } from "@assistant-ui/core";
 import {
   AssistantRuntimeProvider,
@@ -324,7 +324,7 @@ function LocalThreadHarness({ commands }: { commands: SlashCommand[] }) {
   );
 }
 
-function ThreadHarness({ commands = [] }: { commands?: SlashCommand[] } = {}) {
+const ThreadHarness: ComponentType<{ commands?: SlashCommand[] }> = ({ commands = [] }) => {
   const host = useExternalStoreRuntime<ThreadMessage>({
     messages: [],
     onNew: async () => {},
@@ -338,7 +338,7 @@ function ThreadHarness({ commands = [] }: { commands?: SlashCommand[] } = {}) {
       createElement(LocalThreadHarness, { commands }),
     ),
   );
-}
+};
 
 afterEach(() => pluginRegistry.reset());
 afterEach(() => {
