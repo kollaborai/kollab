@@ -61,9 +61,9 @@ import {
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
 import { usePendingPermissionCancellation } from "@/permission-cancellation";
 import { imageAttachmentAdapter, toInputAttachments } from "@/image-attachment";
-import { useChatStore, WEB_INPUT_PREFIX } from "@/chat-store";
+import { useChatStore, WEB_INPUT_PREFIX, type ConnectionState } from "@/chat-store";
 import { useOlderBanner } from "@/history-banner";
-import { newInputId, type InputRequest } from "@/chat-stream";
+import { newInputId, type ChatRow, type InputRequest } from "@/chat-stream";
 import { composerAction, isWaitingRow } from "@/queue-state";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -74,7 +74,6 @@ import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
   AuiIf,
-  type AssistantState,
   ComposerPrimitive,
   ErrorPrimitive,
   groupPartByType,
@@ -184,11 +183,13 @@ const SendNowAllowedContext = createContext(true);
 /** The ids of the input rows the chat store has queued and not yet started or joined. */
 const QueuedIdsContext = createContext<ReadonlySet<string>>(new Set());
 
-// Startup exposes a loading placeholder thread; treat it as a new chat so
-// the composer mounts centered. Loads after startup keep the docked layout.
-const isNewChatView = (s: AssistantState) =>
-  s.thread.messages.length === 0 &&
-  (!s.thread.isLoading || s.threads.isLoading);
+/**
+ * The new-chat layout (a centered composer and the welcome) shows for an empty chat whose stream
+ * is open. While the stream connects the rows are not known yet, so the chat keeps the docked
+ * layout until they are (#1451).
+ */
+export const isNewChatView = (rows: readonly ChatRow[], connection: ConnectionState): boolean =>
+  rows.length === 0 && connection === "live";
 
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
@@ -212,7 +213,7 @@ export const Thread: FC<ThreadProps> = ({
     () => new Set(store.rows.filter((row) => isWaitingRow(row, store.inputs)).map((row) => row.id)),
     [store.rows, store.inputs],
   );
-  const isEmpty = useAuiState(isNewChatView);
+  const isEmpty = isNewChatView(store.rows, store.connection);
 
   return (
     <SendNowAllowedContext.Provider value={!harness}>
@@ -366,11 +367,11 @@ const ThreadRoot: FC<{
           {/* Auto margins on the welcome and the footer center them together
               while the thread is empty, and unlike justify-center they never
               push the top out of reach when a tall hero overflows. */}
-          <AuiIf condition={isNewChatView}>
+          {isEmpty ? (
             <div className="mt-auto">
               <Welcome />
             </div>
-          </AuiIf>
+          ) : null}
 
           <div
             data-slot="aui_message-group"
@@ -515,10 +516,9 @@ const Composer: FC<{
   const sendsNowAvailable = typeof store.sendNow === "function" && sendNowAllowed;
   // The submit under way came from Cmd/Ctrl+Enter: the message goes at once.
   const submitSendsNow = useRef(false);
-  const slotMode = useAuiState((s) =>
-    composerSlotMode(s, voiceAvailable ? voice : null, Boolean(permissionStop)),
-  );
-  const isRunning = useAuiState((s) => s.thread.isRunning);
+  const composerEmpty = useAuiState((s) => s.composer.isEmpty);
+  const slotMode = composerSlotMode(composerEmpty, store.running, voiceAvailable ? voice : null, Boolean(permissionStop));
+  const isRunning = store.running;
   const composerText = useAuiState((s) => s.composer.text);
   const composerImages = useAuiState(
     useShallow((s) => s.composer.attachments),
@@ -1259,16 +1259,18 @@ const SEND_NOW_KEYS = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test
 // One trailing button slot that morphs: stop while a run is going, send once
 // there is something to send, otherwise the voice mic (a mic, or the
 // pulsing listening button while the voice room is up) where the session offers it.
-const composerSlotMode = (
-  s: AssistantState,
+// `running` is the chat store's: the turn runs (#1451).
+export const composerSlotMode = (
+  composerEmpty: boolean,
+  running: boolean,
   voice: VoiceMode | null,
   awaitingPermission = false,
 ): ComposerSlotMode => {
   // A room starting or stopping (or a /voice command run); hold the mic still through it
   // rather than flashing stop.
   if (voice?.pending) return voice.on ? "listening" : "mic";
-  if (!s.composer.isEmpty || !voice) return "send";
-  if (s.thread.isRunning || awaitingPermission) return "stop";
+  if (!composerEmpty || !voice) return "send";
+  if (running || awaitingPermission) return "stop";
   return voice.on ? "listening" : "mic";
 };
 
