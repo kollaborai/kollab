@@ -45,12 +45,19 @@ class ChatStreamLog:
         self._current_turn_id: str | None = None
         self._current_turn_events: dict[int, Event] = {}
         self._last_seq = 0
+        self._last_replace_seq = 0
         self._lock = threading.RLock()
 
     @property
     def next_seq(self) -> int:
         with self._lock:
             return self._last_seq + 1
+
+    @property
+    def last_replace_seq(self) -> int:
+        """Sequence of the most recent transcript replacement or zero."""
+        with self._lock:
+            return self._last_replace_seq
 
     def publish(self, event_type: str, data: dict[str, Any]) -> Event:
         """Validate, sequence, retain and publish one conversation event."""
@@ -153,6 +160,8 @@ class ChatStreamLog:
 
     def _record_locked(self, event: Event) -> None:
         self._last_seq = event["seq"]
+        if event["type"] == "replace":
+            self._last_replace_seq = event["seq"]
         self._events.append(event)
 
         if event["type"] == "turn.state":

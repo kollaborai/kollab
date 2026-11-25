@@ -44,8 +44,7 @@ def test_new_subscriber_gets_a_transcript_snapshot_with_next_cursor():
 def test_events_have_one_strict_sequence_and_replay_after_cursor():
     log = ChatStreamLog("conv-1", snapshot_provider=_snapshot, replay_window=3)
     events = [
-        log.publish("row.delete", {"id": f"row-{index}"})
-        for index in range(1, 4)
+        log.publish("row.delete", {"id": f"row-{index}"}) for index in range(1, 4)
     ]
 
     replay = log.read(after=1, conversation_uid="conv-1")
@@ -75,6 +74,14 @@ def test_a_new_conversation_uid_gets_a_fresh_snapshot():
     assert len(result) == 1
     assert result[0]["type"] == "snapshot"
     assert result[0]["conversation_uid"] == "conv-2"
+
+
+def test_latest_transcript_replacement_sequence_is_available_for_row_cursors():
+    log = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+
+    replacement = log.publish("replace", {"rows": [_row("kept-row")]})
+
+    assert log.last_replace_seq == replacement["seq"]
 
 
 def test_the_current_turn_stays_replayable_past_the_regular_window():
