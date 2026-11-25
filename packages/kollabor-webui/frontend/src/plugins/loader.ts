@@ -680,22 +680,22 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
     try {
       const response = await deps.list();
       if (stopped) return;
-      if (response === null || response === undefined)
+      const inventoryResponse = record(response);
+      if (!inventoryResponse || !Array.isArray(inventoryResponse.plugins))
         throw new Error("Invalid plugin inventory response.");
       const receivedAt = Date.now() / 1000;
-      const inventoryResponse = record(response);
-      const listed = inventoryResponse?.plugins;
+      const listed = inventoryResponse.plugins;
       const serverTime = inventoryResponse?.server_time;
       serverTimeOffsetSeconds = inventory.serverTimeOffsetSeconds;
       if (typeof serverTime === "number" && Number.isFinite(serverTime)) {
         const offset = serverTime - receivedAt;
         if (Number.isFinite(offset)) serverTimeOffsetSeconds = offset;
       }
-      entries = (Array.isArray(listed) ? listed : [])
-        .flatMap((item) => {
-          const normalized = normalizePluginEntry(item);
-          return normalized ? [normalized] : [];
-        });
+      entries = listed.map((item) => {
+        const normalized = normalizePluginEntry(item);
+        if (!normalized) throw new Error("Invalid plugin inventory response.");
+        return normalized;
+      });
     } catch (error) {
       if (stopped) return;
       setInventory({ entries: inventory.entries, error: message(error), serverTimeOffsetSeconds: inventory.serverTimeOffsetSeconds });

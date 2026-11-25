@@ -161,12 +161,13 @@ describe("plugin settings page", () => {
       }],
     } as unknown as Record<string, unknown>;
     const raw = mutate(base);
+    const previousEntries = [...listedPluginEntries()];
     const markup = await markupFor([raw]);
     expect(markup).not.toContain(CANARY);
 
     const entries = listedPluginEntries();
     if (_field === "entry id") {
-      expect(entries).toHaveLength(0);
+      expect(entries).toEqual(previousEntries);
       return;
     }
     expect(entries).toHaveLength(1);
