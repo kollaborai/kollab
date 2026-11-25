@@ -3,6 +3,7 @@ import { AlertTriangle, RefreshCw } from "lucide-react";
 import type { EngineApi, HubCronJob, HubCronJobsView } from "@/api";
 import { errorText } from "@/api";
 import { Button } from "@/components/ui/button";
+import { SchedulesSection } from "./SchedulesPanel";
 
 /** The badge next to an agent name: enough of the job id to tell rows apart. */
 export function shortId(id: string) {
@@ -103,7 +104,7 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
           <thead>
             <tr className="text-muted-foreground border-b">
               <th className="py-2 pr-3 font-medium">Agent</th>
-              <th className="py-2 pr-3 font-medium">Job</th>
+              <th className="py-2 pr-3 font-medium">Type</th>
               <th className="py-2 pr-3 font-medium">Schedule</th>
               <th className="py-2 pr-3 font-medium">Target</th>
               <th className="py-2 pr-3 font-medium">Message</th>
@@ -170,7 +171,7 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
               <dd>{inSeconds(job.next_in_seconds)}</dd>
               {job.last_error ? (
                 <>
-                  <dt className="text-destructive">Error</dt>
+                  <dt className="text-destructive">Last error</dt>
                   <dd className="min-w-0">
                     <ClampText text={job.last_error} className="text-destructive" />
                   </dd>
@@ -185,7 +186,7 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
 }
 
 /**
- * The Cron Jobs settings tab: every live agent's scheduled hub jobs,
+ * The Schedules settings tab: editable schedules on top, then every live agent's in-memory hub cron jobs,
  * read-only. Deletion stays in the owning agent's terminal; this view
  * reflects it on refresh.
  */
@@ -227,9 +228,13 @@ export function CronJobsPanel({ api }: { api: EngineApi }) {
       : "Loading scheduled jobs…";
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between gap-2 px-4 pt-3 sm:px-6">
-        <p className="text-muted-foreground text-sm">{summary}</p>
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-3 pb-4 sm:px-6">
+      <SchedulesSection api={api} />
+      <div className="mt-8 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-base font-medium">Agent Cron Jobs</h2>
+          <p className="text-muted-foreground text-sm">{summary}</p>
+        </div>
         <Button
           type="button"
           variant="outline"
@@ -246,11 +251,11 @@ export function CronJobsPanel({ api }: { api: EngineApi }) {
         </Button>
       </div>
       {error ? (
-        <p role="alert" className="text-destructive px-4 pt-2 text-sm sm:px-6">
+        <p role="alert" className="text-destructive pt-2 text-sm">
           {error}
         </p>
       ) : null}
-      <div className="mt-2 min-h-0 flex-1 overflow-y-auto px-4 pb-4 sm:px-6">
+      <div className="mt-2">
         {view ? <CronJobsBody view={view} /> : null}
         <p className="text-muted-foreground mt-3 text-xs">
           Read-only. Deleting a job happens in the owning agent's terminal

@@ -60,8 +60,8 @@ export const SETTINGS_TABS: readonly {
   },
   {
     id: "cron",
-    label: "Cron Jobs",
-    scope: "Every live agent's scheduled hub jobs; read-only",
+    label: "Schedules",
+    scope: "Scheduled prompts on every live agent",
   },
 ];
 

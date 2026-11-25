@@ -105,6 +105,8 @@ function makeFixtures(view) {
     const endpoint = url.pathname.replace(/^\/api(?=\/)/, "");
     const method = request.method();
     if (endpoint === "/hub/cron-jobs") return json(route, view);
+    if (endpoint === "/hub/schedules")
+      return json(route, { schedules: [], file: "~/.kollab/schedules.json" });
     if (endpoint === "/sessions" && method === "POST") return json(route, session());
     if (endpoint === "/sessions" && method === "GET")
       return json(route, {
@@ -239,8 +241,8 @@ async function openCronTab(page, pageErrors = []) {
   }
   await settingsBtn.click();
   await page.getByRole("tabpanel", { name: "Session" }).waitFor({ state: "visible" });
-  await page.getByRole("tab", { name: "Cron Jobs" }).click();
-  await page.getByRole("tabpanel", { name: "Cron Jobs" }).waitFor({ state: "visible" });
+  await page.getByRole("tab", { name: "Schedules" }).click();
+  await page.getByRole("tabpanel", { name: "Schedules" }).waitFor({ state: "visible" });
 }
 
 async function main() {

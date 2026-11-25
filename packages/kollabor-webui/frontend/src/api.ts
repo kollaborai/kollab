@@ -688,6 +688,33 @@ export type HubCronJobsView = {
   agents_errors: Record<string, string>;
 };
 
+/** One row of ~/.kollab/schedules.json plus its last run (#612). */
+export type HubSchedule = {
+  id: string;
+  agents: string[];
+  prompt: string;
+  interval_seconds: number;
+  anchor: number;
+  active: boolean;
+  when_busy: "queue" | "new_instance";
+  skill: string;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  revision: number;
+  last_run?: {
+    agent?: string;
+    due?: number;
+    fired_at?: number;
+    result?: "ok" | "error";
+    error?: string;
+  } | null;
+};
+
+export type HubScheduleFields = Partial<
+  Pick<HubSchedule, "agents" | "prompt" | "interval_seconds" | "active" | "when_busy" | "skill">
+>;
+
 export type SessionState = {
   profile?: Record<string, unknown> | null;
   agent?: Record<string, unknown> | null;
@@ -1790,6 +1817,31 @@ export class EngineApi {
   listHubCronJobs(refresh = false) {
     return this.json<HubCronJobsView>(
       `/hub/cron-jobs${refresh ? "?refresh=true" : ""}`,
+    );
+  }
+
+  listSchedules() {
+    return this.json<{ schedules: HubSchedule[]; file: string }>("/hub/schedules");
+  }
+
+  createSchedule(fields: HubScheduleFields) {
+    return this.json<{ schedule: HubSchedule; via: string }>("/hub/schedules", {
+      method: "POST",
+      body: JSON.stringify(fields),
+    });
+  }
+
+  updateSchedule(id: string, fields: HubScheduleFields) {
+    return this.json<{ schedule: HubSchedule; via: string }>(
+      `/hub/schedules/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(fields) },
+    );
+  }
+
+  deleteSchedule(id: string) {
+    return this.json<{ ok: boolean; via: string }>(
+      `/hub/schedules/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
     );
   }
 }

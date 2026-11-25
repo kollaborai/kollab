@@ -57,8 +57,8 @@ const view: HubCronJobsView = {
 
 test("the cron tab is registered as a bespoke settings tab with no daemon panel", () => {
   const tab = SETTINGS_TABS.find((item) => item.id === "cron");
-  expect(tab?.label).toBe("Cron Jobs");
-  expect(tab?.scope).toContain("read-only");
+  expect(tab?.label).toBe("Schedules");
+  expect(tab?.scope).toContain("Scheduled prompts");
   expect("cron" in PANEL_NAME).toBe(false);
 });
 

@@ -931,7 +931,7 @@ export function PanelHost({
             </div>
           ) : null}
           {tab === "cron" && open ? (
-            <div role="tabpanel" aria-label="Cron Jobs" className="flex min-h-0 w-full flex-1 flex-col">
+            <div role="tabpanel" aria-label="Schedules" className="flex min-h-0 w-full flex-1 flex-col">
               <CronJobsPanel api={api} />
             </div>
           ) : null}
