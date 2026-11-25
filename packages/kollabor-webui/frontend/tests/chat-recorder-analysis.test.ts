@@ -85,6 +85,32 @@ describe("chat recorder analysis", () => {
     })).toBe(true);
   });
 
+  it("lets a staged native compaction reach the request that applies it", () => {
+    expect(isCompactionComplete({
+      sawStart: true,
+      status: "ready_to_retry",
+      latestEventStatus: "ready_to_retry",
+      replaced: false,
+      runtime: "native",
+    })).toBe(true);
+    expect(isCompactionComplete({
+      sawStart: true,
+      status: "applied",
+      latestEventStatus: "applied",
+      replaced: false,
+      runtime: "native",
+      phase: "transcript",
+    })).toBe(false);
+    expect(isCompactionComplete({
+      sawStart: true,
+      status: "applied",
+      latestEventStatus: "applied",
+      replaced: true,
+      runtime: "native",
+      phase: "transcript",
+    })).toBe(true);
+  });
+
   it("keeps the existing defect counters and detects their frame signatures", () => {
     const frames = [
       frame({ t: 0, anc: 100 }),
