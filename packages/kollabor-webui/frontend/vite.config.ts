@@ -271,6 +271,7 @@ const mainConfig = defineConfig({
       "src/plugins/hello-template.test.ts",
       "tests/permission-tool-outcome.test.tsx",
       "tests/image-attachment.test.ts",
+      "tests/queue-state.test.ts",
     ],
     environment: "node",
   },
