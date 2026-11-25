@@ -129,14 +129,11 @@ describe("useChatStore", () => {
   });
 
   it("names the missing provider when used without one", () => {
-    let caught: unknown;
     function Probe() {
       useChatStore();
       return null;
     }
-    mount(createElement(Probe), (error) => {
-      caught = error;
-    });
-    expect(String(caught)).toContain("ChatStoreProvider");
+    // act() rethrows an error thrown while rendering, so the render itself throws.
+    expect(() => mount(createElement(Probe))).toThrow(/ChatStoreProvider/);
   });
 });
