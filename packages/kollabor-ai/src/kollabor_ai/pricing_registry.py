@@ -31,7 +31,7 @@ def _coerce_finite_nonnegative_rate(
         return None
     try:
         rate = float(value)
-    except (OverflowError, TypeError, ValueError):
+    except OverflowError, TypeError, ValueError:
         return None
     if not math.isfinite(rate) or rate < 0:
         return None

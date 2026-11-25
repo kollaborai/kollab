@@ -123,14 +123,14 @@ def test_openrouter_unknown_prices_clear_stale_values_and_keep_free_prices():
         }
     }
 
-    changed, _ = upd.apply_merge(data, {}, {"data": [dynamic_router]}, today="2026-11-24")
+    changed, _ = upd.apply_merge(
+        data, {}, {"data": [dynamic_router]}, today="2026-11-24"
+    )
 
     assert changed is True
     assert data["models"]["openrouter/auto"]["pricing_in"] is None
     assert data["models"]["openrouter/auto"]["pricing_out"] is None
-    free = upd.map_openrouter_model(
-        {"pricing": {"prompt": "0", "completion": "0"}}
-    )
+    free = upd.map_openrouter_model({"pricing": {"prompt": "0", "completion": "0"}})
     assert free["pricing_in"] == 0.0
     assert free["pricing_out"] == 0.0
 
@@ -382,9 +382,7 @@ def test_oversized_json_integer_in_registry_does_not_abort_refresh(tmp_path):
             }
         }
     ).replace('"PLACEHOLDER"', "9" * 5000)
-    argv, registry = _write_refresh_inputs(
-        tmp_path, json.dumps(source), registry_text
-    )
+    argv, registry = _write_refresh_inputs(tmp_path, json.dumps(source), registry_text)
 
     assert upd.main(argv) == 0
 

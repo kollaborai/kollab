@@ -113,13 +113,15 @@ def openrouter_catalog_id(model_id: str) -> str:
     return model_id.rsplit(":", 1)[0] if ":" in model_id else model_id
 
 
-def _catalog_price(value, *, multiplier: float = 1.0, precision: int = 6) -> float | None:
+def _catalog_price(
+    value, *, multiplier: float = 1.0, precision: int = 6
+) -> float | None:
     """Return a finite, non-negative catalog price, or None when unknown."""
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
     try:
         price = float(value)
-    except (TypeError, ValueError, OverflowError):
+    except TypeError, ValueError, OverflowError:
         return None
     if not math.isfinite(price) or price < 0:
         return None
@@ -179,7 +181,9 @@ def map_openrouter_model(entry: dict) -> dict:
         mapped["max_output"] = max_completion
     model_id = entry.get("id")
     if isinstance(model_id, str):
-        output_override = OPENROUTER_MAX_OUTPUT_OVERRIDES.get(openrouter_catalog_id(model_id))
+        output_override = OPENROUTER_MAX_OUTPUT_OVERRIDES.get(
+            openrouter_catalog_id(model_id)
+        )
         if output_override is not None:
             mapped["max_output"] = output_override
     architecture = entry.get("architecture")
