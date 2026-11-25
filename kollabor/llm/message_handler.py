@@ -212,6 +212,10 @@ class MessageHandler:
         if getattr(event, "source", None) in YES_SOURCES:
             origin_kwargs["may_answer"] = True
 
+        request_id = data.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            origin_kwargs["request_id"] = request_id  # the client follows the turn by it (#551)
+
         if data.get("source") == "voice" and data.get("voice"):
             plugin = self._coordinator.event_bus.get_service("voice_plugin")
             if plugin is None:
@@ -228,9 +232,6 @@ class MessageHandler:
                 ),
             )
 
-        request_id = data.get("request_id")
-        if isinstance(request_id, str) and request_id:
-            origin_kwargs["request_id"] = request_id  # the client follows the turn by it (#551)
         queue_handoff = data.get("queue_handoff")
         if queue_handoff is not None:
             from .queue_handoff import QueueHandoffContext
