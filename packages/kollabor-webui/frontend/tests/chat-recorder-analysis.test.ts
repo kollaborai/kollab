@@ -97,6 +97,19 @@ describe("chat recorder analysis", () => {
     await expect(flow()).rejects.toThrow(/user row/i);
   });
 
+  it("reports ACP goal reload as unsupported without sending a chat prompt", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    let sent = false;
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "acp", send: async () => { sent = true; }, command: async () => {},
+      reloadDuringRun: async () => {}, U: () => "u", R: () => "r", tools: () => "tools", say: () => "say",
+    });
+    await expect(flow()).rejects.toThrow(/unsupported.*ACP|ACP.*unsupported/i);
+    expect(sent).toBe(false);
+  });
+
   it("requires the reloaded snapshot to retain the active turn and its running inputs", () => {
     const expectedTurn = { turn_id: "turn-1", input_ids: ["input-1"] };
     expect(hasRunningTurnWithInputs({
