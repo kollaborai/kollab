@@ -339,6 +339,14 @@ class ChatStreamService:
     def record_event(self, event_type: str, data: dict[str, Any]) -> Event:
         """Record one producer event for the active daemon conversation."""
         uid = self._conversation_uid()
+        with self._log(uid)._lock:
+            return self._record_event_locked(uid, event_type, data)
+
+    def _record_event_locked(self, uid: str, event_type: str, data: dict[str, Any]) -> Event:
+        if event_type == "turn.state":
+            prior = self._turns.get(uid, {}).get(data.get("turn_id"))
+            if prior is not None and prior.get("origin") != data.get("origin"):
+                raise ValueError("turn origin is immutable")
         if event_type == "row.upsert":
             self._rows.setdefault(uid, {})[data["id"]] = copy.deepcopy(data)
         elif event_type == "row.append":
@@ -402,6 +410,10 @@ class ChatStreamService:
         uid = event.get("conversation_uid") or self._conversation_uid()
         if not isinstance(uid, str) or not uid or uid != self._conversation_uid():
             return
+        with self._log(uid)._lock:
+            self._dispatch_display_event(uid, event)
+
+    def _dispatch_display_event(self, uid: str, event: dict[str, Any]) -> None:
         kind = event.get("type")
         if kind == "turn_start":
             self._on_turn_start(uid, event)
@@ -412,6 +424,9 @@ class ChatStreamService:
         elif kind in {"tool_start", "tool_result"}:
             self._on_tool_event(uid, event)
         elif kind == "turn_complete":
+            origin = event.get("origin")
+            if isinstance(origin, dict) and origin.get("kind") == "goal" and not event.get("goal_attempt_terminal"):
+                return
             self._on_turn_complete(uid, event)
         elif kind == "error":
             self._on_turn_error(uid, event)
@@ -454,7 +469,7 @@ class ChatStreamService:
             row = self._rows.setdefault(uid, {}).get(input_id)
             if row is not None:
                 self._upsert(uid, {**row, "turn_id": turn_id, "status": state})
-        self._set_turn_state(uid, turn_id, "running")
+        self._set_turn_state(uid, turn_id, "running", origin=event.get("origin"))
         self._active_turns[uid] = turn_id
 
     def _on_user_message(self, uid: str, event: dict[str, Any]) -> None:
@@ -546,7 +561,7 @@ class ChatStreamService:
             return
         key = (uid, turn_id)
         input_ids = list(dict.fromkeys((*self._turn_inputs.get(key, []), *input_ids)))
-        if not input_ids:
+        if not input_ids and turn_id not in self._turns.get(uid, {}):
             return
         stop_reason = str(event.get("stop_reason") or "")
         if stop_reason in {"cancelled", "canceled", "interrupted", "stop"}:
@@ -1170,8 +1185,18 @@ class ChatStreamService:
         state: str,
         *,
         input_id: str | None = None,
+        origin: dict[str, Any] | None = None,
+    ) -> None:
+        with self._log(uid)._lock:
+            self._set_turn_state_locked(uid, turn_id, state, input_id=input_id, origin=origin)
+
+    def _set_turn_state_locked(
+        self, uid: str, turn_id: str, state: str, *,
+        input_id: str | None = None, origin: dict[str, Any] | None = None,
     ) -> None:
         previous = self._turns.setdefault(uid, {}).get(turn_id, {})
+        if origin is not None and previous and previous.get("origin") != origin:
+            raise ValueError("turn origin is immutable")
         input_ids = list(
             dict.fromkeys(
                 (
@@ -1187,7 +1212,13 @@ class ChatStreamService:
             "state": state,
             "input_ids": input_ids,
         }
-        self._turns[uid][turn_id] = data
+        retained_origin = previous.get("origin", origin)
+        if retained_origin is not None:
+            data["origin"] = copy.deepcopy(retained_origin)
+        problems = event_problems({"seq": 1, "conversation_uid": uid, "type": "turn.state", "data": data})
+        if problems:
+            raise ValueError("; ".join(problems))
+        self._turns[uid][turn_id] = copy.deepcopy(data)
         self._log(uid).publish("turn.state", data)
 
     def _upsert(self, uid: str, row: dict[str, Any]) -> None:

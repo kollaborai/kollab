@@ -1164,6 +1164,18 @@ class GoalStore:
                 )
         return self.get_attempt(attempt_id)
 
+    def bind_attempt_turn(self, attempt_id: str, lease_epoch: int, turn_id: str) -> GoalAttempt:
+        """Bind the admitted stream turn once, before publishing it."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE goal_attempts SET turn_id=?, updated_at=? "
+                "WHERE attempt_id=? AND lease_epoch=? AND state='dispatched' AND turn_id IS NULL",
+                (turn_id, self._now(), attempt_id, lease_epoch),
+            )
+            if cur.rowcount != 1:
+                raise GoalStoreError("attempt cannot be bound to a stream turn")
+        return self.get_attempt(attempt_id)
+
     def mark_ack(
         self, attempt_id: str, lease_epoch: int, provider_request_ref: Optional[str]
     ) -> GoalAttempt:

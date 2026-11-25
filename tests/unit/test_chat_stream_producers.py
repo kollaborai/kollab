@@ -489,3 +489,34 @@ def test_snapshot_exposes_a_cursor_for_transcript_rows_older_than_its_window():
 
     assert len(event["data"]["rows"]) == REPLAY_WINDOW
     assert isinstance(event["data"]["older"], str)
+
+
+def test_goal_origin_survives_inputless_turn_replay_and_snapshot():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "full-goal-id", "attempt_id": "full-attempt-id"}
+    _publish(state, "turn_start", turn_id="goal-turn", origin=origin)
+    running = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert running["data"]["turns"] == [{"turn_id": "goal-turn", "state": "running", "input_ids": [], "origin": origin}]
+    _publish(state, "turn_complete", turn_id="goal-turn", stop_reason="cancelled")
+    events = _events(stream, initial)
+    turns = [e["data"] for e in events if e["type"] == "turn.state"]
+    assert [t["state"] for t in turns] == ["running", "ended"]
+    assert all(t["origin"] == origin for t in turns)
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"][-1] == turns[-1]
+
+
+def test_goal_intermediate_completion_does_not_end_attempt():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    _publish(state, "turn_start", turn_id="t", origin=origin)
+    _publish(state, "turn_complete", turn_id="t", origin=origin, stop_reason="end_turn")
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert snapshot["data"]["turns"][0]["state"] == "running"
+    _publish(state, "turn_complete", turn_id="t", origin=origin, goal_attempt_terminal=True)
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert snapshot["data"]["turns"][0]["state"] == "ended"
