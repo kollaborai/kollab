@@ -6,7 +6,11 @@ import { fromThreadMessageLike, toMessagePartStatus } from "@assistant-ui/core/i
 import fixture from "./fixtures/chat-stream/bad-gap.json";
 import { applyChatStreamEvent, initialStreamState } from "../src/chat-store";
 import type { ChatRow } from "../src/chat-stream";
-import { messageHasRecoverableChatStreamPreview } from "../src/chat-stream-content";
+import {
+  chatStreamStreamingText,
+  chatStreamTextFromMetadata,
+  messageHasRecoverableChatStreamPreview,
+} from "../src/chat-stream-content";
 import {
   WEB_INPUT_PREFIX,
   buildAdapter,
@@ -169,6 +173,14 @@ describe("toThreadMessageLike", () => {
       type: "text",
       providerMetadata: { kollab: { chat_stream_text: textMarker.preview } },
     });
+    const textPart = text.content[0];
+    expect(textPart.type).toBe("text");
+    if (textPart.type === "text") {
+      const streamedText = chatStreamTextFromMetadata(textPart.providerMetadata, textPart.text);
+      expect(streamedText).toBe(textMarker.preview);
+      expect(chatStreamStreamingText(textMarker, `${streamedText}continued`, "full recovered text"))
+        .toBe("full recovered textcontinued");
+    }
     expect(reasoning.content).toHaveLength(1);
     expect(reasoning.content[0]).toMatchObject({
       type: "reasoning",
