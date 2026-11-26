@@ -9,6 +9,7 @@ All endpoints require bearer token auth (server-level middleware).
 
 import asyncio
 import logging
+import weakref
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Query  # type: ignore[import-not-found]
@@ -18,7 +19,18 @@ from ..hub_bridge import HubBridge
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/hub", tags=["hub"])
-_schedule_mutation_lock = asyncio.Lock()
+_schedule_mutation_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_schedule_rows_cache: list | None = None
+_schedule_rows_cache_signature: tuple | None = None
+
+
+def _schedule_mutation_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _schedule_mutation_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _schedule_mutation_locks[loop] = lock
+    return lock
 
 # Shared bridge instance (stateless, safe to reuse)
 _bridge = HubBridge()
@@ -282,6 +294,34 @@ def _load_schedule_rows() -> list:
     return [row.to_dict() for row in ScheduleStore(_schedules_dir() / "schedules.json").load()]
 
 
+def _schedule_rows_signature() -> tuple:
+    path = _schedules_dir() / "schedules.json"
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), None)
+    return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
+def _mutable_schedule_rows() -> list:
+    """Return the latest roster, including a remote save not synced to disk yet."""
+    global _schedule_rows_cache, _schedule_rows_cache_signature
+
+    signature = _schedule_rows_signature()
+    if _schedule_rows_cache is None or signature != _schedule_rows_cache_signature:
+        _schedule_rows_cache = _load_schedule_rows()
+        _schedule_rows_cache_signature = signature
+    return [dict(row) for row in _schedule_rows_cache]
+
+
+def _remember_schedule_rows(rows: list) -> None:
+    """Keep later mutations based on the accepted roster while sync catches up."""
+    global _schedule_rows_cache, _schedule_rows_cache_signature
+
+    _schedule_rows_cache = [dict(row) for row in rows]
+    _schedule_rows_cache_signature = _schedule_rows_signature()
+
+
 class ScheduleFields(BaseModel):
     agents: list[str] | None = None
     prompt: str | None = None
@@ -358,7 +398,7 @@ async def list_schedules():
 
 @router.post("/schedules")
 async def create_schedule(body: ScheduleFields):
-    async with _schedule_mutation_lock:
+    async with _schedule_mutation_lock():
         import time
         import uuid
 
@@ -381,16 +421,19 @@ async def create_schedule(body: ScheduleFields):
                 "revision": 1,
             }
         )
-        via = await _save_schedule_rows(_load_schedule_rows() + [row])
+        rows = _mutable_schedule_rows()
+        rows.append(row)
+        via = await _save_schedule_rows(rows)
+        _remember_schedule_rows(rows)
         return {"schedule": row, "via": via}
 
 
 @router.put("/schedules/{schedule_id}")
 async def update_schedule(schedule_id: str, body: ScheduleFields):
-    async with _schedule_mutation_lock:
+    async with _schedule_mutation_lock():
         import time
 
-        rows = _load_schedule_rows()
+        rows = _mutable_schedule_rows()
         for i, old in enumerate(rows):
             if old["id"] == schedule_id:
                 row = _checked(
@@ -403,16 +446,18 @@ async def update_schedule(schedule_id: str, body: ScheduleFields):
                 )
                 rows[i] = row
                 via = await _save_schedule_rows(rows)
+                _remember_schedule_rows(rows)
                 return {"schedule": row, "via": via}
         raise HTTPException(status_code=404, detail=f"No schedule '{schedule_id}'")
 
 
 @router.delete("/schedules/{schedule_id}")
 async def delete_schedule(schedule_id: str):
-    async with _schedule_mutation_lock:
-        rows = _load_schedule_rows()
+    async with _schedule_mutation_lock():
+        rows = _mutable_schedule_rows()
         kept = [row for row in rows if row["id"] != schedule_id]
         if len(kept) == len(rows):
             raise HTTPException(status_code=404, detail=f"No schedule '{schedule_id}'")
         via = await _save_schedule_rows(kept)
+        _remember_schedule_rows(kept)
         return {"ok": True, "via": via}
