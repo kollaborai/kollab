@@ -812,6 +812,7 @@ class QueueProcessor:
         self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
         self._after_turn: list[tuple[str, Callable[[], Awaitable[Any]]]] = []  # see after_turn
         self._after_turn_flush: asyncio.Task | None = None
+        self._queued_terminal_tasks: set[asyncio.Task] = set()
         self._cancel_processing = False
         self._cancel_generation = 0
         self._cancel_origin: CancellationOrigin | None = None
@@ -1216,11 +1217,11 @@ class QueueProcessor:
         if not preserve_queued:
             for item in messages:
                 if isinstance(item, TaggedInput) and not isinstance(item, QueueHandoffInput):
-                    self._end_dropped(
+                    self._schedule_end_dropped_persisted(
                         item, "Stopped before this message ran. Send it again."
                     )
                 elif isinstance(item, QueuedInput) and item.request_ids:
-                    self._end_dropped(
+                    self._schedule_end_dropped_persisted(
                         item, "Stopped before this message ran. Send it again."
                     )
         # The messages were removed from this queue moments ago. Reinsert all
@@ -1251,7 +1252,9 @@ class QueueProcessor:
         queue._queue.remove(item)
         queue.task_done()
         queue._wakeup_next(queue._putters)
-        self._end_dropped(item, "Stopped before this message ran. Send it again.")
+        self._schedule_end_dropped_persisted(
+            item, "Stopped before this message ran. Send it again."
+        )
 
     def clear_remote_task_cancellation(self, generation: int) -> bool:
         """Clear an idle relay cancellation only if no newer request replaced it."""
@@ -1583,6 +1586,39 @@ class QueueProcessor:
         if isinstance(request_ids, tuple) and request_ids:
             await self._persist_native_input_outcomes(request_ids, "error")
         self._end_dropped(item, why)
+
+    def _schedule_end_dropped_persisted(
+        self,
+        item: Any,
+        why: str = "The agent's queue was full, so this message was dropped. Send it again.",
+    ) -> None:
+        """Persist a sync cancellation's queued outcomes before its end event."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Preserve persist-before-end semantics for synchronous callers as
+            # well; there is no running app loop here to own the persistence task.
+            asyncio.run(self._end_dropped_persisted(item, why))
+            return
+
+        pending = getattr(self, "_queued_terminal_tasks", None)
+        if not isinstance(pending, set):
+            pending = self._queued_terminal_tasks = set()
+        task = loop.create_task(self._end_dropped_persisted(item, why))
+        pending.add(task)
+
+        def release_task(done: asyncio.Task) -> None:
+            pending.discard(done)
+            if done.cancelled():
+                return
+            error = done.exception()
+            if error is not None:
+                logger.error(
+                    "Could not persist queued input cancellation outcome",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        task.add_done_callback(release_task)
 
     async def _end_queued_persisted(self, item: Any) -> None:
         """Remove one queued item and persist its terminal outcome first."""
