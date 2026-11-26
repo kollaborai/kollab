@@ -1635,7 +1635,7 @@ export const UserMessage: FC = () => {
           </p>
         ) : goalReply?.state === "uncertain" ? (
           <div data-slot="kollab_goal-reply" role="status" className="mt-1 text-xs text-muted-foreground">
-            <p>Goal admission could not be confirmed.</p>
+            <p>Goal reply is unavailable or its admission could not be confirmed.</p>
             <Button
               type="button"
               variant="link"
