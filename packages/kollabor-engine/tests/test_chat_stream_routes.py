@@ -743,3 +743,91 @@ def test_send_now_after_cancelling_input_returns_409_not_404(monkeypatch):
     assert added.status_code == 202
     assert cancelled.status_code == 200
     assert sent.status_code == 409
+
+
+def test_stream_binds_phone_context_and_stops_when_revoked(monkeypatch):
+    from kollabor_engine.session_context import (
+        SESSION_READ_CONTEXT_SCOPE_KEY,
+        SessionReadContext,
+    )
+
+    context = SessionReadContext(owner_id="owner", phone_id="phone")
+    session = _Session()
+    seen = []
+
+    def subscribe(*, context=None):
+        seen.append(context)
+        return session.queue
+
+    session.subscribe = subscribe
+    monkeypatch.setattr(stream, "_get_rpc", lambda _session_id: (session, session.rpc))
+    request = SimpleNamespace(scope={"state": {SESSION_READ_CONTEXT_SCOPE_KEY: context}})
+
+    async def run():
+        response = await stream.chat_stream("s1", request, after=None, conversation_uid=None, generation=None)
+        context.revoked = True
+        return [item async for item in response.body_iterator]
+
+    assert asyncio.run(run()) == []
+    assert seen == [context]
+
+
+def test_stream_ends_on_daemon_closed_frame(monkeypatch):
+    session = _Session()
+    session.queue = asyncio.Queue()
+    session.queue.put_nowait({"type": "daemon_closed", "session_id": "s1"})
+    monkeypatch.setattr(stream, "_get_rpc", lambda _session_id: (session, session.rpc))
+
+    async def disconnected():
+        return False
+
+    request = SimpleNamespace(scope={}, is_disconnected=disconnected)
+
+    async def run():
+        response = await stream.chat_stream("s1", request, after=None, conversation_uid=None, generation=None)
+        iterator = response.body_iterator
+        first = await anext(iterator)
+        try:
+            next_item = await asyncio.wait_for(anext(iterator), timeout=0.1)
+        except StopAsyncIteration:
+            next_item = None
+        await iterator.aclose()
+        return first, next_item
+
+    first, next_item = asyncio.run(run())
+    assert first is not None
+    assert next_item is None
+
+
+def test_stream_recovers_dropped_tail_even_without_a_later_chat_event(monkeypatch):
+    from kollabor_engine.daemon_pool import DaemonEventQueue
+
+    session = _Session()
+    session.queue = DaemonEventQueue()
+    session.rpc.subscribe_results = [
+        {"events": [{"seq": 7, "conversation_uid": "conv-1", "generation": "daemon-1", "type": "snapshot", "data": {"rows": [], "next_seq": 8, "older": None, "turns": [], "inputs": []}}]},
+        {"events": [{"seq": 8, "conversation_uid": "conv-1", "generation": "daemon-1", "type": "row.delete", "data": {"id": "lost"}}]},
+    ]
+    monkeypatch.setattr(stream, "_get_rpc", lambda _session_id: (session, session.rpc))
+
+    async def disconnected():
+        return False
+
+    request = SimpleNamespace(scope={}, is_disconnected=disconnected)
+
+    async def run():
+        response = await stream.chat_stream("s1", request, after=None, conversation_uid=None, generation=None)
+        iterator = response.body_iterator
+        await anext(iterator)
+        session.queue.note_drop({"type": "chat_stream"})
+        session.queue.put_nowait({"type": "daemon_closed", "session_id": "s1"})
+        try:
+            recovered = await asyncio.wait_for(anext(iterator), timeout=0.1)
+        except (TimeoutError, StopAsyncIteration):
+            recovered = None
+        await iterator.aclose()
+        return recovered
+
+    recovered = asyncio.run(run())
+    assert recovered is not None
+    assert json.loads(recovered["data"])["seq"] == 8
