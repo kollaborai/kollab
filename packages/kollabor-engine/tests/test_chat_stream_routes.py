@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 from kollabor_engine import server
@@ -387,4 +388,31 @@ def test_goal_input_passes_private_capability_to_registered_daemon(monkeypatch):
 
     assert response.status_code == 202
     assert response.json() == {"id": "web-goal-1", "state": "queued"}
+    assert capability not in response.text
     assert captured[0]["goal_reply_id"] == capability
+
+
+def test_private_goal_poll_route_returns_only_the_owned_result(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    capability = "goal-" + "a" * 32
+    session.poll_goal_reply = AsyncMock(return_value={
+        "status": "complete",
+        "conversation_uid": "conv-1",
+        "success": True,
+        "message": "private goal result",
+        "goal_reply_id": capability,
+    })
+
+    response = client.post(
+        "/sessions/s1/goal-replies/poll",
+        json={"goal_reply_id": capability},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "complete",
+        "success": True,
+        "message": "private goal result",
+    }
+    assert capability not in response.text
+    session.poll_goal_reply.assert_awaited_once_with(capability)
