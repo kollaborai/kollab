@@ -1,7 +1,7 @@
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import type { ChatRow, ChatStreamEvent, InputInfo, TurnInfo } from "../../src/chat-stream";
+import type { ChatRow, ChatStreamCursor, ChatStreamEvent, InputInfo, TurnInfo } from "../../src/chat-stream";
 import { ChatStoreProvider, LiveChatStore, type ChatTransport, useChatStore } from "../../src/chat-store";
 import { useChatRuntime } from "../../src/chat-runtime";
 import { PermissionResponseContext, type PermissionArgs, type PermissionResult } from "../../src/components/PermissionTool";
@@ -25,6 +25,7 @@ declare global {
 }
 
 const CONVERSATION_UID = "acceptance-conversation";
+const GENERATION = "acceptance-generation";
 const CREATED_AT = "2026-11-25T00:00:00.000Z";
 
 class ChatStoreTransport implements ChatTransport {
@@ -35,7 +36,8 @@ class ChatStoreTransport implements ChatTransport {
   private readonly inputs = new Map<string, InputInfo>();
   private readonly acceptedInputIds = new Set<string>();
   private readonly turns = new Map<string, TurnInfo>();
-  private readonly listeners = new Set<(event: unknown) => void>();
+  private readonly listeners = new Set<(event: ChatStreamEvent) => void>();
+  private readonly log: ChatStreamEvent[] = [];
 
   async request(path: string, init: RequestInit = {}): Promise<Response> {
     const method = (init.method ?? "GET").toUpperCase();
@@ -82,29 +84,40 @@ class ChatStoreTransport implements ChatTransport {
     });
   }
 
-  async streamSse<T = unknown>(
-    _path: string,
+  /** The daemon's stream: a matching cursor replays the later events, anything else gets a snapshot first. */
+  async streamChatEvents(
+    _sessionId: string,
+    cursor: ChatStreamCursor | null,
     signal?: AbortSignal,
-    onEvent?: (event: T) => void,
+    onEvent?: (event: ChatStreamEvent) => void,
     onOpen?: () => void,
   ): Promise<void> {
     if (!onEvent) throw new Error("chat stream callback is required");
     this.streamConnects += 1;
-    const receive = onEvent as (event: unknown) => void;
+    const receive = onEvent;
     this.listeners.add(receive);
     onOpen?.();
-    receive({
-      seq: this.sequence,
-      conversation_uid: CONVERSATION_UID,
-      type: "snapshot",
-      data: {
-        rows: [...this.rows],
-        next_seq: this.sequence + 1,
-        older: null,
-        turns: [...this.turns.values()],
-        inputs: [...this.inputs.values()],
-      },
-    } as T);
+    const replay = cursor !== null &&
+      cursor.conversation_uid === CONVERSATION_UID &&
+      cursor.generation === GENERATION &&
+      cursor.after <= this.sequence;
+    if (replay) {
+      for (const event of this.log.filter((candidate) => candidate.seq > cursor.after)) receive(event);
+    } else {
+      receive({
+        seq: this.sequence,
+        conversation_uid: CONVERSATION_UID,
+        generation: GENERATION,
+        type: "snapshot",
+        data: {
+          rows: [...this.rows],
+          next_seq: this.sequence + 1,
+          older: null,
+          turns: [...this.turns.values()],
+          inputs: [...this.inputs.values()],
+        },
+      });
+    }
     if (new URLSearchParams(window.location.search).has("fail-stream")) return Promise.resolve();
     return new Promise((resolve) => {
       const close = () => {
@@ -141,9 +154,11 @@ class ChatStoreTransport implements ChatTransport {
     const event = {
       seq: this.sequence,
       conversation_uid: CONVERSATION_UID,
+      generation: GENERATION,
       type,
       data: eventData,
     } as ChatStreamEvent;
+    this.log.push(event);
     for (const listener of [...this.listeners]) listener(event);
   }
 }
