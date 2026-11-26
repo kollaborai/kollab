@@ -9,8 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 from kollabor_engine import auth, server
+from kollabor_engine.daemon_pool import REMOTE_STATE_TIMEOUT_SECONDS
 from kollabor_engine.routes import stream
 
 from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
@@ -1868,3 +1870,42 @@ def test_authenticated_large_row_pages_parts_and_recovers_oversized_part(
     )
     assert stale_page.status_code == 409
     assert stale_part.status_code == 409
+
+
+@pytest.mark.parametrize(
+    ("state_timeout", "expected"),
+    [(REMOTE_STATE_TIMEOUT_SECONDS, REMOTE_STATE_TIMEOUT_SECONDS), (None, 15.0)],
+    ids=["agent-on-another-device", "local-agent"],
+)
+def test_chat_stream_daemon_calls_use_the_sessions_state_budget(
+    monkeypatch, state_timeout, expected
+):
+    """A remote agent's replies cross the relay: its chat calls get its budget (#880)."""
+
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.daemon.state_timeout = state_timeout
+    timeouts: list[tuple[str, float | None]] = []
+    call = session.rpc.call
+
+    async def recording_call(method, params, *, timeout=None):
+        timeouts.append((method, timeout))
+        if method == "state.chat_stream.rows":
+            return {"rows": [], "older": None}
+        return await call(method, params, timeout=timeout)
+
+    session.rpc.call = recording_call
+
+    assert client.get("/sessions/s1/stream").status_code == 200
+    assert client.get("/sessions/s1/rows?before=cursor").status_code == 200
+    assert (
+        client.post("/sessions/s1/inputs", json={"id": "web-1", "text": "hi"}).status_code
+        == 202
+    )
+    assert client.post("/sessions/s1/inputs/web-1/send-now").status_code == 202
+
+    assert timeouts == [
+        ("state.chat_stream.subscribe", expected),
+        ("state.chat_stream.rows", expected),
+        ("state.chat_stream.add_input", expected),
+        ("state.chat_stream.send_now", expected),
+    ]
