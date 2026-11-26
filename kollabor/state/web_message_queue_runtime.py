@@ -741,7 +741,12 @@ class WebMessageQueueRuntime:
                         "state": "queued",
                     }
             if not self._send_now_available():
-                return {"found": True, "accepted": False, "state": "queued"}
+                return {
+                    "found": True,
+                    "accepted": False,
+                    "state": "queued",
+                    "reason": "dispatch_unavailable",
+                }
             result = await self._dispatch_scope(
                 matches[0], batch_id=batch.batch_id, send_now=True, request_id=input_id
             )

@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from kollabor.llm.agent_hud import build_hub_note
 from kollabor_agent.runtime import AgentRuntime
 from plugins.hub.plugin import _ACP_BUSY_RETRY_LIMIT, HubPlugin
 from plugins.hub.relay_agent import RelayAgentBridge
@@ -400,7 +401,9 @@ async def test_authenticated_agent_message_uses_nonhuman_acp_envelope():
         thread_id="thread-agent",
         origin_context={"sender": PEER, "sender_identity": PEER,
                         "relay_turn_id": None, "correlated_relay_event": False,
-                        "authenticated": True, "operator": False},
+                        "authenticated": True, "operator": False,
+                        "hub_message_id": "req-agent",
+                        "hub_note": build_hub_note(message, observed=False)},
     )
 
 

@@ -258,6 +258,37 @@ async def test_send_now_selects_one_input_from_a_shared_batch():
 
 
 @pytest.mark.asyncio
+async def test_send_now_reports_dispatch_unavailable_without_ending_queued_input():
+    server, state, runtime = _server_and_runtime()
+    admitted = await _call(
+        server,
+        "state.chat_stream.add_input",
+        {"id": "web-still-queued", "text": "keep queued", "attachments": []},
+    )
+    assert admitted["result"] == {
+        "id": "web-still-queued",
+        "state": "queued",
+    }
+    runtime.dispatch_available = False
+
+    sent = await _call(
+        server, "state.chat_stream.send_now", {"id": "web-still-queued"}
+    )
+
+    assert sent["result"] == {
+        "found": True,
+        "accepted": False,
+        "state": "queued",
+        "reason": "dispatch_unavailable",
+    }
+    assert state.dispatches == []
+    scopes = await runtime.registry.known_scopes()
+    async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
+        snapshot = await queue.snapshot()
+    assert snapshot.batches[0].request_ids == ("web-still-queued",)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("lifecycle", ["started", "joined", "ended"])
 @pytest.mark.parametrize("during_lookup", [False, True])
 async def test_send_now_retry_does_not_disclose_another_principals_input(

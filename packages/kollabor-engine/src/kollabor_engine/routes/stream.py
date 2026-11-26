@@ -617,8 +617,18 @@ async def send_input_now(session_id: str, input_id: str):
     already_moved = state in {"started", "joined"} or (
         state == "ended" and turn_id is not None
     )
+    if result.get("reason") == "dispatch_unavailable" and state == "queued":
+        raise HTTPException(
+            status_code=503,
+            detail="Queue dispatch is unavailable; the message remains queued.",
+        )
     if not accepted and not already_moved:
-        raise HTTPException(status_code=409, detail="Input is no longer queued")
+        detail = (
+            "Input could not be sent now; it stays queued."
+            if state == "queued"
+            else "Input is no longer queued"
+        )
+        raise HTTPException(status_code=409, detail=detail)
     return JSONResponse(
         status_code=202 if accepted else 200,
         content={"id": input_id, "state": state, "turn_id": turn_id},

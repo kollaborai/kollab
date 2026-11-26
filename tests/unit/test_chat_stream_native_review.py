@@ -13,7 +13,10 @@ import pytest
 from kollabor.llm.agent_hud import AgentHudEntry, merge_agent_hud_with_user_message
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
-from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
+from kollabor.state.chat_stream import (
+    ChatStreamService,
+    register_chat_stream_handlers,
+)
 from kollabor_agent.queue_processor import (
     QueuedInput,
     QueueProcessor,
@@ -778,6 +781,277 @@ async def test_plugin_send_now_rpc_prioritizes_exact_native_tagged_input(tmp_pat
     ]
     assert scheduled == ["force_send_plugin_input"]
     assert state._event_bus.services["web_message_queue_runtime"].calls == []
+
+
+@pytest.mark.asyncio
+async def test_second_plugin_send_now_reports_queued_while_reservation_is_held(tmp_path):
+    state = _State()
+    _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    coordinator.create_background_task = lambda *_args, **_kwargs: None
+    first_id = await _add_triggered_plugin_input(coordinator, "send this first")
+    second_id = await _add_triggered_plugin_input(coordinator, "still queued second")
+
+    first = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": first_id})
+    second = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": second_id})
+
+    assert first == {"found": True, "accepted": True, "state": "queued"}
+    assert second == {"found": True, "accepted": False, "state": "queued"}
+    assert [item.request_ids[0] for item in processor.processing_queue._queue] == [
+        first_id,
+        second_id,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plugin_send_now_recovers_turn_id_when_input_starts_during_gate(tmp_path):
+    state = _State()
+    _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    coordinator.create_background_task = lambda *_args, **_kwargs: None
+    input_id = await _add_triggered_plugin_input(
+        coordinator, "send this plugin input now"
+    )
+    native_send = coordinator.send_now_native_plugin_input
+    turn_id = "native-turn-started-during-send-now"
+
+    async def start_while_send_waits(request_id):
+        queued = processor.processing_queue.get_nowait()
+        processor.processing_queue.task_done()
+        assert queued.request_ids == (input_id,)
+        processor.active_request_ids = (input_id,)
+        processor.is_processing = True
+        publish_semantic(
+            processor.renderer,
+            "turn_start",
+            request_id=input_id,
+            request_ids=[input_id],
+            turn_id=turn_id,
+            input_source="native",
+        )
+        return await native_send(request_id)
+
+    coordinator.send_now_native_plugin_input = start_while_send_waits
+
+    result = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": input_id})
+
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": "started",
+        "turn_id": turn_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_plugin_send_now_reports_cancelled_input_when_cancel_wins_gate(tmp_path):
+    state = _State()
+    _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "cancel during send gate")
+    original_begin = processor.begin_forced_send
+    gate_entered = asyncio.Event()
+    release_gate = asyncio.Event()
+
+    async def hold_gate_after_acquire():
+        token = await original_begin()
+        gate_entered.set()
+        await release_gate.wait()
+        return token
+
+    processor.begin_forced_send = hold_gate_after_acquire
+    send_task = asyncio.create_task(
+        _rpc_call(rpc, "state.chat_stream.send_now", {"id": input_id})
+    )
+    await asyncio.wait_for(gate_entered.wait(), timeout=1)
+
+    cancelled = await _rpc_call(
+        rpc, "state.chat_stream.cancel_queued_input", {"id": input_id}
+    )
+    assert cancelled == {"found": True, "cancelled": True}
+
+    release_gate.set()
+    result = await send_task
+
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": "ended",
+    }
+
+
+@pytest.mark.asyncio
+async def test_plugin_send_now_prefers_recorded_joined_turn_over_coordinator_started(
+    tmp_path,
+):
+    state = _State()
+    _logger, coordinator, _processor, stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "join the active turn")
+    turn_id = "native-turn-already-running"
+
+    async def start_joined_turn(_request_id):
+        stream._set_turn_state("conversation-a", turn_id, "running")
+        publish_semantic(
+            state._event_bus.tap,
+            "turn_start",
+            request_id=input_id,
+            request_ids=[input_id],
+            turn_id=turn_id,
+            input_source="native",
+        )
+        return {
+            "found": True,
+            "accepted": False,
+            "state": "started",
+        }
+
+    coordinator.send_now_native_plugin_input = start_joined_turn
+
+    result = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": input_id})
+
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": "joined",
+        "turn_id": turn_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_plugin_send_now_recovers_started_turn_when_coordinator_loses_input_id(
+    tmp_path,
+):
+    state = _State()
+    _logger, coordinator, _processor, stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "start during lookup")
+    turn_id = "native-turn-started-before-active-id"
+
+    async def drain_before_active_id(_request_id):
+        publish_semantic(
+            state._event_bus.tap,
+            "turn_start",
+            request_id=input_id,
+            request_ids=[input_id],
+            turn_id=turn_id,
+            input_source="native",
+        )
+        return {"found": False}
+
+    coordinator.send_now_native_plugin_input = drain_before_active_id
+
+    result = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": input_id})
+
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": "started",
+        "turn_id": turn_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_plugin_send_now_retry_after_end_keeps_native_identity(tmp_path):
+    state = _State()
+    _logger, coordinator, _processor, stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "already completed")
+    turn_id = "native-turn-already-completed"
+    publish_semantic(
+        state._event_bus.tap,
+        "turn_start",
+        request_id=input_id,
+        request_ids=[input_id],
+        turn_id=turn_id,
+        input_source="native",
+    )
+    stream._set_input_state(
+        "conversation-a", input_id, "ended", turn_id=turn_id, outcome="completed"
+    )
+
+    result = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": input_id})
+
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": "ended",
+        "turn_id": turn_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_plugin_retry_survives_other_conversations_lifecycle_churn(tmp_path):
+    state = _State()
+    _logger, coordinator, _processor, stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "retry after lifecycle churn")
+    turn_id = "native-turn-retained-with-admission"
+    publish_semantic(
+        state._event_bus.tap,
+        "turn_start",
+        request_id=input_id,
+        request_ids=[input_id],
+        turn_id=turn_id,
+        input_source="native",
+    )
+    stream._set_input_state(
+        "conversation-a", input_id, "ended", turn_id=turn_id, outcome="completed"
+    )
+    recorded = stream.record_event(
+        "input.state",
+        {
+            "id": input_id,
+            "state": "ended",
+            "turn_id": turn_id,
+            "outcome": "completed",
+        },
+    )
+    assert "_native_plugin" not in recorded["data"]
+
+    for index in range(300):
+        uid = f"other-conversation-{index}"
+        other_input_id = input_id if index == 0 else f"plugin-{index}"
+        key = (uid, other_input_id)
+        stream._native_plugin_inputs.add(key)
+        stream._set_input_state(
+            uid, other_input_id, "ended", turn_id=f"turn-{index}", outcome="completed"
+        )
+
+    # Native origin must live as long as the admission record so unrelated
+    # conversations cannot evict the retry identity.
+    result = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": input_id})
+
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": "ended",
+        "turn_id": turn_id,
+    }
+    snapshot = await _rpc_call(rpc, "state.chat_stream.subscribe", {})
+    snapshot_inputs = next(
+        event["data"]["inputs"]
+        for event in snapshot["events"]
+        if event["type"] == "snapshot"
+    )
+    assert all("_native_plugin" not in item for item in snapshot_inputs)
+    assert (
+        stream._admission_inputs["conversation-a"][input_id]["_native_plugin"]
+        is True
+    )
+    assert "_native_plugin" not in stream._inputs["conversation-a"][input_id]
+    assert (
+        stream._admission_inputs["other-conversation-0"][input_id]["turn_id"]
+        == "turn-0"
+    )
+    assert stream._native_plugin_inputs == set()
 
 
 @pytest.mark.asyncio

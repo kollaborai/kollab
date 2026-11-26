@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -809,6 +810,78 @@ def test_send_now_route_returns_409_when_input_is_not_queued(monkeypatch):
     assert response.status_code == 409
 
 
+def test_send_now_route_explains_that_queued_input_remains_queued(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.send_now_result = {
+        "found": True,
+        "accepted": False,
+        "state": "queued",
+        "turn_id": None,
+    }
+
+    response = client.post("/sessions/s1/inputs/web-a1/send-now")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Input could not be sent now; it stays queued."
+
+
+def test_send_now_route_returns_503_when_dispatch_is_unavailable(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.send_now_result = {
+        "found": True,
+        "accepted": False,
+        "state": "queued",
+        "reason": "dispatch_unavailable",
+    }
+
+    response = client.post("/sessions/s1/inputs/web-a1/send-now")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Queue dispatch is unavailable; the message remains queued."
+    )
+
+
+def test_send_now_spec_documents_dispatch_unavailable_response():
+    repo_root = Path(__file__).resolve().parents[3]
+    spec = (repo_root / "docs/specs/webui-chat-single-stream.md").read_text(
+        encoding="utf-8"
+    )
+    send_now_contract = next(
+        line
+        for line in spec.splitlines()
+        if line.startswith("`POST /sessions/{id}/inputs/{input_id}/send-now`")
+    )
+
+    assert (
+        "When queue dispatch is unavailable, the input stays queued and the route "
+        "answers `503`."
+        in send_now_contract
+    )
+
+
+def test_send_now_route_prefers_a_recorded_started_turn_over_unavailable_dispatch(
+    monkeypatch,
+):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.send_now_result = {
+        "found": True,
+        "accepted": False,
+        "state": "started",
+        "turn_id": "native-turn-1",
+        "reason": "dispatch_unavailable",
+    }
+
+    response = client.post("/sessions/s1/inputs/web-a1/send-now")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": "web-a1",
+        "state": "started",
+        "turn_id": "native-turn-1",
+    }
+
+
 def test_goal_input_passes_private_capability_to_registered_daemon(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
     bus = _LiveBus()
@@ -969,8 +1042,34 @@ def test_stream_recovers_dropped_tail_even_without_a_later_chat_event(monkeypatc
     session = _Session()
     session.queue = DaemonEventQueue()
     session.rpc.subscribe_results = [
-        {"events": [{"seq": 7, "conversation_uid": "conv-1", "generation": "daemon-1", "type": "snapshot", "data": {"rows": [], "next_seq": 8, "older": None, "turns": [], "inputs": []}}]},
-        {"events": [{"seq": 8, "conversation_uid": "conv-1", "generation": "daemon-1", "type": "row.delete", "data": {"id": "lost"}}]},
+        {
+            "events": [
+                {
+                    "seq": 7,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 8,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        },
+        {
+            "events": [
+                {
+                    "seq": 8,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "row.delete",
+                    "data": {"id": "lost"},
+                }
+            ]
+        },
     ]
     monkeypatch.setattr(stream, "_get_rpc", lambda _session_id: (session, session.rpc))
 
