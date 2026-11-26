@@ -133,6 +133,19 @@ describe("chat stream contract", () => {
     }))).toBe(false);
   });
 
+  it.each([
+    ["text", { type: "text", text: "visible text" }],
+    ["reasoning", { type: "reasoning", text: "thinking" }],
+    ["image", { type: "image", url: "data:image/png;base64,AAAA" }],
+    ["prompt", { type: "prompt", prompt_id: "prompt-1", data: {} }],
+    ["hub-note", { type: "hub-note", from: "lapis", to: "", text: "note", observed: true }],
+  ])("rejects an args preview on a %s part", (_label, part) => {
+    expect(isChatStreamEvent(upsert({
+      ...ROW,
+      parts: [{ ...part, chat_stream_args_preview: contentPreview("args") }],
+    }))).toBe(false);
+  });
+
   it("rejects preview markers whose row identity disagrees with their row", () => {
     expect(isChatStreamEvent(upsert({
       ...ROW,
