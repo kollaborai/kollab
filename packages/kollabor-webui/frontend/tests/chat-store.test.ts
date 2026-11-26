@@ -1,4 +1,4 @@
-import { EngineApi } from "../src/api";
+import { ApiError, EngineApi } from "../src/api";
 import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatRow, ChatStreamContentPreviewMarker, ChatStreamCursor, InputInfo, InputRequest, TurnInfo } from "../src/chat-stream";
@@ -572,6 +572,15 @@ describe("LiveChatStore", () => {
     streams[1].open();
     streams[1].emit(snapshot(8, [row("r3", "three")]));
     expect(store.rows.map((r) => r.id)).toEqual(["r3"]);
+  });
+
+  it("stops and reports outdated when the agent predates the chat stream (426)", async () => {
+    const { store, streamChatEvents } = make({ maxAttempts: 5 });
+    streamChatEvents.mockImplementation(() => Promise.reject(new ApiError("older agent", 426, null)));
+    store.start();
+    await vi.waitFor(() => expect(store.connection).toBe("outdated"));
+    await settle();
+    expect(streamChatEvents).toHaveBeenCalledTimes(1);
   });
 
   it("fails after repeated snapshots followed by drops", async () => {

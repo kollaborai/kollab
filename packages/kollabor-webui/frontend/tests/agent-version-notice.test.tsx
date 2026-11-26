@@ -44,6 +44,16 @@ describe("agentVersionNotice", () => {
     expect(agentVersionNotice({ engineVersion: "0.21.0+aaaa1111", agent: { ...agent, version: "0.21.0+aaaa1111" }, restartAgents: true })).toBeNull();
   });
 
+  it("names stop-and-start, not /restart, when the chat cannot reach an older agent (#1451)", () => {
+    const older = { ...agent, version: "0.20.0" };
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: older, restartAgents: false, chatOutdated: true }))
+      .toMatchObject({ kind: "unknown", name: "lapis" });
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: older, restartAgents: true, chatOutdated: true }))
+      .toMatchObject({ kind: "button" });
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: { ...agent, version: "0.21.0" }, restartAgents: false, chatOutdated: true }))
+      .toMatchObject({ kind: "unknown", name: "lapis" });
+  });
+
   it("is silent when either side does not say (no agent row, no engine version)", () => {
     expect(agentVersionNotice({ engineVersion: "0.21.0+aaaa1111", agent: undefined, restartAgents: true })).toBeNull();
     expect(agentVersionNotice({ engineVersion: "", agent: { ...agent, version: "0.20.0" }, restartAgents: true })).toBeNull();
