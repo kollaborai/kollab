@@ -622,6 +622,19 @@ class ChatStreamService:
             or input_id in self._rows.get(uid, {})
         )
 
+    def get_admitted_input(
+        self, input_id: str, scope: tuple[str, str, str]
+    ) -> dict[str, Any] | None:
+        """Return stored content for an input owned by this exact queue scope."""
+        if not self.has_admitted_input(input_id, scope):
+            return None
+        key = (scope[1], input_id)
+        text = self._input_text.get(key)
+        attachments = self._input_attachments.get(key)
+        if not isinstance(text, str) or not isinstance(attachments, list):
+            return None
+        return {"text": text, "attachments": copy.deepcopy(attachments)}
+
     async def bind_queued_input_scopes(
         self, input_ids: list[str], scope: tuple[str, str, str]
     ) -> bool:
@@ -801,8 +814,6 @@ class ChatStreamService:
             self._on_turn_error(uid, event)
         elif kind == "hub_message":
             self._on_hub_message(uid, event)
-        elif kind == "hub_display":
-            self._on_hub_note(uid, event)
         elif kind == "permission_request":
             self._on_permission_prompt(uid, event)
         elif kind in {

@@ -87,6 +87,42 @@ def _acp_input_metadata(value: Any) -> Dict[str, Any]:
     outcome = value.get("chat_stream_outcome")
     if isinstance(outcome, str) and outcome in {"completed", "failed", "cancelled"}:
         result["chat_stream_outcome"] = outcome
+    if value.get("hub_message") is True:
+        result["hub_message"] = True
+    hub_message_id = value.get("hub_message_id")
+    if isinstance(hub_message_id, str) and hub_message_id:
+        result["hub_message_id"] = hub_message_id
+    hub_admission = value.get("hub_admission")
+    if isinstance(hub_admission, str) and hub_admission in {"input", "note"}:
+        result["hub_admission"] = hub_admission
+    hub_note = value.get("hub_note")
+    if (
+        isinstance(hub_note, dict)
+        and hub_note.get("type") == "hub-note"
+        and isinstance(hub_note.get("from"), str)
+        and hub_note["from"]
+        and isinstance(hub_note.get("to"), str)
+        and isinstance(hub_note.get("text"), str)
+        and isinstance(hub_note.get("observed"), bool)
+    ):
+        note = {
+            key: hub_note[key]
+            for key in ("type", "from", "to", "text", "observed")
+        }
+        for key, valid in (
+            ("kind", lambda item: isinstance(item, str)),
+            ("thread_id", lambda item: isinstance(item, str)),
+            ("reply_to", lambda item: isinstance(item, str)),
+            ("is_direct", lambda item: isinstance(item, bool)),
+            (
+                "presence",
+                lambda item: isinstance(item, str) and item in {"online", "offline"},
+            ),
+        ):
+            item = hub_note.get(key)
+            if item is not None and valid(item):
+                note[key] = item
+        result["hub_note"] = note
     return result
 
 

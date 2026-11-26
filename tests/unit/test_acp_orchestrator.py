@@ -303,6 +303,38 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         assert restored.load_session(conversation_logger.session_id)
         restored_inputs = [message["content"] for message in restored.messages if message["role"] == "user"]
         assert restored_inputs == [row.content for row in inputs] + [human]
+
+        resumed_history = [
+            ConversationMessage(
+                role=message["role"],
+                content=message["content"],
+                metadata=message.get("metadata", {}),
+            )
+            for message in restored.messages
+        ]
+        resumed_llm = SimpleNamespace(
+            conversation_manager=restored,
+            conversation_history=resumed_history,
+        )
+        resumed_state = SimpleNamespace(
+            _event_bus=bus,
+            _llm_service=resumed_llm,
+            get_conversation_uid=lambda: conversation_logger.session_id,
+        )
+        resumed_snapshot = ChatStreamService(resumed_state).subscribe(
+            {"after": None, "conversation_uid": None}
+        )["events"][0]["data"]
+        note = next(row for row in resumed_snapshot["rows"] if row["id"] == observation_ids[0])
+        assert note["kind"] == "note"
+        assert note["role"] == "system"
+        assert note["parts"][0]["type"] == "hub-note"
+        assert note["parts"][0]["text"] == "PEER_NOTE_0\n\nDetails 0"
+        restored_note = next(
+            message
+            for message in restored.messages
+            if message["metadata"].get("hub_message_id") == observation_ids[0]
+        )
+        assert restored_note["metadata"]["hub_admission"] == "note"
     finally:
         await orchestrator.close()
 
