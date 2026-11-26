@@ -435,7 +435,7 @@ class TestCompactionIntegration(unittest.IsolatedAsyncioTestCase):
             {row["id"] for row in manager.chat_stream_rows},
             {"retained-prefix-row", "concurrent-hub-row"},
         )
-        replacement_rows = stream._logs["compaction-position-test"].history[-1][
+        replacement_rows = stream._logs["compaction-position-test"]._events[-1][
             "data"
         ]["rows"]
         self.assertNotIn("old-hub-row", {row["id"] for row in replacement_rows})

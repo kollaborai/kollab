@@ -46,7 +46,11 @@ def _parse_chat_timestamp(value: Any) -> datetime | None:
 
 def _public_chat_stream_row(row: dict[str, Any]) -> dict[str, Any]:
     """Remove manager-only persistence metadata before exposing a row."""
-    return {key: copy.deepcopy(value) for key, value in row.items() if key != "_history_index"}
+    return {
+        key: copy.deepcopy(value)
+        for key, value in row.items()
+        if not key.startswith("_history_")
+    }
 
 
 class ChatStreamLog:
@@ -1325,9 +1329,14 @@ class ChatStreamService:
         history = getattr(llm_service, "conversation_history", None)
         if not isinstance(history, list):
             history = getattr(manager, "messages", None)
+        dropped_row_ids: set[str] = set()
         if isinstance(history, list):
             compaction_stamps = []
             has_unparseable_compaction = False
+            compaction_snapshot_count = None
+            compaction_retained_positions: set[int] = set()
+            has_compaction_position_metadata = False
+            compaction_round = None
             for message in history:
                 if isinstance(message, dict):
                     metadata = message.get("metadata")
@@ -1340,13 +1349,43 @@ class ChatStreamService:
                     or metadata.get("compaction_summary")
                 ):
                     continue
+                snapshot_count = metadata.get("compaction_snapshot_count")
+                retained_positions = metadata.get("compaction_retained_positions")
+                if (
+                    isinstance(snapshot_count, int)
+                    and not isinstance(snapshot_count, bool)
+                    and snapshot_count >= 0
+                    and isinstance(retained_positions, list)
+                    and all(
+                        isinstance(position, int)
+                        and not isinstance(position, bool)
+                        and position >= 0
+                        for position in retained_positions
+                    )
+                ):
+                    compaction_snapshot_count = snapshot_count
+                    compaction_retained_positions = set(retained_positions)
+                    has_compaction_position_metadata = True
+                round_number = metadata.get("compaction_round")
+                if (
+                    isinstance(round_number, int)
+                    and not isinstance(round_number, bool)
+                    and round_number >= 0
+                ):
+                    compaction_round = round_number
                 stamp = _parse_chat_timestamp(timestamp)
                 if stamp is None:
                     has_unparseable_compaction = True
                     break
                 compaction_stamps.append(stamp)
-            if compaction_stamps and not has_unparseable_compaction:
-                boundary = max(compaction_stamps)
+            if has_compaction_position_metadata or (
+                compaction_stamps and not has_unparseable_compaction
+            ):
+                boundary = (
+                    max(compaction_stamps)
+                    if compaction_stamps and not has_unparseable_compaction
+                    else None
+                )
                 manager_rows = getattr(manager, "chat_stream_rows", None)
                 if isinstance(manager_rows, list):
                     retained_rows = []
@@ -1354,9 +1393,54 @@ class ChatStreamService:
                         if not isinstance(row, dict):
                             continue
                         row_stamp = _parse_chat_timestamp(row.get("created_at"))
-                        if row_stamp is not None and row_stamp <= boundary:
+                        row_position = row.get("_history_index")
+                        if has_compaction_position_metadata:
+                            if (
+                                row.get("_history_compaction_round") == compaction_round
+                                and compaction_round is not None
+                            ):
+                                keep_row = True
+                            elif (
+                                isinstance(row_position, int)
+                                and not isinstance(row_position, bool)
+                                and row_position >= 0
+                            ):
+                                adjacent_to_retained = (
+                                    row_position - 1 in compaction_retained_positions
+                                    or row_position in compaction_retained_positions
+                                )
+                                keep_row = (
+                                    row_position >= compaction_snapshot_count
+                                    or adjacent_to_retained
+                                )
+                            else:
+                                # Legacy rows have no source position. Preserve
+                                # the historical timestamp fallback for them.
+                                keep_row = (
+                                    row_stamp is None
+                                    or boundary is None
+                                    or row_stamp > boundary
+                                )
+                        else:
+                            keep_row = (
+                                row_stamp is None
+                                or boundary is None
+                                or row_stamp > boundary
+                            )
+                        if not keep_row:
+                            row_id = row.get("id")
+                            if isinstance(row_id, str):
+                                dropped_row_ids.add(row_id)
                             continue
-                        if row_stamp is not None:
+                        row_compaction_round = row.get("_history_compaction_round")
+                        is_current_compaction_row = (
+                            row_compaction_round == compaction_round
+                            and compaction_round is not None
+                        )
+                        if row_stamp is not None and (
+                            not has_compaction_position_metadata
+                            or is_current_compaction_row
+                        ):
                             preceding = []
                             for index, message in enumerate(history):
                                 if isinstance(message, dict):
@@ -1366,7 +1450,12 @@ class ChatStreamService:
                                 message_stamp = _parse_chat_timestamp(timestamp)
                                 if message_stamp is not None and message_stamp <= row_stamp:
                                     preceding.append(index)
-                            row["_history_index"] = max(preceding, default=0)
+                            row["_history_index"] = len(preceding)
+                        if (
+                            isinstance(row_compaction_round, int)
+                            and row_compaction_round != compaction_round
+                        ):
+                            row.pop("_history_compaction_round", None)
                         retained_rows.append(row)
                     manager_rows[:] = retained_rows
         custom = getattr(self._state_service, "chat_stream_snapshot", None)
@@ -1380,7 +1469,11 @@ class ChatStreamService:
             if isinstance(row, dict)
             and isinstance(row.get("id"), str)
             and row["id"]
+            and row["id"] not in dropped_row_ids
         ]
+        row_cache = self._rows.get(uid, {})
+        for row_id in dropped_row_ids:
+            row_cache.pop(row_id, None)
         rows = merge_chat_stream_rows(self._transcript_rows(uid), state_rows)
         active_turn = self._active_turns.get(uid)
         live_rows = []
@@ -1842,6 +1935,9 @@ class ChatStreamService:
                     {
                         "seq": 0,
                         "conversation_uid": uid,
+                        # Validation-only event for durable native rows. The
+                        # transport supplies its live generation separately.
+                        "generation": "native-hub-row-validation",
                         "type": "row.upsert",
                         "data": public_row,
                     }

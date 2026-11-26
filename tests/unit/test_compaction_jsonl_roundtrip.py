@@ -62,6 +62,8 @@ class TestCompactionSummaryPersists(unittest.TestCase):
                     post_count=13,
                     tasks_preserved=1,
                     summary_text=GO_BLOCK,
+                    compaction_snapshot_count=52,
+                    compaction_retained_positions=[0, 48, 49, 50, 51],
                 )
             )
             self.assertTrue(sf.exists())
@@ -72,6 +74,10 @@ class TestCompactionSummaryPersists(unittest.TestCase):
             self.assertEqual(rec["subtype"], "compaction_summary")
             self.assertIn("GO — build now. Full authority.", rec["content"])
             self.assertIn("=== COORDINATION STATE", rec["content"])
+            self.assertEqual(rec["compaction_snapshot_count"], 52)
+            self.assertEqual(
+                rec["compaction_retained_positions"], [0, 48, 49, 50, 51]
+            )
 
     def test_no_summary_text_no_content_key(self):
         # legacy/empty summary -> record shape unchanged
@@ -156,6 +162,8 @@ class TestLoaderReplaysCompaction(unittest.TestCase):
                     "compaction_round": 1,
                     "messages_summarized": 40,
                     "messages_kept": 12,
+                    "compaction_snapshot_count": 52,
+                    "compaction_retained_positions": [0, 48, 49, 50, 51],
                     "content": GO_BLOCK,
                     "role": "user",
                     "subtype": "compaction_summary",
@@ -213,6 +221,16 @@ class TestLoaderReplaysCompaction(unittest.TestCase):
             self.assertTrue(
                 any(m.get("context_compaction") for m in roles),
                 "replayed summary must carry context_compaction metadata",
+            )
+            summary = next(
+                message
+                for message in msgs
+                if message.get("metadata", {}).get("context_compaction")
+            )
+            self.assertEqual(summary["metadata"]["compaction_snapshot_count"], 52)
+            self.assertEqual(
+                summary["metadata"]["compaction_retained_positions"],
+                [0, 48, 49, 50, 51],
             )
 
     def test_last_round_wins(self):

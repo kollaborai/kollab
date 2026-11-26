@@ -337,7 +337,7 @@ def test_compaction_replacement_drops_old_persisted_hub_rows():
     ]
 
 
-def test_compacted_hub_rows_stay_pruned_after_restart(tmp_path):
+def test_legacy_compaction_stays_pruned_after_restart(tmp_path):
     conversations = tmp_path / "conversations"
     config = SimpleNamespace(
         _conversations_dir=conversations,
@@ -345,7 +345,7 @@ def test_compacted_hub_rows_stay_pruned_after_restart(tmp_path):
     )
     logger = KollaborConversationLogger(conversations)
     manager = ConversationManager(config, logger)
-    manager.conversation_metadata["conversation_uid"] = "compacted-hub-session"
+    manager.conversation_metadata["conversation_uid"] = "legacy-compacted-hub-session"
     old_row = _hub_row(
         "old-hub-input",
         kind="input",
@@ -357,15 +357,14 @@ def test_compacted_hub_rows_stay_pruned_after_restart(tmp_path):
     manager.chat_stream_rows = [old_row]
     assert manager.save_session(logger.session_id)
 
-    session_file = logger.session_file
-    with session_file.open("a") as session:
+    with logger.session_file.open("a") as session:
         session.write(
-            '{"type":"context_compaction","uuid":"compact-1",'
+            '{"type":"context_compaction","uuid":"compact-legacy",'
             '"timestamp":"2026-11-25T12:00:02Z","content":"summary"}\n'
         )
         session.write(
             '{"type":"system","subtype":"hub_incoming",'
-            '"uuid":"hub-row-record-2","timestamp":"2026-11-25T12:00:04Z",'
+            '"uuid":"hub-row-record-legacy","timestamp":"2026-11-25T12:00:04Z",'
             '"chat_stream_row":'
             + json.dumps(
                 _hub_row(
@@ -384,6 +383,78 @@ def test_compacted_hub_rows_stay_pruned_after_restart(tmp_path):
         "new-hub-note"
     ]
 
+
+def test_compacted_hub_rows_stay_pruned_after_restart(tmp_path):
+    conversations = tmp_path / "conversations"
+    config = SimpleNamespace(
+        _conversations_dir=conversations,
+        get=lambda _key, default=None: default,
+    )
+    logger = KollaborConversationLogger(conversations)
+    manager = ConversationManager(config, logger)
+    manager.conversation_metadata["conversation_uid"] = "compacted-hub-session"
+    old_row = _hub_row(
+        "old-hub-input",
+        kind="input",
+        created_at="2026-11-25T12:00:01Z",
+        turn_id="old-turn",
+        status="completed",
+        history_index=4,
+    )
+    retained_row = _hub_row(
+        "retained-prefix-note",
+        kind="note",
+        created_at="2026-11-25T12:00:01Z",
+        history_index=19,
+    )
+    manager.chat_stream_rows = [old_row, retained_row]
+    assert manager.save_session(logger.session_id)
+
+    session_file = logger.session_file
+    with session_file.open("a") as session:
+        session.write(
+            '{"type":"context_compaction","uuid":"compact-1",'
+            '"timestamp":"2026-11-25T12:00:02Z","content":"summary",'
+            '"compaction_round":1,"compaction_snapshot_count":20,'
+            '"compaction_retained_positions":[0,14,15,16,17,18,19]}\n'
+        )
+        session.write(
+            '{"type":"system","subtype":"hub_incoming",'
+            '"uuid":"hub-row-record-2","timestamp":"2026-11-25T12:00:01Z",'
+            '"chat_stream_row":'
+            + json.dumps(
+                _hub_row(
+                    "concurrent-hub-note",
+                    kind="note",
+                    created_at="2026-11-25T12:00:01Z",
+                    history_index=21,
+                )
+            )
+            + "}\n"
+        )
+
+    resumed_manager = ConversationManager(config)
+    assert resumed_manager.load_session(logger.session_id)
+    assert [row["id"] for row in resumed_manager.chat_stream_rows] == [
+        "retained-prefix-note",
+        "concurrent-hub-note",
+    ]
+    summary = next(
+        message
+        for message in resumed_manager.messages
+        if message.get("metadata", {}).get("context_compaction")
+    )
+    assert summary["metadata"]["compaction_snapshot_count"] == 20
+    assert summary["metadata"]["compaction_retained_positions"] == [
+        0,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+    ]
+
     state = SimpleNamespace(
         _llm_service=SimpleNamespace(
             conversation_manager=resumed_manager,
@@ -398,5 +469,53 @@ def test_compacted_hub_rows_stay_pruned_after_restart(tmp_path):
     )["events"][0]
     assert all("_history_index" not in row for row in snapshot["data"]["rows"])
     assert [row["id"] for row in snapshot["data"]["rows"] if row["kind"] != "marker"] == [
-        "new-hub-note"
+        "retained-prefix-note",
+        "concurrent-hub-note",
+    ]
+
+
+def test_compacted_hub_rows_filter_from_saved_base_without_stream_tail(tmp_path):
+    conversations = tmp_path / "conversations"
+    config = SimpleNamespace(
+        _conversations_dir=conversations,
+        get=lambda _key, default=None: default,
+    )
+    logger = KollaborConversationLogger(conversations)
+    manager = ConversationManager(config, logger)
+    manager.conversation_metadata["conversation_uid"] = "saved-base-compacted-hub"
+    manager.add_message("user", "compaction summary")
+    manager.messages[0]["timestamp"] = "2026-11-25T12:00:02Z"
+    manager.messages[0]["metadata"].update(
+        {
+            "context_compaction": True,
+            "compaction_round": 1,
+            "compaction_snapshot_count": 20,
+            "compaction_retained_positions": [0, 14, 15, 16, 17, 18, 19],
+        }
+    )
+    manager.chat_stream_rows = [
+        _hub_row(
+            "saved-base-old-row",
+            kind="note",
+            created_at="2026-11-25T12:00:01Z",
+            history_index=4,
+        ),
+        _hub_row(
+            "saved-base-retained-row",
+            kind="note",
+            created_at="2026-11-25T12:00:01Z",
+            history_index=19,
+        ),
+    ]
+    assert manager.save_session(logger.session_id)
+
+    resumed_manager = ConversationManager(config)
+    assert resumed_manager.load_session(logger.session_id)
+    assert [row["id"] for row in resumed_manager.chat_stream_rows] == [
+        "saved-base-retained-row"
+    ]
+    branch = resumed_manager.branch_session(logger.session_id, 0)
+    assert branch["success"] is True
+    assert [row["id"] for row in resumed_manager.chat_stream_rows] == [
+        "saved-base-retained-row"
     ]
