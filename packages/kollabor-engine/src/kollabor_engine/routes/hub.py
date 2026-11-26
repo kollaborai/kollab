@@ -304,11 +304,19 @@ def _checked(row: dict) -> dict:
 async def _save_schedule_rows(rows: list) -> str:
     agents = _bridge.get_agents(use_cache=False)
     if not agents:
+        from plugins.hub.device_names import parse_handle
         from plugins.hub.schedules import ScheduleRow, ScheduleStore
 
-        ScheduleStore(_schedules_dir() / "schedules.json").save(
-            [ScheduleRow.from_dict(r) for r in rows]
-        )
+        clean = [ScheduleRow.from_dict(r) for r in rows]
+        if any(parse_handle(agent) is None for row in clean for agent in row.agents):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Cannot save schedules with unqualified agent names while no "
+                    "hub agent is live. Start an agent and try again."
+                ),
+            )
+        ScheduleStore(_schedules_dir() / "schedules.json").save(clean)
         return "file"
     replies = await asyncio.gather(
         *[

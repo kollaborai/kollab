@@ -326,10 +326,15 @@ def test_a_coordinator_error_is_passed_through(client, monkeypatch):
 
 def test_no_live_agent_writes_the_file_directly(client, monkeypatch, tmp_path):
     _install(monkeypatch, _Bridge(agents=[], replies={}))
-    res = client.post("/hub/schedules", json={"agents": ["lapis"], "prompt": "x", "interval_seconds": 60})
+    res = client.post(
+        "/hub/schedules",
+        json={"agents": ["lapis@device-one"], "prompt": "x", "interval_seconds": 60},
+    )
     assert res.status_code == 200, res.text
     assert res.json()["via"] == "file"
-    assert [r.prompt for r in ScheduleStore(tmp_path / "schedules.json").load()] == ["x"]
+    rows = ScheduleStore(tmp_path / "schedules.json").load()
+    assert [r.prompt for r in rows] == ["x"]
+    assert rows[0].agents == ["lapis@device-one"]
 
 
 def test_one_coordinator_saving_wins_over_another_one_failing(client, monkeypatch):
