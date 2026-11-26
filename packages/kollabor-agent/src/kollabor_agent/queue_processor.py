@@ -2149,9 +2149,12 @@ class QueueProcessor:
             if operator_inputs:
                 metadata["operator_inputs"] = operator_inputs
 
-            if batch_ids:
-                metadata["request_id"] = batch_ids[0]
-                metadata["request_ids"] = list(batch_ids)
+            # These explicit empty fields fence DisplayTap's current-turn
+            # defaults for untracked TUI input. Without them, an id-less
+            # message can inherit the previous batch's request ID and be
+            # rendered as an update to that input row.
+            metadata["request_id"] = batch_ids[0] if batch_ids else ""
+            metadata["request_ids"] = list(batch_ids)
             if stream_input_count > 0:
                 metadata["chat_stream_input_count"] = stream_input_count
             if native_stream_inputs:

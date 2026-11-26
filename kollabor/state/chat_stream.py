@@ -961,6 +961,29 @@ class ChatStreamService:
                     },
                 )
             return
+        # A native TUI admission may have no client request ID. Its
+        # operator-input record is the authored user text; the `text` field on
+        # this event is the model payload and can include HUD context or image
+        # placeholders. Give each untracked authored input its own live row.
+        records = event.get("operator_inputs")
+        if isinstance(records, list) and records:
+            for record in records:
+                if not isinstance(record, dict) or not isinstance(
+                    record.get("text"), str
+                ):
+                    continue
+                request_id = record.get("request_id")
+                self._on_user_message_input(
+                    uid,
+                    {
+                        **event,
+                        "request_id": request_id if isinstance(request_id, str) else "",
+                        "request_ids": [],
+                        "operator_inputs": [],
+                        "text": record["text"],
+                    },
+                )
+            return
         self._on_user_message_input(uid, event)
 
     def _on_user_message_input(self, uid: str, event: dict[str, Any]) -> None:
@@ -986,37 +1009,26 @@ class ChatStreamService:
             "state"
         ) == "running" and input_id not in self._turn_inputs.get((uid, turn_id), [])
         state = "joined" if joined else "started"
+        if prior.get("turn_id") == turn_id and prior.get("state") in {
+            "started",
+            "joined",
+        }:
+            # _on_turn_start already classified a newly admitted input as
+            # joined. The native queue can re-enter LOOP 1 under this same
+            # turn, so the later user_message must preserve that state.
+            state = prior["state"]
         if prior.get("state") != state or prior.get("turn_id") != turn_id:
             self._set_input_state(uid, input_id, state, turn_id=turn_id)
         self._input_turns[(uid, input_id)] = turn_id
         self._add_turn_input(uid, turn_id, input_id)
         row = self._rows.setdefault(uid, {}).get(input_id)
-        parts = copy.deepcopy(row.get("parts", [])) if row is not None else []
-        has_text = any(
-            isinstance(part, dict)
-            and part.get("type") == "text"
-            and isinstance(part.get("text"), str)
-            and part["text"]
-            for part in parts
-        )
-        if not has_text and text:
-            images = [
-                copy.deepcopy(part)
-                for part in parts
-                if isinstance(part, dict) and part.get("type") == "image"
-            ]
-            parts = self._input_parts(text)
-            parts.extend(images)
-        if row is not None and (
-            row.get("status") != state or row.get("parts") != parts
-        ):
+        if row is not None and row.get("status") != state:
             self._upsert(
                 uid,
                 {
                     **row,
                     "turn_id": turn_id,
                     "status": state,
-                    "parts": parts,
                 },
             )
         if current.get("state") != "running" or joined:
@@ -1083,7 +1095,37 @@ class ChatStreamService:
         turn_id = self._event_turn_id(event)
         input_ids = self._event_input_ids(event)
         if turn_id is None and input_ids:
-            turn_id = self._input_turns.get((uid, input_ids[0]))
+            input_turns = {
+                input_id: self._input_turns.get((uid, input_id))
+                for input_id in input_ids
+            }
+            bound_turn_ids = set(input_turns.values()) - {None}
+            if not bound_turn_ids:
+                self._end_unbound_inputs(uid, event, input_ids)
+                return
+            if len(bound_turn_ids) != 1:
+                self._end_unbound_inputs(
+                    uid,
+                    event,
+                    [
+                        input_id
+                        for input_id in input_ids
+                        if input_turns[input_id] is None
+                    ],
+                )
+                return
+            turn_id = next(iter(bound_turn_ids))
+            unbound_ids = [
+                input_id
+                for input_id in input_ids
+                if input_turns[input_id] is None
+            ]
+            self._end_unbound_inputs(uid, event, unbound_ids)
+            input_ids = [
+                input_id
+                for input_id in input_ids
+                if input_turns[input_id] == turn_id
+            ]
         if turn_id is None:
             turn_id = self._active_turns.get(uid)
         if turn_id is None:
@@ -1129,6 +1171,32 @@ class ChatStreamService:
         if self._active_turns.get(uid) == turn_id:
             self._active_turns.pop(uid, None)
 
+    def _end_unbound_inputs(
+        self, uid: str, event: dict[str, Any], input_ids: list[str]
+    ) -> None:
+        """End named requests that never joined a turn without ending another."""
+        outcome = outcome_for_stop_reason(event.get("stop_reason"))
+        for input_id in dict.fromkeys(input_ids):
+            if not input_id:
+                continue
+            prior = self._inputs.setdefault(uid, {}).get(input_id, {})
+            if prior.get("state") == "ended":
+                continue
+            self._ensure_input_row(uid, input_id)
+            self._set_input_state(
+                uid,
+                input_id,
+                "ended",
+                turn_id=None,
+                outcome=outcome,
+            )
+            row = self._rows.setdefault(uid, {}).get(input_id)
+            if row is not None:
+                self._upsert(
+                    uid,
+                    {**row, "turn_id": None, "status": outcome},
+                )
+
     def _reconcile_silent_reply(self, uid: str, turn_id: str) -> None:
         """Publish a live row update when persisted projection silences its period."""
         transcript_rows = {
@@ -1159,7 +1227,16 @@ class ChatStreamService:
 
     def _on_turn_error(self, uid: str, event: dict[str, Any]) -> None:
         message = event.get("message")
-        turn_id = self._event_turn_id(event) or self._active_turns.get(uid)
+        turn_id = self._event_turn_id(event)
+        if turn_id is None:
+            input_ids = self._event_input_ids(event)
+            bound_turn_ids = {
+                self._input_turns.get((uid, input_id)) for input_id in input_ids
+            } - {None}
+            if len(bound_turn_ids) == 1:
+                turn_id = next(iter(bound_turn_ids))
+            elif not input_ids:
+                turn_id = self._active_turns.get(uid)
         if not isinstance(message, str) or not message:
             return
         if turn_id:
