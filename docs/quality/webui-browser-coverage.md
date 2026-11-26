@@ -100,7 +100,7 @@ counted exactly:
 | `reload` | Reloads in the middle of its own turn |
 | `prompt-other` | Opens a permission prompt in the page, then approves it through a separate engine client |
 | `compact` | Seeds enough short turns, compacts the conversation, then sends again |
-| `goal-reload` | Reloads while a native `/goal` runs; ACP uses an equivalent goal-directed chat turn because `/goal` is unavailable on ACP |
+| `goal-reload` | Reloads while a native `/goal` runs. It needs `GET /sessions/{id}/goal`, `turn.state.origin` and the `data-chat-*` tool-card attributes; ACP reports unsupported because persisted goals are unavailable |
 | `hub-note` | Sends a hub note to the selected agent while the page's turn is running |
 
 Run one flow or `all` against a runtime matrix by naming one sidebar identity
@@ -118,6 +118,8 @@ runtime and flow. Recordings go under `--out/<runtime>/<flow>-<label>`; each
 counter. `--agent <identity>` keeps the single-agent mode. Matrix agents need
 their own active sessions; `hub-note` also needs each selected agent to be
 reachable through the local Hub.
+Because ACP does not expose persisted goals, `all --runtime-matrix` reports
+`goal-reload` as unsupported for both `codex-cli` and `claude-code`.
 
 Per flow it writes, under `--out` (default `./chat-recordings`):
 
