@@ -908,18 +908,8 @@ class ChatStreamService:
         text = event.get("text")
         if not isinstance(text, str):
             return
-        raw_ids = event.get("request_ids")
-        if isinstance(raw_ids, list) and raw_ids:
-            input_ids = list(
-                dict.fromkeys(
-                    input_id
-                    for input_id in raw_ids
-                    if isinstance(input_id, str) and input_id
-                )
-            )
-            request_id = event.get("request_id")
-            if isinstance(request_id, str) and request_id and request_id not in input_ids:
-                input_ids.append(request_id)
+        input_ids = self._event_input_ids(event)
+        if input_ids:
             records = event.get("operator_inputs")
             text_by_id = {
                 record["request_id"]: record["text"]
@@ -931,6 +921,7 @@ class ChatStreamService:
             }
             for input_id in input_ids:
                 input_text = text_by_id.get(input_id)
+                authored_text = input_id in text_by_id
                 if input_text is None:
                     existing = self._rows.setdefault(uid, {}).get(input_id)
                     existing_text = next(
@@ -943,11 +934,7 @@ class ChatStreamService:
                         ),
                         None,
                     )
-                    input_text = (
-                        existing_text
-                        if existing_text is not None
-                        else text if len(input_ids) == 1 else ""
-                    )
+                    input_text = existing_text if existing_text is not None else ""
                 self._on_user_message_input(
                     uid,
                     {
@@ -956,6 +943,7 @@ class ChatStreamService:
                         "request_ids": [],
                         "operator_inputs": [],
                         "text": input_text,
+                        "_authored_text": authored_text,
                     },
                 )
             return
@@ -979,10 +967,13 @@ class ChatStreamService:
                         "request_ids": [],
                         "operator_inputs": [],
                         "text": record["text"],
+                        "_authored_text": True,
                     },
                 )
             return
-        self._on_user_message_input(uid, event)
+        # Without a request ID or authenticated operator text, this event's
+        # text is only the model payload. It may contain HUD context or image
+        # placeholders and is not safe to project as authored input.
 
     def _on_user_message_input(self, uid: str, event: dict[str, Any]) -> None:
         text = event.get("text")
@@ -993,12 +984,14 @@ class ChatStreamService:
             input_id = self._transcript_input_id(uid, text)
         if input_id is None:
             input_id = f"daemon-{uuid.uuid4().hex}"
+        authored_text = event.get("_authored_text") is True
+        display_text = text if authored_text else ""
         turn_id = self._event_turn_id(event) or self._input_turns.get((uid, input_id))
         if turn_id is None:
             turn_id = self._active_turns.get(uid)
         if turn_id is None:
             turn_id = f"turn-{uuid.uuid4().hex}"
-        self._ensure_input_row(uid, input_id, text=text, turn_id=turn_id)
+        self._ensure_input_row(uid, input_id, text=display_text, turn_id=turn_id)
         prior = self._inputs.setdefault(uid, {}).get(input_id, {})
         if prior.get("state") == "ended":
             return
@@ -1020,13 +1013,32 @@ class ChatStreamService:
         self._input_turns[(uid, input_id)] = turn_id
         self._add_turn_input(uid, turn_id, input_id)
         row = self._rows.setdefault(uid, {}).get(input_id)
-        if row is not None and row.get("status") != state:
+        parts = copy.deepcopy(row.get("parts", [])) if row is not None else []
+        has_text = any(
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+            and part["text"]
+            for part in parts
+        )
+        if authored_text and text and not has_text:
+            non_text_parts = [
+                part
+                for part in parts
+                if not isinstance(part, dict) or part.get("type") != "text"
+            ]
+            parts = self._input_parts(text)
+            parts.extend(non_text_parts)
+        if row is not None and (
+            row.get("status") != state or row.get("parts") != parts
+        ):
             self._upsert(
                 uid,
                 {
                     **row,
                     "turn_id": turn_id,
                     "status": state,
+                    "parts": parts,
                 },
             )
         if current.get("state") != "running" or joined:
