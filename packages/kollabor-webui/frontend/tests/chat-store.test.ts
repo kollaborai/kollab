@@ -538,6 +538,34 @@ describe("LiveChatStore", () => {
     expect(request).not.toHaveBeenCalledWith("/sessions/s1/cancel", { method: "POST" });
   });
 
+  it("aborts private goal polling on disposal and ignores a late reply", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-dispose",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"c".repeat(32)}`,
+    } as InputRequest;
+    let resolvePoll!: (response: Response) => void;
+    let pollSignal: AbortSignal | undefined;
+    request.mockImplementation(async (path, init) => {
+      if (!path.endsWith("/goal-replies/poll")) return new Response(null, { status: 202 });
+      pollSignal = init?.signal as AbortSignal | undefined;
+      return new Promise<Response>((resolve) => { resolvePoll = resolve; });
+    });
+    const changed = vi.fn();
+    store.subscribe(changed);
+
+    await store.send(input);
+    await vi.waitFor(() => expect(pollSignal).toBeDefined());
+    store.dispose();
+    expect(pollSignal?.aborted).toBe(true);
+
+    resolvePoll(new Response(JSON.stringify({ status: "complete", success: true, message: "late" }), { status: 200 }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(JSON.stringify(store.getSnapshot())).not.toContain("late");
+  });
+
   it("send throws when the POST answers 500", async () => {
     const { store, request } = make();
     request.mockResolvedValueOnce(new Response(null, { status: 500 }));

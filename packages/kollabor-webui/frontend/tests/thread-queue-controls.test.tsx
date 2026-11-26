@@ -37,8 +37,13 @@ const row = (id: string, text: string): ChatRow => ({
   created_at: "2026-11-25T00:00:00Z",
 });
 
-function fakeStore(rows: ChatRow[], inputs: Record<string, InputInfo>, running: boolean) {
-  const snap: ChatSnapshot = { rows, inputs, running, connection: "live", hasEarlier: false, olderStatus: "idle" };
+function fakeStore(
+  rows: ChatRow[],
+  inputs: Record<string, InputInfo>,
+  running: boolean,
+  goalReplies: Record<string, { state: "complete"; success: boolean; message: string }> = {},
+) {
+  const snap = { rows, inputs, running, connection: "live" as const, hasEarlier: false, olderStatus: "idle" as const, goalReplies } as ChatSnapshot;
   const store = {
     subscribe: (_listener: () => void) => () => {},
     getSnapshot: () => snap,
@@ -188,6 +193,23 @@ describe("composer send, queue, Stop and Send Now on the chat store", () => {
     expect(sent.goal_reply_id).toMatch(/^goal-[0-9a-f]{32}$/);
     expect(sent.id).toMatch(/^web-[0-9a-f]{24}$/);
     expect(runtimeSpies.onNew).not.toHaveBeenCalled();
+  });
+
+  it("renders the private goal outcome below only its initiating input row", () => {
+    const id = "web-goal-result";
+    const { live } = fakeStore(
+      [row(id, "/goal inspect the build"), row("other-goal", "hello")],
+      {},
+      false,
+      { [id]: { state: "complete", success: false, message: "The build is red." } },
+    );
+    const container = mount(live, spies());
+
+    const reply = container.querySelector<HTMLElement>('[data-slot="kollab_goal-reply"]');
+    expect(reply?.getAttribute("role")).toBe("alert");
+    expect(reply?.textContent).toContain("Goal failed");
+    expect(reply?.textContent).toContain("The build is red.");
+    expect(container.querySelector('[data-chat-row-id="other-goal"] [data-slot="kollab_goal-reply"]')).toBeNull();
   });
 
   it("Stop calls store.stop and not the runtime's cancel", async () => {
