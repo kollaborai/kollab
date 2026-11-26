@@ -143,9 +143,7 @@ def test_transcript_fallback_runs_outside_the_log_lock_for_all_retrievals():
                 "limit": 32,
             }
         elif method == "get_parts":
-            _content, _output_type, revision = chat_stream_parts_revision(
-                row["parts"]
-            )
+            _content, _output_type, revision = chat_stream_parts_revision(row["parts"])
             params = {
                 "row_id": row["id"],
                 "output_revision": revision,
