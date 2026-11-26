@@ -13,11 +13,13 @@ import {
 } from "@/components/ui/card";
 import {
   ChatStreamContentPreview,
+  chatStreamArgsPreviewFromMetadata,
   chatStreamContentIdentity,
   type ChatStreamContentPreviewMarker,
 } from "@/chat-stream-content";
 import {
   CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND,
+  isChatStreamContentPreviewMarker,
   isChatStreamPartPreviewMarker,
   type ChatStreamPartPreviewMarker,
 } from "@/chat-stream";
@@ -241,12 +243,24 @@ export function PermissionPrompt({
   args,
   result,
   toolCallId,
+  providerMetadata,
 }: ToolCallMessagePartProps<PermissionArgs, PermissionResult>) {
+  const marker = chatStreamArgsPreviewFromMetadata(providerMetadata);
+  if (hasChatStreamArgsPreviewMetadata(providerMetadata)) {
+    return marker
+      ? <PermissionArgsPreview id={toolCallId} marker={marker} result={result ?? undefined} />
+      : <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
+  }
   return <PermissionPromptCard partId={toolCallId} args={args || {}} result={result ?? undefined} />;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasChatStreamArgsPreviewMetadata(value: unknown): boolean {
+  return isRecord(value) && isRecord(value.kollab) &&
+    Object.hasOwn(value.kollab, "chat_stream_args_preview");
 }
 
 function permissionArgsFromData(value: unknown): PermissionArgs {
@@ -339,6 +353,112 @@ function parsePermissionPromptPart(content: string, promptId: string): {
   }
 }
 
+function parsePermissionArgs(content: string): PermissionArgs | null {
+  try {
+    const value: unknown = JSON.parse(content);
+    if (!isRecord(value) || typeof value.tool_id !== "string" || !value.tool_id) return null;
+    const details = isRecord(value.details) ? value.details : undefined;
+    const permissionId = typeof value.permission_id === "string" && value.permission_id
+      ? value.permission_id
+      : typeof details?.permission_id === "string" && details.permission_id
+        ? details.permission_id
+        : undefined;
+    if (!permissionId) return null;
+    return { ...permissionArgsFromData(value), permission_id: permissionId };
+  } catch {
+    return null;
+  }
+}
+
+/** Full request_permission args must be fetched before the card can act. */
+function PermissionArgsPreview({
+  id,
+  marker,
+  result,
+}: {
+  id: string;
+  marker: ChatStreamContentPreviewMarker;
+  result?: PermissionResult;
+}) {
+  if (!isChatStreamContentPreviewMarker(marker) || marker.field !== "args") {
+    return <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
+  }
+  return (
+    <ChatStreamContentPreview
+      key={chatStreamContentIdentity(marker)}
+      marker={marker}
+      autoLoad
+    >
+      {(content, loaded) => {
+        const args = loaded ? parsePermissionArgs(content) : null;
+        if (!loaded) {
+          return <p role="status" className="text-muted-foreground text-xs">Loading complete permission details before showing decision options…</p>;
+        }
+        if (!args) {
+          return <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
+        }
+        return <LoadedPermissionArgs id={id} marker={marker} args={args} content={content} result={result} />;
+      }}
+    </ChatStreamContentPreview>
+  );
+}
+
+function LoadedPermissionArgs({
+  id,
+  marker,
+  args,
+  content,
+  result,
+}: {
+  id: string;
+  marker: ChatStreamContentPreviewMarker;
+  args: PermissionArgs;
+  content: string;
+  result?: PermissionResult;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(true);
+  const register = (isVisible: boolean) => {
+    if (result || !isVisible || !args.tool_id || !args.permission_id) {
+      registerRecoveredPermissionPrompt({
+        sessionId: marker.session_id,
+        promptId: id,
+        rowId: marker.row_id,
+        partIndex: marker.part_index,
+        revision: marker.output_revision,
+        data: args,
+        partType: "tool-call",
+      }, false);
+      return;
+    }
+    registerRecoveredPermissionPrompt({
+      sessionId: marker.session_id,
+      promptId: id,
+      rowId: marker.row_id,
+      partIndex: marker.part_index,
+      revision: marker.output_revision,
+      data: args,
+      partType: "tool-call",
+    }, true);
+  };
+  useEffect(() => {
+    register(detailsOpen);
+    return () => register(false);
+  }, [detailsOpen, id, marker.output_revision, marker.part_index, marker.row_id, marker.session_id, result]);
+  return (
+    <div className="space-y-2">
+      <details open={detailsOpen} onToggle={(event) => {
+        const open = event.currentTarget.open;
+        setDetailsOpen(open);
+        register(open);
+      }}>
+        <summary className="cursor-pointer text-xs font-medium">Full permission request details</summary>
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 text-xs">{content}</pre>
+      </details>
+      {detailsOpen ? <PermissionPromptCard partId={id} args={args} result={result} /> : null}
+    </div>
+  );
+}
+
 /** A clipped permission prompt has no decision actions until its exact source is loaded. */
 export function PermissionPromptPreview({
   id,
@@ -393,7 +513,15 @@ function LoadedPermissionPrompt({
   const payload = permissionArgsFromData(parsed.data);
   return (
     <div className="space-y-2">
-      <details open={detailsOpen} onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+      <details open={detailsOpen} onToggle={(event) => {
+        const open = event.currentTarget.open;
+        setDetailsOpen(open);
+        markPermissionPromptPreviewVisible({
+          sessionId: marker.session_id,
+          promptId: id,
+          revision: marker.output_revision,
+        }, open);
+      }}>
         <summary className="cursor-pointer text-xs font-medium">Full permission request details</summary>
         <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 text-xs">{content}</pre>
       </details>

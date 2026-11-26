@@ -1,5 +1,6 @@
 import type { ChatRow } from "../chat-stream.ts";
 import {
+  isChatStreamContentPreviewMarker,
   isChatStreamPartPreviewMarker,
   isChatStreamPartsPreviewMarker,
 } from "../chat-stream.ts";
@@ -49,6 +50,9 @@ export function pendingPermissions(
     let payload: unknown;
     if (part.type === "tool-call") {
       if (part.tool_name !== "request_permission" || part.result !== undefined) return [];
+      // A compact owner summary is only an association hint. The complete args
+      // must be fetched and the matching preview opened before Stop is enabled.
+      if (part.chat_stream_args_preview !== undefined) return [];
       payload = part.args;
     } else if (part.type === "prompt") {
       if (row.kind !== "prompt" || row.role !== "system" || row.status !== "open" ||
@@ -74,8 +78,24 @@ export function pendingPermissions(
   const rowsById = new Map(rows.map((row) => [row.id, row]));
   const fromRecovered = recoveredPrompts.flatMap((prompt) => {
     const row = rowsById.get(prompt.rowId);
-    const marker = row?.chat_stream_parts_preview;
     const data = prompt.data;
+    if (prompt.partType === "tool-call") {
+      const part = row?.parts[prompt.partIndex];
+      const marker = part?.type === "tool-call" ? part.chat_stream_args_preview : undefined;
+      if (
+        row?.kind !== "tool" || row.role !== "assistant" || part?.type !== "tool-call" ||
+        part.tool_name !== "request_permission" || part.tool_call_id !== prompt.promptId ||
+        part.result !== undefined || !isChatStreamContentPreviewMarker(marker) ||
+        marker.field !== "args" || marker.session_id !== prompt.sessionId ||
+        marker.row_id !== prompt.rowId || marker.part_index !== prompt.partIndex ||
+        marker.output_revision !== prompt.revision || typeof data !== "object" || data === null ||
+        Array.isArray(data) || !("tool_id" in data) || !("permission_id" in data)
+      ) return [];
+      const owner = permissionOwner(data);
+      if (!owner?.requestId || !("permission_id" in data) || typeof data.permission_id !== "string" || !data.permission_id) return [];
+      return [{ ...owner, previewKey: permissionPromptPreviewKey(prompt) }];
+    }
+    const marker = row?.chat_stream_parts_preview;
     if (
       row?.kind !== "prompt" || row.role !== "system" || row.status !== "open" ||
       !isChatStreamPartsPreviewMarker(marker) || marker.session_id !== prompt.sessionId ||

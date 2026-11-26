@@ -1,6 +1,10 @@
 "use client";
 
-import { isChatStreamPartsPreviewMarker, type ChatRow } from "./chat-stream.ts";
+import {
+  isChatStreamContentPreviewMarker,
+  isChatStreamPartsPreviewMarker,
+  type ChatRow,
+} from "./chat-stream.ts";
 
 export type PermissionPreviewKey = {
   sessionId: string;
@@ -12,14 +16,23 @@ export type RecoveredPermissionPrompt = PermissionPreviewKey & {
   rowId: string;
   partIndex: number;
   data: unknown;
+  /** A fetched request_permission args payload rather than a daemon prompt part. */
+  partType?: "tool-call";
 };
 
 const visible = new Set<string>();
 const recovered = new Map<string, RecoveredPermissionPrompt>();
 const listeners = new Set<() => void>();
+let previewStateVersion = 0;
 
 function notify(): void {
+  previewStateVersion += 1;
   for (const listener of listeners) listener();
+}
+
+/** A changing external-store snapshot so subscribers recompute from current rows. */
+export function permissionPreviewStateVersion(): number {
+  return previewStateVersion;
 }
 
 export function permissionPromptPreviewKey(key: PermissionPreviewKey): string {
@@ -72,6 +85,20 @@ export function visibleRecoveredPermissionPrompts(
       return false;
     }
     const row = rowsById.get(prompt.rowId);
+    if (prompt.partType === "tool-call") {
+      const part = row?.parts[prompt.partIndex];
+      const marker = part?.type === "tool-call" ? part.chat_stream_args_preview : undefined;
+      const data = prompt.data;
+      return row?.kind === "tool" && row.role === "assistant" &&
+        part?.type === "tool-call" && part.tool_name === "request_permission" &&
+        part.tool_call_id === prompt.promptId && part.result === undefined &&
+        isChatStreamContentPreviewMarker(marker) && marker.field === "args" &&
+        marker.session_id === prompt.sessionId && marker.row_id === prompt.rowId &&
+        marker.part_index === prompt.partIndex && marker.output_revision === prompt.revision &&
+        typeof data === "object" && data !== null && !Array.isArray(data) &&
+        "tool_id" in data && typeof data.tool_id === "string" && data.tool_id.length > 0 &&
+        "permission_id" in data && typeof data.permission_id === "string" && data.permission_id.length > 0;
+    }
     const marker = row?.chat_stream_parts_preview;
     const data = prompt.data;
     return row?.kind === "prompt" && row.role === "system" && row.status === "open" &&

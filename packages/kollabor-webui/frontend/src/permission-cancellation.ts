@@ -20,6 +20,7 @@ import { cancelPendingPermission } from "./permission-respond";
 import { pendingPermissions, type PendingPermission } from "./utils/permission-cancel";
 import {
   isPermissionPromptPreviewVisible,
+  permissionPreviewStateVersion,
   subscribePermissionPromptPreview,
   visibleRecoveredPermissionPrompts,
 } from "./permission-preview-state";
@@ -97,16 +98,18 @@ export function usePendingPermissionCancellation(): {
   const control = useContext(PermissionCancellationContext);
   const { rows } = useChatStore();
   const sessionId = control?.sessionId ?? "";
+  const previewState = useSyncExternalStore(
+    subscribePermissionPromptPreview,
+    permissionPreviewStateVersion,
+    () => 0,
+  );
   const recovered = visibleRecoveredPermissionPrompts(rows, sessionId);
   const candidates = pendingPermissions(rows, recovered);
   const expected = visiblePendingPermissions(rows, sessionId);
-  const previewReady = useSyncExternalStore(
-    subscribePermissionPromptPreview,
-    () => candidates.length === 1 && (
+  const previewReady = previewState === permissionPreviewStateVersion() &&
+    candidates.length === 1 && (
       !candidates[0].previewKey || isPermissionPromptPreviewVisible(candidates[0].previewKey)
-    ),
-    () => false,
-  );
+    );
   return control && previewReady && expected.length === 1 && expected[0].parked === false
     ? { cancel: () => control.cancel(expected), cancelling: control.cancelling, error: control.error }
     : null;

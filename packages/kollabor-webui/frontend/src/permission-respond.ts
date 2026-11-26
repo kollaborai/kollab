@@ -1,5 +1,7 @@
 import type { EngineApi } from "./api.ts";
 import {
+  isChatStreamContentPreviewMarker,
+  isChatStreamPartPreviewMarker,
   isChatStreamPartsPreviewMarker,
   type ChatPart,
   type ChatRow,
@@ -7,6 +9,7 @@ import {
 import type { PendingPermission } from "./utils/permission-cancel.ts";
 import { cancelPendingPermission as cancelIfStillPending, permissionOwner } from "./utils/permission-cancel.ts";
 import {
+  isPermissionPromptPreviewVisible,
   permissionPromptPreviewKey,
   type RecoveredPermissionPrompt,
 } from "./permission-preview-state.ts";
@@ -55,16 +58,32 @@ const samePermissionResponseOwner = (
 function openPermissionPart(
   row: ChatRow,
   toolCallId: string,
+  sessionId: string,
 ): { payload: unknown; previewKey?: string } | undefined {
   const toolCall = row.parts.find((part) => part.type === "tool-call" &&
     part.tool_call_id === toolCallId && part.tool_name === "request_permission" && part.result === undefined);
-  if (toolCall?.type === "tool-call") return { payload: toolCall.args };
-  const prompt = row.parts.find((part) => part.type === "prompt" && part.prompt_id === toolCallId);
+  if (toolCall?.type === "tool-call") {
+    // Never treat the bounded owner summary as the permission being approved.
+    // The verified, open full-args entry below is the authority for previews.
+    if (toolCall.chat_stream_args_preview !== undefined) return undefined;
+    return { payload: toolCall.args };
+  }
+  const promptIndex = row.parts.findIndex((part) => part.type === "prompt" && part.prompt_id === toolCallId);
+  const prompt = promptIndex < 0 ? undefined : row.parts[promptIndex];
   if (prompt?.type !== "prompt" || row.kind !== "prompt" || row.role !== "system" || row.status !== "open") return undefined;
   if (!prompt.data || typeof prompt.data !== "object" || Array.isArray(prompt.data) || "resolution" in prompt.data) return undefined;
   const data = prompt.data as { permission_id?: unknown };
   if (data.permission_id !== toolCallId) return undefined;
-  return { payload: prompt.data };
+  const marker = prompt.chat_stream_part_preview;
+  if (!isChatStreamPartPreviewMarker(marker)) return { payload: prompt.data };
+  if (marker.session_id !== sessionId || marker.row_id !== row.id || marker.part_index !== promptIndex) return undefined;
+  const previewKey = permissionPromptPreviewKey({
+    sessionId: marker.session_id,
+    promptId: prompt.prompt_id,
+    revision: marker.output_revision,
+  });
+  if (!isPermissionPromptPreviewVisible(previewKey)) return undefined;
+  return { payload: prompt.data, previewKey };
 }
 
 /**
@@ -93,12 +112,31 @@ export async function respondToPermission({
   const findPrompt = () => {
     const currentRows = rows();
     for (const row of currentRows) {
-      const part = openPermissionPart(row, toolCallId);
+      const part = openPermissionPart(row, toolCallId, sessionId);
       if (part) return { row, part };
     }
     for (const prompt of recoveredPrompts?.() ?? []) {
       if (prompt.sessionId !== sessionId || prompt.promptId !== toolCallId) continue;
       const row = currentRows.find((candidate) => candidate.id === prompt.rowId);
+      if (prompt.partType === "tool-call") {
+        const part = row?.parts[prompt.partIndex];
+        const marker = part?.type === "tool-call" ? part.chat_stream_args_preview : undefined;
+        const data = prompt.data;
+        const previewKey = permissionPromptPreviewKey(prompt);
+        if (
+          row?.kind !== "tool" || row.role !== "assistant" || part?.type !== "tool-call" ||
+          part.tool_name !== "request_permission" || part.tool_call_id !== toolCallId ||
+          part.result !== undefined || !isChatStreamContentPreviewMarker(marker) ||
+          marker.field !== "args" || marker.session_id !== sessionId || marker.row_id !== prompt.rowId ||
+          marker.part_index !== prompt.partIndex || marker.output_revision !== prompt.revision ||
+          !isPermissionPromptPreviewVisible(previewKey) || typeof data !== "object" || data === null ||
+          Array.isArray(data) || !permissionResponseOwner(data)
+        ) continue;
+        return {
+          row,
+          part: { payload: data, previewKey },
+        };
+      }
       const marker = row?.chat_stream_parts_preview;
       const data = prompt.data;
       if (
