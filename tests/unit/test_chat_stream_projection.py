@@ -115,14 +115,17 @@ def test_compaction_snapshot_and_replace_use_one_stable_public_marker():
     snapshot_rows = stream.subscribe({})["events"][0]["data"]["rows"]
     replacement = stream.replace_transcript()
     replacement_rows = replacement["data"]["rows"]
+    repeated_replacement = stream.replace_transcript()
+    repeated_rows = repeated_replacement["data"]["rows"]
 
-    for rows in (snapshot_rows, replacement_rows):
+    for rows in (snapshot_rows, replacement_rows, repeated_rows):
         markers = [row for row in rows if row["kind"] == "marker"]
         assert len(markers) == 1
         assert markers[0]["parts"] == [
             {"type": "text", "text": "Earlier messages compacted"}
         ]
     assert replacement_rows[0]["id"] == snapshot_rows[0]["id"]
+    assert repeated_rows[0]["id"] == snapshot_rows[0]["id"]
 
 
 def test_native_tool_history_reloads_as_distinct_reply_segments_and_one_call_row():
@@ -189,6 +192,93 @@ def test_native_tool_history_reloads_as_distinct_reply_segments_and_one_call_row
         }
     ]
     assert len(rows) == 4
+
+
+def test_native_tool_first_turn_does_not_consume_an_empty_reply_segment():
+    uid = "conversation-projection"
+    turn_id = "native-tool-first"
+    history = [
+        ConversationMessage(
+            role="assistant",
+            content="",
+            metadata={
+                "turn_id": turn_id,
+                "tool_calls": [
+                    {
+                        "id": "call-first-1",
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "arguments": '{"query":"weather"}',
+                        },
+                    }
+                ],
+            },
+        ),
+        ConversationMessage(
+            role="tool",
+            content="sunny",
+            metadata={"tool_call_id": "call-first-1", "is_error": False},
+        ),
+        ConversationMessage(
+            role="assistant",
+            content="The forecast is sunny.",
+            metadata={"turn_id": turn_id},
+        ),
+    ]
+
+    rows = ChatStreamService(_State(history)).subscribe({})["events"][0]["data"]["rows"]
+    replies = [row for row in rows if row["kind"] == "reply"]
+    expected_id = ChatStreamService._reply_row_id(uid, turn_id)
+
+    assert len(replies) == 1
+    assert replies[0]["id"] == expected_id
+    assert replies[0]["parts"] == [
+        {"type": "text", "text": "The forecast is sunny."}
+    ]
+
+
+def test_reused_native_tool_call_id_keeps_each_turns_own_result_and_status():
+    history = []
+    for turn_id, result, is_error in (
+        ("native-tool-turn-1", "first result", False),
+        ("native-tool-turn-2", "second result", True),
+    ):
+        history.extend(
+            [
+                ConversationMessage(
+                    role="assistant",
+                    content="Calling tool.",
+                    metadata={
+                        "turn_id": turn_id,
+                        "tool_calls": [
+                            {
+                                "id": "reused-call-id",
+                                "type": "function",
+                                "function": {
+                                    "name": "inspect",
+                                    "arguments": '{"target":"item"}',
+                                },
+                            }
+                        ],
+                    },
+                ),
+                ConversationMessage(
+                    role="tool",
+                    content=result,
+                    metadata={"tool_call_id": "reused-call-id", "is_error": is_error},
+                ),
+            ]
+        )
+
+    rows = ChatStreamService(_State(history)).subscribe({})["events"][0]["data"]["rows"]
+    tools = [row for row in rows if row["kind"] == "tool"]
+
+    assert [row["parts"][0]["result"] for row in tools] == [
+        "first result",
+        "second result",
+    ]
+    assert [row["parts"][0]["is_error"] for row in tools] == [False, True]
 
 
 @pytest.mark.asyncio
