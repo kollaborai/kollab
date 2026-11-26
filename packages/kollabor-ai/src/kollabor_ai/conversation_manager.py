@@ -1896,6 +1896,9 @@ class ConversationManager:
                             turn_id = data.get("turn_id")
                             if isinstance(turn_id, str) and turn_id:
                                 message["metadata"]["turn_id"] = turn_id
+                            voice_turn_id = data.get("voice_turn_id")
+                            if isinstance(voice_turn_id, str) and voice_turn_id:
+                                message["metadata"]["voice_turn_id"] = voice_turn_id
                         # Native input IDs are stored with the original user
                         # message, not in the assistant's display metadata.
                         # Keep the identifier when rebuilding history so resume
