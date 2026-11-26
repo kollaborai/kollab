@@ -14,6 +14,16 @@ ROW_KINDS = frozenset({"input", "reply", "tool", "note", "prompt", "marker"})
 ROLES = frozenset({"user", "assistant", "system"})
 INPUT_STATES = frozenset({"queued", "started", "joined", "ended"})
 OUTCOMES = frozenset({"completed", "failed", "cancelled"})
+
+
+def outcome_for_stop_reason(stop_reason: Any) -> str:
+    """Map provider terminal reasons to the one persisted input outcome."""
+    reason = str(stop_reason or "").strip().lower()
+    if reason in {"cancelled", "canceled", "interrupted", "stop"}:
+        return "cancelled"
+    if reason == "end_turn":
+        return "completed"
+    return "failed"
 TURN_STATES = frozenset({"running", "ended"})
 EVENT_TYPES = frozenset(
     {

@@ -1989,6 +1989,17 @@ class QueueProcessor:
             if operator_inputs:
                 metadata["operator_inputs"] = operator_inputs
 
+            if batch_ids:
+                metadata["request_id"] = batch_ids[0]
+                metadata["request_ids"] = list(batch_ids)
+            active_turn_id = current_turn.get().get("turn_id")
+            if (
+                isinstance(active_turn_id, (str, int))
+                and not isinstance(active_turn_id, bool)
+                and str(active_turn_id)
+            ):
+                metadata["turn_id"] = str(active_turn_id)
+
             # Add user message to conversation history
             self._add_message_fn(
                 ConversationMessage(role="user", content=combined_message, metadata=metadata),
@@ -3001,6 +3012,7 @@ class QueueProcessor:
                     thinking_duration,
                     _last_provider_reasoning(self.api_service),
                 )
+                assistant_metadata.update(self._turn_history_metadata())
                 if raw_tool_calls:
                     assistant_metadata["tool_calls"] = [
                         {
@@ -3132,6 +3144,7 @@ class QueueProcessor:
                     thinking_duration,
                     _last_provider_reasoning(self.api_service),
                 )
+                xml_metadata.update(self._turn_history_metadata())
                 xml_metadata.update(
                     _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
@@ -3327,8 +3340,7 @@ class QueueProcessor:
                 input_tokens=self.session_stats.get("input_tokens", 0),
                 output_tokens=self.session_stats.get("output_tokens", 0),
                 tool_calls=self.tool_executor.take_executed_count(),
-                stop_reason=getattr(self.api_service, "last_stop_reason", "")
-                or ("error" if self.last_turn_error else "end_turn"),
+                stop_reason=self._terminal_stop_reason(),
             )
             self._stamp_turn(None)
 
@@ -3361,6 +3373,25 @@ class QueueProcessor:
         it to the part that was heard (LocalStateService.record_interrupted_voice_reply)."""
         turn_id = _voice_turn_id(self.active_origin_context)
         return {"voice_turn_id": turn_id} if turn_id else {}
+
+    @staticmethod
+    def _turn_history_metadata() -> dict[str, Any]:
+        """Keep durable native rows attached to the turn that streamed them."""
+        turn_id = current_turn.get().get("turn_id")
+        if isinstance(turn_id, (str, int)) and not isinstance(turn_id, bool) and str(turn_id):
+            return {"turn_id": str(turn_id)}
+        return {}
+
+    def _terminal_stop_reason(self) -> str:
+        """Separate a user Stop from a provider's normal `stop` finish reason."""
+        if self.cancel_processing:
+            return "cancelled"
+        if self.last_turn_error:
+            return "error"
+        reason = str(getattr(self.api_service, "last_stop_reason", "") or "").strip().lower()
+        if reason in {"", "stop", "tool_calls"}:
+            return "end_turn"
+        return reason
 
     def after_turn(self, voice_turn: str, work: Callable[[], Awaitable[Any]]) -> None:
         """Run `work` under the turn lock once `voice_turn` has no round left to run.
@@ -3407,11 +3438,14 @@ class QueueProcessor:
         if not isinstance(text, str) or not text.strip():
             return
         voice = self._voice_turn_metadata()
+        turn = self._turn_history_metadata()
         # History first: a second cancel can land on the await below, and the
         # engine reads history when turn_complete goes out.
         self._add_message_fn(
             ConversationMessage(
-                role="assistant", content=text, metadata={"interrupted": True, **voice}
+                role="assistant",
+                content=text,
+                metadata={"interrupted": True, **turn, **voice},
             ),
             parent_uuid=parent_uuid,
         )
