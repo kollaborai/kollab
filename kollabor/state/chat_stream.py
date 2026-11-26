@@ -9,6 +9,7 @@ import threading
 import uuid
 from collections import deque
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from kollabor_events.chat_stream import (
@@ -26,6 +27,26 @@ from .chat_stream_rows import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_chat_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        stamp = value
+    elif isinstance(value, str) and value:
+        try:
+            stamp = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.astimezone()
+    return stamp.astimezone(timezone.utc)
+
+
+def _public_chat_stream_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Remove manager-only persistence metadata before exposing a row."""
+    return {key: copy.deepcopy(value) for key, value in row.items() if key != "_history_index"}
 
 
 class ChatStreamLog:
@@ -1299,13 +1320,62 @@ class ChatStreamService:
     def replace_transcript(self) -> Event:
         """Replace the row window after a daemon transcript compaction."""
         uid = self._conversation_uid()
+        llm_service = getattr(self._state_service, "_llm_service", None)
+        manager = getattr(llm_service, "conversation_manager", None)
+        history = getattr(llm_service, "conversation_history", None)
+        if not isinstance(history, list):
+            history = getattr(manager, "messages", None)
+        if isinstance(history, list):
+            compaction_stamps = []
+            has_unparseable_compaction = False
+            for message in history:
+                if isinstance(message, dict):
+                    metadata = message.get("metadata")
+                    timestamp = message.get("timestamp")
+                else:
+                    metadata = getattr(message, "metadata", None)
+                    timestamp = getattr(message, "timestamp", None)
+                if not isinstance(metadata, dict) or not (
+                    metadata.get("context_compaction")
+                    or metadata.get("compaction_summary")
+                ):
+                    continue
+                stamp = _parse_chat_timestamp(timestamp)
+                if stamp is None:
+                    has_unparseable_compaction = True
+                    break
+                compaction_stamps.append(stamp)
+            if compaction_stamps and not has_unparseable_compaction:
+                boundary = max(compaction_stamps)
+                manager_rows = getattr(manager, "chat_stream_rows", None)
+                if isinstance(manager_rows, list):
+                    retained_rows = []
+                    for row in manager_rows:
+                        if not isinstance(row, dict):
+                            continue
+                        row_stamp = _parse_chat_timestamp(row.get("created_at"))
+                        if row_stamp is not None and row_stamp <= boundary:
+                            continue
+                        if row_stamp is not None:
+                            preceding = []
+                            for index, message in enumerate(history):
+                                if isinstance(message, dict):
+                                    timestamp = message.get("timestamp")
+                                else:
+                                    timestamp = getattr(message, "timestamp", None)
+                                message_stamp = _parse_chat_timestamp(timestamp)
+                                if message_stamp is not None and message_stamp <= row_stamp:
+                                    preceding.append(index)
+                            row["_history_index"] = max(preceding, default=0)
+                        retained_rows.append(row)
+                    manager_rows[:] = retained_rows
         custom = getattr(self._state_service, "chat_stream_snapshot", None)
         state = custom() if callable(custom) else {}
         state_rows = state.get("rows") if isinstance(state, dict) else None
         if not isinstance(state_rows, list):
             state_rows = []
         state_rows = [
-            row
+            _public_chat_stream_row(row)
             for row in state_rows
             if isinstance(row, dict)
             and isinstance(row.get("id"), str)
@@ -1381,7 +1451,7 @@ class ChatStreamService:
         if not isinstance(state_rows, list):
             state_rows = []
         state_rows = [
-            row
+            _public_chat_stream_row(row)
             for row in state_rows
             if isinstance(row, dict)
             and isinstance(row.get("id"), str)
@@ -1767,16 +1837,17 @@ class ChatStreamService:
                 role = "user" if row["kind"] == "input" else "system"
                 if row.get("role") != role:
                     continue
+                public_row = _public_chat_stream_row(row)
                 if event_problems(
                     {
                         "seq": 0,
                         "conversation_uid": uid,
                         "type": "row.upsert",
-                        "data": row,
+                        "data": public_row,
                     }
                 ):
                     continue
-                native_rows.append(row)
+                native_rows.append(public_row)
         return merge_chat_stream_rows(rows, native_rows)
 
     @staticmethod

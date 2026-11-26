@@ -160,6 +160,15 @@ def _native_hub_chat_stream_row(value: Any) -> Dict[str, Any] | None:
         "created_at",
     )
     row = {key: deepcopy(value[key]) for key in row_keys if key in value}
+    history_index = value.get("_history_index")
+    if (
+        isinstance(history_index, int)
+        and not isinstance(history_index, bool)
+        and history_index >= 0
+    ):
+        # This is persistence metadata for branch filtering, not part of the
+        # public chat-stream row shape. ChatStreamService strips it on output.
+        row["_history_index"] = history_index
     row.setdefault("seq", 0)
     row["parts"] = [
         {key: deepcopy(source_note[key]) for key in note_keys if key in source_note}
@@ -293,11 +302,13 @@ class ConversationManager:
         """Bind the live LLM statistics mapping used for persistence and restore."""
         self._session_stats = session_stats
 
-    def record_hub_chat_stream_row(self, row: Dict[str, Any]) -> None:
+    def record_hub_chat_stream_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
         """Upsert one structured, display-only native Hub row."""
         normalized = _native_hub_chat_stream_row(row)
         if normalized is None:
             raise ValueError("invalid native Hub chat stream row")
+        if "_history_index" not in normalized:
+            normalized["_history_index"] = max(0, len(self.messages) - 1)
         row_id = normalized["id"]
         for index, existing in enumerate(self.chat_stream_rows):
             if existing.get("id") == row_id:
@@ -306,10 +317,13 @@ class ConversationManager:
                 normalized["created_at"] = existing.get(
                     "created_at", normalized["created_at"]
                 )
+                if isinstance(existing.get("_history_index"), int):
+                    normalized["_history_index"] = existing["_history_index"]
                 self.chat_stream_rows[index] = normalized
                 break
         else:
             self.chat_stream_rows.append(normalized)
+        return deepcopy(normalized)
 
     def _ensure_conversation_uid(self) -> str:
         """Durable conversation identity (goal-command spec 6.5).
@@ -1439,6 +1453,28 @@ class ConversationManager:
                     ]
                 messages = [pending_compaction] + messages
 
+            # Native Hub rows live beside the model transcript. Apply the
+            # same last-compaction boundary so a restart cannot resurrect
+            # display rows that were removed from the compacted history.
+            if last_compaction_at is not None:
+                retained_hub_rows: Dict[str, Dict[str, Any]] = {}
+                for row_id, row in chat_stream_rows_by_id.items():
+                    row_stamp = _parse_record_stamp(row.get("created_at"))
+                    if row_stamp is not None and row_stamp <= last_compaction_at:
+                        continue
+                    if row_stamp is not None:
+                        preceding = [
+                            index
+                            for index, message in enumerate(messages)
+                            if (message_stamp := _parse_record_stamp(
+                                message.get("timestamp")
+                            )) is not None
+                            and message_stamp <= row_stamp
+                        ]
+                        row["_history_index"] = max(preceding, default=0)
+                    retained_hub_rows[row_id] = row
+                chat_stream_rows_by_id = retained_hub_rows
+
             # Place each result batch after its owning assistant, even if log
             # records arrived out of order or another turn reused a tool ID.
             # Resume remains text-only for providers; the display projector
@@ -1536,6 +1572,35 @@ class ConversationManager:
             # Get messages up to and including the branch point
             branched_messages = self.messages[: branch_point_index + 1]
 
+            # Native Hub rows are display-only but share the source
+            # transcript's timeline. Do not carry rows recorded after the
+            # selected message into a branch. Older rows without an explicit
+            # position can be located by their timestamps when possible.
+            branched_hub_rows = []
+            for row in self.chat_stream_rows:
+                history_index = row.get("_history_index")
+                if (
+                    isinstance(history_index, bool)
+                    or not isinstance(history_index, int)
+                ):
+                    row_stamp = _parse_record_stamp(row.get("created_at"))
+                    message_positions = [
+                        index
+                        for index, message in enumerate(self.messages)
+                        if (message_stamp := _parse_record_stamp(
+                            message.get("timestamp")
+                        )) is not None
+                        and row_stamp is not None
+                        and message_stamp <= row_stamp
+                    ]
+                    if row_stamp is None:
+                        continue
+                    history_index = max(message_positions, default=0)
+                if history_index <= branch_point_index:
+                    branched_row = deepcopy(row)
+                    branched_row["_history_index"] = history_index
+                    branched_hub_rows.append(branched_row)
+
             # Create new session ID with memorable branch name
             new_session_id = generate_branch_name()
 
@@ -1566,6 +1631,7 @@ class ConversationManager:
             self.current_session_id = new_session_id
             self.messages = new_messages
             self.message_index = {m["uuid"]: m for m in new_messages}
+            self.chat_stream_rows = branched_hub_rows
             self._update_context_window()
 
             # Update parent UUID for next message

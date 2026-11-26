@@ -39,7 +39,7 @@ def _hub_row(
         "created_at": created_at,
     }
     if history_index is not None:
-        row["history_index"] = history_index
+        row["_history_index"] = history_index
     return row
 
 
@@ -226,20 +226,22 @@ def test_branch_session_filters_native_hub_rows_after_the_branch_point(tmp_path)
     manager.conversation_metadata["conversation_uid"] = "branch-source"
     manager.add_message("user", "first message")
     manager.add_message("assistant", "later message")
-    manager.chat_stream_rows = [
+    manager.record_hub_chat_stream_row(
         _hub_row(
             "hub-before-branch-point",
             kind="note",
             created_at="2026-11-25T12:00:00Z",
             history_index=0,
-        ),
+        )
+    )
+    manager.record_hub_chat_stream_row(
         _hub_row(
             "hub-after-branch-point",
             kind="note",
             created_at="2026-11-25T12:00:02Z",
             history_index=1,
-        ),
-    ]
+        )
+    )
     assert manager.save_session(logger.session_id)
 
     result = manager.branch_session(logger.session_id, 0)
@@ -364,6 +366,7 @@ def test_compacted_hub_rows_stay_pruned_after_restart(tmp_path):
     snapshot = ChatStreamService(state).subscribe(
         {"after": None, "conversation_uid": None}
     )["events"][0]
+    assert all("_history_index" not in row for row in snapshot["data"]["rows"])
     assert [row["id"] for row in snapshot["data"]["rows"] if row["kind"] != "marker"] == [
         "new-hub-note"
     ]

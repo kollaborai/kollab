@@ -283,7 +283,9 @@ class MessageHandler:
         record_row = getattr(manager, "record_hub_chat_stream_row", None)
         if callable(record_row):
             try:
-                record_row(row)
+                recorded_row = record_row(row)
+                if isinstance(recorded_row, dict):
+                    row = recorded_row
             except Exception:
                 logger.debug("Could not update native Hub row in memory", exc_info=True)
 
