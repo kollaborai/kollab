@@ -292,6 +292,10 @@ def _materialize_row_images(rows: Any, session_id: str) -> None:
             resolved = _resolved_image_url(part.get("url"), session_id)
             if resolved is not None:
                 parts.append({**part, "url": resolved})
+            else:
+                parts.append(
+                    {"type": "text", "text": "[Image attachment unavailable.]"}
+                )
         row["parts"] = parts
 
 
@@ -616,9 +620,6 @@ async def chat_stream_parts(
                 status_code=502,
                 detail="The local daemon returned invalid chat part metadata.",
             )
-    materialized_parts = {"parts": parts}
-    _materialize_row_images([materialized_parts], session_id)
-    parts = materialized_parts["parts"]
     payload = {
         "row_id": row_id,
         "offset": offset,
@@ -628,11 +629,21 @@ async def chat_stream_parts(
         "parts": parts,
         "done": done,
     }
-    if len(json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) > _PART_PAGE_RPC_BYTES:
+    if (
+        len(
+            json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        > _PART_PAGE_RPC_BYTES
+    ):
         raise HTTPException(
             status_code=502,
             detail="The local daemon returned an oversized chat parts page.",
         )
+    materialized_parts = {"parts": copy.deepcopy(parts)}
+    _materialize_row_images([materialized_parts], session_id)
+    payload["parts"] = materialized_parts["parts"]
     return payload
 
 

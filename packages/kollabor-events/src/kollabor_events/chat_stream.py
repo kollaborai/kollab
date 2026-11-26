@@ -69,6 +69,14 @@ def _is_count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _is_revision(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _one_of(value: Any, allowed: frozenset[str]) -> bool:
     """Membership that reports a wrong-typed value instead of raising on it (a list is unhashable)."""
     return isinstance(value, str) and value in allowed
@@ -88,6 +96,82 @@ def _is_presence(value: Any) -> bool:
 
 def _present(value: Any) -> bool:
     return True
+
+
+def _preview_marker_problems(
+    marker: Any,
+    where: str,
+    *,
+    kind: str,
+    row_id: Any,
+    count_fields: tuple[str, ...],
+    output_type: str,
+    preview_required: bool,
+) -> list[str]:
+    if not isinstance(marker, dict):
+        return [f"{where}: preview marker is not an object"]
+    problems = []
+    if marker.get("kind") != kind:
+        problems.append(f"{where}: invalid preview marker kind")
+    if not _is_id(row_id) or marker.get("row_id") != row_id:
+        problems.append(f"{where}: preview marker row_id does not match its row")
+    if "session_id" in marker and not _is_id(marker["session_id"]):
+        problems.append(f"{where}: preview marker session_id must be a non-empty string")
+    for key in count_fields:
+        if not _is_count(marker.get(key)):
+            problems.append(f"{where}: preview marker {key} must be a non-negative integer")
+    if marker.get("output_type") != output_type:
+        problems.append(f"{where}: preview marker has an invalid output_type")
+    if not _is_revision(marker.get("output_revision")):
+        problems.append(f"{where}: preview marker has an invalid output_revision")
+    if preview_required and not _is_str(marker.get("preview")):
+        problems.append(f"{where}: preview marker preview must be a string")
+    return problems
+
+
+def _content_preview_problems(
+    marker: Any,
+    where: str,
+    *,
+    row_id: Any,
+    field: str,
+) -> list[str]:
+    problems = _preview_marker_problems(
+        marker,
+        where,
+        kind="chat-stream-content-preview",
+        row_id=row_id,
+        count_fields=("part_index", "output_bytes", "output_chars"),
+        output_type="json" if field == "args" else "text",
+        preview_required=True,
+    )
+    if isinstance(marker, dict) and marker.get("field") != field:
+        problems.append(f"{where}: preview marker field does not match its part")
+    return problems
+
+
+def _part_preview_problems(marker: Any, where: str, *, row_id: Any) -> list[str]:
+    return _preview_marker_problems(
+        marker,
+        where,
+        kind="chat-stream-part-preview",
+        row_id=row_id,
+        count_fields=("part_index", "output_bytes", "output_chars"),
+        output_type="json",
+        preview_required=True,
+    )
+
+
+def _parts_preview_problems(marker: Any, where: str, *, row_id: Any) -> list[str]:
+    return _preview_marker_problems(
+        marker,
+        where,
+        kind="chat-stream-parts-preview",
+        row_id=row_id,
+        count_fields=("part_count", "output_bytes", "output_chars"),
+        output_type="json",
+        preview_required=False,
+    )
 
 
 # How far along its lifecycle each input state is: a state only moves forward.
@@ -114,7 +198,7 @@ _PART_OPTIONAL = {
 }
 
 
-def _part_problems(part: Any, where: str) -> list[str]:
+def _part_problems(part: Any, where: str, *, row_id: Any) -> list[str]:
     if not isinstance(part, dict):
         return [f"{where}: part is not an object"]
     kind = part.get("type")
@@ -130,6 +214,26 @@ def _part_problems(part: Any, where: str) -> list[str]:
         for key, check in _PART_OPTIONAL.get(kind, {}).items()
         if part.get(key) is not None and not check(part[key])
     ]
+    content_preview = part.get("chat_stream_content_preview")
+    part_preview = part.get("chat_stream_part_preview")
+    if kind == "text":
+        if content_preview is not None:
+            problems += _content_preview_problems(
+                content_preview, where, row_id=row_id, field="text"
+            )
+        if part_preview is not None:
+            problems += _part_preview_problems(part_preview, where, row_id=row_id)
+    elif kind == "reasoning":
+        if content_preview is not None:
+            problems += _content_preview_problems(
+                content_preview, where, row_id=row_id, field="reasoning"
+            )
+    elif kind == "tool-call":
+        args = part.get("args")
+        if isinstance(args, dict) and args.get("kind") == "chat-stream-content-preview":
+            problems += _content_preview_problems(
+                args, f"{where} args", row_id=row_id, field="args"
+            )
     return problems
 
 
@@ -150,7 +254,12 @@ def _row_problems(row: Any, where: str) -> list[str]:
         problems.append(f"{where}: parts must be a list")
     else:
         for index, part in enumerate(parts):
-            problems += _part_problems(part, f"{where} part {index}")
+            problems += _part_problems(
+                part, f"{where} part {index}", row_id=row.get("id")
+            )
+    parts_preview = row.get("chat_stream_parts_preview")
+    if parts_preview is not None:
+        problems += _parts_preview_problems(parts_preview, where, row_id=row.get("id"))
     if "seq" in row and not _is_count(row["seq"]):
         problems.append(f"{where}: row seq must be a non-negative integer")
     if "turn_id" in row and row["turn_id"] is not None and not _is_id(row["turn_id"]):
