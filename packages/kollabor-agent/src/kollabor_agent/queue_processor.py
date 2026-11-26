@@ -1933,6 +1933,7 @@ class QueueProcessor:
         current_parent_uuid: str,
         request_ids: tuple[str, ...] | None = None,
         stream_inputs: tuple[dict[str, Any], ...] | None = None,
+        stream_input_count: int | None = None,
     ) -> str:
         """Process a batch of messages.
 
@@ -1943,6 +1944,9 @@ class QueueProcessor:
                 TaggedInputs away; else read from ``messages``
             stream_inputs: Original input content and durable row identities,
                 captured before a caller merges HUD context into the batch.
+            stream_input_count: Number of original batch items before a
+                caller merges or combines them. This is persisted as evidence
+                for legacy transcript image attribution.
 
         Returns:
             Updated parent UUID
@@ -1962,6 +1966,14 @@ class QueueProcessor:
         # Taken up once this batch's turn holds the lock (#551): a turn still
         # running clears what it answered as it ends, never these.
         batch_ids = batch_request_ids(messages) if request_ids is None else request_ids
+        if (
+            not isinstance(stream_input_count, int)
+            or isinstance(stream_input_count, bool)
+            or stream_input_count < 1
+        ):
+            stream_input_count = max(
+                len(messages), len(batch_ids), len(stream_inputs or ())
+            )
         if stream_inputs is None:
             stream_inputs = tuple(
                 {
@@ -2077,6 +2089,8 @@ class QueueProcessor:
             if batch_ids:
                 metadata["request_id"] = batch_ids[0]
                 metadata["request_ids"] = list(batch_ids)
+            if stream_input_count > 0:
+                metadata["chat_stream_input_count"] = stream_input_count
             if native_stream_inputs:
                 metadata["chat_stream_inputs"] = native_stream_inputs
             active_turn_id = current_turn.get().get("turn_id")

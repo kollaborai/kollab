@@ -131,9 +131,11 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
                 current_parent_uuid,
                 request_ids=None,
                 stream_inputs=None,
+                stream_input_count=None,
             ):
                 self.messages = messages
                 self.stream_inputs = stream_inputs
+                self.stream_input_count = stream_input_count
                 return "next-parent"
 
         service = LLMService.__new__(LLMService)
@@ -156,6 +158,7 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(service.current_parent_uuid, "next-parent")
         self.assertEqual(service._queue_processor.stream_inputs, ())
+        self.assertEqual(service._queue_processor.stream_input_count, 1)
         self.assertEqual(
             service._queue_processor.messages,
             [
@@ -169,6 +172,55 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(service._pending_agent_hud, [])
+
+    async def test_batch_input_count_survives_hud_rebatch_with_untracked_input(self):
+        class FakeQueueProcessor:
+            def __init__(self):
+                self.stream_input_count = None
+
+            async def process_message_batch(
+                self,
+                messages,
+                current_parent_uuid,
+                request_ids=None,
+                stream_inputs=None,
+                stream_input_count=None,
+            ):
+                self.stream_input_count = stream_input_count
+                return "assistant-row"
+
+        service = LLMService.__new__(LLMService)
+        service._pending_agent_hud = [
+            AgentHudEntry("system", "hub_nudge", "save notes")
+        ]
+        service._queue_processor = FakeQueueProcessor()
+        service.current_parent_uuid = "parent-1"
+        service._batch_tail_serial = None
+        service._cursor_winner_serial = -1
+        service._turn_serial = 1
+
+        await service._process_message_batch(
+            [
+                TaggedInput(
+                    "tracked input",
+                    request_ids=("web-tracked",),
+                    admission_serial=1,
+                    parent_uuid="input-row",
+                ),
+                [
+                    {"type": "text", "text": "untracked input"},
+                    {
+                        "type": "image",
+                        "source": {
+                            "kind": "url",
+                            "url": "https://example.test/untracked.png",
+                        },
+                    },
+                ],
+            ]
+        )
+
+        self.assertEqual(service._queue_processor.stream_input_count, 2)
 
     async def test_continue_conversation_does_not_flush_hud_alone(self):
         class FakeQueueProcessor:

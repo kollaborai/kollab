@@ -2710,6 +2710,13 @@ class LLMService:
             if isinstance(item, (QueuedInput, TaggedInput))
             for request_id in item.request_ids
         )
+        # ``messages`` can also contain an untracked item that has no
+        # request ID. Preserve the count before HUD rebatching so legacy
+        # projection can distinguish a genuinely single-input history row
+        # from a mixed batch with only one tracked request.
+        stream_input_count = max(
+            len(messages), len(request_ids), len(stream_inputs)
+        )
         # Keep the admission-time capture through the rebatch (#676): the
         # most recent capture, since the pointer today lands on the last row
         # admitted into the batch. Read BEFORE the rebatch so the non-voice
@@ -2812,6 +2819,7 @@ class LLMService:
             current_parent_uuid=batch_parent_uuid,
             request_ids=request_ids,
             stream_inputs=stream_inputs,
+            stream_input_count=stream_input_count,
         )
         # Seed the chain-local tail for this batch's tool-loop continuations
         # (#676), under the same discipline as the continue ticket: an older

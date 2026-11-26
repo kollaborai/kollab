@@ -1721,6 +1721,15 @@ class ChatStreamService:
                     and "content" in record
                 }
                 input_row_ids = input_row_ids or [row_id]
+                # A single tracked request does not prove the provider turn
+                # contained a single original item: an untracked item can be
+                # folded into the same history row. Keep legacy combined
+                # images only when the producer persisted that exact count.
+                single_input_proven = (
+                    len(input_row_ids) == 1
+                    and type(metadata.get("chat_stream_input_count")) is int
+                    and metadata["chat_stream_input_count"] == 1
+                )
                 for input_row_id in input_row_ids:
                     saved_parts = metadata.get("chat_stream_parts")
                     if isinstance(saved_parts, list):
@@ -1736,14 +1745,14 @@ class ChatStreamService:
                         input_parts = self._transcript_parts(
                             original_text, resolve_image
                         )
-                        if len(input_row_ids) == 1:
+                        if single_input_proven:
                             input_parts.extend(
                                 copy.deepcopy(part)
                                 for part in parts
                                 if isinstance(part, dict)
                                 and part.get("type") == "image"
                             )
-                    elif len(input_row_ids) == 1:
+                    elif single_input_proven:
                         input_parts = parts
                     else:
                         input_parts = []

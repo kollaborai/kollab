@@ -886,7 +886,13 @@ async def test_older_batch_completion_does_not_restore_its_continue_ticket():
 
     class GatedQueueProcessor:
         async def process_message_batch(
-            self, *, messages, current_parent_uuid, request_ids, stream_inputs=None
+            self,
+            *,
+            messages,
+            current_parent_uuid,
+            request_ids,
+            stream_inputs=None,
+            stream_input_count=None,
         ):
             serial = messages[0].admission_serial
             assert service._continue_serial == serial
@@ -1079,7 +1085,13 @@ def test_stale_untracked_nudge_cannot_overwrite_newer_hub_cursor() -> None:
             turn_completed = False
 
             async def process_message_batch(
-                self, *, messages, current_parent_uuid, request_ids, stream_inputs=None
+                self,
+                *,
+                messages,
+                current_parent_uuid,
+                request_ids,
+                stream_inputs=None,
+                stream_input_count=None,
             ) -> str:
                 assert messages == [nudge]
                 assert stream_inputs == ()
@@ -1173,7 +1185,13 @@ async def test_continuation_parents_on_chain_tail_not_a_drifted_pointer():
         turn_completed = False
 
         async def process_message_batch(
-            self, *, messages, current_parent_uuid, request_ids, stream_inputs=None
+            self,
+            *,
+            messages,
+            current_parent_uuid,
+            request_ids,
+            stream_inputs=None,
+            stream_input_count=None,
         ) -> str:
             calls.append(("batch", current_parent_uuid))
             captured_stream_inputs.extend(stream_inputs)
@@ -1244,7 +1262,13 @@ async def test_delayed_continuation_cannot_clobber_newer_batch_tail_or_cursor():
             return "stale-cont-1"
 
         async def process_message_batch(
-            self, *, messages, current_parent_uuid, request_ids, stream_inputs=None
+            self,
+            *,
+            messages,
+            current_parent_uuid,
+            request_ids,
+            stream_inputs=None,
+            stream_input_count=None,
         ):
             assert stream_inputs[0]["request_id"] == "second"
             return "assistant-2"
