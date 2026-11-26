@@ -648,3 +648,58 @@ async def test_native_model_continuations_clean_only_their_own_reply_segment():
     snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
     reply = next(row for row in snapshot["data"]["rows"] if row["kind"] == "reply")
     assert reply["parts"][0]["text"] == "First Last"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("goal", [False, True])
+async def test_native_reply_segments_keep_tool_order_in_replay_and_snapshot(goal):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from kollabor_agent.queue_processor import QueueProcessor
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"} if goal else None
+    _publish(state, "turn_start", turn_id="t", request_id="input", origin=origin)
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = state._event_bus
+    processor._turn_lock = asyncio.Lock()
+    processor._run_after_turn = AsyncMock()
+    processor._turn_token = None
+    processor.active_request_ids = ()
+    processor.turn_completed = False
+    processor.cancel_processing = False
+    segments = iter([("before <tool>", "before"), ("after <tool>", "after")])
+
+    async def model_call(*args, **kwargs):
+        raw, clean = next(segments)
+        _publish(state, "token", turn_id="t", text=raw)
+        _publish(state, "response", turn_id="t", text=clean)
+        return "parent"
+
+    processor._execute_llm_turn_inner = model_call
+    await processor._execute_llm_turn(True, "parent")
+    _publish(state, "tool_start", turn_id="t", tool_id="tool", tool_name="Search")
+    _publish(state, "tool_result", turn_id="t", tool_id="tool", tool_name="Search", success=True)
+    await processor._execute_llm_turn(False, "parent")
+    _publish(state, "turn_complete", turn_id="t", origin=origin, goal_attempt_terminal=True)
+
+    events = _events(stream, initial)
+    assert sequence_problems(events) == []
+    rows = {}
+    for event in events[1:]:
+        if event["type"] == "row.upsert":
+            rows[event["data"]["id"]] = event["data"]
+        elif event["type"] == "row.append":
+            data = event["data"]
+            rows[data["id"]]["parts"][data["part"]]["text"] += data["text"]
+    replay = [row for row in rows.values() if row["kind"] in {"reply", "tool"}]
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    saved = [row for row in snapshot["data"]["rows"] if row["kind"] in {"reply", "tool"}]
+    for result in (replay, saved):
+        assert [row["kind"] for row in result] == ["reply", "tool", "reply"]
+        assert [result[0]["parts"][0]["text"], result[2]["parts"][0]["text"]] == ["before", "after"]
+        assert result[0]["id"] != result[2]["id"]
