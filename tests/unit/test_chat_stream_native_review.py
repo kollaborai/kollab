@@ -10,6 +10,7 @@ import pytest
 
 from kollabor.llm.agent_hud import AgentHudEntry, merge_agent_hud_with_user_message
 from kollabor.llm.llm_coordinator import LLMService
+from kollabor.llm.message_handler import MessageHandler
 from kollabor.state.chat_stream import ChatStreamService
 from kollabor_agent.queue_processor import QueueProcessor, TaggedInput, batch_request_ids
 from kollabor_ai.message_content import combine_message_contents
@@ -339,6 +340,92 @@ def test_native_user_message_fills_turn_start_placeholders_by_authenticated_inpu
         for part in row["parts"]
     )
     assert sequence_problems(events, complete=False) == []
+
+
+@pytest.mark.asyncio
+async def test_plugin_add_message_projects_its_displayable_user_text_live():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({})["events"][0]
+
+    coordinator = state._llm_service
+    coordinator._acp_owns_chat = lambda: False
+    coordinator._add_conversation_message = coordinator.add
+    coordinator.current_parent_uuid = "plugin-parent"
+    coordinator.conversation_logger = SimpleNamespace(
+        log_user_message=AsyncMock(return_value="plugin-user-row")
+    )
+    coordinator.message_display_service = SimpleNamespace(
+        show_loading=lambda *_args: None,
+        hide_loading=lambda: None,
+        message_coordinator=SimpleNamespace(display_message_sequence=lambda *_args: None),
+    )
+    coordinator.session_stats = {"messages": 0}
+
+    result = await MessageHandler(coordinator).handle_add_message(
+        {
+            "messages": [
+                {"role": "user", "content": "plugin message"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "plugin caption"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "kind": "url",
+                                "url": "https://example.invalid/photo.png",
+                            },
+                        },
+                    ],
+                },
+            ],
+            "options": {
+                "show_loading": False,
+                "log_messages": False,
+                "display_messages": True,
+            },
+        },
+        None,
+    )
+
+    events = _events(stream, initial)
+    rows = _row_events(events, "input")
+    assert result["success"] is True
+    latest_rows = {row["id"]: row for row in rows}
+    assert len(latest_rows) == 2
+    text_by_id = {
+        row_id: [part.get("text") for part in row["parts"] if part["type"] == "text"]
+        for row_id, row in latest_rows.items()
+    }
+    assert sorted(tuple(texts) for texts in text_by_id.values()) == [
+        ("plugin caption",),
+        ("plugin message",),
+    ]
+    assert all(
+        "[image" not in part.get("text", "")
+        for row in latest_rows.values()
+        for part in row["parts"]
+    )
+    assert sequence_problems(events, complete=False) == []
+
+
+def test_unmarked_idless_user_payload_still_hides_model_hud_and_image_tokens():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({})["events"][0]
+
+    publish_semantic(
+        state._event_bus.tap,
+        "user_message",
+        text="<agent_hud>private model context</agent_hud>\n[image1]",
+    )
+
+    events = _events(stream, initial)
+    assert _row_events(events, "input") == []
+    assert sequence_problems(events) == []
 
 
 @pytest.mark.asyncio

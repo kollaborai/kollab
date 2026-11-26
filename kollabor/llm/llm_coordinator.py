@@ -314,10 +314,18 @@ class LLMService:
             metadata = getattr(message, "metadata", None)
             event_fields = {}
             if isinstance(metadata, dict):
-                for field in ("request_id", "request_ids", "turn_id", "operator_inputs"):
+                for field in (
+                    "request_id",
+                    "request_ids",
+                    "turn_id",
+                    "operator_inputs",
+                ):
                     value = metadata.get(field)
                     if value is not None:
                         event_fields[field] = value
+                display_text = metadata.get("chat_stream_display_text")
+                if isinstance(display_text, str):
+                    event_fields["display_text"] = display_text
             publish_semantic(
                 getattr(self, "event_bus", None),
                 "user_message",
