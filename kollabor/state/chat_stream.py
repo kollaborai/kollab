@@ -252,7 +252,12 @@ class ChatStreamService:
         self._event_bus = getattr(state_service, "_event_bus", None)
         self._logs: dict[str, ChatStreamLog] = {}
         self._rows: dict[str, dict[str, dict[str, Any]]] = {}
+        # Snapshot lifecycle projection. This is rebuilt when an older saved
+        # transcript is restored, so stale running states cannot shadow it.
         self._inputs: dict[str, dict[str, dict[str, Any]]] = {}
+        # Daemon-lifetime admission/idempotency state, kept separately from the
+        # transcript projection so accepted retries retain their owner binding.
+        self._admission_inputs: dict[str, dict[str, dict[str, Any]]] = {}
         self._turns: dict[str, dict[str, dict[str, Any]]] = {}
         self._input_scopes: dict[tuple[str, str], tuple[str, str, str]] = {}
         self._input_text: dict[tuple[str, str], str] = {}
@@ -304,7 +309,7 @@ class ChatStreamService:
         uid = self._conversation_uid()
         runtime = self._queue_runtime()
         scope = await runtime.input_scope(uid)
-        known = self._inputs.setdefault(uid, {}).get(input_id)
+        known = self._admission_inputs.setdefault(uid, {}).get(input_id)
         owner = self._input_scopes.get((uid, input_id))
         if owner != scope and (owner is not None or known is not None):
             return {"error": "input was not admitted"}
@@ -412,7 +417,7 @@ class ChatStreamService:
         ):
             return None
         owner = self._input_scopes.get((conversation_uid, input_id))
-        current = self._inputs.get(conversation_uid, {}).get(input_id, {})
+        current = self._admission_inputs.get(conversation_uid, {}).get(input_id, {})
         if (
             owner is None
             or owner[0] != queue_scope_id
@@ -443,7 +448,7 @@ class ChatStreamService:
         """End one ordered slash-command lifecycle without exposing its result."""
         if outcome not in {"completed", "failed", "cancelled"}:
             outcome = "failed"
-        current = self._inputs.get(conversation_uid, {}).get(input_id, {})
+        current = self._admission_inputs.get(conversation_uid, {}).get(input_id, {})
         if current.get("state") == "ended":
             return
         if current.get("turn_id") not in (None, turn_id):
@@ -503,7 +508,7 @@ class ChatStreamService:
             result = mailbox.poll(reply_id, uid)
             if result.get("status") != "missing":
                 return result
-        current = self._inputs.get(uid, {}).get(input_id, {})
+        current = self._admission_inputs.get(uid, {}).get(input_id, {})
         if current.get("state") in {"queued", "started", "joined"}:
             return {"status": "pending"}
         outcome = current.get("outcome")
@@ -541,7 +546,9 @@ class ChatStreamService:
             reply_id: owner
             for reply_id, owner in self._goal_reply_owners.items()
             if (
-                self._inputs.get(owner[0], {}).get(owner[1], {}).get("state")
+                self._admission_inputs.get(owner[0], {})
+                .get(owner[1], {})
+                .get("state")
                 != "ended"
                 or now - owner[3] < 600.0
             )
@@ -559,7 +566,7 @@ class ChatStreamService:
         uid = self._conversation_uid()
         if expected_conversation_uid is not None and expected_conversation_uid != uid:
             return {"found": False, "cancelled": False}
-        existing = self._inputs.setdefault(uid, {}).get(input_id)
+        existing = self._admission_inputs.setdefault(uid, {}).get(input_id)
         if existing is not None and existing.get("state") != "queued":
             return {"found": True, "cancelled": False}
         runtime_params = {"id": input_id}
@@ -569,7 +576,7 @@ class ChatStreamService:
         if not isinstance(result, dict) or result.get("found") is not True:
             return {"found": False, "cancelled": False}
         cancelled = result.get("cancelled") is True
-        existing = self._inputs.setdefault(uid, {}).get(input_id)
+        existing = self._admission_inputs.setdefault(uid, {}).get(input_id)
         if cancelled and existing is not None and existing.get("state") == "queued":
             self._set_input_state(
                 uid,
@@ -616,7 +623,7 @@ class ChatStreamService:
             if any(
                 self._input_scopes.get(key, scope) != scope
                 or (
-                    key[1] in self._inputs.get(key[0], {})
+                    key[1] in self._admission_inputs.get(key[0], {})
                     and key not in self._input_scopes
                 )
                 for key in keys
@@ -627,7 +634,7 @@ class ChatStreamService:
             self.attach_display_tap()
             for (input_id, text, attachments), key in zip(normalized, keys):
                 self._input_scopes[key] = scope
-                prior = self._inputs.setdefault(uid, {}).get(input_id)
+                prior = self._admission_inputs.setdefault(uid, {}).get(input_id)
                 if prior is None:
                     self._input_text[key] = text
                     self._input_attachments[key] = copy.deepcopy(attachments)
@@ -669,7 +676,7 @@ class ChatStreamService:
         uid = scope[1]
         key = (uid, input_id)
         return self._input_scopes.get(key) == scope and (
-            input_id in self._inputs.get(uid, {})
+            input_id in self._admission_inputs.get(uid, {})
             or input_id in self._rows.get(uid, {})
         )
 
@@ -695,7 +702,7 @@ class ChatStreamService:
             if any(
                 self._input_scopes.get(key, scope) != scope
                 or (
-                    key[1] in self._inputs.get(key[0], {})
+                    key[1] in self._admission_inputs.get(key[0], {})
                     and key not in self._input_scopes
                 )
                 for key in keys
@@ -714,7 +721,7 @@ class ChatStreamService:
         scope = await runtime.input_scope(uid)
 
         def moved_input_result() -> dict[str, Any] | None:
-            current = self._inputs.get(uid, {}).get(input_id, {})
+            current = self._admission_inputs.get(uid, {}).get(input_id, {})
             state = current.get("state")
             turn_id = current.get("turn_id")
             if state not in {"started", "joined", "ended"} or (
@@ -734,7 +741,7 @@ class ChatStreamService:
         result = await runtime.send_now({"id": input_id})
         if await runtime.input_scope(uid) != scope:
             return {"found": False}
-        current = self._inputs.get(uid, {}).get(input_id, {})
+        current = self._admission_inputs.get(uid, {}).get(input_id, {})
         owner = self._input_scopes.get((uid, input_id))
         if owner != scope:
             return {"found": False}
@@ -750,7 +757,7 @@ class ChatStreamService:
             uid = self._conversation_uid()
             self._set_input_state(uid, input_id, state, turn_id=turn_id)
             self._set_turn_state(uid, turn_id, "running", input_id=input_id)
-        current = self._inputs.get(uid, {}).get(input_id, {})
+        current = self._admission_inputs.get(uid, {}).get(input_id, {})
         return {
             "found": True,
             "accepted": result.get("accepted") is True,
@@ -799,7 +806,11 @@ class ChatStreamService:
         elif event_type == "input.state":
             input_id = data.get("id")
             if isinstance(input_id, str):
-                self._inputs.setdefault(uid, {})[input_id] = copy.deepcopy(data)
+                copied = copy.deepcopy(data)
+                self._inputs.setdefault(uid, {})[input_id] = copied
+                self._admission_inputs.setdefault(uid, {})[
+                    input_id
+                ] = copy.deepcopy(copied)
         return self._log(uid).publish(event_type, data)
 
     def attach_display_tap(self) -> None:
@@ -2115,9 +2126,9 @@ class ChatStreamService:
         )
 
     def _reset_conversation_cache(self, uid: str) -> None:
-        """Drop transcript projections but retain daemon-lifetime input owners."""
+        """Rebuild transcript projections while retaining admission ownership."""
         previous_rows = self._rows.get(uid, {})
-        admitted_inputs = self._inputs.get(uid, {})
+        admitted_inputs = self._admission_inputs.get(uid, {})
         queued_ids = {
             input_id
             for input_id, info in admitted_inputs.items()
@@ -2139,10 +2150,14 @@ class ChatStreamService:
         else:
             self._rows.pop(uid, None)
 
-        # These maps also form the daemon-lifetime admission ledger. Keeping
-        # them preserves retries, queue scope ownership, and private goal reply
-        # authorization while snapshots filter them to rows in the restored
-        # transcript or retained queue projection.
+        # Rebuild live projection from retained accepted work. In particular,
+        # stale started entries stay in the admission ledger for idempotency,
+        # but cannot shadow lifecycle reconstructed from the restored history.
+        self._inputs[uid] = {
+            input_id: copy.deepcopy(admitted_inputs[input_id])
+            for input_id in queued_ids
+        }
+
         self._turns.pop(uid, None)
         self._active_turns.pop(uid, None)
 
@@ -2163,6 +2178,25 @@ class ChatStreamService:
         self._reply_after_tool = {
             key for key in self._reply_after_tool if key[0] != uid
         }
+
+        restored_inputs = self._snapshot_components(uid)[2]
+        self._inputs[uid] = {
+            item["id"]: copy.deepcopy(item)
+            for item in restored_inputs
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        for input_id, restored in self._inputs[uid].items():
+            admitted = admitted_inputs.get(input_id)
+            if (
+                admitted is not None
+                and admitted.get("state") != "queued"
+                and restored.get("state") == "ended"
+            ):
+                # Stable request IDs can appear in a restored transcript after
+                # a later visit left a stale started admission projection.
+                # Keep its owner/content binding, but return the canonical
+                # terminal lifecycle for subsequent idempotent retries.
+                admitted_inputs[input_id] = copy.deepcopy(restored)
 
     def _log(self, uid: str | None = None) -> ChatStreamLog:
         uid = uid or self._conversation_uid()
@@ -3164,6 +3198,7 @@ class ChatStreamService:
         if outcome is not None:
             data["outcome"] = outcome
         self._inputs.setdefault(uid, {})[input_id] = data
+        self._admission_inputs.setdefault(uid, {})[input_id] = copy.deepcopy(data)
         self._log(uid).publish("input.state", data)
 
     def _set_turn_state(
