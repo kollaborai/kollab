@@ -1078,6 +1078,12 @@ async def test_native_hub_hud_context_is_not_a_second_input_and_hub_input_owns_t
     ]
     assert sequence_problems([snapshot]) == []
 
+    state._llm_service = coordinator
+    reloaded = ChatStreamService(state).subscribe(
+        {"after": None, "conversation_uid": None}
+    )["events"][0]
+    assert reloaded["data"]["rows"] == []
+
 
 class _RpcServer:
     def __init__(self):
