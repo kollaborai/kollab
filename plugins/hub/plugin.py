@@ -10491,7 +10491,10 @@ class HubPlugin(BasePlugin):
                     "hub_message": True,
                     "hub_message_id": message.id,
                     "hub_note": hub_note,
-                    "hub_admission": "input" if wake_decision.should_trigger else "note",
+                    # The native continuation claims the input only when its
+                    # turn actually starts. Until then this transcript copy
+                    # and the live row remain a note.
+                    "hub_admission": "note",
                     "hub_from": message.from_identity,
                     "hub_to": message.to,
                     "hub_is_intended": is_intended,
@@ -10627,9 +10630,10 @@ class HubPlugin(BasePlugin):
                         request_id=message.id,
                         input_source="hub",
                         hub_note=hub_note,
-                        hub_admission=(
-                            "input" if should_trigger_llm else "note"
-                        ),
+                        # A requested wake can still be absorbed by an active
+                        # turn or declined before it starts. MessageHandler
+                        # promotes it to an input at the actual turn_start.
+                        hub_admission="note",
                     )
                 # Trigger LLM if this agent is the intended target (or broadcast).
                 # Skip departures to avoid feedback loops.

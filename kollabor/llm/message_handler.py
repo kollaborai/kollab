@@ -181,6 +181,41 @@ class MessageHandler:
                 admissions[message_id] = admission
         return [message_id for message_id in ids if admissions.get(message_id) != "note"]
 
+    @staticmethod
+    def _hub_notes_by_id(
+        data: dict[str, Any], hud_metadata: dict[str, Any] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Return the structured notes available for a claimed native wake."""
+        notes: dict[str, dict[str, Any]] = {}
+        for source in (data, hud_metadata or {}):
+            entries = source.get("pending_hub_notes")
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    message_id = entry.get("message_id")
+                    note = entry.get("hub_note")
+                    if not isinstance(message_id, str):
+                        message_id = entry.get("id")
+                    if not isinstance(note, dict):
+                        note = entry.get("part")
+                    if isinstance(message_id, str) and message_id and isinstance(note, dict):
+                        notes[message_id] = note
+            entries = source.get("hub_notes")
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    message_id = entry.get("id")
+                    note = entry.get("part")
+                    if isinstance(message_id, str) and message_id and isinstance(note, dict):
+                        notes[message_id] = note
+            message_id = source.get("hub_message_id") or source.get("request_id")
+            note = source.get("hub_note")
+            if isinstance(message_id, str) and message_id and isinstance(note, dict):
+                notes[message_id] = note
+        return notes
+
     def _downgrade_hub_wake(self, data: dict[str, Any]) -> None:
         """Keep a wake visible as a note when it did not start its own turn."""
         coord = self._coordinator
@@ -748,71 +783,128 @@ class MessageHandler:
                 # error breaks. The checkpoint just logs progress every 5min.
                 chain_start = time.monotonic()
                 checkpoint_at = chain_start + 300
-                # A message that arrived while busy was buffered as HUD, and
-                # turn_completed=False keeps _continue_conversation from
-                # injecting it. Deliver it once, at chain start, or the turn it
-                # woke never sees it. (A direct wake already drained it: no-op.)
-                pop_pending = getattr(coord, "pop_pending_agent_hud", None)
-                hud_entries = pop_pending() if callable(pop_pending) else None
-                if isinstance(hud_entries, (list, tuple)):
-                    hud = format_agent_hud(hud_entries)
-                    hud_metadata = agent_hud_hub_metadata(hud_entries)
-                else:
-                    drain = getattr(coord, "drain_pending_agent_hud", None)
-                    hud = drain() if callable(drain) else ""
-                    hud_metadata = {}
-                input_ids = self._hub_input_ids(wake_data, hud_metadata)
-                turn_id = f"native-{uuid.uuid4().hex}" if input_ids else None
+                turn_id = None
                 turn_context_token = None
-                if turn_id is not None:
-                    current_turn_context = {
-                        **current_turn.get(),
-                        "turn_id": turn_id,
-                        "request_id": input_ids[0],
-                        "request_ids": list(input_ids),
-                        "input_source": "hub",
-                    }
-                    turn_context_token = current_turn.set(current_turn_context)
-                    publish_semantic(
-                        coord.event_bus,
-                        "turn_start",
-                        request_id=input_ids[0],
-                        request_ids=list(input_ids),
-                        turn_id=turn_id,
-                        input_source="hub",
-                    )
-                if isinstance(hud, str) and hud:
-                    from kollabor_events.data_models import ConversationMessage
-
-                    hub_note = wake_data.get("hub_note")
-                    hub_message_id = wake_data.get("hub_message_id") or wake_data.get("request_id")
-                    metadata = {
-                        "agent_hud": True,
-                        "agent_hud_sources": ["hub"],
-                        **hud_metadata,
-                    }
-                    if isinstance(hub_note, dict):
-                        metadata.update(
-                            {
-                                "hub_message_id": hub_message_id,
-                                "hub_note": dict(hub_note),
-                                "hub_admission": "input",
-                            }
-                        )
-                    hud_uuid = coord._add_conversation_message(
-                        ConversationMessage(
-                            role="user",
-                            content=hud,
-                            metadata=metadata,
-                        ),
-                        parent_uuid=coord.current_parent_uuid,
-                    )
-                    coord.publish_cursor(hud_uuid, turn_serial)
+                turn_tap = None
+                turn_listener = None
+                terminal_seen = False
+                terminal_reason = None
                 try:
+                    # A message that arrived while busy was buffered as HUD,
+                    # and turn_completed=False keeps _continue_conversation
+                    # from injecting it. Deliver it once at chain start.
+                    pop_pending = getattr(coord, "pop_pending_agent_hud", None)
+                    hud_entries = pop_pending() if callable(pop_pending) else None
+                    if isinstance(hud_entries, (list, tuple)):
+                        hud = format_agent_hud(hud_entries)
+                        hud_metadata = agent_hud_hub_metadata(hud_entries)
+                    else:
+                        drain = getattr(coord, "drain_pending_agent_hud", None)
+                        hud = drain() if callable(drain) else ""
+                        hud_metadata = {}
+                    input_ids = self._hub_input_ids(wake_data, hud_metadata)
+                    hub_notes = self._hub_notes_by_id(wake_data, hud_metadata)
+                    turn_id = f"native-{uuid.uuid4().hex}" if input_ids else None
+                    if turn_id is not None:
+                        current_turn_context = {
+                            **current_turn.get(),
+                            "turn_id": turn_id,
+                            "request_id": input_ids[0],
+                            "request_ids": list(input_ids),
+                            "input_source": "hub",
+                        }
+                        turn_context_token = current_turn.set(current_turn_context)
+
+                        # The producer first records every native message as
+                        # a note. Promote only the messages this claimed turn
+                        # actually answers, before publishing turn_start.
+                        for input_id in input_ids:
+                            note = hub_notes.get(input_id)
+                            if isinstance(note, dict):
+                                publish_semantic(
+                                    coord.event_bus,
+                                    "hub_message",
+                                    message_id=input_id,
+                                    request_id=input_id,
+                                    input_source="hub",
+                                    hub_note=note,
+                                    hub_admission="input",
+                                )
+                        for history_message in getattr(
+                            coord, "conversation_history", []
+                        ):
+                            if isinstance(history_message, dict):
+                                message_metadata = history_message.get("metadata")
+                            else:
+                                message_metadata = getattr(
+                                    history_message, "metadata", None
+                                )
+                            if (
+                                isinstance(message_metadata, dict)
+                                and message_metadata.get("hub_message_id") in input_ids
+                            ):
+                                message_metadata["hub_admission"] = "input"
+
+                        get_service = getattr(coord.event_bus, "get_service", None)
+                        if callable(get_service):
+                            try:
+                                turn_tap = get_service("display_tap")
+                            except Exception:
+                                turn_tap = None
+                        add_listener = getattr(turn_tap, "add_listener", None)
+                        if callable(add_listener):
+
+                            def observe_turn_terminal(event):
+                                nonlocal terminal_seen
+                                if (
+                                    isinstance(event, dict)
+                                    and event.get("type") == "turn_complete"
+                                    and event.get("turn_id") == turn_id
+                                ):
+                                    terminal_seen = True
+
+                            turn_listener = observe_turn_terminal
+                            add_listener(turn_listener)
+                        publish_semantic(
+                            coord.event_bus,
+                            "turn_start",
+                            request_id=input_ids[0],
+                            request_ids=list(input_ids),
+                            turn_id=turn_id,
+                            input_source="hub",
+                        )
+                    if isinstance(hud, str) and hud:
+                        from kollabor_events.data_models import ConversationMessage
+
+                        hub_note = wake_data.get("hub_note")
+                        hub_message_id = wake_data.get("hub_message_id") or wake_data.get("request_id")
+                        metadata = {
+                            "agent_hud": True,
+                            "agent_hud_sources": ["hub"],
+                            **hud_metadata,
+                        }
+                        if isinstance(hub_note, dict):
+                            metadata.update(
+                                {
+                                    "hub_message_id": hub_message_id,
+                                    "hub_note": dict(hub_note),
+                                    "hub_admission": "input",
+                                }
+                            )
+                        hud_uuid = coord._add_conversation_message(
+                            ConversationMessage(
+                                role="user",
+                                content=hud,
+                                metadata=metadata,
+                            ),
+                            parent_uuid=coord.current_parent_uuid,
+                        )
+                        coord.publish_cursor(hud_uuid, turn_serial)
                     try:
                         await coord._continue_conversation()
                     except Exception as e:
                         logger.error(f"Hub continue error (turn 1): {e}")
+                        terminal_reason = "error"
                         await self._report_detached_chain_break(
                             reason="conversation continuation failed"
                         )
@@ -831,6 +923,7 @@ class MessageHandler:
                             logger.info(
                                 "Hub continue: user message arrived, yielding chain to queue drain"
                             )
+                            terminal_reason = "interrupted"
                             break
                         if time.monotonic() > checkpoint_at:
                             elapsed = int(time.monotonic() - chain_start)
@@ -853,6 +946,7 @@ class MessageHandler:
                             await self._report_detached_chain_break(
                                 reason="maximum continuation turns reached"
                             )
+                            terminal_reason = "error"
                             qp.turn_completed = True
                             break
                         turn_count += 1
@@ -866,6 +960,7 @@ class MessageHandler:
                             await coord._continue_conversation()
                         except Exception as e:
                             logger.error(f"Hub continue error (turn {turn_count}): {e}")
+                            terminal_reason = "error"
                             await self._report_detached_chain_break(
                                 reason="conversation continuation failed"
                             )
@@ -883,9 +978,41 @@ class MessageHandler:
                             await self._report_detached_chain_break(
                                 reason=f"{stuck.count} identical tool errors"
                             )
+                            terminal_reason = "error"
                             qp.turn_completed = True
                             break
+                    if qp.cancel_processing and terminal_reason is None:
+                        terminal_reason = "cancelled"
+                except asyncio.CancelledError:
+                    terminal_reason = terminal_reason or "cancelled"
+                    raise
+                except Exception:
+                    terminal_reason = terminal_reason or "error"
+                    raise
                 finally:
+                    if turn_id is not None and not terminal_seen:
+                        if terminal_reason is None:
+                            if qp.cancel_processing:
+                                terminal_reason = "cancelled"
+                            elif qp.turn_completed:
+                                terminal_reason = (
+                                    "error"
+                                    if getattr(qp, "last_turn_error", None)
+                                    else "end_turn"
+                                )
+                            else:
+                                terminal_reason = "interrupted"
+                        publish_semantic(
+                            coord.event_bus,
+                            "turn_complete",
+                            request_id=input_ids[0],
+                            request_ids=list(input_ids),
+                            turn_id=turn_id,
+                            stop_reason=terminal_reason,
+                        )
+                    remove_listener = getattr(turn_tap, "remove_listener", None)
+                    if turn_listener is not None and callable(remove_listener):
+                        remove_listener(turn_listener)
                     if turn_context_token is not None:
                         try:
                             current_turn.reset(turn_context_token)
