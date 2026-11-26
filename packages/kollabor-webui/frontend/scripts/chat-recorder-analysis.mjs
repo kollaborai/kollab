@@ -200,7 +200,7 @@ export function analyzeChatFrames(frames, marks) {
     if (!dupReply && on.dupReply) flag(frame.t, "DUP-REPLY-END", "");
     on.dupReply = dupReply;
 
-    const dupTools = frame.toolsDrawn > frame.toolsStarted;
+    const dupTools = frame.duplicateTools !== undefined ? frame.duplicateTools > 0 : frame.toolsDrawn > frame.toolsStarted;
     if (dupTools && !on.dupTools) {
       flag(frame.t, "DUP-TOOLS", `${frame.toolsDrawn} tool calls drawn, ${frame.toolsStarted} started`, "dupTools");
     }

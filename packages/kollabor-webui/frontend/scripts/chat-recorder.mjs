@@ -122,6 +122,9 @@ function installRecorder(cfg) {
     toolCalls: Array.isArray(restore?.toolCalls) ? restore.toolCalls : [],
     measuredInputs: restore?.measuredInputs ?? [],
     measuredTurns: restore?.measuredTurns ?? [],
+    goalTurn: restore?.goalTurn ?? null,
+    goalMode: restore?.goalMode ?? false,
+    goalCardsObserved: restore?.goalCardsObserved ?? false,
     pendingToolCalls: restore?.pendingToolCalls ?? [],
     measuring: restore?.measuring ?? false,
     flowSeq: Number.isInteger(restore?.flowSeq) ? restore.flowSeq : null,
@@ -147,13 +150,34 @@ function installRecorder(cfg) {
     }
     rec.toolsStarted = rec.pendingToolCalls.filter((call) => rec.measuredTurns.includes(call.turn_id)).length;
   };
+  rec.verifyGoalTurn = (turnId) => {
+    rec.goalTurn = turnId;
+    if (!rec.measuredTurns.includes(turnId)) rec.measuredTurns.push(turnId);
+    rec.refreshMeasured();
+  };
+  rec.goalToolSample = (cards) => {
+    const calls = rec.goalTurn ? rec.pendingToolCalls.filter((call) => call.turn_id === rec.goalTurn) : [];
+    const counts = new Map();
+    for (const card of cards) {
+      const { chatTurnId, chatRowId, chatToolCallId } = card.dataset;
+      if (chatTurnId !== rec.goalTurn || !calls.some((call) => call.id === chatToolCallId && call.rows?.includes(chatRowId))) continue;
+      counts.set(chatToolCallId, (counts.get(chatToolCallId) ?? 0) + 1);
+    }
+    const toolsDrawn = [...counts.values()].reduce((sum, count) => sum + count, 0);
+    if (toolsDrawn) rec.goalCardsObserved = true;
+    return { toolsStarted: calls.length, toolsDrawn, duplicateTools: [...counts.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0) };
+  };
   rec.mark = (name) => {
+    if (name.startsWith("GOAL VERIFIED ")) rec.verifyGoalTurn(name.slice("GOAL VERIFIED ".length));
     if (/^(PAGE SEND U1(?: \(|$)|OTHER CLIENT SEND U1$|PAGE START GOAL$)/.test(name)) {
       rec.toolsStarted = 0;
       rec.measuring = true;
       rec.measuredInputs = [];
       rec.measuredTurns = [];
       rec.pendingToolCalls = [];
+      rec.goalTurn = null;
+      rec.goalMode = name === "PAGE START GOAL";
+      rec.goalCardsObserved = false;
     }
     rec.marks.push({ t: now(), name });
   };
@@ -168,10 +192,11 @@ function installRecorder(cfg) {
       if (part.type !== "tool-call" || !part.tool_call_id) continue;
       const pending = rec.pendingToolCalls.find((call) => call.id === part.tool_call_id);
       if (pending && row.turn_id) pending.turn_id = row.turn_id;
-      if (rec.toolCalls.includes(part.tool_call_id)) continue;
-      rec.toolCalls.push(part.tool_call_id);
-      if (rec.measuring) rec.pendingToolCalls.push({ id: part.tool_call_id, turn_id: row.turn_id });
-      else if (rec.flowSeq !== null) rec.toolsStarted += 1;
+      if (pending && row.id && !pending.rows.includes(row.id)) pending.rows.push(row.id);
+      const known = rec.toolCalls.includes(part.tool_call_id);
+      if (!known) rec.toolCalls.push(part.tool_call_id);
+      if (rec.measuring && !pending) rec.pendingToolCalls.push({ id: part.tool_call_id, turn_id: row.turn_id, rows: row.id ? [row.id] : [] });
+      else if (!rec.measuring && !known && rec.flowSeq !== null) rec.toolsStarted += 1;
     }
     if (rec.measuring) rec.refreshMeasured();
   };
@@ -403,8 +428,10 @@ function installRecorder(cfg) {
       }
       if (!viewport || !viewport.isConnected) viewport = findViewport(all[all.length - 1]);
       const errors = [...document.querySelectorAll(".aui-message-error-root")];
+      const goalTools = rec.goalMode ? rec.goalToolSample(document.querySelectorAll('[data-chat-tool-call-id][data-chat-row-id][data-chat-turn-id]')) : null;
       const frame = {
         n: all.length, rows, texts, fading, users, replies, toolsDrawn, toolsStarted: rec.toolsStarted,
+        ...(goalTools ?? {}),
         st: viewport ? Math.round(viewport.scrollTop) : -1,
         pick: document.querySelectorAll('[class*="branch-picker-root"]').length,
         err: errors.length,
@@ -591,6 +618,9 @@ async function record(flow, session, browser, target) {
       toolCalls: window.__rec.toolCalls,
       measuredInputs: window.__rec.measuredInputs,
       measuredTurns: window.__rec.measuredTurns,
+      goalTurn: window.__rec.goalTurn,
+      goalMode: window.__rec.goalMode,
+      goalCardsObserved: window.__rec.goalCardsObserved,
       pendingToolCalls: window.__rec.pendingToolCalls,
       measuring: window.__rec.measuring,
       flowSeq: window.__rec.flowSeq,
@@ -850,6 +880,7 @@ async function record(flow, session, browser, target) {
               !hasMatchingGoalTurn(await currentStreamState(), expectedGoal, turn)) {
             throw new Error("goal reload proof inconclusive: persisted goal and running stream turn do not match before reload");
           }
+          await mark(`GOAL VERIFIED ${turn.turn_id}`);
           await mark(`GOAL BEFORE ${JSON.stringify({ persisted: expectedGoal, turn, conversation_uid: stream.conversation_uid })}`);
         },
         after: async (turn, snapshot, stream) => {
@@ -867,9 +898,10 @@ async function record(flow, session, browser, target) {
           await mark(`GOAL AFTER ${JSON.stringify({ persisted: restored, turn: reloadedTurn, conversation_uid: snapshot.conversation_uid })}`);
         },
       });
-      // Rendered assistant rows and tool groups expose no stream row, turn,
-      // or tool-call identity, so they cannot be attributed to this goal.
-      throw new Error("goal reload proof inconclusive: rendered tool cards cannot be associated with the verified goal turn");
+      const observed = typeof page !== "undefined" && await page.evaluate(() =>
+        window.__rec.goalCardsObserved && !window.__rec.sampleError &&
+        window.__rec.pendingToolCalls.some((call) => call.turn_id === window.__rec.goalTurn));
+      if (!observed) throw new Error("goal reload proof inconclusive: rendered tool cards cannot be associated with the verified goal turn");
     },
     // Inject a real hub message while the page's turn is still running.
     async "hub-note"() {
