@@ -28,7 +28,7 @@ class _State:
         return {"rows": [], "turns": [], "inputs": []}
 
 
-def test_reply_segments_with_different_request_ids_keep_one_snapshot_row():
+def test_reply_segments_with_different_request_ids_share_history_identity():
     turn_id = "acp-turn-7"
     history_key = "session-turn-key-7"
     request_id = "request-7"
@@ -62,7 +62,10 @@ def test_reply_segments_with_different_request_ids_keep_one_snapshot_row():
     snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
 
     replies = [row for row in snapshot["data"]["rows"] if row["kind"] == "reply"]
-    expected_id = stream._reply_row_id(
-        "conversation-snapshot-identity", turn_id, history_key
-    )
-    assert [row["id"] for row in replies] == [expected_id]
+    expected_ids = [
+        stream._reply_row_id("conversation-snapshot-identity", turn_id, history_key),
+        stream._reply_segment_row_id(
+            "conversation-snapshot-identity", turn_id, 1, history_key
+        ),
+    ]
+    assert [row["id"] for row in replies] == expected_ids
