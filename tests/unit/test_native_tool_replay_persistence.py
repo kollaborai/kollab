@@ -9,16 +9,15 @@ from kollabor_engine.history_xml_tools import web_history
 
 from kollabor.state.chat_stream import ChatStreamService
 from kollabor.state.local import LocalStateService
-from kollabor_agent.queue_processor import _xml_tool_result_entry
+from kollabor_agent.queue_processor import QueueProcessor, _xml_tool_call_entries, _xml_tool_result_entry
 from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.conversation_logger import KollaborConversationLogger, utc_stamp
 from kollabor_ai.conversation_manager import ConversationManager
+from kollabor_ai.response_parser import ResponseParser
 from kollabor_events import EventBus
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import DisplayTap
-from kollabor_agent.queue_processor import QueueProcessor, _xml_tool_call_entries
-from kollabor_ai.response_parser import ResponseParser
 
 
 def manager(directory):
@@ -186,6 +185,10 @@ async def test_empty_xml_display_text_survives_jsonl_resume(tmp_path):
 @pytest.mark.asyncio
 async def test_xml_tool_row_identity_survives_jsonl_resume(tmp_path):
     writer = KollaborConversationLogger(tmp_path)
+    saved_base = manager(tmp_path)
+    saved_base.current_session_id = writer.session_id
+    saved_base.conversation_metadata["conversation_uid"] = "conversation-a"
+    saved_base.save_conversation()
     parent = await writer.log_user_message("Run two XML commands")
     turn_id = "xml-row-identity-turn"
     history = []
@@ -290,6 +293,7 @@ async def test_xml_tool_row_identity_survives_jsonl_resume(tmp_path):
     state, _reader, resumed_history, _result = await resume(
         tmp_path, writer.session_id
     )
+    assert state.get_conversation_uid() == "conversation-a"
     assert [
         message.metadata.get("turn_id")
         for message in resumed_history
@@ -300,7 +304,10 @@ async def test_xml_tool_row_identity_survives_jsonl_resume(tmp_path):
     ]
     replay_ids = {row["id"] for row in replay_rows if row["kind"] == "tool"}
     assert len(live_ids) == len(replay_ids) == 2
-    assert live_ids == replay_ids
+    assert live_ids == replay_ids, (
+        [row for row in live_stream._rows["conversation-a"].values() if row["kind"] == "tool"],
+        [row for row in replay_rows if row["kind"] == "tool"],
+    )
 
 
 @pytest.mark.asyncio
