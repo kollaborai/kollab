@@ -176,6 +176,11 @@ def _prepare_triggered_plugin_stream(state: _State, tmp_path, *, max_queue_size:
     processor = _plugin_queue_processor(state, logger, max_queue_size=max_queue_size)
     coordinator._queue_processor = processor
     coordinator._enqueue_with_overflow_strategy = processor.enqueue
+    native_send_now = getattr(LLMService, "send_now_native_plugin_input", None)
+    if callable(native_send_now):
+        coordinator.send_now_native_plugin_input = MethodType(
+            native_send_now, coordinator
+        )
     state._event_bus.services["llm_service"] = coordinator
     stream = ChatStreamService(state)
     stream.attach_display_tap()
@@ -681,6 +686,100 @@ async def test_plugin_send_now_rpc_prioritizes_exact_native_tagged_input(tmp_pat
     ]
     assert scheduled == ["force_send_plugin_input"]
     assert state._event_bus.services["web_message_queue_runtime"].calls == []
+
+
+@pytest.mark.asyncio
+async def test_plugin_logging_without_history_initializes_message_metadata(tmp_path):
+    state = _State()
+    logger, coordinator, _processor, _stream, _rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=2
+    )
+
+    result = await MessageHandler(coordinator).handle_add_message(
+        {
+            "messages": [{"role": "user", "content": "log without history"}],
+            "options": {
+                "show_loading": False,
+                "display_messages": False,
+                "add_to_history": False,
+                "log_messages": True,
+                "trigger_llm": False,
+            },
+        },
+        None,
+    )
+
+    assert result["success"] is True
+    assert coordinator.conversation_history == []
+    record = next(
+        json.loads(line)
+        for line in logger.session_file.read_text().splitlines()
+        if json.loads(line).get("type") == "user"
+    )
+    assert record["message"]["content"] == "log without history"
+    assert record["message"]["metadata"] == {}
+
+
+@pytest.mark.asyncio
+async def test_plugin_batch_capture_uses_authored_text_not_model_image_payload():
+    captured = {}
+
+    class RecordingProcessor:
+        async def process_message_batch(self, **kwargs):
+            captured.update(kwargs)
+            return "assistant-row"
+
+    service = object.__new__(LLMService)
+    service._queue_processor = RecordingProcessor()
+    service._pending_agent_hud = []
+    service.current_parent_uuid = "before"
+    service._turn_serial = 0
+    service._cursor_winner_serial = -1
+    service._continue_serial = None
+    plugin_input = TaggedInput(
+        content=[
+            {"type": "text", "text": "authored plugin text"},
+            {
+                "type": "image",
+                "source": {"kind": "url", "url": "https://example.invalid/x.png"},
+            },
+        ],
+        request_ids=("plugin-input",),
+        history_row_uuid="history-row",
+        stream_display_content="authored plugin text",
+    )
+
+    await service._process_message_batch([plugin_input])
+
+    assert captured["stream_inputs"] == (
+        {
+            "request_id": "plugin-input",
+            "history_row_uuid": "history-row",
+            "content": "authored plugin text",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_cancel_persists_plugin_input_terminal_outcome(tmp_path):
+    state = _State()
+    logger, coordinator, processor, _stream, _rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=2
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "cancel on external stop")
+    processor._cancel_generation = 0
+
+    processor.request_cancellation(origin="external")
+    await asyncio.sleep(0.05)
+
+    record = next(
+        json.loads(line)
+        for line in logger.session_file.read_text().splitlines()
+        if json.loads(line).get("type") == "user"
+    )
+    assert record["message"]["metadata"]["input_id"] == input_id
+    assert record["message"]["metadata"]["chat_stream_outcome"] == "failed"
+    assert processor.processing_queue.empty()
 
 
 @pytest.mark.asyncio
