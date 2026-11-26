@@ -88,6 +88,7 @@ async def test_queued_slash_command_uses_existing_executor_in_order():
         executor,
         request_id="web-help-1",
         turn_id="command-turn-1",
+        expected_conversation_uid="conversation-a",
     )
     submit.assert_not_awaited()
     assert result == {"status": "accepted", "request_id": "web-help-1"}
