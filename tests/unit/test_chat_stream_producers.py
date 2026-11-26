@@ -941,3 +941,215 @@ async def test_permission_prompt_row_carries_full_data_and_resolution():
     assert prompt["status"] == "granted"
     assert prompt["turn_id"] == "19"
     assert sequence_problems([snapshot]) == []
+def test_goal_origin_survives_inputless_turn_replay_and_snapshot():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "full-goal-id", "attempt_id": "full-attempt-id"}
+    _publish(state, "turn_start", turn_id="goal-turn", origin=origin)
+    running = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert running["data"]["turns"] == [{"turn_id": "goal-turn", "state": "running", "input_ids": [], "origin": origin}]
+    _publish(state, "turn_complete", turn_id="goal-turn", stop_reason="cancelled")
+    events = _events(stream, initial)
+    turns = [e["data"] for e in events if e["type"] == "turn.state"]
+    assert [t["state"] for t in turns] == ["running", "ended"]
+    assert all(t["origin"] == origin for t in turns)
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"][-1] == turns[-1]
+
+
+def test_goal_intermediate_completion_does_not_end_attempt():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    _publish(state, "turn_start", turn_id="t", origin=origin)
+    _publish(state, "turn_complete", turn_id="t", origin=origin, stop_reason="end_turn")
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert snapshot["data"]["turns"][0]["state"] == "running"
+    _publish(state, "turn_complete", turn_id="t", origin=origin, goal_attempt_terminal=True)
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert snapshot["data"]["turns"][0]["state"] == "ended"
+
+
+@pytest.mark.asyncio
+async def test_goal_origin_survives_joined_human_input():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "full-goal", "attempt_id": "full-attempt"}
+    _publish(state, "turn_start", turn_id="goal-turn", origin=origin)
+    await _add(stream, "human", "steer")
+    _publish(state, "user_message", request_id="human", turn_id="goal-turn", text="steer")
+    turns = [e["data"] for e in _events(stream, initial) if e["type"] == "turn.state"]
+    expected = {"turn_id": "goal-turn", "state": "running", "input_ids": ["human"], "origin": origin}
+    assert turns[-1] == expected
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"] == [expected]
+    _publish(state, "turn_complete", turn_id="goal-turn", goal_attempt_terminal=True)
+    turns = [e["data"] for e in _events(stream, initial) if e["type"] == "turn.state"]
+    assert any(t["input_ids"] == ["human"] for t in turns)
+    assert all(t["origin"] == origin for t in turns)
+    assert turns[-1]["state"] == "ended"
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"][-1] == turns[-1]
+
+
+@pytest.mark.parametrize("transition", ["start", "end"])
+def test_snapshot_cursor_is_atomic_with_goal_turn_transition(transition):
+    import threading
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    if transition == "end":
+        _publish(state, "turn_start", turn_id="t", origin=origin)
+    log = stream._log("conversation-a")
+    publish = log.publish
+    entered = threading.Event()
+    release = threading.Event()
+    snapshot_done = threading.Event()
+    snapshots = []
+    def paused_publish(kind, data):
+        if kind == "turn.state":
+            entered.set()
+            assert release.wait(2)
+        return publish(kind, data)
+    log.publish = paused_publish
+    def produce():
+        if transition == "start":
+            _publish(state, "turn_start", turn_id="t", origin=origin)
+        else:
+            _publish(state, "turn_complete", turn_id="t", goal_attempt_terminal=True)
+    def snapshot():
+        snapshots.append(stream.subscribe({"after": None, "conversation_uid": None})["events"][0])
+        snapshot_done.set()
+    producer = threading.Thread(target=produce)
+    reader = threading.Thread(target=snapshot)
+    producer.start()
+    try:
+        assert entered.wait(2)
+        reader.start()
+        assert not snapshot_done.wait(0.1)
+    finally:
+        release.set()
+        producer.join(2)
+        if reader.ident is not None:
+            reader.join(2)
+    assert snapshot_done.is_set()
+    turn = snapshots[0]["data"]["turns"][0]
+    assert turn["origin"] == origin
+    assert turn["state"] == ("running" if transition == "start" else "ended")
+    assert snapshots[0]["data"]["next_seq"] == log.next_seq
+
+
+def test_goal_continuation_responses_replace_only_current_segment():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    _publish(state, "turn_start", turn_id="t", origin=origin)
+    for raw, clean in [("First <tool>", "First "), ("Second <tool>", "Second "), ("Third <tool>", "Third")]:
+        _publish(state, "reply_segment_start", turn_id="t", origin=origin)
+        _publish(state, "token", turn_id="t", text=raw)
+        _publish(state, "response", turn_id="t", text=clean)
+    events = _events(stream, initial)
+    replies = [e["data"] for e in events if e["type"] == "row.upsert" and e["data"]["kind"] == "reply"]
+    assert replies[-1]["parts"][0]["text"] == "First Second Third"
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    reply = next(row for row in snapshot["data"]["rows"] if row["kind"] == "reply")
+    assert reply["parts"][0]["text"] == "First Second Third"
+
+
+@pytest.mark.asyncio
+async def test_native_model_continuations_clean_only_their_own_reply_segment():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from kollabor_agent.queue_processor import QueueProcessor
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    _publish(state, "turn_start", turn_id="native", request_id="input")
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = state._event_bus
+    processor._turn_lock = asyncio.Lock()
+    processor._run_after_turn = AsyncMock()
+    processor._turn_token = None
+    processor.active_request_ids = ()
+    processor.turn_completed = False
+    processor.cancel_processing = False
+    segments = iter(
+        [("First <tool>", "First "), ("<tool>", ""), ("Last <tool>", "Last")]
+    )
+
+    async def model_call(*args, **kwargs):
+        raw, clean = next(segments)
+        _publish(state, "token", turn_id="native", text=raw)
+        _publish(state, "response", turn_id="native", text=clean)
+        return "parent"
+
+    processor._execute_llm_turn_inner = model_call
+    for first in (True, False, False):
+        await processor._execute_llm_turn(first, "parent")
+
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    reply = next(row for row in snapshot["data"]["rows"] if row["kind"] == "reply")
+    assert reply["parts"][0]["text"] == "First Last"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("goal", [False, True])
+async def test_native_reply_segments_keep_tool_order_in_replay_and_snapshot(goal):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from kollabor_agent.queue_processor import QueueProcessor
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"} if goal else None
+    _publish(state, "turn_start", turn_id="t", request_id="input", origin=origin)
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = state._event_bus
+    processor._turn_lock = asyncio.Lock()
+    processor._run_after_turn = AsyncMock()
+    processor._turn_token = None
+    processor.active_request_ids = ()
+    processor.turn_completed = False
+    processor.cancel_processing = False
+    segments = iter([("before <tool>", "before"), ("after <tool>", "after")])
+
+    async def model_call(*args, **kwargs):
+        raw, clean = next(segments)
+        _publish(state, "token", turn_id="t", text=raw)
+        _publish(state, "response", turn_id="t", text=clean)
+        return "parent"
+
+    processor._execute_llm_turn_inner = model_call
+    await processor._execute_llm_turn(True, "parent")
+    _publish(state, "tool_start", turn_id="t", tool_id="tool", tool_name="Search")
+    _publish(state, "tool_result", turn_id="t", tool_id="tool", tool_name="Search", success=True)
+    await processor._execute_llm_turn(False, "parent")
+    _publish(state, "turn_complete", turn_id="t", origin=origin, goal_attempt_terminal=True)
+
+    events = _events(stream, initial)
+    assert sequence_problems(events) == []
+    rows = {}
+    for event in events[1:]:
+        if event["type"] == "row.upsert":
+            rows[event["data"]["id"]] = event["data"]
+        elif event["type"] == "row.append":
+            data = event["data"]
+            rows[data["id"]]["parts"][data["part"]]["text"] += data["text"]
+    replay = [row for row in rows.values() if row["kind"] in {"reply", "tool"}]
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    saved = [row for row in snapshot["data"]["rows"] if row["kind"] in {"reply", "tool"}]
+    for result in (replay, saved):
+        assert [row["kind"] for row in result] == ["reply", "tool", "reply"]
+        assert [result[0]["parts"][0]["text"], result[2]["parts"][0]["text"]] == ["before", "after"]
+        assert result[0]["id"] != result[2]["id"]

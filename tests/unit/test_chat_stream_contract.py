@@ -440,3 +440,16 @@ def test_input_cannot_change_its_turn_binding_to_end_early():
     )
     problems = sequence_problems(events)
     assert any("turn" in problem and "t1" in problem for problem in problems), problems
+
+
+def test_goal_origin_requires_complete_identity():
+    turn = {"turn_id": "t", "state": "running", "input_ids": []}
+    valid = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    assert not event_problems(_event("turn.state", {**turn, "origin": valid}))
+    for origin in (
+        None,
+        {},
+        {"kind": "goal", "goal_id": "g"},
+        {"kind": "user", "goal_id": "g", "attempt_id": "a"},
+    ):
+        assert event_problems(_event("turn.state", {**turn, "origin": origin}))
