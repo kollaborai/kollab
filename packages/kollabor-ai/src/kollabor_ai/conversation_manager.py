@@ -66,6 +66,22 @@ def _chat_stream_input_metadata(value: Any) -> Dict[str, Any]:
         return {}
     result: Dict[str, Any] = {}
 
+    for key in ("input_id", "chat_stream_display_text"):
+        item = value.get(key)
+        if isinstance(item, str) and item:
+            result[key] = item
+    if value.get("chat_stream_trigger_llm") is True:
+        result["chat_stream_trigger_llm"] = True
+    status = value.get("status")
+    if isinstance(status, str) and status in {
+        "queued",
+        "started",
+        "completed",
+        "failed",
+        "cancelled",
+    }:
+        result["status"] = status
+
     input_count = value.get("chat_stream_input_count")
     if (
         isinstance(input_count, int)

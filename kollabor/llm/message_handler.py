@@ -670,6 +670,8 @@ class MessageHandler:
             history_failures = 0
             last_user_message = None
             last_user_input_id = None
+            last_user_history_row_uuid = None
+            last_user_display_text = None
 
             for message_index, msg in enumerate(messages):
                 role = msg.get("role", "user")
@@ -694,6 +696,7 @@ class MessageHandler:
                         if trigger_llm and message_index == last_user_index:
                             message_metadata["chat_stream_trigger_llm"] = True
                             message_metadata["status"] = "queued"
+                            message_metadata["request_id"] = plugin_input_id
                         else:
                             message_metadata["chat_stream_outcome"] = "completed"
                     coord._add_conversation_message(
@@ -708,6 +711,7 @@ class MessageHandler:
                 if role == "user" and message_index == last_user_index:
                     last_user_message = content
                     last_user_input_id = plugin_input_id
+                    last_user_display_text = display_text
 
                 # Log message. A failed write leaves the chain on the previous
                 # record; the rest of the batch still reaches history.
@@ -716,9 +720,14 @@ class MessageHandler:
                     log_content = content_to_text(content)
                     try:
                         if role == "user":
-                            parent_uuid = await conv_logger.log_user_message(
-                                log_content, parent_uuid=parent_uuid
+                            logged_uuid = await conv_logger.log_user_message(
+                                log_content,
+                                parent_uuid=parent_uuid,
+                                message_metadata=message_metadata,
                             )
+                            parent_uuid = logged_uuid
+                            if role == "user" and message_index == last_user_index:
+                                last_user_history_row_uuid = logged_uuid
                         elif role == "assistant":
                             parent_uuid = await conv_logger.log_assistant_message(
                                 log_content,
@@ -765,7 +774,12 @@ class MessageHandler:
             if trigger_llm:
                 if last_user_message:
                     queued_message = (
-                        TaggedInput(last_user_message, (last_user_input_id,))
+                        TaggedInput(
+                            last_user_message,
+                            (last_user_input_id,),
+                            history_row_uuid=last_user_history_row_uuid,
+                            stream_display_content=last_user_display_text,
+                        )
                         if isinstance(last_user_input_id, str) and last_user_input_id
                         else last_user_message
                     )

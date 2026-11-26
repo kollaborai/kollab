@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -108,6 +109,33 @@ def _manager_config(conversations_dir):
             True if key == "kollabor.llm.save_conversations" else default
         ),
     )
+
+
+def _plugin_queue_processor(state: _State, logger, *, max_queue_size: int):
+    processor = _processor(state)
+    processor.processing_queue = asyncio.Queue(maxsize=max_queue_size)
+    processor.max_queue_size = max_queue_size
+    processor.task_config = SimpleNamespace(
+        queue=SimpleNamespace(
+            overflow_strategy="drop_newest",
+            log_queue_events=False,
+            block_timeout=0.1,
+        )
+    )
+    processor._queue_metrics = {
+        "total_enqueue_attempts": 0,
+        "total_enqueue_successes": 0,
+        "drop_oldest_count": 0,
+        "drop_newest_count": 0,
+        "block_count": 0,
+        "block_timeout_count": 0,
+    }
+    processor.conversation_logger = logger
+    processor.event_bus = state._event_bus
+    processor._native_stream_inputs = {}
+    processor._native_stream_messages = {}
+    processor._persisted_native_stream_ids = set()
+    return processor
 
 
 def _events(stream: ChatStreamService, initial: dict):
@@ -510,6 +538,121 @@ async def test_plugin_multipart_input_identity_and_text_survive_snapshot_reload(
             "state": "ended",
             "turn_id": None,
             "outcome": "completed",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_triggered_plugin_drop_persists_identity_and_failure_to_jsonl(tmp_path):
+    state = _State()
+    conversation_dir = tmp_path / "conversations"
+    logger = KollaborConversationLogger(conversation_dir)
+    await logger.log_conversation_start()
+    manager = ConversationManager(_manager_config(conversation_dir), logger)
+    manager.conversation_metadata["conversation_uid"] = "conversation-a"
+    coordinator = state._llm_service
+    coordinator.conversation_manager = manager
+    coordinator.conversation_logger = logger
+    coordinator._acp_owns_chat = lambda: False
+    coordinator._profile_selects_acp = lambda: (False, None)
+    coordinator._active_acp = lambda: None
+    coordinator._add_conversation_message = coordinator.add
+    coordinator.current_parent_uuid = None
+    coordinator.is_processing = False
+    coordinator.session_stats = {"messages": 0}
+    coordinator.api_service = SimpleNamespace(model="test-model")
+    coordinator.create_background_task = lambda *_args, **_kwargs: None
+    coordinator.message_display_service = SimpleNamespace(
+        show_loading=lambda *_args: None,
+        hide_loading=lambda: None,
+        message_coordinator=SimpleNamespace(display_message_sequence=lambda *_args: None),
+    )
+    processor = _plugin_queue_processor(state, logger, max_queue_size=0)
+    coordinator._queue_processor = processor
+    coordinator._enqueue_with_overflow_strategy = processor.enqueue
+    state._event_bus.services["llm_service"] = coordinator
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({})["events"][0]
+
+    result = await MessageHandler(coordinator).handle_add_message(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "authored plugin text"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "kind": "url",
+                                "url": "https://example.invalid/plugin.png",
+                            },
+                        },
+                    ],
+                }
+            ],
+            "options": {
+                "show_loading": False,
+                "display_messages": True,
+                "trigger_llm": True,
+            },
+        },
+        None,
+    )
+
+    events = _events(stream, initial)
+    input_rows = {row["id"]: row for row in _row_events(events, "input")}
+    assert result["success"] is False
+    assert len(input_rows) == 1
+    input_id, row = next(iter(input_rows.items()))
+    assert row["status"] == "failed"
+    assert [part.get("text") for part in row["parts"]] == ["authored plugin text"]
+    assert sequence_problems(events) == []
+
+    user_records = [
+        json.loads(line)
+        for line in logger.session_file.read_text().splitlines()
+        if json.loads(line).get("type") == "user"
+    ]
+    assert len(user_records) == 1
+    logged_metadata = user_records[0]["message"]["metadata"]
+    assert logged_metadata["input_id"] == input_id
+    assert logged_metadata["request_id"] == input_id
+    assert logged_metadata["chat_stream_display_text"] == "authored plugin text"
+    assert logged_metadata["chat_stream_outcome"] == "failed"
+
+    resumed_manager = ConversationManager(_manager_config(conversation_dir), logger)
+    assert resumed_manager.load_session(logger.session_id)
+    resumed_user = next(
+        message for message in resumed_manager.messages if message["role"] == "user"
+    )
+    assert resumed_user["metadata"]["input_id"] == input_id
+    assert resumed_user["metadata"]["chat_stream_display_text"] == "authored plugin text"
+    assert resumed_user["metadata"]["chat_stream_outcome"] == "failed"
+    resumed_state = SimpleNamespace(
+        _event_bus=state._event_bus,
+        _llm_service=SimpleNamespace(
+            conversation_history=None,
+            conversation_manager=resumed_manager,
+            conversation_logger=logger,
+        ),
+        get_conversation_uid=lambda: "conversation-a",
+    )
+    resumed = ChatStreamService(resumed_state).subscribe({})["events"][0]["data"]
+    resumed_rows = [item for item in resumed["rows"] if item["kind"] == "input"]
+    assert len(resumed_rows) == 1
+    assert resumed_rows[0]["id"] == input_id
+    assert resumed_rows[0]["status"] == "failed"
+    assert resumed_rows[0]["parts"] == [
+        {"type": "text", "text": "authored plugin text"}
+    ]
+    assert resumed["inputs"] == [
+        {
+            "id": input_id,
+            "state": "ended",
+            "turn_id": None,
+            "outcome": "failed",
         }
     ]
 
