@@ -210,11 +210,17 @@ async def test_tagged_voice_ignore_period_stays_silent_after_jsonl_resume(tmp_pa
     assert record["display_content"] == "."
     assert record["voice_turn_id"] == "voice-turn"
 
-    _state, _reader, history, result = await resume(tmp_path, writer.session_id)
+    state, _reader, history, result = await resume(tmp_path, writer.session_id)
     assert history[-1].content == "."
     assert history[-1].metadata["display_content"] == "."
     assert history[-1].metadata["voice_turn_id"] == "voice-turn"
     assert [message for message in result["messages"] if message["role"] == "assistant"] == []
+    rows = ChatStreamService(state).subscribe({})["events"][0]["data"]["rows"]
+    assert not any(
+        row["kind"] == "reply"
+        and any(part.get("type") == "text" and part.get("text") == "." for part in row["parts"])
+        for row in rows
+    )
 
 
 @pytest.mark.asyncio

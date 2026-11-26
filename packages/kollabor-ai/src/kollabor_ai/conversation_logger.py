@@ -1548,6 +1548,11 @@ class KollaborConversationLogger:
                     dropped[record["uuid"]] = record.get("parentUuid")
                 continue
             message["content"] = [*content, *calls]
+            if isinstance(record.get("display_content"), str):
+                # The display projection is independently persisted for XML
+                # replies. Keep it in step with a voice cut, including an
+                # intentionally empty value for an XML-only reply.
+                record["display_content"] = text or ""
         kept = []
         for record in records:
             if isinstance(record, dict):

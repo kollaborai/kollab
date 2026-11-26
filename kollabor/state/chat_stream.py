@@ -2209,6 +2209,19 @@ class ChatStreamService:
                 return message.get(name, default)
             return getattr(message, name, default)
 
+        from kollabor_ai.response_channels import turn_display_texts
+
+        voice_display = turn_display_texts(
+            [
+                {
+                    "role": field(message, "role"),
+                    "content": field(message, "content", ""),
+                    "metadata": field(message, "metadata", {}),
+                }
+                for message in messages
+            ]
+        )
+
         def normalize_tool_id(value: Any) -> str | None:
             if isinstance(value, int) and not isinstance(value, bool):
                 return str(value)
@@ -2417,9 +2430,14 @@ class ChatStreamService:
                         if source_role == "tool"
                         else "reply" if source_role == "assistant" else "note"
                     )
-                )
+            )
             raw_content = field(message, "content", "")
-            content = metadata.get("display_content", raw_content)
+            projected = voice_display[index]
+            content = (
+                projected
+                if source_role == "assistant" and projected is not None
+                else metadata.get("display_content", raw_content)
+            )
             image_store = getattr(llm_service, "_image_store", None)
             resolve_image = getattr(image_store, "resolve", None)
             conversation_logger = getattr(llm_service, "conversation_logger", None)
