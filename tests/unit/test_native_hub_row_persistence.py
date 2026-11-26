@@ -474,6 +474,132 @@ def test_compacted_hub_rows_stay_pruned_after_restart(tmp_path):
     ]
 
 
+def test_repeated_live_compaction_remaps_hub_row_into_current_history_coordinates():
+    row = _hub_row(
+        "retained-from-first-compaction",
+        kind="note",
+        created_at="2026-11-25T12:00:01Z",
+        history_index=19,
+    )
+    row["_history_row_revision"] = 1
+    manager = SimpleNamespace(messages=[], chat_stream_rows=[row])
+    first_summary = SimpleNamespace(
+        role="user",
+        content="first summary",
+        timestamp="2026-11-25T12:00:02Z",
+        metadata={
+            "context_compaction": True,
+            "compaction_round": 1,
+            "compaction_id": "compact-one",
+            "compaction_source_id": None,
+            "compaction_snapshot_count": 20,
+            "compaction_snapshot_row_revision": 1,
+            "compaction_retained_positions": [0, 19],
+            "compaction_retained_position_map": {"0": 0, "19": 2},
+            "compaction_output_count": 3,
+        },
+    )
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_history=[
+            SimpleNamespace(role="system", content="system", timestamp=None, metadata={}),
+            first_summary,
+            SimpleNamespace(role="assistant", content="retained tail", timestamp=None, metadata={}),
+        ],
+    )
+    state = SimpleNamespace(
+        _llm_service=llm,
+        get_conversation_uid=lambda: "repeated-live-compaction",
+        chat_stream_snapshot=lambda: {"rows": [], "turns": [], "inputs": []},
+    )
+    stream = ChatStreamService(state)
+
+    stream.replace_transcript()
+
+    assert manager.chat_stream_rows[0]["_history_index"] == 2
+    assert manager.chat_stream_rows[0]["_history_compaction_id"] == "compact-one"
+
+    second_summary = SimpleNamespace(
+        role="user",
+        content="second summary",
+        timestamp="2026-11-25T12:00:04Z",
+        metadata={
+            "context_compaction": True,
+            # Simulate a daemon restart: the plugin's in-memory round resets.
+            "compaction_round": 1,
+            "compaction_id": "compact-two",
+            "compaction_source_id": "compact-one",
+            "compaction_snapshot_count": 3,
+            "compaction_snapshot_row_revision": 1,
+            "compaction_retained_positions": [0],
+            "compaction_retained_position_map": {"0": 0},
+            "compaction_output_count": 2,
+        },
+    )
+    llm.conversation_history = [
+        SimpleNamespace(role="system", content="system", timestamp=None, metadata={}),
+        second_summary,
+    ]
+
+    replacement = stream.replace_transcript()
+
+    assert "retained-from-first-compaction" not in {
+        row["id"] for row in replacement["data"]["rows"]
+    }
+    assert manager.chat_stream_rows == []
+
+
+def test_repeated_compaction_rows_are_filtered_sequentially_after_restart(tmp_path):
+    conversations = tmp_path / "conversations"
+    config = SimpleNamespace(
+        _conversations_dir=conversations,
+        get=lambda _key, default=None: default,
+    )
+    logger = KollaborConversationLogger(conversations)
+    manager = ConversationManager(config, logger)
+    manager.conversation_metadata["conversation_uid"] = "repeated-restart-compaction"
+    old_row = _hub_row(
+        "stale-after-second-compaction",
+        kind="note",
+        created_at="2026-11-25T12:00:01Z",
+        history_index=19,
+    )
+    old_row["_history_row_revision"] = 1
+    assert manager.record_hub_chat_stream_row(old_row)
+    assert manager.save_session(logger.session_id)
+
+    common = (
+        '"messages_summarized":10,"messages_kept":3,"summary_length":120,'
+        '"pre_message_count":20,"post_message_count":3,'
+        '"compaction_snapshot_row_revision":1,'
+        '"compaction_retained_positions":[0,19],'
+        '"compaction_retained_position_map":{"0":0,"19":2},'
+        '"compaction_output_count":3'
+    )
+    with logger.session_file.open("a") as session:
+        session.write(
+            '{"type":"context_compaction","uuid":"compact-one",'
+            '"timestamp":"2026-11-25T12:00:02Z","compaction_round":1,'
+            '"compaction_id":"compact-one","compaction_source_id":null,'
+            '"compaction_snapshot_count":20,' + common + ',"content":"summary one"}\n'
+        )
+        session.write(
+            '{"type":"context_compaction","uuid":"compact-two",'
+            '"timestamp":"2026-11-25T12:00:04Z","compaction_round":1,'
+            '"compaction_id":"compact-two","compaction_source_id":"compact-one",'
+            '"compaction_snapshot_count":3,'
+            '"compaction_snapshot_row_revision":1,'
+            '"compaction_retained_positions":[0],'
+            '"compaction_retained_position_map":{"0":0},'
+            '"compaction_output_count":2,"content":"summary two"}\n'
+        )
+
+    resumed_manager = ConversationManager(config)
+    assert resumed_manager.load_session(logger.session_id)
+
+    assert resumed_manager.chat_stream_rows == []
+
+
 def test_compacted_hub_rows_filter_from_saved_base_without_stream_tail(tmp_path):
     conversations = tmp_path / "conversations"
     config = SimpleNamespace(

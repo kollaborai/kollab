@@ -122,6 +122,41 @@ def test_preservation_has_a_hard_cap_even_if_many_tasks_are_live() -> None:
     assert omitted_count == len(messages) - MAX_PRESERVED_HUB_TASK_MESSAGES
 
 
+def test_hard_cap_retry_records_only_positions_retained_after_task_drop() -> None:
+    plugin = _plugin()
+    plugin._get_live_task_ids = lambda: {"old-task", "new-task"}
+    plugin._get_hard_cap_threshold = lambda: 1
+    plugin._estimate_history_tokens = lambda messages: sum(
+        len(str(message.content)) for message in messages
+    )
+    system = Message(role="system", content="system")
+    oldest = _task_message("old-task", "oldest preserved task " + "x" * 40)
+    newest = _task_message("new-task", "newest preserved task " + "y" * 40)
+    recent = Message(role="assistant", content="recent")
+    source_history = [system, oldest, newest, recent]
+    original_retained_positions = plugin._compaction_retained_positions(
+        source_history, source_history
+    )
+
+    compacted = plugin._build_compacted_history(
+        system_msg=system,
+        summary_text="summary",
+        to_keep=[recent],
+        preserved_tasks=[oldest, newest],
+        pre_message_count=len(source_history),
+        compaction_snapshot_count=len(source_history),
+        compaction_retained_positions=original_retained_positions,
+    )
+
+    summary = next(
+        message for message in compacted if message.metadata.get("context_compaction")
+    )
+    assert "old-task" not in {
+        message.metadata.get("task_id") for message in compacted
+    }
+    assert 1 not in summary.metadata["compaction_retained_positions"]
+
+
 def test_oversized_live_task_is_bounded_and_left_for_summary() -> None:
     message = _task_message("large-task", "x" * 20_000)
 
