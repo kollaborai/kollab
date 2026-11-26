@@ -139,9 +139,33 @@ export function toThreadMessageLike(row: ChatRow, turns: Readonly<Record<string,
   };
 }
 
-/** The repository for the rows, one message per row, in row order. */
+/** Whether `next` continues `prev`'s run of tool calls: both tool rows of one turn, with no parts preview. */
+function continuesToolRun(prev: ChatRow, next: ChatRow): boolean {
+  return prev.kind === "tool" && next.kind === "tool" && prev.role === "assistant" && next.role === "assistant" &&
+    prev.turn_id !== null && prev.turn_id === next.turn_id &&
+    !prev.chat_stream_parts_preview && !next.chat_stream_parts_preview;
+}
+
+/**
+ * The repository for the rows, in row order. The daemon stores each tool call as its own row; a turn's
+ * consecutive tool rows become one message (under the first row's id) so the thread groups them as one
+ * set of steps. Every other row is its own message.
+ */
 export function toRepository(rows: readonly ChatRow[], turns: Readonly<Record<string, TurnInfo>> = {}): ExportedMessageRepository {
-  return ExportedMessageRepository.fromArray(rows.map((row) => toThreadMessageLike(row, turns)));
+  const merged: ChatRow[] = [];
+  for (const row of rows) {
+    const prev = merged.at(-1);
+    if (prev && continuesToolRun(prev, row)) {
+      merged[merged.length - 1] = {
+        ...prev,
+        parts: [...prev.parts, ...row.parts],
+        status: prev.status === "failed" ? prev.status : row.status,
+      };
+    } else {
+      merged.push(row);
+    }
+  }
+  return ExportedMessageRepository.fromArray(merged.map((row) => toThreadMessageLike(row, turns)));
 }
 
 /** The text of a composed message: its text parts joined in order, other parts ignored. */
