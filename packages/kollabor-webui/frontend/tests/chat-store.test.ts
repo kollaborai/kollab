@@ -509,6 +509,26 @@ describe("LiveChatStore", () => {
     expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
   });
 
+  it("turns an expired private goal owner into a local failed outcome", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-expired",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"e".repeat(32)}`,
+    } as InputRequest;
+    request.mockImplementation(async (path) => path.endsWith("/goal-replies/poll")
+      ? new Response(JSON.stringify({ status: "missing", message: "goal reply expired or is unavailable" }), { status: 200 })
+      : new Response(null, { status: 202 }));
+
+    await store.send(input);
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toMatchObject({
+      state: "complete",
+      success: false,
+      message: "goal reply expired or is unavailable",
+    }));
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(input.goal_reply_id);
+  });
+
   it("stops an active goal only through its private owner id", async () => {
     const { store, request, streams } = make();
     const input = {
