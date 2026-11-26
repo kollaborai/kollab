@@ -530,3 +530,49 @@ def test_input_cannot_drop_turn_binding_when_ending():
     )
     problems = sequence_problems(events)
     assert any("turn" in problem and "t1" in problem for problem in problems), problems
+
+
+def _turn_event(kind, turn, seq):
+    """The turn as its own turn.state event, or in a snapshot that holds only it."""
+    if kind == "snapshot":
+        return _event(
+            "snapshot", {**SNAPSHOT, "next_seq": seq + 1, "turns": [turn]}, seq=seq
+        )
+    return _event("turn.state", turn, seq=seq)
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("turn.state", "turn.state"),
+        ("turn.state", "snapshot"),
+        ("snapshot", "turn.state"),
+        ("snapshot", "snapshot"),
+    ],
+)
+def test_a_turn_cannot_resume_after_it_ended(first, second):
+    ended = {"turn_id": "t1", "state": "ended", "input_ids": []}
+    running = {"turn_id": "t1", "state": "running", "input_ids": []}
+    events = [
+        _event("snapshot", {**SNAPSHOT, "next_seq": 2}, seq=1),
+        _turn_event(first, ended, seq=2),
+        _turn_event(second, running, seq=3),
+    ]
+    problems = sequence_problems(events)
+    assert any(
+        "turn t1" in problem and "running" in problem for problem in problems
+    ), problems
+
+
+def test_a_turn_may_restate_its_state_without_going_back():
+    running = {"turn_id": "t1", "state": "running", "input_ids": []}
+    ended = {"turn_id": "t1", "state": "ended", "input_ids": []}
+    events = [
+        _event("snapshot", {**SNAPSHOT, "next_seq": 2}, seq=1),
+        _turn_event("turn.state", running, seq=2),
+        _turn_event("snapshot", running, seq=3),
+        _turn_event("turn.state", ended, seq=4),
+        _turn_event("snapshot", ended, seq=5),
+        _turn_event("turn.state", ended, seq=6),
+    ]
+    assert sequence_problems(events) == []
