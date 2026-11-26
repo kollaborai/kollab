@@ -263,8 +263,7 @@ def bounded_chat_stream_row(
                     if isinstance(marker, dict):
                         compact["chat_stream_content_preview"] = marker
                     elif (
-                        len(value.encode("utf-8", errors="replace"))
-                        > CHAT_STREAM_PART_INLINE_BYTES
+                        value != compact["text"]
                     ):
                         compact["chat_stream_content_preview"] = content_preview(
                             part_index, field, value

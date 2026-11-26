@@ -27,6 +27,7 @@ from kollabor_events.chat_stream_emit import emit_chat_event
 from .chat_stream_history import turn_history_key_index
 from .chat_stream_rows import (
     CHAT_STREAM_MAX_RESPONSE_BYTES,
+    CHAT_STREAM_MAX_ROW_BYTES,
     CHAT_STREAM_PART_PAGE_BYTES,
     CHAT_STREAM_PART_PAGE_SIZE,
     CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS,
@@ -843,12 +844,14 @@ class ChatStreamService:
         uid = self._conversation_uid()
         log = self._log(uid)
         with log._lock:
-            if event_type in {"row.upsert", "replace"}:
+            if event_type in {"row.upsert", "replace", "row.append"}:
                 with self._tool_output_lock:
                     if event_type == "row.upsert":
                         self._invalidate_tool_output_row(uid, data.get("id"))
-                    else:
+                    elif event_type == "replace":
                         self._clear_tool_output_cache(uid)
+                    else:
+                        self._invalidate_tool_output_row(uid, data.get("id"))
                     return self._record_event_locked(uid, event_type, data)
             return self._record_event_locked(uid, event_type, data)
 
@@ -876,7 +879,7 @@ class ChatStreamService:
                     part = {"type": "text", "text": ""}
                     parts[part_index] = part
                 part["text"] = str(part.get("text") or "") + data["text"]
-                if chat_stream_wire_bytes(data) > 256 * 1024:
+                if chat_stream_wire_bytes(row) > CHAT_STREAM_MAX_ROW_BYTES:
                     raw_row = copy.deepcopy(row)
                     publish_data = self._project_chat_stream_row(uid, raw_row)
                     event_type = "row.upsert"
