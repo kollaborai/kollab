@@ -760,6 +760,20 @@ class ChatStreamService:
             if not callable(send_native):
                 return {"found": False}
             result = await send_native(input_id)
+            if isinstance(result, dict) and result.get("found") is True:
+                state = result.get("state")
+                turn_id = result.get("turn_id")
+                if state in {"started", "joined"} and not (
+                    isinstance(turn_id, str) and turn_id
+                ):
+                    current = self._admission_inputs.get(uid, {}).get(input_id, {})
+                    current_turn_id = current.get("turn_id")
+                    if (
+                        current.get("state") == state
+                        and isinstance(current_turn_id, str)
+                        and current_turn_id
+                    ):
+                        return {**result, "turn_id": current_turn_id}
             return (
                 result
                 if isinstance(result, dict) and result.get("found") is True
