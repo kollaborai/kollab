@@ -323,5 +323,10 @@ async def test_dropped_unbound_input_does_not_end_running_native_turn():
     assert inputs["web-active"]["state"] == "started"
     assert inputs["voice-dropped"]["state"] == "ended"
     assert inputs["voice-dropped"].get("turn_id") is None
+    assert all(
+        row.get("turn_id") is None
+        for row in snapshot["rows"]
+        if row["kind"] == "marker"
+    )
     events = _events(stream, initial)
     assert sequence_problems(events, complete=False) == []
