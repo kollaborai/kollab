@@ -103,6 +103,32 @@ def test_rows_route_returns_an_empty_page(monkeypatch):
     ]
 
 
+def test_rows_route_materializes_queue_image_refs_for_authenticated_fetch(monkeypatch):
+    row = _row("web-image-1", 1)
+    row["parts"] = [
+        {
+            "type": "image",
+            "url": (
+                "kollab-queue-image:?conversation_uid=conversation-a"
+                "&request_id=web-image-1&ref=att-ref"
+            ),
+        }
+    ]
+    client, _session = _install_client(
+        monkeypatch,
+        bypass_auth=True,
+        responses={None: {"rows": [row], "older": None}},
+    )
+
+    response = client.get("/sessions/s1/rows")
+
+    assert response.status_code == 200
+    assert response.json()["rows"][0]["parts"][0]["url"] == (
+        "/sessions/s1/web-message-queue/items/web-image-1/attachments/att-ref"
+        "?conversation_uid=conversation-a"
+    )
+
+
 def test_rows_route_returns_409_for_a_stale_cursor_after_compaction(monkeypatch):
     client, _session = _install_client(
         monkeypatch,

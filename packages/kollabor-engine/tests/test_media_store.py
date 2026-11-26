@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from kollabor_engine import media_store
 from kollabor_engine.media_store import (
     MAX_DECODED_BYTES,
     REF_RE,
@@ -17,6 +18,8 @@ from kollabor_engine.media_store import (
     list_for,
     open_media,
     save,
+    save_managed_upload_media,
+    save_queue_handoff_media,
 )
 from kollabor_engine.routes.messages import _save_sent_media
 
@@ -32,6 +35,20 @@ def test_save_stores_and_returns_ref(tmp_path: Path) -> None:
     stored = list((tmp_path / "media" / "s1").glob("*.png"))
     assert len(stored) == 1
     assert stored[0].read_bytes() == bytes([1, 2, 3])
+
+
+def test_managed_upload_save_reuses_stable_ref_and_rejects_rebinding(tmp_path: Path) -> None:
+    media_id = "img_" + "a" * 32
+    first = save_managed_upload_media(tmp_path, "s1", media_id, PNG)
+    retried = save_managed_upload_media(tmp_path, "s1", media_id, PNG)
+
+    assert retried == first
+    index = json.loads((tmp_path / "media" / "s1" / "index.json").read_text())
+    assert len(index) == 1
+    assert index[0]["managed_upload_id"] == media_id
+    assert open_media(tmp_path, first.ref, session_id="s1") == (b"\x01\x02\x03", "image/png")
+    with pytest.raises(MediaError, match="managed upload id is already bound"):
+        save_managed_upload_media(tmp_path, "s1", media_id, JPEG)
 
 
 @pytest.mark.parametrize(
@@ -179,6 +196,50 @@ def test_queue_handoff_is_idempotent_but_cannot_rebind_request_to_other_media(
     ]
     assert [entry["ref"] for entry in request_entries] == [first.ref]
     assert not any(entry.get("queue_request_id") for entry in entries if entry["ref"] == second.ref)
+
+
+def test_queue_attachment_is_resolvable_only_after_its_history_row_is_bound(
+    tmp_path: Path,
+) -> None:
+    image = b"\x89PNG\r\n\x1a\nattachment bytes"
+    media_refs = save_queue_handoff_media(
+        tmp_path,
+        "s1",
+        request_id="queue-request-a",
+        attachments=(("att-source-a", "image/png", image),),
+    )
+    source_ref, media_ref = media_refs[0]
+
+    with pytest.raises(FileNotFoundError):
+        media_store.open_queue_handoff_media(
+            tmp_path,
+            "s1",
+            request_id="queue-request-a",
+            source_ref=source_ref,
+        )
+
+    bind_queue_handoff(
+        tmp_path,
+        "s1",
+        request_id="queue-request-a",
+        history_row_uuid="history-row-a",
+        source_media_refs=media_refs,
+    )
+
+    assert media_store.open_queue_handoff_media(
+        tmp_path,
+        "s1",
+        request_id="queue-request-a",
+        source_ref=source_ref,
+    ) == (image, "image/png")
+    with pytest.raises(FileNotFoundError):
+        media_store.open_queue_handoff_media(
+            tmp_path,
+            "s1",
+            request_id="queue-request-b",
+            source_ref=source_ref,
+        )
+    assert media_ref
 
 
 def test_non_ascii_digit_tokens_are_not_tokens_and_bind_nothing(tmp_path: Path) -> None:

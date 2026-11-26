@@ -89,9 +89,8 @@ export function MediaImageProvider({ api, children }: { api: EngineApi; children
 }
 
 /** The blob URL for a media ref: undefined while loading, null when it cannot be shown. */
-export function useMediaImage(ref: string | null | undefined): string | null | undefined {
+export function useAuthenticatedImage(path: string | null | undefined): string | null | undefined {
   const load = useContext(MediaImageContext);
-  const path = ref && load ? `/media/${encodeURIComponent(ref)}` : null;
   const [loaded, setLoaded] = useState<{ path: string; url: string | null } | null>(null);
   useEffect(() => {
     if (!path || !load) return;
@@ -103,9 +102,16 @@ export function useMediaImage(ref: string | null | undefined): string | null | u
       current = false;
     };
   }, [path, load]);
-  if (!ref) return null;
+  if (!path) return null;
   if (!loaded || loaded.path !== path) return undefined;
   return loaded.url;
+}
+
+/** The blob URL for a stored media ref, loaded with the active session token. */
+export function useMediaImage(ref: string | null | undefined): string | null | undefined {
+  return useAuthenticatedImage(
+    ref ? `/media/${encodeURIComponent(ref)}` : null,
+  );
 }
 
 /** One sent image, small: the thumbnail in a user bubble or a gallery grid. */

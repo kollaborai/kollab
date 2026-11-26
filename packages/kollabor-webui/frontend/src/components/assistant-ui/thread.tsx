@@ -27,7 +27,12 @@ import {
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { resolveMediaSegment, splitMediaSegments } from "@/components/media/media-tokens";
-import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
+import {
+  MediaThumb,
+  useAuthenticatedImage,
+  useMediaViewer,
+  useSessionMedia,
+} from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -74,6 +79,7 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
   type PendingAttachment,
+  type ImageMessagePartProps,
   type ToolCallMessagePartComponent,
   useAui,
   useAuiState,
@@ -431,13 +437,27 @@ const ThreadMessage: FC = () => {
   return <AssistantMessageComponent />;
 };
 
+const AuthenticatedMessageImage: FC<ImageMessagePartProps> = ({ image }) => {
+  const protectedPath = image.startsWith("/") ? image : null;
+  const authenticated = useAuthenticatedImage(protectedPath);
+  const src = protectedPath ? authenticated : image;
+  return (
+    <img
+      src={typeof src === "string" ? src : undefined}
+      alt="Message image"
+      className="my-1 max-h-80 max-w-full rounded-md object-contain"
+      draggable={false}
+    />
+  );
+};
+
 export const SystemMessage: FC = () => (
   <MessagePrimitive.Root
     data-slot="aui_system-message-root"
     data-role="system"
     className="fade-in slide-in-from-bottom-1 animate-in text-muted-foreground px-2 text-center text-sm duration-150"
   >
-    <MessagePrimitive.Parts />
+    <MessagePrimitive.Parts components={{ Image: AuthenticatedMessageImage }} />
   </MessagePrimitive.Root>
 );
 
@@ -1424,6 +1444,8 @@ const AssistantMessage: FC = () => {
                     {part.toolUI ?? <ToolFallbackComponent {...part} />}
                   </div>
                 );
+              case "image":
+                return <AuthenticatedMessageImage {...part} />;
               case "data":
                 return part.dataRendererUI;
               case "indicator":
@@ -1622,7 +1644,9 @@ export const UserMessage: FC = () => {
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 whitespace-pre-wrap wrap-break-word empty:hidden pointer-fine:text-sm">
-          <MessagePrimitive.Parts components={{ Text: UserText }} />
+          <MessagePrimitive.Parts
+            components={{ Text: UserText, Image: AuthenticatedMessageImage }}
+          />
         </div>
         {failed ? (
           <p data-slot="aui_user-send-failure" role="alert" className="text-destructive mt-1 text-xs">

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from typing import Any
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -153,6 +154,8 @@ async def _read_events(
         raise HTTPException(
             status_code=502, detail="The local daemon returned an invalid chat stream."
         )
+    for event in events:
+        _materialize_event_images(event, session_id)
     return events
 
 
@@ -178,6 +181,59 @@ def _valid_row(value: Any) -> bool:
         and all(isinstance(part, dict) for part in value["parts"])
         and isinstance(value.get("created_at"), str)
     )
+
+
+def _resolved_image_url(url: Any, session_id: str) -> str | None:
+    if not isinstance(url, str) or not url.startswith("kollab-queue-image:"):
+        return url if isinstance(url, str) else None
+    try:
+        query = parse_qs(
+            urlsplit(url).query,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except ValueError:
+        return None
+    fields = ("conversation_uid", "request_id", "ref")
+    values = [query.get(field) for field in fields]
+    if any(
+        not isinstance(value, list) or len(value) != 1 or not value[0]
+        for value in values
+    ):
+        return None
+    conversation_uid, request_id, ref = (value[0] for value in values)
+    path = (
+        f"/sessions/{quote(session_id, safe='')}/web-message-queue/items/"
+        f"{quote(request_id, safe='')}/attachments/{quote(ref, safe='')}"
+    )
+    return f"{path}?{urlencode({'conversation_uid': conversation_uid})}"
+
+
+def _materialize_row_images(rows: Any, session_id: str) -> None:
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("parts"), list):
+            continue
+        parts = []
+        for part in row["parts"]:
+            if not isinstance(part, dict) or part.get("type") != "image":
+                parts.append(part)
+                continue
+            resolved = _resolved_image_url(part.get("url"), session_id)
+            if resolved is not None:
+                parts.append({**part, "url": resolved})
+        row["parts"] = parts
+
+
+def _materialize_event_images(event: dict[str, Any], session_id: str) -> None:
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return
+    if event.get("type") in {"snapshot", "replace"}:
+        _materialize_row_images(data.get("rows"), session_id)
+    elif event.get("type") == "row.upsert":
+        _materialize_row_images([data], session_id)
 
 
 @router.get("/{session_id}/rows")
@@ -220,6 +276,7 @@ async def older_rows(
         raise HTTPException(
             status_code=502, detail="The local daemon returned invalid chat rows."
         )
+    _materialize_row_images(rows, session_id)
     return {"rows": rows, "older": older}
 
 

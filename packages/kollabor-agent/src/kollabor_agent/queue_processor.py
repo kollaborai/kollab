@@ -2202,12 +2202,22 @@ class QueueProcessor:
                     and input_count > 0
                 ):
                     updates["chat_stream_input_count"] = input_count
-                parts = _native_chat_stream_parts(record.get("content"))
-                # Persist remote HTTPS images, which remain addressable after
-                # restart. Managed uploads stay in the bounded image store and
-                # are projected live from the original per-input content.
-                if parts:
-                    updates["chat_stream_parts"] = parts
+                content = record.get("content")
+                has_managed_upload = isinstance(content, list) and any(
+                    isinstance(part, dict)
+                    and part.get("type") == "image"
+                    and isinstance(part.get("source"), dict)
+                    and part["source"].get("kind") == "managed_upload"
+                    for part in content
+                )
+                # Native admission writes durable managed media refs before
+                # queueing. Keep those exact refs when the terminal outcome is
+                # persisted; regenerating this metadata from process-local IDs
+                # would erase the image from history after the turn.
+                if not has_managed_upload:
+                    parts = _native_chat_stream_parts(content)
+                    if parts:
+                        updates["chat_stream_parts"] = parts
                 try:
                     persisted = await update_metadata(
                         row_uuid,

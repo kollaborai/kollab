@@ -47,6 +47,7 @@ from kollabor_ai.message_content import (
     EphemeralImageStore,
     MessageContent,
     MessageContentError,
+    chat_stream_parts,
     combine_message_contents,
     contains_image_content,
     content_to_text,
@@ -1600,6 +1601,34 @@ class LLMService:
         """Resolve one live pasted image for a provider request."""
         store = getattr(self, "_image_store", None)
         return store.resolve(media_id) if store is not None else None
+
+    def _persist_managed_upload_for_chat_stream(self, media_id: str) -> str | None:
+        """Make an accepted native image available through the authenticated media route."""
+        data_url = self.resolve_media(media_id)
+        conversation_logger = getattr(self, "conversation_logger", None)
+        conversations_dir = getattr(conversation_logger, "conversations_dir", None)
+        session_id = getattr(conversation_logger, "session_id", None)
+        if (
+            not isinstance(data_url, str)
+            or conversations_dir is None
+            or not isinstance(session_id, str)
+            or not session_id
+        ):
+            return None
+        try:
+            from kollabor_engine.media_store import save_managed_upload_media
+
+            record = save_managed_upload_media(
+                conversations_dir, session_id, media_id, data_url
+            )
+        except Exception:
+            logger.warning(
+                "Could not persist managed upload %s for chat display",
+                media_id,
+                exc_info=True,
+            )
+            return None
+        return f"/media/{record.ref}"
 
     def supports_image_input(self) -> bool:
         """Return whether the active provider model accepts image input."""
@@ -3297,13 +3326,23 @@ class LLMService:
         # parent captured at admission.
         admitted_parent_uuid = admission_parent_uuid
         history_row_uuid: str | None = None
+        input_metadata: dict[str, Any] = {}
+        if request_id:
+            input_metadata["request_id"] = request_id
+        if contains_image_content(normalized_message):
+            display_parts = chat_stream_parts(
+                normalized_message,
+                persist_managed_upload=self._persist_managed_upload_for_chat_stream,
+            )
+            if any(part.get("type") == "image" for part in display_parts):
+                input_metadata["chat_stream_parts"] = display_parts
         try:
             user_uuid = await self.conversation_logger.log_user_message(
                 display_text,
                 parent_uuid=admission_parent_uuid,
                 # The saved row names the sender's id, so it pairs with the input
                 # it admits and with the events that answer that input (#1371).
-                message_metadata={"request_id": request_id} if request_id else None,
+                message_metadata=input_metadata or None,
             )
         except Exception as exc:
             logger.error("User message not written to history: %s", exc)

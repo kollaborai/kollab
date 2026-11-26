@@ -555,7 +555,12 @@ class WebMessageQueueRuntime:
                     existing.attachment_refs
                 ) != len(attachments):
                     return {"accepted": False, "reason": "input_id_conflict"}
-                return {"accepted": True, "id": input_id, "state": "queued"}
+                return {
+                    "accepted": True,
+                    "id": input_id,
+                    "state": "queued",
+                    "attachment_refs": list(existing.attachment_refs),
+                }
 
             attachment_refs: list[str] = []
             if attachments:
@@ -621,6 +626,7 @@ class WebMessageQueueRuntime:
             "id": input_id,
             "state": "queued",
             "batch_id": receipt.batch_id,
+            "attachment_refs": attachment_refs,
         }
 
     async def cancel_queued_input(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1018,12 +1024,11 @@ def register_web_message_queue_runtime(
                     staged = await attachment_scope.open_for_admission(
                         item.request_id, ref
                     )
-                    encoded = base64.b64encode(staged.data).decode("ascii")
                     item_attachments.append(
                         {
                             "name": staged.filename,
                             "content_type": staged.mime,
-                            "data_url": f"data:{staged.mime};base64,{encoded}",
+                            "source_ref": ref,
                         }
                     )
             stream_inputs.append(

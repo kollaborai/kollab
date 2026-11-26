@@ -13,6 +13,7 @@ from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote, urlencode
 
 from kollabor_events.chat_stream import (
     EVENT_TYPES,
@@ -352,6 +353,21 @@ class ChatStreamService:
         turn_id = result.get("turn_id")
         if state in {"started", "joined"} and not isinstance(turn_id, str):
             return {"error": "daemon omitted the input turn"}
+        attachment_refs = result.get("attachment_refs", [])
+        if (
+            not isinstance(attachment_refs, list)
+            or len(attachment_refs) != len(attachments)
+            or any(not isinstance(ref, str) or not ref for ref in attachment_refs)
+        ):
+            return {"error": "daemon omitted input image references"}
+        display_attachments = [
+            {
+                "name": attachment["name"],
+                "content_type": attachment["content_type"],
+                "source_ref": ref,
+            }
+            for attachment, ref in zip(attachments, attachment_refs)
+        ]
 
         self._input_scopes[(uid, input_id)] = scope
         self._input_text[(uid, input_id)] = text
@@ -377,7 +393,9 @@ class ChatStreamService:
             "role": "user",
             "turn_id": turn_id,
             "status": state,
-            "parts": self._input_parts(text, attachments),
+            "parts": self._input_parts(
+                text, display_attachments, conversation_uid=uid, input_id=input_id
+            ),
             "created_at": self._timestamp(),
         }
         self._upsert(uid, row)
@@ -629,7 +647,12 @@ class ChatStreamService:
                             "role": "user",
                             "turn_id": (prior or {}).get("turn_id"),
                             "status": status,
-                            "parts": self._input_parts(text, attachments),
+                            "parts": self._input_parts(
+                                text,
+                                attachments,
+                                conversation_uid=uid,
+                                input_id=input_id,
+                            ),
                             "created_at": self._timestamp(),
                         },
                     )
@@ -2355,14 +2378,52 @@ class ChatStreamService:
             content = field(message, "content", "")
             image_store = getattr(llm_service, "_image_store", None)
             resolve_image = getattr(image_store, "resolve", None)
+            conversation_logger = getattr(llm_service, "conversation_logger", None)
+            persist_managed_image = None
+            conversations_dir = getattr(conversation_logger, "conversations_dir", None)
+            session_id = getattr(conversation_logger, "session_id", None)
+            if (
+                callable(resolve_image)
+                and conversations_dir is not None
+                and isinstance(session_id, str)
+                and session_id
+            ):
+                def persist_managed_image(media_id: str) -> str | None:
+                    data_url = resolve_image(media_id)
+                    if not isinstance(data_url, str):
+                        return None
+                    try:
+                        from kollabor_engine.media_store import save_managed_upload_media
+
+                        record = save_managed_upload_media(
+                            conversations_dir, session_id, media_id, data_url
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Could not persist managed chat image %s",
+                            media_id,
+                            exc_info=True,
+                        )
+                        return None
+                    return f"/media/{quote(record.ref, safe='')}"
+            handoff_request_id = (
+                handoff.get("request_id") if isinstance(handoff, dict) else None
+            )
+            handoff_image_urls = self._handoff_image_urls(handoff)
             hub_note = self._hub_note_part(metadata.get("hub_note"))
+            saved_parts = metadata.get("chat_stream_parts")
             parts = (
                 [{"type": "text", "text": "Earlier messages compacted"}]
                 if is_compaction
                 else (
                     [hub_note]
                     if hub_note is not None
-                    else self._transcript_parts(content, resolve_image)
+                    else self._transcript_parts(
+                        saved_parts if isinstance(saved_parts, list) else content,
+                        None if isinstance(saved_parts, list) else resolve_image,
+                        handoff_image_urls,
+                        persist_managed_image,
+                    )
                 )
             )
             turn_id = self._event_turn_id(metadata)
@@ -2533,12 +2594,22 @@ class ChatStreamService:
                     )
                 )
                 for input_row_id in input_row_ids:
+                    input_image_urls = (
+                        handoff_image_urls
+                        if input_row_id == handoff_request_id
+                        else []
+                    )
                     saved_parts = metadata.get("chat_stream_parts")
                     if isinstance(saved_parts, list):
-                        input_parts = copy.deepcopy(saved_parts)
+                        input_parts = self._transcript_parts(
+                            saved_parts, None, input_image_urls, persist_managed_image
+                        )
                     elif input_row_id in content_by_id:
                         input_parts = self._transcript_parts(
-                            content_by_id[input_row_id], resolve_image
+                            content_by_id[input_row_id],
+                            resolve_image,
+                            input_image_urls,
+                            persist_managed_image,
                         )
                     elif (
                         hub_note is not None
@@ -2550,7 +2621,10 @@ class ChatStreamService:
                         # map, retain its authenticated text but do not guess
                         # which input owned an image from the combined turn.
                         input_parts = self._transcript_parts(
-                            original_text, resolve_image
+                            original_text,
+                            resolve_image,
+                            input_image_urls,
+                            persist_managed_image,
                         )
                         if single_input_proven:
                             input_parts.extend(
@@ -2708,14 +2782,23 @@ class ChatStreamService:
     def _transcript_parts(
         content: Any,
         resolve_image: Callable[[str], str | None] | None,
+        durable_image_urls: list[str] | None = None,
+        persist_managed_image: Callable[[str], str | None] | None = None,
     ) -> list[dict[str, Any]]:
         if isinstance(content, str):
-            return [{"type": "text", "text": content}] if content else []
+            parts = [{"type": "text", "text": content}] if content else []
+            parts.extend(
+                {"type": "image", "url": url}
+                for url in durable_image_urls or []
+                if isinstance(url, str) and url and not url.lower().startswith("data:")
+            )
+            return parts
         if not isinstance(content, list):
             return [{"type": "text", "text": str(content)}]
 
         parts: list[dict[str, Any]] = []
         supported = {"text", "reasoning", "tool-call", "prompt"}
+        durable_urls = iter(durable_image_urls or [])
         for raw_part in content:
             if not isinstance(raw_part, dict):
                 parts.append({"type": "text", "text": str(raw_part)})
@@ -2731,18 +2814,24 @@ class ChatStreamService:
                     if source.get("kind") == "url":
                         url = source.get("url")
                     elif source.get("kind") == "managed_upload":
-                        media_id = source.get("media_id")
-                        if isinstance(media_id, str) and callable(resolve_image):
-                            url = resolve_image(media_id)
+                        try:
+                            url = next(durable_urls)
+                        except StopIteration:
+                            media_id = source.get("media_id")
+                            if isinstance(media_id, str):
+                                if callable(persist_managed_image):
+                                    url = persist_managed_image(media_id)
+                                if url is None and callable(resolve_image):
+                                    url = resolve_image(media_id)
                 if not isinstance(url, str):
                     url = raw_part.get("image")
-                if isinstance(url, str) and url:
+                if isinstance(url, str) and url and not url.lower().startswith("data:"):
                     parts.append({"type": "image", "url": url})
                 continue
             if part_type == "image_url":
                 image_url = raw_part.get("image_url")
                 url = image_url.get("url") if isinstance(image_url, dict) else image_url
-                if isinstance(url, str) and url:
+                if isinstance(url, str) and url and not url.lower().startswith("data:"):
                     parts.append({"type": "image", "url": url})
                 continue
             if part_type in {"tool_use", "tool_call"}:
@@ -2762,6 +2851,23 @@ class ChatStreamService:
             if isinstance(text, str):
                 parts.append({"type": "text", "text": text})
         return parts
+
+    @staticmethod
+    def _handoff_image_urls(handoff: Any) -> list[str]:
+        if not isinstance(handoff, dict):
+            return []
+        values = handoff.get("media_refs")
+        if not isinstance(values, list):
+            return []
+        return [
+            f"/media/{quote(entry['ref'], safe='')}"
+            for entry in values
+            if isinstance(entry, dict)
+            and isinstance(entry.get("source_ref"), str)
+            and entry["source_ref"]
+            and isinstance(entry.get("ref"), str)
+            and entry["ref"]
+        ]
 
     def _set_input_state(
         self,
@@ -2892,12 +2998,20 @@ class ChatStreamService:
         for attachment in attachments:
             if not isinstance(attachment, dict) or any(
                 not isinstance(attachment.get(key), str) or not attachment[key]
-                for key in ("name", "content_type", "data_url")
+                for key in ("name", "content_type")
             ):
                 raise ValueError("invalid input attachment")
-            copied.append(
-                {key: attachment[key] for key in ("name", "content_type", "data_url")}
-            )
+            data_url = attachment.get("data_url")
+            source_ref = attachment.get("source_ref")
+            if (isinstance(data_url, str) and data_url) == (
+                isinstance(source_ref, str) and bool(source_ref)
+            ):
+                raise ValueError("invalid input attachment")
+            copied.append({"name": attachment["name"], "content_type": attachment["content_type"]})
+            if isinstance(data_url, str) and data_url:
+                copied[-1]["data_url"] = data_url
+            else:
+                copied[-1]["source_ref"] = source_ref
         if not text.strip() and not copied:
             raise ValueError("input text or an attachment is required")
         from kollabor.state.goal_replies import GOAL_REPLY_PATTERN, is_goal_input
@@ -2916,12 +3030,31 @@ class ChatStreamService:
     def _input_parts(
         text: str,
         attachments: list[dict[str, Any]] | None = None,
+        *,
+        conversation_uid: str | None = None,
+        input_id: str | None = None,
     ) -> list[dict[str, str]]:
         parts = [{"type": "text", "text": text}] if text else []
         for attachment in attachments or []:
-            data_url = attachment.get("data_url")
-            if isinstance(data_url, str) and data_url:
-                parts.append({"type": "image", "url": data_url})
+            source_ref = attachment.get("source_ref")
+            if (
+                isinstance(source_ref, str)
+                and source_ref
+                and isinstance(conversation_uid, str)
+                and conversation_uid
+                and isinstance(input_id, str)
+                and input_id
+            ):
+                image_ref = urlencode(
+                    {
+                        "conversation_uid": conversation_uid,
+                        "request_id": input_id,
+                        "ref": source_ref,
+                    }
+                )
+                parts.append(
+                    {"type": "image", "url": f"kollab-queue-image:?{image_ref}"}
+                )
         return parts
 
     @staticmethod
