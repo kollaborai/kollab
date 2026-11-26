@@ -802,6 +802,47 @@ async def test_second_plugin_send_now_reports_queued_while_reservation_is_held(t
 
 
 @pytest.mark.asyncio
+async def test_plugin_send_now_recovers_turn_id_when_input_starts_during_gate(tmp_path):
+    state = _State()
+    _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    coordinator.create_background_task = lambda *_args, **_kwargs: None
+    input_id = await _add_triggered_plugin_input(
+        coordinator, "send this plugin input now"
+    )
+    native_send = coordinator.send_now_native_plugin_input
+    turn_id = "native-turn-started-during-send-now"
+
+    async def start_while_send_waits(request_id):
+        queued = processor.processing_queue.get_nowait()
+        processor.processing_queue.task_done()
+        assert queued.request_ids == (input_id,)
+        processor.active_request_ids = (input_id,)
+        processor.is_processing = True
+        publish_semantic(
+            processor.renderer,
+            "turn_start",
+            request_id=input_id,
+            request_ids=[input_id],
+            turn_id=turn_id,
+            input_source="native",
+        )
+        return await native_send(request_id)
+
+    coordinator.send_now_native_plugin_input = start_while_send_waits
+
+    result = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": input_id})
+
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": "started",
+        "turn_id": turn_id,
+    }
+
+
+@pytest.mark.asyncio
 async def test_plugin_send_now_isolates_selected_input_from_queue_siblings(tmp_path):
     state = _State()
     _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
