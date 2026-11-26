@@ -13,7 +13,11 @@ import pytest
 from kollabor.llm.agent_hud import AgentHudEntry, merge_agent_hud_with_user_message
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
-from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
+from kollabor.state.chat_stream import (
+    _NATIVE_PLUGIN_INPUT_HISTORY_LIMIT,
+    ChatStreamService,
+    register_chat_stream_handlers,
+)
 from kollabor_agent.queue_processor import (
     QueuedInput,
     QueueProcessor,
@@ -943,6 +947,41 @@ async def test_plugin_send_now_retry_after_end_keeps_native_identity(tmp_path):
         "state": "ended",
         "turn_id": turn_id,
     }
+
+
+def test_native_plugin_lifecycle_history_is_bounded_and_conversation_scoped(tmp_path):
+    state = _State()
+    _logger, _coordinator, _processor, stream, _rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+
+    for index in range(_NATIVE_PLUGIN_INPUT_HISTORY_LIMIT + 1):
+        uid = f"conversation-{index}"
+        input_id = f"plugin-{index}"
+        key = (uid, input_id)
+        stream._native_plugin_inputs.add(key)
+        stream._set_input_state(
+            uid, input_id, "ended", turn_id=f"turn-{index}", outcome="completed"
+        )
+
+    assert (
+        len(stream._native_plugin_input_history)
+        == _NATIVE_PLUGIN_INPUT_HISTORY_LIMIT
+    )
+    assert ("conversation-0", "plugin-0") not in stream._native_plugin_input_history
+    assert (
+        f"conversation-{_NATIVE_PLUGIN_INPUT_HISTORY_LIMIT}",
+        f"plugin-{_NATIVE_PLUGIN_INPUT_HISTORY_LIMIT}",
+    ) in stream._native_plugin_input_history
+
+    for uid in ("conversation-a", "conversation-b"):
+        stream._native_plugin_inputs.add((uid, "same-id"))
+        stream._set_input_state(
+            uid, "same-id", "ended", turn_id=f"turn-{uid}", outcome="completed"
+        )
+
+    assert ("conversation-a", "same-id") in stream._native_plugin_input_history
+    assert ("conversation-b", "same-id") in stream._native_plugin_input_history
 
 
 @pytest.mark.asyncio

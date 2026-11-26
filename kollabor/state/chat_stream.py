@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -32,6 +32,7 @@ from .chat_stream_rows import (
 )
 
 logger = logging.getLogger(__name__)
+_NATIVE_PLUGIN_INPUT_HISTORY_LIMIT = 256
 
 
 def _parse_chat_timestamp(value: Any) -> datetime | None:
@@ -264,6 +265,11 @@ class ChatStreamService:
         self._input_attachments: dict[tuple[str, str], list[dict[str, str]]] = {}
         self._input_goal_reply_ids: dict[tuple[str, str], str | None] = {}
         self._native_plugin_inputs: set[tuple[str, str]] = set()
+        # Keep a bounded, conversation-keyed marker for native inputs after
+        # dispatch so send-now retries can consult their recorded lifecycle.
+        self._native_plugin_input_history: OrderedDict[
+            tuple[str, str], None
+        ] = OrderedDict()
         self._goal_reply_owners: dict[
             str, tuple[str, str, tuple[str, str, str], float]
         ] = {}
@@ -739,8 +745,12 @@ class ChatStreamService:
         if not isinstance(input_id, str) or not input_id:
             return {"found": False}
         uid = self._conversation_uid()
-        if (uid, input_id) in self._native_plugin_inputs:
-            current = self._inputs.get(uid, {}).get(input_id, {})
+        native_key = (uid, input_id)
+        if (
+            native_key in self._native_plugin_inputs
+            or native_key in self._native_plugin_input_history
+        ):
+            current = self._admission_inputs.get(uid, {}).get(input_id, {})
             state = current.get("state")
             if state != "queued":
                 result = {
@@ -760,20 +770,19 @@ class ChatStreamService:
             if not callable(send_native):
                 return {"found": False}
             result = await send_native(input_id)
-            if isinstance(result, dict) and result.get("found") is True:
-                state = result.get("state")
-                turn_id = result.get("turn_id")
-                if state in {"started", "joined"} and not (
-                    isinstance(turn_id, str) and turn_id
+            if not isinstance(result, dict) or result.get("accepted") is not True:
+                current = self._admission_inputs.get(uid, {}).get(input_id, {})
+                current_state = current.get("state")
+                current_turn_id = current.get("turn_id")
+                if current_state in {"started", "joined", "ended"} and (
+                    isinstance(current_turn_id, str) and current_turn_id
                 ):
-                    current = self._admission_inputs.get(uid, {}).get(input_id, {})
-                    current_turn_id = current.get("turn_id")
-                    if (
-                        current.get("state") == state
-                        and isinstance(current_turn_id, str)
-                        and current_turn_id
-                    ):
-                        return {**result, "turn_id": current_turn_id}
+                    return {
+                        "found": True,
+                        "accepted": False,
+                        "state": current_state,
+                        "turn_id": current_turn_id,
+                    }
             return (
                 result
                 if isinstance(result, dict) and result.get("found") is True
@@ -1098,7 +1107,9 @@ class ChatStreamService:
         state = "queued" if queued else "ended"
         outcome = None if queued else "completed"
         if queued:
-            self._native_plugin_inputs.add((uid, input_id))
+            key = (uid, input_id)
+            self._native_plugin_input_history.pop(key, None)
+            self._native_plugin_inputs.add(key)
         row = self._rows.setdefault(uid, {}).get(input_id)
         if row is not None:
             parts = self._input_parts(display_text)
@@ -3360,8 +3371,26 @@ class ChatStreamService:
             data["outcome"] = outcome
         self._inputs.setdefault(uid, {})[input_id] = data
         self._admission_inputs.setdefault(uid, {})[input_id] = copy.deepcopy(data)
-        if state == "ended":
-            self._native_plugin_inputs.discard((uid, input_id))
+        key = (uid, input_id)
+        if state == "queued":
+            if (
+                key in self._native_plugin_inputs
+                or key in self._native_plugin_input_history
+            ):
+                self._native_plugin_input_history.pop(key, None)
+                self._native_plugin_inputs.add(key)
+        elif state in {"started", "joined", "ended"} and (
+            key in self._native_plugin_inputs
+            or key in self._native_plugin_input_history
+        ):
+            self._native_plugin_inputs.discard(key)
+            self._native_plugin_input_history[key] = None
+            self._native_plugin_input_history.move_to_end(key)
+            while (
+                len(self._native_plugin_input_history)
+                > _NATIVE_PLUGIN_INPUT_HISTORY_LIMIT
+            ):
+                self._native_plugin_input_history.popitem(last=False)
         self._log(uid).publish("input.state", data)
 
     def _set_turn_state(
