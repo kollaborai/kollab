@@ -1605,7 +1605,8 @@ export const UserMessage: FC = () => {
   const id = useAuiState((s) => s.message.id);
   const failed = useAuiState((s) => s.message.metadata.custom.chatRowStatus === "failed");
   const queued = useContext(QueuedIdsContext).has(id);
-  const goalReply = useChatStore().goalReplies[id];
+  const chat = useChatStore();
+  const goalReply = chat.goalReplies[id];
   // A message that was queued keeps the note's row, empty, once it is sent:
   // the rows under it stay where they are.
   const [wasQueued, setWasQueued] = useState(queued);
@@ -1632,6 +1633,19 @@ export const UserMessage: FC = () => {
           <p data-slot="kollab_goal-reply" role="status" className="mt-1 text-xs text-muted-foreground">
             Goal is running…
           </p>
+        ) : goalReply?.state === "uncertain" ? (
+          <div data-slot="kollab_goal-reply" role="status" className="mt-1 text-xs text-muted-foreground">
+            <p>Goal admission could not be confirmed.</p>
+            <Button
+              type="button"
+              variant="link"
+              className="h-auto p-0 text-xs"
+              aria-label="Check status"
+              onClick={() => chat.checkGoalReply(id)}
+            >
+              Check status
+            </Button>
+          </div>
         ) : goalReply?.state === "complete" ? (
           <div
             data-slot="kollab_goal-reply"

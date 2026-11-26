@@ -565,12 +565,16 @@ describe("LiveChatStore", () => {
   });
 
   it("turns an expired private goal owner into a local failed outcome", async () => {
-    const { store, request } = make();
+    const { store, request, streams } = make();
     const input = {
       id: "web-goal-expired",
       text: "/goal inspect the build",
       goal_reply_id: `goal-${"e".repeat(32)}`,
     } as InputRequest;
+    const stream = await startOpen(store, streams);
+    stream.emit(snapshot(2, [row(input.id, input.text, "input", "user")], {
+      inputs: [{ id: input.id, state: "ended", turn_id: "goal-turn", outcome: "completed" }],
+    }));
     request.mockImplementation(async (path) => path.endsWith("/goal-replies/poll")
       ? new Response(JSON.stringify({ status: "missing", message: "goal reply expired or is unavailable" }), { status: 200 })
       : new Response(null, { status: 202 }));

@@ -25,6 +25,7 @@ export type OlderStatus = ChatStore["olderStatus"];
 /** Private goal output held only by this client's chat store, keyed by its input row id. */
 export type LocalGoalReply =
   | { readonly state: "pending" }
+  | { readonly state: "uncertain" }
   | { readonly state: "complete"; readonly success: boolean; readonly message: string }
   | { readonly state: "cancelled" };
 
@@ -179,6 +180,8 @@ export interface LiveStore extends ChatStore {
   start(): void;
   retry(): void;
   dispose(): void;
+  /** Resumes a private status poll without resubmitting the goal command. */
+  checkGoalReply(inputId: string): void;
 }
 
 /** The client prefix for the input ids the web UI picks: newInputId(WEB_INPUT_PREFIX). */
@@ -186,6 +189,8 @@ export const WEB_INPUT_PREFIX = "web";
 
 const HEALTHY_CONNECTION_MS = 30_000;
 const MAX_BACKOFF_MS = 10_000;
+const MAX_UNCONFIRMED_GOAL_POLLS = 12;
+const GOAL_REPLY_POLL_INTERVAL_MS = 500;
 // Rows per older page: the same size the daemon's history route defaults to.
 const HISTORY_PAGE_LIMIT = 50;
 
@@ -225,6 +230,8 @@ export class LiveChatStore implements LiveStore {
   // An ambiguous admission is still unresolved when its mailbox has no reply yet. This stays private and
   // lets a manual retry resume polling without treating an early `missing` as a terminal failure.
   private readonly uncertainGoalAdmissions = new Map<string, string>();
+  // Admission is confirmed by a successful POST, an `input.state`/snapshot, or a mailbox `pending` result.
+  private readonly confirmedGoalAdmissions = new Map<string, string>();
   private readonly goalReplyPolls = new Map<string, { ownerId: string; controller: AbortController }>();
   private goalReplies: Record<string, LocalGoalReply> = {};
   private attempts = 0;
@@ -239,18 +246,27 @@ export class LiveChatStore implements LiveStore {
   private readonly enc: string;
   private readonly retryBaseMs: number;
   private readonly maxAttempts: number;
+  private readonly maxUnconfirmedGoalPolls: number;
+  private readonly goalReplyPollIntervalMs: number;
   private snapshot: ChatSnapshot;
 
   constructor(
     transport: ChatTransport,
     sessionId: string,
-    options: { retryBaseMs?: number; maxAttempts?: number } = {},
+    options: {
+      retryBaseMs?: number;
+      maxAttempts?: number;
+      maxUnconfirmedGoalPolls?: number;
+      goalReplyPollIntervalMs?: number;
+    } = {},
   ) {
     this.transport = transport;
     this.sessionId = sessionId;
     this.enc = encodeURIComponent(sessionId);
     this.retryBaseMs = options.retryBaseMs ?? 500;
     this.maxAttempts = options.maxAttempts ?? 8;
+    this.maxUnconfirmedGoalPolls = options.maxUnconfirmedGoalPolls ?? MAX_UNCONFIRMED_GOAL_POLLS;
+    this.goalReplyPollIntervalMs = options.goalReplyPollIntervalMs ?? GOAL_REPLY_POLL_INTERVAL_MS;
     this.snapshot = this.snapshotOf();
   }
 
@@ -309,6 +325,7 @@ export class LiveChatStore implements LiveStore {
     this.goalReplyPolls.clear();
     this.goalReplyOwners.clear();
     this.uncertainGoalAdmissions.clear();
+    this.confirmedGoalAdmissions.clear();
     this.goalReplies = {};
     clearTimeout(this.timer);
     const wake = this.wake;
@@ -316,6 +333,14 @@ export class LiveChatStore implements LiveStore {
     wake?.();
     this.listeners.clear();
     this.snapshot = this.snapshotOf();
+  }
+
+  /** Rechecks an uncertain private goal without resubmitting its input. */
+  checkGoalReply(inputId: string): void {
+    if (this.goalReplies[inputId]?.state !== "uncertain") return;
+    const ownerId = this.goalReplyOwners.get(inputId);
+    if (!ownerId || this.uncertainGoalAdmissions.get(inputId) !== ownerId) return;
+    this.startGoalReplyPolling(inputId, ownerId, true);
   }
 
   /** Shows the input at once as a pending row, then posts it. A failed post leaves the row as failed, and rethrows. */
@@ -455,15 +480,37 @@ export class LiveChatStore implements LiveStore {
   }
 
   private markGoalAdmissionUncertain(inputId: string, ownerId: string): void {
-    if (this.goalReplyOwners.get(inputId) === ownerId) this.uncertainGoalAdmissions.set(inputId, ownerId);
+    if (this.goalReplyOwners.get(inputId) !== ownerId) return;
+    if (this.state.inputs[inputId] || this.confirmedGoalAdmissions.get(inputId) === ownerId) {
+      this.confirmGoalReplyAdmission(inputId, ownerId, true);
+      return;
+    }
+    this.uncertainGoalAdmissions.set(inputId, ownerId);
   }
 
   private markGoalReplyAdmitted(inputId: string, ownerId: string): void {
-    if (this.goalReplyOwners.get(inputId) !== ownerId) return;
-    this.uncertainGoalAdmissions.delete(inputId);
+    this.confirmGoalReplyAdmission(inputId, ownerId, false);
     // A manual resend can resolve an earlier ambiguous admission while its poll is still in flight.
     // Abort that poll so a stale `missing` cannot race the successful admission response.
     this.startGoalReplyPolling(inputId, ownerId, true);
+  }
+
+  private confirmGoalReplyAdmission(inputId: string, ownerId: string, restartPoll: boolean): void {
+    if (this.goalReplyOwners.get(inputId) !== ownerId) return;
+    this.uncertainGoalAdmissions.delete(inputId);
+    this.confirmedGoalAdmissions.set(inputId, ownerId);
+    if (restartPoll) this.startGoalReplyPolling(inputId, ownerId, true);
+  }
+
+  private reconcileGoalAdmission(inputId: string): void {
+    const ownerId = this.goalReplyOwners.get(inputId);
+    if (!ownerId) return;
+    const wasUncertain = this.uncertainGoalAdmissions.get(inputId) === ownerId;
+    this.confirmGoalReplyAdmission(inputId, ownerId, false);
+    const poll = this.goalReplyPolls.get(inputId);
+    if (wasUncertain || !poll || poll.ownerId !== ownerId || poll.controller.signal.aborted) {
+      this.startGoalReplyPolling(inputId, ownerId, true);
+    }
   }
 
   private startGoalReplyPolling(inputId: string, ownerId: string, restart = false): void {
@@ -486,9 +533,13 @@ export class LiveChatStore implements LiveStore {
 
   private forgetRejectedGoalReply(inputId: string, ownerId: string): void {
     // An earlier request may have been admitted even when a later manual retry was rejected.
-    if (this.uncertainGoalAdmissions.get(inputId) === ownerId) return;
+    if (this.uncertainGoalAdmissions.get(inputId) === ownerId) {
+      if (!this.goalReplyPolls.has(inputId)) this.setGoalReplyUncertain(inputId, ownerId);
+      return;
+    }
+    if (this.confirmedGoalAdmissions.get(inputId) === ownerId) return;
     if (this.goalReplyOwners.get(inputId) === ownerId) this.goalReplyOwners.delete(inputId);
-    this.uncertainGoalAdmissions.delete(inputId);
+    this.confirmedGoalAdmissions.delete(inputId);
     if (this.goalReplies[inputId]?.state !== "pending") return;
     const next = { ...this.goalReplies };
     delete next[inputId];
@@ -497,6 +548,7 @@ export class LiveChatStore implements LiveStore {
   }
 
   private async pollGoalReply(inputId: string, ownerId: string, controller: AbortController): Promise<void> {
+    let unconfirmedPolls = 0;
     while (this.isCurrentGoalPoll(inputId, ownerId, controller)) {
       try {
         const response = await this.transport.request(`/sessions/${this.enc}/goal-replies/poll`, {
@@ -519,29 +571,58 @@ export class LiveChatStore implements LiveStore {
             });
             return;
           }
+          if (isRecord(result) && result.status === "pending") {
+            // A pending mailbox can only exist after the server admitted this private goal.
+            this.confirmGoalReplyAdmission(inputId, ownerId, false);
+            unconfirmedPolls = 0;
+          }
           if (isRecord(result) && result.status === "missing") {
             if (this.uncertainGoalAdmissions.get(inputId) === ownerId) {
-              // Missing is inconclusive until a retry confirms admission. Stop polling for now and
-              // keep the private owner so the user's manual retry can restart it with the same id.
-              this.goalReplyPolls.delete(inputId);
-              controller.abort();
+              // A missing mailbox does not prove that an ambiguous POST was not admitted. Keep
+              // polling briefly; a later snapshot or input.state can confirm admission as well.
+            } else if (
+              this.confirmedGoalAdmissions.get(inputId) === ownerId &&
+              this.state.inputs[inputId]?.state !== "ended"
+            ) {
+              // An accepted input may still be queued, before its private mailbox is registered.
+            } else {
+              this.finishGoalReply(inputId, ownerId, {
+                state: "complete",
+                success: false,
+                message: typeof result.message === "string"
+                  ? result.message
+                  : "Goal reply expired or is unavailable.",
+              });
               return;
             }
-            this.finishGoalReply(inputId, ownerId, {
-              state: "complete",
-              success: false,
-              message: typeof result.message === "string"
-                ? result.message
-                : "Goal reply expired or is unavailable.",
-            });
-            return;
           }
         }
       } catch {
         if (!this.isCurrentGoalPoll(inputId, ownerId, controller)) return;
       }
-      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+      if (this.uncertainGoalAdmissions.get(inputId) === ownerId) {
+        unconfirmedPolls += 1;
+        if (unconfirmedPolls >= this.maxUnconfirmedGoalPolls) {
+          this.setGoalReplyUncertain(inputId, ownerId);
+          return;
+        }
+      } else if (this.confirmedGoalAdmissions.get(inputId) === ownerId) {
+        unconfirmedPolls = 0;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, this.goalReplyPollIntervalMs));
     }
+  }
+
+  private setGoalReplyUncertain(inputId: string, ownerId: string): void {
+    if (
+      this.disposed || this.goalReplyOwners.get(inputId) !== ownerId ||
+      this.uncertainGoalAdmissions.get(inputId) !== ownerId
+    ) return;
+    this.goalReplyPolls.get(inputId)?.controller.abort();
+    this.goalReplyPolls.delete(inputId);
+    if (this.goalReplies[inputId]?.state === "uncertain") return;
+    this.goalReplies = { ...this.goalReplies, [inputId]: { state: "uncertain" } };
+    this.publish();
   }
 
   private isCurrentGoalPoll(inputId: string, ownerId: string, controller: AbortController): boolean {
@@ -554,6 +635,7 @@ export class LiveChatStore implements LiveStore {
     if (this.disposed || this.goalReplyOwners.get(inputId) !== ownerId) return;
     this.goalReplyOwners.delete(inputId);
     this.uncertainGoalAdmissions.delete(inputId);
+    this.confirmedGoalAdmissions.delete(inputId);
     const poll = this.goalReplyPolls.get(inputId);
     poll?.controller.abort();
     this.goalReplyPolls.delete(inputId);
@@ -566,6 +648,7 @@ export class LiveChatStore implements LiveStore {
     this.goalReplyPolls.clear();
     this.goalReplyOwners.clear();
     this.uncertainGoalAdmissions.clear();
+    this.confirmedGoalAdmissions.clear();
     this.goalReplies = {};
   }
 
@@ -732,6 +815,11 @@ export class LiveChatStore implements LiveStore {
       this.lastConversationUid = event.conversation_uid;
     }
     this.state = result.state;
+    if (event.type === "snapshot") {
+      for (const input of event.data.inputs) this.reconcileGoalAdmission(input.id);
+    } else if (event.type === "input.state") {
+      this.reconcileGoalAdmission(event.data.id);
+    }
     // A new window or deletion invalidates an in-flight page, which may contain stale rows.
     // Keep the current cursor so a fresh page can be requested.
     if (event.type === "snapshot" || event.type === "replace" || event.type === "row.delete") {
@@ -789,6 +877,7 @@ export type ChatStoreView = ChatSnapshot & {
   readonly stop: LiveStore["stop"];
   readonly loadOlder: LiveStore["loadOlder"];
   readonly retry: LiveStore["retry"];
+  readonly checkGoalReply: LiveStore["checkGoalReply"];
 };
 
 const ChatStoreContext = createContext<LiveStore | null>(null);
@@ -812,6 +901,7 @@ export function useChatStore(): ChatStoreView {
       stop: () => store.stop(),
       loadOlder: () => store.loadOlder(),
       retry: () => store.retry(),
+      checkGoalReply: (inputId) => store.checkGoalReply(inputId),
     }),
     [snap, store],
   );

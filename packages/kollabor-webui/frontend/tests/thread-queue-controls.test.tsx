@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { AssistantRuntimeProvider, useAui, useExternalStoreRuntime } from "@assistant-ui/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { toRepository } from "../src/chat-runtime";
-import { ChatStoreProvider, type ChatSnapshot, type LiveStore } from "../src/chat-store";
+import { ChatStoreProvider, type ChatSnapshot, type LiveStore, type LocalGoalReply } from "../src/chat-store";
 import type { ChatRow, InputInfo } from "../src/chat-stream";
 import { Thread } from "../src/components/assistant-ui/thread";
 import { PermissionCancellationProvider } from "../src/permission-cancellation";
@@ -41,7 +41,7 @@ function fakeStore(
   rows: ChatRow[],
   inputs: Record<string, InputInfo>,
   running: boolean,
-  goalReplies: Record<string, { state: "complete"; success: boolean; message: string }> = {},
+  goalReplies: Record<string, LocalGoalReply> = {},
 ) {
   const snap = { rows, inputs, running, connection: "live" as const, hasEarlier: false, olderStatus: "idle" as const, goalReplies } as ChatSnapshot;
   const store = {
@@ -53,6 +53,7 @@ function fakeStore(
     stop: vi.fn(async () => {}),
     loadOlder: vi.fn(async () => {}),
     retry: vi.fn(),
+    checkGoalReply: vi.fn(),
     start: vi.fn(),
     dispose: vi.fn(),
   };
@@ -232,6 +233,25 @@ describe("composer send, queue, Stop and Send Now on the chat store", () => {
     expect(reply?.textContent).toContain("Goal failed");
     expect(reply?.textContent).toContain("The build is red.");
     expect(container.querySelector('[data-chat-row-id="other-goal"] [data-slot="kollab_goal-reply"]')).toBeNull();
+  });
+
+  it("renders unresolved goal admission with a status-only recovery action", async () => {
+    const id = "web-goal-uncertain";
+    const { store, live } = fakeStore(
+      [row(id, "/goal inspect the build")],
+      {},
+      false,
+      { [id]: { state: "uncertain" } },
+    );
+    const container = mount(live, spies());
+
+    const reply = container.querySelector<HTMLElement>('[data-slot="kollab_goal-reply"]');
+    expect(reply?.getAttribute("role")).toBe("status");
+    expect(reply?.textContent).toContain("Goal admission could not be confirmed.");
+    await click(byLabel(container, "Check status"));
+
+    expect(store.checkGoalReply).toHaveBeenCalledWith(id);
+    expect(store.send).not.toHaveBeenCalled();
   });
 
   it("Stop calls store.stop and not the runtime's cancel", async () => {
