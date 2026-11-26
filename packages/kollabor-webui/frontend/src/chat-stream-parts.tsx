@@ -206,7 +206,8 @@ export function RecoveredChatPart({
     const argsPreview = isChatStreamContentPreviewMarker(part.chat_stream_args_preview) && part.chat_stream_args_preview.field === "args"
       ? part.chat_stream_args_preview
       : undefined;
-    const hasResult = Object.hasOwn(part, "result") || Object.hasOwn(part, "chat_stream_result_preview");
+    const hasResult = Object.hasOwn(part, "result") ||
+      isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview);
     if (part.tool_name === "request_permission" && typeof part.tool_call_id === "string" && !hasResult) {
       return <RecoveredPermissionToolCall
         id={part.tool_call_id}
