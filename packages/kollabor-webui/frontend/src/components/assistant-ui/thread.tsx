@@ -41,7 +41,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { resolveMediaSegment, splitMediaSegments } from "@/components/media/media-tokens";
 import {
   MediaThumb,
-  useAuthenticatedImage,
+  MessageImage,
   useMediaViewer,
   useSessionMedia,
 } from "@/components/media/media-view";
@@ -451,19 +451,7 @@ const ThreadMessage: FC = () => {
   return <AssistantMessageComponent />;
 };
 
-const AuthenticatedMessageImage: FC<ImageMessagePartProps> = ({ image }) => {
-  const protectedPath = image.startsWith("/") ? image : null;
-  const authenticated = useAuthenticatedImage(protectedPath);
-  const src = protectedPath ? authenticated : image;
-  return (
-    <img
-      src={typeof src === "string" ? src : undefined}
-      alt="Message image"
-      className="my-1 max-h-80 max-w-full rounded-md object-contain"
-      draggable={false}
-    />
-  );
-};
+const AuthenticatedMessageImage: FC<ImageMessagePartProps> = ({ image }) => <MessageImage image={image} />;
 
 export const SystemMessage: FC = () => (
   <MessagePrimitive.Root

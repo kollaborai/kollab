@@ -164,6 +164,57 @@ export const MediaThumb: FC<{
   );
 };
 
+/** The stored media ref in an engine `/media/{ref}` path, or null for any other image URL. */
+export function storedMediaRef(url: string): string | null {
+  const match = /^\/media\/([^/?#]+)$/.exec(url);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One image part of a chat message (#1451). A picture stored by the engine is a thumbnail that opens the
+ * session's viewer, as sent pictures always were; any other image shows inline, fetched with the token.
+ */
+export const MessageImage: FC<{ image: string }> = ({ image }) => {
+  const ref = storedMediaRef(image);
+  return ref ? <StoredMessageImage ref_={ref} /> : <InlineMessageImage image={image} />;
+};
+
+const StoredMessageImage: FC<{ ref_: string }> = ({ ref_ }) => {
+  const openViewer = useMediaViewer();
+  const sessionMedia = useSessionMedia();
+  // The session list can lag a new message: add this picture so the viewer can open on it.
+  const items = sessionMedia?.some((item) => item.ref === ref_)
+    ? sessionMedia.filter((item) => item.ref && !item.failed)
+    : [...(sessionMedia ?? []).filter((item) => item.ref && !item.failed), { ref: ref_, mime: "image/*" }];
+  const index = items.findIndex((item) => item.ref === ref_);
+  return (
+    <MediaThumb
+      ref_={ref_}
+      className="my-1"
+      onOpen={openViewer && index >= 0 ? () => openViewer(items, index) : undefined}
+    />
+  );
+};
+
+const InlineMessageImage: FC<{ image: string }> = ({ image }) => {
+  const protectedPath = image.startsWith("/") ? image : null;
+  const authenticated = useAuthenticatedImage(protectedPath);
+  const src = protectedPath ? authenticated : image;
+  return (
+    <img
+      src={typeof src === "string" ? src : undefined}
+      alt="Message image"
+      className="my-1 max-h-80 max-w-full rounded-md object-contain"
+      draggable={false}
+    />
+  );
+};
+
 type MediaViewerState = { items: MediaEntry[]; index: number } | null;
 
 type OpenViewer = (items: MediaEntry[], index: number) => void;
