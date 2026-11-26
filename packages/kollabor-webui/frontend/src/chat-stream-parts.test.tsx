@@ -621,13 +621,15 @@ describe("chat stream part recovery", () => {
       output_revision: "9".repeat(64),
       preview: output,
     };
+    const hasResultPreview = "resultPreview" in resultState && resultState.resultPreview === true;
+    const inlineResult = "result" in resultState ? resultState.result : undefined;
     const toolPart = {
       type: "tool-call",
       tool_call_id: "completed-call",
       tool_name: "request_permission",
       args: owner,
-      ...(Object.hasOwn(resultState, "result") ? { result: resultState.result } : {}),
-      ...(resultState.resultPreview ? { chat_stream_result_preview: outputPreview } : {}),
+      ...(Object.hasOwn(resultState, "result") ? { result: inlineResult } : {}),
+      ...(hasResultPreview ? { chat_stream_result_preview: outputPreview } : {}),
     };
     mocks.getChatStreamParts.mockResolvedValueOnce({
       row_id: marker.row_id,
@@ -680,7 +682,7 @@ describe("chat stream part recovery", () => {
       expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent?.trim() === "Stop")).toBe(false);
       expect(respond).not.toHaveBeenCalled();
       expect(permissionApi.cancelOwned).not.toHaveBeenCalled();
-      if (resultState.resultPreview) {
+      if (hasResultPreview) {
         await vi.waitFor(() => expect(ui.host.textContent).toContain("permission tool finished"));
       }
     } finally {
