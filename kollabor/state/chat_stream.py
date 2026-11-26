@@ -22,6 +22,7 @@ from kollabor_events.chat_stream import (
 )
 from kollabor_events.chat_stream_emit import emit_chat_event
 
+from .chat_stream_history import turn_history_key_index
 from .chat_stream_rows import (
     ChatStreamRowPager,
     merge_chat_stream_rows,
@@ -1899,6 +1900,16 @@ class ChatStreamService:
 
     def row_pager(self, *, uid: str | None = None) -> ChatStreamRowPager:
         """Build a pager over this conversation's transcript and live rows."""
+        return self._row_pager(uid=uid)
+
+    def _row_pager(
+        self,
+        *,
+        uid: str | None = None,
+        snapshot_rows: list[dict[str, Any]] | None = None,
+        transcript_rows: list[dict[str, Any]] | None = None,
+    ) -> ChatStreamRowPager:
+        """Build a pager, optionally reusing rows already projected by a snapshot."""
 
         def current_uid() -> str:
             return uid if uid is not None else self._conversation_uid()
@@ -1909,13 +1920,26 @@ class ChatStreamService:
 
         return ChatStreamRowPager(
             conversation_uid_provider=current_uid,
-            snapshot_rows_provider=lambda: self._snapshot_rows(current_uid()),
-            transcript_rows_provider=lambda: self._transcript_rows(current_uid()),
+            snapshot_rows_provider=lambda: (
+                snapshot_rows
+                if snapshot_rows is not None
+                else self._snapshot_rows(current_uid())
+            ),
+            transcript_rows_provider=lambda: (
+                transcript_rows
+                if transcript_rows is not None
+                else self._transcript_rows(current_uid())
+            ),
             row_log_provider=lambda: list(self._rows.get(current_uid(), {}).values()),
             compaction_seq_provider=current_compaction_seq,
         )
 
-    def _snapshot_components(self, uid: str) -> tuple[
+    def _snapshot_components(
+        self,
+        uid: str,
+        *,
+        transcript_rows: list[dict[str, Any]] | None = None,
+    ) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[dict[str, Any]],
@@ -1935,10 +1959,12 @@ class ChatStreamService:
             and isinstance(row.get("id"), str)
             and row["id"]
         ]
+        if transcript_rows is None:
+            transcript_rows = self._transcript_rows(uid)
         rows_by_id = {
             row["id"]: row
             for row in merge_chat_stream_rows(
-                self._transcript_rows(uid),
+                transcript_rows,
                 list(self._rows.get(uid, {}).values()),
                 state_rows,
             )
@@ -2078,8 +2104,15 @@ class ChatStreamService:
         return self._snapshot_components(uid)[0]
 
     def _snapshot(self, uid: str) -> dict[str, Any]:
-        rows, turns, inputs, state = self._snapshot_components(uid)
-        older = self.row_pager(uid=uid).snapshot_older_cursor()
+        transcript_rows = self._transcript_rows(uid)
+        rows, turns, inputs, state = self._snapshot_components(
+            uid, transcript_rows=transcript_rows
+        )
+        older = self._row_pager(
+            uid=uid,
+            snapshot_rows=rows,
+            transcript_rows=transcript_rows,
+        ).snapshot_older_cursor()
         return {
             "rows": rows,
             "turns": turns,
@@ -2098,6 +2131,10 @@ class ChatStreamService:
             messages = manager_messages
         if not isinstance(messages, list):
             messages = []
+
+        turn_history_by_turn, turn_history_by_request = turn_history_key_index(
+            messages, self._event_turn_id
+        )
 
         def field(message: Any, name: str, default: Any = None) -> Any:
             if isinstance(message, dict):
@@ -2194,10 +2231,17 @@ class ChatStreamService:
             if isinstance(request_id, str) and request_id and request_id not in input_row_ids:
                 input_row_ids.insert(0, request_id)
             if history_key is None and kind in {"reply", "tool"}:
-                search_ids = [request_id] if isinstance(request_id, str) else None
-                history_key = self._turn_history_key(
-                    uid, turn_id, input_ids=search_ids
+                history_key = (
+                    self._turn_history_keys.get((uid, turn_id))
+                    if turn_id is not None
+                    else None
                 )
+                if history_key is None:
+                    history_key = (
+                        turn_history_by_request.get((turn_id, request_id))
+                        if isinstance(request_id, str)
+                        else turn_history_by_turn.get(turn_id)
+                    )
             input_id = metadata.get("input_id")
             hub_message_id = metadata.get("hub_message_id")
             tool_id = metadata.get("tool_id")
