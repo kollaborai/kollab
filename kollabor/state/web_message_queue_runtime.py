@@ -114,12 +114,8 @@ class WebMessageQueueRuntime:
         default_factory=lambda: asyncio.Queue(maxsize=1), repr=False
     )
     _scope_locks: dict[str, asyncio.Lock] = field(default_factory=dict, repr=False)
-    _active_workers: set[WebMessageQueueWorker] = field(
-        default_factory=set, repr=False
-    )
-    _worker_close_tasks: dict[
-        WebMessageQueueWorker, asyncio.Task[bool]
-    ] = field(
+    _active_workers: set[WebMessageQueueWorker] = field(default_factory=set, repr=False)
+    _worker_close_tasks: dict[WebMessageQueueWorker, asyncio.Task[bool]] = field(
         default_factory=dict, repr=False
     )
     _supervisor_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -260,7 +256,9 @@ class WebMessageQueueRuntime:
                 if isinstance(task, asyncio.Future) and not task.done()
             )
         except Exception:
-            logger.debug("WebUI queue could not inspect ACP completion tasks", exc_info=True)
+            logger.debug(
+                "WebUI queue could not inspect ACP completion tasks", exc_info=True
+            )
             return ()
 
     def _watch_acp_completion_tasks(
@@ -275,7 +273,9 @@ class WebMessageQueueRuntime:
                 continue
 
             def settled(
-                completed: asyncio.Future[Any], *, target_loop: asyncio.AbstractEventLoop = loop
+                completed: asyncio.Future[Any],
+                *,
+                target_loop: asyncio.AbstractEventLoop = loop,
             ) -> None:
                 try:
                     target_loop.call_soon_threadsafe(
@@ -413,7 +413,7 @@ class WebMessageQueueRuntime:
             if task is not None and task.done():
                 try:
                     settled = task.result() is True
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError, Exception:
                     settled = False
                 if settled:
                     self._worker_close_tasks.pop(worker, None)
@@ -430,9 +430,7 @@ class WebMessageQueueRuntime:
             close_tasks.add(task)
 
         if close_tasks:
-            await asyncio.wait(
-                close_tasks, timeout=max(0.0, deadline - loop.time())
-            )
+            await asyncio.wait(close_tasks, timeout=max(0.0, deadline - loop.time()))
 
         workers_ok = True
         for worker, task in tuple(self._worker_close_tasks.items()):
@@ -441,7 +439,7 @@ class WebMessageQueueRuntime:
                 continue
             try:
                 settled = task.result() is True
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError, Exception:
                 settled = False
             if settled:
                 self._worker_close_tasks.pop(worker, None)
@@ -464,7 +462,9 @@ class WebMessageQueueRuntime:
             except asyncio.CancelledError:
                 pass
             except Exception:
-                logger.debug("WebUI queue supervisor failed during close", exc_info=True)
+                logger.debug(
+                    "WebUI queue supervisor failed during close", exc_info=True
+                )
 
         return (
             retry_done
@@ -473,6 +473,15 @@ class WebMessageQueueRuntime:
             and not self._active_workers
             and not self._worker_close_tasks
         )
+
+    async def input_scope(self, conversation_uid: str) -> tuple[str, str, str]:
+        """Authenticate and bind a chat input to its principal and conversation."""
+        binding = await self._resolve_trusted_scope(
+            {"expected_conversation_uid": conversation_uid}
+        )
+        caller = current_rpc_caller_context()
+        assert isinstance(caller, RpcCallerContext)
+        return binding.scope_id, binding.conversation_uid, caller.principal_id
 
     async def capabilities(self, params: dict[str, Any]) -> dict[str, bool]:
         self._ensure_supervisor()
@@ -525,7 +534,7 @@ class WebMessageQueueRuntime:
             if existing is not None:
                 try:
                     existing_payload = json.loads(existing.payload.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
+                except UnicodeDecodeError, json.JSONDecodeError:
                     existing_payload = None
                 if existing_payload != {"text": text} or len(
                     existing.attachment_refs
@@ -658,7 +667,7 @@ class WebMessageQueueRuntime:
                     )
                 else:
                     receipt = await queue.remove_item(operation_id, input_id)
-            except (ItemNotFound, ItemNotQueued):
+            except ItemNotFound, ItemNotQueued:
                 return {"found": True, "cancelled": False}
         self.wake_all()
         return {"found": True, "cancelled": receipt.status == "removed"}
@@ -710,7 +719,7 @@ class WebMessageQueueRuntime:
             if not self._send_now_available():
                 return {"found": True, "accepted": False, "state": "queued"}
             result = await self._dispatch_scope(
-                matches[0], batch_id=batch.batch_id, send_now=True
+                matches[0], batch_id=batch.batch_id, send_now=True, request_id=input_id
             )
             return {
                 "found": result.get("status") != WorkerStatus.EMPTY.value,
@@ -762,7 +771,11 @@ class WebMessageQueueRuntime:
     def _is_processing(self) -> bool:
         value = getattr(self.state_service, "is_processing", None)
         if value is None:
-            value = getattr(getattr(self.state_service, "_llm_service", None), "is_processing", False)
+            value = getattr(
+                getattr(self.state_service, "_llm_service", None),
+                "is_processing",
+                False,
+            )
         return value is True
 
     async def _current_identity(self) -> ConversationIdentity | None:
@@ -801,6 +814,7 @@ class WebMessageQueueRuntime:
         *,
         batch_id: str | None,
         send_now: bool,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         if self._closing:
             return {"status": WorkerStatus.CLOSED.value, "accepted": False}
@@ -815,12 +829,20 @@ class WebMessageQueueRuntime:
                 if queue is None:
                     return {"status": WorkerStatus.EMPTY.value, "accepted": False}
                 snapshot = await queue.snapshot()
-                batches = [batch for batch in snapshot.batches if batch.status.value == "queued"]
+                batches = [
+                    batch
+                    for batch in snapshot.batches
+                    if batch.status.value == "queued"
+                ]
                 if batch_id is not None:
                     batches = [batch for batch in batches if batch.batch_id == batch_id]
                     if not batches:
                         existing = next(
-                            (batch for batch in snapshot.batches if batch.batch_id == batch_id),
+                            (
+                                batch
+                                for batch in snapshot.batches
+                                if batch.batch_id == batch_id
+                            ),
                             None,
                         )
                         if existing is not None:
@@ -844,9 +866,34 @@ class WebMessageQueueRuntime:
                     for batch in batches:
                         if not send_now and self._is_processing():
                             break
+                        bus = getattr(self.state_service, "_event_bus", None)
+                        get_service = getattr(bus, "get_service", None)
+                        stream = (
+                            get_service("chat_stream")
+                            if callable(get_service)
+                            else None
+                        )
+                        bind_scope = getattr(stream, "bind_queued_input_scopes", None)
+                        if callable(bind_scope):
+                            scope = (
+                                binding.scope_id,
+                                binding.conversation_uid,
+                                binding.principal_id,
+                            )
+                            selected_ids = [
+                                item.request_id
+                                for item in batch.items
+                                if request_id is None or item.request_id == request_id
+                            ]
+                            if not await bind_scope(selected_ids, scope):
+                                return {
+                                    "status": WorkerStatus.NOT_SENT.value,
+                                    "accepted": False,
+                                }
                         last_result = await worker.dispatch_batch(
                             batch.batch_id,
                             send_now=send_now,
+                            request_id=request_id,
                         )
                         if last_result.status is not WorkerStatus.ADMITTED:
                             return self._worker_result_to_wire(last_result)
@@ -907,6 +954,17 @@ def register_web_message_queue_runtime(
         state_service=state_service,
         resolve_scope=resolver,
     )
+
+    async def admit_batch(resolved, items, enqueue):
+        bus = getattr(state_service, "_event_bus", None)
+        get_service = getattr(bus, "get_service", None)
+        stream = get_service("chat_stream") if callable(get_service) else None
+        admit = getattr(stream, "admit_queued_batch", None)
+        if not callable(admit):
+            return await enqueue()
+        scope = (resolved.scope_id, resolved.conversation_uid, resolved.principal_id)
+        return await admit([item.request_id for item in items], scope, enqueue)
+
     register_web_message_queue_handlers(
         rpc_server,
         registry,
@@ -914,6 +972,7 @@ def register_web_message_queue_runtime(
         on_change=runtime._changes.put_nowait,
         attachment_registry=attachments,
         include_worker_methods=False,
+        admit_batch=admit_batch,
     )
 
     rpc_server.register("state.web_queue.capabilities", runtime.capabilities)

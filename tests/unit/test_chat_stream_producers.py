@@ -19,6 +19,9 @@ from plugins.hub.models import HubMessage
 
 
 class _QueueRuntime:
+    async def input_scope(self, conversation_uid):
+        return ("scope", conversation_uid, "principal")
+
     async def add_input(self, params):
         return {"accepted": True, "id": params["id"], "state": "queued"}
 
@@ -211,11 +214,7 @@ async def test_acp_steering_admission_identity_recovers_a_missed_turn_start():
 
     events = _events(stream, initial)
     assert sequence_problems(events) == []
-    input_states = [
-        event["data"]
-        for event in events
-        if event["type"] == "input.state"
-    ]
+    input_states = [event["data"] for event in events if event["type"] == "input.state"]
     assert [
         (item["id"], item["state"], item["turn_id"], item.get("outcome"))
         for item in input_states
@@ -419,9 +418,7 @@ def test_snapshot_and_compaction_read_active_transcript_rows():
     ]
     stream = ChatStreamService(state)
 
-    snapshot = stream.subscribe({"after": None, "conversation_uid": None})[
-        "events"
-    ][0]
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
     rows = snapshot["data"]["rows"]
     input_row = next(row for row in rows if row["id"] == "web-transcript-1")
     tool_row = next(row for row in rows if row["kind"] == "tool")
@@ -476,9 +473,7 @@ def test_retained_transcript_row_keeps_its_id_when_compaction_changes_its_index(
     ]
     stream = ChatStreamService(state)
 
-    before = stream.subscribe({"after": None, "conversation_uid": None})[
-        "events"
-    ][0]
+    before = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
     before_id = next(
         row["id"]
         for row in before["data"]["rows"]

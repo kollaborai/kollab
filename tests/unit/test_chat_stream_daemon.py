@@ -14,6 +14,9 @@ class _QueueRuntime:
         self.calls: list[tuple[str, dict]] = []
         self.queued: set[str] = set()
 
+    async def input_scope(self, conversation_uid):
+        return ("scope", conversation_uid, "principal")
+
     async def add_input(self, params):
         self.calls.append(("add", params))
         self.queued.add(params["id"])
@@ -175,3 +178,67 @@ async def test_resending_the_same_input_id_returns_current_state():
 
     assert first == second == {"id": "web-a1", "state": "queued"}
     assert [kind for kind, _params in state._queue_runtime.calls] == ["add"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["started", "joined", "ended"])
+async def test_send_now_retry_returns_recorded_moved_input(lifecycle):
+    state = _State()
+    stream = ChatStreamService(state)
+    stream._set_input_state(
+        "conv-1",
+        "web-moved",
+        lifecycle,
+        turn_id="turn-1",
+        outcome="completed" if lifecycle == "ended" else None,
+    )
+
+    stream._input_scopes[("conv-1", "web-moved")] = ("scope", "conv-1", "principal")
+    result = await stream.send_now({"id": "web-moved"})
+
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": lifecycle,
+        "turn_id": "turn-1",
+    }
+    assert state._queue_runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_send_now_retry_handles_input_moving_during_queue_lookup():
+    state = _State()
+    stream = ChatStreamService(state)
+
+    async def moved_during_lookup(params):
+        stream._set_input_state("conv-1", params["id"], "started", turn_id="turn-1")
+        return {"found": False}
+
+    stream._input_scopes[("conv-1", "web-moved")] = ("scope", "conv-1", "principal")
+    state._queue_runtime.send_now = moved_during_lookup
+    assert await stream.send_now({"id": "web-moved"}) == {
+        "found": True,
+        "accepted": False,
+        "state": "started",
+        "turn_id": "turn-1",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["started", "joined", "ended"])
+async def test_send_now_retry_hides_unowned_input_moving_during_lookup(lifecycle):
+    state = _State()
+    stream = ChatStreamService(state)
+
+    async def moved_during_lookup(params):
+        stream._set_input_state(
+            "conv-1",
+            params["id"],
+            lifecycle,
+            turn_id="turn-secret",
+            outcome="completed" if lifecycle == "ended" else None,
+        )
+        return {"found": False}
+
+    state._queue_runtime.send_now = moved_during_lookup
+    assert await stream.send_now({"id": "web-unowned"}) == {"found": False}

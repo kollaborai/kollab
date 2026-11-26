@@ -237,6 +237,9 @@ def test_send_now_route_returns_202_with_the_started_turn(monkeypatch):
 
 
 class _LiveQueueRuntime:
+    async def input_scope(self, conversation_uid):
+        return ("test-scope", conversation_uid, "test-principal")
+
     async def add_input(self, params):
         return {"accepted": True, "id": params["id"], "state": "queued"}
 
@@ -247,6 +250,11 @@ class _LiveQueueRuntime:
             "state": "started",
             "turn_id": "turn-1",
         }
+
+
+def test_live_queue_runtime_supplies_conversation_scoped_identity():
+    scope = asyncio.run(_LiveQueueRuntime().input_scope("conv-1"))
+    assert scope == ("test-scope", "conv-1", "test-principal")
 
 
 class _LiveBus:
