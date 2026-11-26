@@ -538,6 +538,30 @@ describe("LiveChatStore", () => {
     expect(request).not.toHaveBeenCalledWith("/sessions/s1/cancel", { method: "POST" });
   });
 
+  it("keeps a private goal stoppable before any shared turn event arrives", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-private-only",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"d".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    request.mockImplementation(async (path) => path.endsWith("/goal-replies/poll")
+      ? new Response(JSON.stringify({ status: "pending" }), { status: 200 })
+      : path.endsWith("/cancel-owned")
+        ? new Response(JSON.stringify({ ok: true, cancelled: true }), { status: 200 })
+        : new Response(null, { status: 202 }));
+
+    await store.send(input);
+    await vi.waitFor(() => expect(store.getSnapshot().running).toBe(true));
+    await store.stop();
+
+    expect(request).toHaveBeenCalledWith("/sessions/s1/cancel-owned", {
+      method: "POST",
+      body: JSON.stringify({ request_id: ownerId }),
+    });
+  });
+
   it("aborts private goal polling on disposal and ignores a late reply", async () => {
     const { store, request } = make();
     const input = {
