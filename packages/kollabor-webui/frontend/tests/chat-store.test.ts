@@ -633,6 +633,55 @@ describe("LiveChatStore", () => {
     expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
   });
 
+  it("bounds missing replies for a confirmed queued goal and keeps status check poll-only", async () => {
+    const { store, request, streams } = make({ maxUnconfirmedGoalPolls: 2, goalReplyPollIntervalMs: 1 });
+    const input = {
+      id: "web-goal-confirmed-missing",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"c".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let sends = 0;
+    let polls = 0;
+    let allowRecovery = false;
+    request.mockImplementation(async (path) => {
+      if (path.endsWith("/inputs")) {
+        sends += 1;
+        return new Response(null, { status: 202 });
+      }
+      if (path.endsWith("/goal-replies/poll")) {
+        polls += 1;
+        if (polls <= 2 || !allowRecovery) return new Response(JSON.stringify({ status: "missing" }), { status: 200 });
+        if (polls === 3) return new Response(JSON.stringify({ status: "pending" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "complete", success: true, message: "Recovered after restart." }), { status: 200 });
+      }
+      return new Response(null, { status: 202 });
+    });
+
+    const stream = await startOpen(store, streams);
+    stream.emit(snapshot(2, [row(input.id, input.text, "input", "user")], {
+      inputs: [{ id: input.id, state: "queued", turn_id: null }],
+    }));
+    await store.send(input);
+
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "uncertain" }));
+    expect(store.getSnapshot().running).toBe(false);
+    expect(sends).toBe(1);
+    expect(polls).toBe(2);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+
+    allowRecovery = true;
+    store.checkGoalReply(input.id);
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
+      state: "complete",
+      success: true,
+      message: "Recovered after restart.",
+    }));
+    expect(sends).toBe(1);
+    expect(polls).toBe(4);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
   it("reconciles an ambiguous goal admission when the stream later confirms its input", async () => {
     const { store, request, streams } = make();
     const input = {
