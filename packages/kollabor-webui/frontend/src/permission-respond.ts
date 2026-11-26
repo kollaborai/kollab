@@ -2,6 +2,7 @@ import type { EngineApi } from "./api.ts";
 import {
   isChatStreamContentPreviewMarker,
   isChatStreamPartPreviewMarker,
+  isChatStreamToolOutputPreviewMarker,
   type ChatPart,
   type ChatRow,
 } from "./chat-stream.ts";
@@ -61,7 +62,9 @@ function openPermissionPart(
   sessionId: string,
 ): { payload: unknown; previewKey?: string } | undefined {
   const toolCall = row.parts.find((part) => part.type === "tool-call" &&
-    part.tool_call_id === toolCallId && part.tool_name === "request_permission" && part.result === undefined);
+    part.tool_call_id === toolCallId && part.tool_name === "request_permission" && part.result === undefined &&
+    !(isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview) &&
+      part.chat_stream_result_preview.tool_call_id === part.tool_call_id));
   if (toolCall?.type === "tool-call") {
     // Never treat the bounded owner summary as the permission being approved.
     // The verified, open full-args entry below is the authority for previews.

@@ -1,6 +1,7 @@
 import type { ChatRow } from "../chat-stream.ts";
 import {
   isChatStreamPartPreviewMarker,
+  isChatStreamToolOutputPreviewMarker,
 } from "../chat-stream.ts";
 import {
   permissionPromptPreviewKey,
@@ -48,7 +49,9 @@ export function pendingPermissions(
   const fromRows = rows.flatMap((row) => row.parts.flatMap((part) => {
     let payload: unknown;
     if (part.type === "tool-call") {
-      if (part.tool_name !== "request_permission" || part.result !== undefined) return [];
+      if (part.tool_name !== "request_permission" || part.result !== undefined ||
+          (isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview) &&
+            part.chat_stream_result_preview.tool_call_id === part.tool_call_id)) return [];
       // A compact owner summary is only an association hint. The complete args
       // must be fetched and the matching preview opened before Stop is enabled.
       if (part.chat_stream_args_preview !== undefined) return [];

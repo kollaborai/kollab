@@ -14,13 +14,16 @@ import {
 import {
   ChatStreamContentPreview,
   chatStreamArgsPreviewFromMetadata,
+  chatStreamResultPreviewFromMetadata,
   chatStreamContentIdentity,
   type ChatStreamContentPreviewMarker,
 } from "@/chat-stream-content";
+import { ToolFallbackResult } from "@/components/assistant-ui/tool-fallback";
 import {
   CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND,
   isChatStreamContentPreviewMarker,
   isChatStreamPartPreviewMarker,
+  type ChatStreamToolOutputPreviewMarker,
   type ChatStreamPartPreviewMarker,
 } from "@/chat-stream";
 import {
@@ -94,7 +97,8 @@ const RISK_BADGE_VARIANT: Record<
 type PermissionPromptCardProps = {
   partId: string;
   args: PermissionArgs;
-  result?: PermissionResult;
+  result?: PermissionResult | null;
+  resultPreview?: ChatStreamToolOutputPreviewMarker;
   resolved?: boolean;
 };
 
@@ -106,13 +110,16 @@ export type RecoveredPermissionRowContext = {
   partRevision?: string;
 };
 
-function PermissionPromptCard({ partId, args, result, resolved = false }: PermissionPromptCardProps) {
+function PermissionPromptCard({ partId, args, result, resultPreview, resolved = false }: PermissionPromptCardProps) {
   const payload = args || {};
   // The tool-call row decides the outcome. The daemon writes `result` once it
   // records the answer, so every client shows the same state. Until then the
   // card is pending.
-  const decided: PermissionResult | undefined = result ?? undefined;
-  const isResolved = resolved || decided !== undefined;
+  const decided: PermissionResult | undefined = isRecord(result) &&
+      (result.decision === "approve" || result.decision === "deny")
+    ? result as PermissionResult
+    : undefined;
+  const isResolved = resolved || result !== undefined || resultPreview !== undefined;
   // The one in-flight flag. It stops a second send while the decision is out
   // (a double click), and it stays set after an answer, so the card stays
   // locked until the row carries the result.
@@ -193,6 +200,7 @@ function PermissionPromptCard({ partId, args, result, resolved = false }: Permis
         {isResolved && !decided ? (
           <p className="font-medium text-muted-foreground">Permission resolved</p>
         ) : null}
+        {resultPreview ? <ToolFallbackResult resultPreview={resultPreview} /> : null}
         {stale ? <p role="status" className="text-destructive text-xs">This permission request is no longer pending.</p> : null}
         {submissionError ? <p role="status" className="text-destructive text-xs">Couldn't send the decision. Refresh to check whether it was applied.</p> : null}
         {submitting && !decided ? <p role="status" className="text-muted-foreground text-xs">Sending decision…</p> : null}
@@ -254,12 +262,16 @@ export function PermissionPrompt({
   providerMetadata,
 }: ToolCallMessagePartProps<PermissionArgs, PermissionResult>) {
   const marker = chatStreamArgsPreviewFromMetadata(providerMetadata);
+  const candidateResultPreview = chatStreamResultPreviewFromMetadata(providerMetadata);
+  const resultPreview = candidateResultPreview?.tool_call_id === toolCallId
+    ? candidateResultPreview
+    : undefined;
   if (hasChatStreamArgsPreviewMetadata(providerMetadata)) {
     return marker
-      ? <PermissionArgsPreview id={toolCallId} marker={marker} result={result ?? undefined} />
+      ? <PermissionArgsPreview id={toolCallId} marker={marker} result={result} resultPreview={resultPreview} />
       : <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
   }
-  return <PermissionPromptCard partId={toolCallId} args={args || {}} result={result ?? undefined} />;
+  return <PermissionPromptCard partId={toolCallId} args={args || {}} result={result} resultPreview={resultPreview} />;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -383,11 +395,13 @@ function PermissionArgsPreview({
   id,
   marker,
   result,
+  resultPreview,
   rowContext,
 }: {
   id: string;
   marker: ChatStreamContentPreviewMarker;
-  result?: PermissionResult;
+  result?: PermissionResult | null;
+  resultPreview?: ChatStreamToolOutputPreviewMarker;
   rowContext?: RecoveredPermissionRowContext;
 }) {
   if (!isChatStreamContentPreviewMarker(marker) || marker.field !== "args" ||
@@ -409,7 +423,7 @@ function PermissionArgsPreview({
         if (!args) {
           return <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
         }
-        return <LoadedPermissionArgs id={id} marker={marker} args={args} content={content} result={result} rowContext={rowContext} />;
+        return <LoadedPermissionArgs id={id} marker={marker} args={args} content={content} result={result} resultPreview={resultPreview} rowContext={rowContext} />;
       }}
     </ChatStreamContentPreview>
   );
@@ -421,13 +435,15 @@ function LoadedPermissionArgs({
   args,
   content,
   result,
+  resultPreview,
   rowContext,
 }: {
   id: string;
   marker: ChatStreamContentPreviewMarker;
   args: PermissionArgs;
   content: string;
-  result?: PermissionResult;
+  result?: PermissionResult | null;
+  resultPreview?: ChatStreamToolOutputPreviewMarker;
   rowContext?: RecoveredPermissionRowContext;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(true);
@@ -445,14 +461,15 @@ function LoadedPermissionArgs({
     contentRevision: marker.output_revision,
     argsPreview: marker,
   };
+  const hasResult = result !== undefined || resultPreview !== undefined;
   const register = (isVisible: boolean) => {
-    registerRecoveredPermissionPrompt(recoveredPrompt, !result && isVisible && !!args.tool_id && !!args.permission_id);
+    registerRecoveredPermissionPrompt(recoveredPrompt, !hasResult && isVisible && !!args.tool_id && !!args.permission_id);
   };
   useEffect(() => {
     register(detailsOpen);
     return () => register(false);
   }, [detailsOpen, id, marker.output_revision, marker.part_index, marker.row_id, marker.session_id,
-      result, rowContext?.rowRevision, rowContext?.partRevision, rowContext?.sessionId, rowContext?.rowId]);
+      result, resultPreview, rowContext?.rowRevision, rowContext?.partRevision, rowContext?.sessionId, rowContext?.rowId]);
   return (
     <div className="space-y-2">
       <details open={detailsOpen} onToggle={(event) => {
@@ -464,7 +481,7 @@ function LoadedPermissionArgs({
         <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 text-xs">{content}</pre>
       </details>
       <div hidden={!detailsOpen} aria-hidden={!detailsOpen}>
-        <PermissionPromptCard partId={id} args={args} result={result} />
+        <PermissionPromptCard partId={id} args={args} result={result} resultPreview={resultPreview} />
       </div>
     </div>
   );

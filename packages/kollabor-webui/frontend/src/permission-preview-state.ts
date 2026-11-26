@@ -4,6 +4,7 @@ import {
   isChatStreamContentPreviewMarker,
   isChatStreamPartPreviewMarker,
   isChatStreamPartsPreviewMarker,
+  isChatStreamToolOutputPreviewMarker,
   type ChatStreamContentPreviewMarker,
   type ChatRow,
 } from "./chat-stream.ts";
@@ -129,7 +130,9 @@ export function recoveredPermissionPromptIsCurrent(
     }
 
     if (part?.type !== "tool-call" || part.tool_name !== "request_permission" ||
-        part.tool_call_id !== prompt.promptId || part.result !== undefined) return false;
+        part.tool_call_id !== prompt.promptId || part.result !== undefined ||
+        (isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview) &&
+          part.chat_stream_result_preview.tool_call_id === part.tool_call_id)) return false;
     // A direct live row may carry an externalized args marker. A recovered
     // complete part may instead have inline args, bound by its part revision.
     if (prompt.argsPreview) return matchesArgsPreview(part.chat_stream_args_preview, prompt);
