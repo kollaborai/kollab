@@ -678,12 +678,12 @@ class MessageHandler:
                 content = msg.get("content", "")
                 display_text = _plugin_display_text(content)
                 plugin_input_id = None
+                message_metadata = {}
 
                 # Add to conversation history
                 if add_to_history:
                     from kollabor_events.data_models import ConversationMessage
 
-                    message_metadata = {}
                     if role == "user" and display_messages and display_text.strip():
                         # This is the plugin's authored, displayable string,
                         # captured before any model-only context is merged.

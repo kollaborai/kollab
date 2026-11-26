@@ -2817,7 +2817,12 @@ class LLMService:
             {
                 "request_id": request_id,
                 "history_row_uuid": item.history_row_uuid,
-                "content": item.content,
+                "content": (
+                    item.stream_display_content
+                    if isinstance(item, TaggedInput)
+                    and isinstance(item.stream_display_content, str)
+                    else item.content
+                ),
             }
             for item in messages
             if isinstance(item, (QueuedInput, TaggedInput))
