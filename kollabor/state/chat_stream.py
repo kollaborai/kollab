@@ -19,7 +19,11 @@ from kollabor_events.chat_stream import (
 )
 from kollabor_events.chat_stream_emit import emit_chat_event
 
-from .chat_stream_rows import ChatStreamRowPager, register_chat_stream_rows_handler
+from .chat_stream_rows import (
+    ChatStreamRowPager,
+    merge_chat_stream_rows,
+    register_chat_stream_rows_handler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1224,28 +1228,29 @@ class ChatStreamService:
         uid = self._conversation_uid()
         custom = getattr(self._state_service, "chat_stream_snapshot", None)
         state = custom() if callable(custom) else {}
-        rows_by_id = {
-            row["id"]: copy.deepcopy(row) for row in self._transcript_rows(uid)
-        }
         state_rows = state.get("rows") if isinstance(state, dict) else None
-        if isinstance(state_rows, list):
-            rows_by_id.update(
-                {
-                    row["id"]: copy.deepcopy(row)
-                    for row in state_rows
-                    if isinstance(row, dict) and isinstance(row.get("id"), str)
-                }
-            )
+        if not isinstance(state_rows, list):
+            state_rows = []
+        state_rows = [
+            row
+            for row in state_rows
+            if isinstance(row, dict)
+            and isinstance(row.get("id"), str)
+            and row["id"]
+        ]
+        rows = merge_chat_stream_rows(self._transcript_rows(uid), state_rows)
         active_turn = self._active_turns.get(uid)
+        live_rows = []
         for row in self._rows.get(uid, {}).values():
             row_id = row.get("id")
             input_info = self._inputs.get(uid, {}).get(row_id, {})
-            if row.get("turn_id") == active_turn or input_info.get("state") in {
-                "queued",
-                "started",
-                "joined",
-            }:
-                rows_by_id[row_id] = copy.deepcopy(row)
+            if (
+                row.get("turn_id") == active_turn
+                or input_info.get("state") in {"queued", "started", "joined"}
+                or row.get("kind") == "note"
+            ):
+                live_rows.append(row)
+        rows = merge_chat_stream_rows(rows, live_rows)
         marker = {
             "id": f"marker-{uuid.uuid4().hex}",
             "seq": self._log(uid).next_seq,
@@ -1256,7 +1261,7 @@ class ChatStreamService:
             "parts": [{"type": "text", "text": "Earlier messages compacted"}],
             "created_at": self._timestamp(),
         }
-        replacement_rows = [marker, *rows_by_id.values()][-REPLAY_WINDOW:]
+        replacement_rows = [marker, *rows][-REPLAY_WINDOW:]
         event = self._log(uid).publish("replace", {"rows": replacement_rows})
         self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in replacement_rows}
         return event
@@ -1299,18 +1304,24 @@ class ChatStreamService:
         state = custom() if callable(custom) and uid == self._conversation_uid() else {}
         if not isinstance(state, dict):
             state = {}
-        rows = self._transcript_rows(uid)
-        rows_by_id = {row["id"]: row for row in rows}
-        rows_by_id.update(copy.deepcopy(self._rows.get(uid, {})))
         state_rows = state.get("rows")
-        if isinstance(state_rows, list):
-            rows_by_id.update(
-                {
-                    row["id"]: row
-                    for row in state_rows
-                    if isinstance(row, dict) and row.get("id")
-                }
+        if not isinstance(state_rows, list):
+            state_rows = []
+        state_rows = [
+            row
+            for row in state_rows
+            if isinstance(row, dict)
+            and isinstance(row.get("id"), str)
+            and row["id"]
+        ]
+        rows_by_id = {
+            row["id"]: row
+            for row in merge_chat_stream_rows(
+                self._transcript_rows(uid),
+                list(self._rows.get(uid, {}).values()),
+                state_rows,
             )
+        }
         turns = {
             turn["turn_id"]: turn
             for turn in state.get("turns", [])

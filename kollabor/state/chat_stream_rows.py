@@ -7,6 +7,7 @@ import binascii
 import copy
 import json
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 _MAX_CURSOR_LENGTH = 8192
@@ -25,20 +26,62 @@ class ConversationChanged(ValueError):
     """The supplied cursor belongs to another conversation."""
 
 
-def _rows_by_id(*sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge transcript and live row-log records, with the live copy winning."""
+def _row_time(row: dict[str, Any]) -> datetime | None:
+    value = row.get("created_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_compaction_marker(row: dict[str, Any]) -> bool:
+    parts = row.get("parts")
+    return row.get("kind") == "marker" and isinstance(parts, list) and any(
+        isinstance(part, dict)
+        and part.get("type") == "text"
+        and part.get("text") == "Earlier messages compacted"
+        for part in parts
+    )
+
+
+def merge_chat_stream_rows(*sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge rows, preserving transcript order and inserting live rows by time."""
     ordered_ids: list[str] = []
     rows: dict[str, dict[str, Any]] = {}
-    for source in sources:
+    for source_index, source in enumerate(sources):
         for row in source:
             if not isinstance(row, dict):
                 raise ValueError("chat stream rows must be objects")
             row_id = row.get("id")
             if not isinstance(row_id, str) or not row_id:
                 raise ValueError("chat stream row id must be a non-empty string")
-            if row_id not in rows:
-                ordered_ids.append(row_id)
-            rows[row_id] = copy.deepcopy(row)
+            copied = copy.deepcopy(row)
+            if row_id in rows:
+                rows[row_id] = copied
+                continue
+            insert_at = len(ordered_ids)
+            if source_index and _is_compaction_marker(copied):
+                insert_at = 0
+            elif source_index:
+                row_time = _row_time(copied)
+                if row_time is not None:
+                    for index, current_id in enumerate(ordered_ids):
+                        current = rows[current_id]
+                        current_time = _row_time(current)
+                        if (
+                            not _is_compaction_marker(current)
+                            and current_time is not None
+                            and current_time > row_time
+                        ):
+                            insert_at = index
+                            break
+            ordered_ids.insert(insert_at, row_id)
+            rows[row_id] = copied
     return [rows[row_id] for row_id in ordered_ids]
 
 
@@ -108,7 +151,7 @@ class ChatStreamRowPager:
         ):
             raise ValueError("chat stream row sources must be lists")
 
-        all_rows = _rows_by_id(transcript_rows, snapshot_rows, row_log_rows)
+        all_rows = merge_chat_stream_rows(transcript_rows, snapshot_rows, row_log_rows)
         if before is None:
             if not snapshot_rows:
                 return {"rows": [], "older": None}
@@ -195,7 +238,7 @@ class ChatStreamRowPager:
         if not snapshot_rows:
             return None
 
-        all_rows = _rows_by_id(transcript_rows, snapshot_rows, row_log_rows)
+        all_rows = merge_chat_stream_rows(transcript_rows, snapshot_rows, row_log_rows)
         boundary = snapshot_rows[0]
         boundary_index = next(
             (
