@@ -164,10 +164,8 @@ describe("toThreadMessageLike", () => {
       tool_name: "inspect",
       args: markerShapedUserArgs,
     }]));
-    expect(opaqueMessage.content[0]).toMatchObject({
-      type: "tool-call",
-      providerMetadata: undefined,
-    });
+    expect(opaqueMessage.content[0]).toMatchObject({ type: "tool-call" });
+    expect(opaqueMessage.content[0]).not.toHaveProperty("providerMetadata");
     expect(opaqueMessage.content[0]).toMatchObject({
       argsText: JSON.stringify(markerShapedUserArgs),
     });

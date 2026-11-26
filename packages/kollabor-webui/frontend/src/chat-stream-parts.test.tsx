@@ -24,6 +24,7 @@ vi.mock("@/components/media/media-view", () => ({
 import {
   ChatStreamPartPreview,
   ChatStreamPartsPreview,
+  RecoveredChatPart,
   fetchChatStreamPartsPage,
 } from "./chat-stream-parts";
 import type { ChatStreamPartPreviewMarker, ChatStreamPartsPreviewMarker } from "./chat-stream";
@@ -180,6 +181,102 @@ describe("chat stream part recovery", () => {
     });
 
     await expect(fetchChatStreamPartsPage(marker, 0)).rejects.toThrow("does not match");
+  });
+
+  it("keeps marker-shaped tool args opaque and validates the dedicated args preview", async () => {
+    const marker = partsMarker("row-args-marker");
+    const opaqueArgs = {
+      kind: "chat-stream-content-preview",
+      field: "args",
+      app_value: "ordinary user data",
+    };
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: marker.part_count,
+      output_revision: marker.output_revision,
+      parts: [{
+        type: "tool-call", tool_call_id: "call-opaque", tool_name: "inspect", args: opaqueArgs,
+      }],
+      done: false,
+    });
+    await expect(fetchChatStreamPartsPage(marker, 0)).resolves.toMatchObject({
+      parts: [{ args: opaqueArgs }],
+    });
+
+    const argsPreview = {
+      kind: "chat-stream-content-preview" as const,
+      session_id: marker.session_id,
+      row_id: marker.row_id,
+      part_index: 0,
+      field: "args" as const,
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "json" as const,
+      output_revision: "c".repeat(64),
+      preview: '{"large":',
+    };
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: marker.part_count,
+      output_revision: marker.output_revision,
+      parts: [{
+        type: "tool-call", tool_call_id: "call-large", tool_name: "inspect", args: {},
+        chat_stream_args_preview: argsPreview,
+      }],
+      done: false,
+    });
+    await expect(fetchChatStreamPartsPage(marker, 0)).resolves.toMatchObject({
+      parts: [{ chat_stream_args_preview: argsPreview }],
+    });
+  });
+
+  it("recovers tool args from the dedicated top-level args preview marker", async () => {
+    const marker = {
+      kind: "chat-stream-content-preview" as const,
+      session_id: "session-1",
+      row_id: "row-args-view",
+      part_index: 0,
+      field: "args" as const,
+      output_bytes: 24,
+      output_chars: 24,
+      output_type: "json" as const,
+      output_revision: "d".repeat(64),
+      preview: '{"secret":"preview"}',
+    };
+    mocks.getChatStreamContent.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      part_index: marker.part_index,
+      field: "args",
+      output_revision: marker.output_revision,
+      offset: 0,
+      next_offset: 22,
+      total_chars: 22,
+      output_type: "json",
+      content: '{"secret":"recovered"}',
+      done: true,
+    });
+    const ui = mount();
+    try {
+      await ui.render(<RecoveredChatPart part={{
+        type: "tool-call", tool_call_id: "call-args", tool_name: "inspect", args: {},
+        chat_stream_args_preview: marker,
+      }} />);
+      await act(async () => {
+        ui.host.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(mocks.getChatStreamContent).toHaveBeenCalledWith(
+        marker.session_id, marker.row_id, marker.part_index, "args", marker.output_revision,
+        { offset: 0, limit: 32768 },
+      );
+      expect(ui.host.textContent).toContain("recovered");
+      expect(ui.host.textContent).not.toContain("preview");
+    } finally {
+      await ui.unmount();
+    }
   });
 
   it("loads a row a page at a time and renders image, hub-note, and prompt parts", async () => {
