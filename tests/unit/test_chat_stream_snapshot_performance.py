@@ -244,3 +244,67 @@ def test_snapshot_preserves_live_inputs_when_their_rows_are_trimmed():
             "input_ids": ["running-without-row"],
         }
     ]
+
+
+def test_snapshot_drops_unreferenced_turn_metadata():
+    state = _State([])
+    stream = ChatStreamService(state)
+    uid = state.get_conversation_uid()
+    stream._turns[uid] = {
+        f"old-{index}": {
+            "turn_id": f"old-{index}",
+            "state": "ended",
+            "input_ids": [],
+            "origin": {
+                "kind": "goal",
+                "goal_id": f"goal-{index}",
+                "attempt_id": f"attempt-{index}",
+                "unused_payload": "x" * 25_000,
+            },
+        }
+        for index in range(180)
+    }
+    stream._turns[uid]["active-turn"] = {
+        "turn_id": "active-turn",
+        "state": "running",
+        "input_ids": ["active-input"],
+    }
+    stream._inputs[uid] = {
+        "active-input": {
+            "id": "active-input",
+            "state": "started",
+            "turn_id": "active-turn",
+        }
+    }
+
+    snapshot = stream._snapshot(uid)
+
+    assert snapshot["rows"] == []
+    assert snapshot["turns"] == [stream._turns[uid]["active-turn"]]
+    assert snapshot["inputs"] == [stream._inputs[uid]["active-input"]]
+
+
+def test_snapshot_pages_the_window_when_its_row_budget_trims_every_row(monkeypatch):
+    state = _State([])
+    stream = ChatStreamService(state)
+    uid = state.get_conversation_uid()
+    monkeypatch.setattr(chat_stream_module, "CHAT_STREAM_MAX_RESPONSE_BYTES", 512)
+    row = {
+        "id": "row-windowed",
+        "seq": 1,
+        "kind": "reply",
+        "role": "assistant",
+        "turn_id": None,
+        "status": "completed",
+        "parts": [{"type": "text", "text": "large row " * 1000}],
+        "created_at": "2026-11-26T10:00:00Z",
+    }
+    stream._upsert(uid, row)
+
+    empty_snapshot = stream._snapshot(uid)
+
+    assert empty_snapshot["rows"] == []
+    assert empty_snapshot["older"] is not None
+    pager = stream._row_pager(snapshot_rows=[], transcript_rows=[])
+    page = pager.read(before=empty_snapshot["older"], limit=10)
+    assert [item["id"] for item in page["rows"]] == [row["id"]]

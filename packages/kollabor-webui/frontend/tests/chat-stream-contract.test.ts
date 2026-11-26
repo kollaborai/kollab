@@ -60,11 +60,18 @@ const partsPreview = (rowId = "r1") => ({
 });
 
 describe("chat stream contract", () => {
-  it("reads all eight fixtures", () => {
+  it("reads all ten fixtures", () => {
     expect(cases.map((c) => c.name).sort()).toEqual([
-      "bad-gap.json", "bad-never-ends.json", "bad-regress.json", "bad-reid.json", "bad-seq.json", "compaction.json",
-      "reload-mid-turn.json", "steered-input.json",
+      "bad-gap.json", "bad-never-ends.json", "bad-preview-marker-identity.json", "bad-regress.json", "bad-reid.json", "bad-seq.json", "compaction.json",
+      "preview-markers.json", "reload-mid-turn.json", "steered-input.json",
     ]);
+  });
+
+  it("keeps Python and TypeScript preview-marker fixtures in parity", () => {
+    const valid = cases.find((item) => item.name === "preview-markers.json");
+    const invalid = cases.find((item) => item.name === "bad-preview-marker-identity.json");
+    expect(valid?.events.every(isChatStreamEvent)).toBe(true);
+    expect(invalid?.events.every(isChatStreamEvent)).toBe(false);
   });
 
   it("accepts a row that carries every part type", () => {

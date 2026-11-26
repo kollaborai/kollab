@@ -25,6 +25,8 @@ def test_fixtures_cover_good_and_bad_streams():
         "bad-seq",
         "bad-regress",
         "bad-gap",
+        "preview-markers",
+        "bad-preview-marker-identity",
     } <= names
 
 
@@ -40,10 +42,21 @@ def test_fixture_produces_exactly_its_expected_problems(path):
             assert any(needle in problem for problem in problems), (needle, problems)
 
 
-def test_every_fixture_event_has_a_valid_shape():
+def test_every_fixture_event_has_its_expected_shape_problems():
     for path in CASES:
-        for event in json.loads(path.read_text())["events"]:
-            assert event_problems(event) == [], (path.stem, event)
+        case = json.loads(path.read_text())
+        expected_by_index = case.get("event_expect", {})
+        for index, event in enumerate(case["events"]):
+            problems = event_problems(event)
+            expected = expected_by_index.get(str(index), [])
+            assert len(problems) == len(expected), (path.stem, index, problems)
+            for needle in expected:
+                assert any(needle in problem for problem in problems), (
+                    path.stem,
+                    index,
+                    needle,
+                    problems,
+                )
 
 
 @pytest.mark.parametrize(
