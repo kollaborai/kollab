@@ -9,6 +9,8 @@ import { toRepository } from "../src/chat-runtime";
 import { ChatStoreProvider, type ChatSnapshot, type LiveStore } from "../src/chat-store";
 import type { ChatRow, InputInfo } from "../src/chat-stream";
 import { Thread } from "../src/components/assistant-ui/thread";
+import { PermissionCancellationProvider } from "../src/permission-cancellation";
+import type { EngineApi } from "../src/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -89,7 +91,11 @@ function Capture() {
 const roots: Root[] = [];
 const containers: HTMLElement[] = [];
 
-function mount(live: LiveStore, runtimeSpies: Spies): HTMLElement {
+function mount(
+  live: LiveStore,
+  runtimeSpies: Spies,
+  permissionApi?: Pick<EngineApi, "getPermissions" | "cancelOwned">,
+): HTMLElement {
   const container = document.createElement("div");
   document.body.appendChild(container);
   containers.push(container);
@@ -98,10 +104,19 @@ function mount(live: LiveStore, runtimeSpies: Spies): HTMLElement {
   act(() => {
     root.render(
       <ChatStoreProvider store={live}>
-        <SpyRuntime store={live} spies={runtimeSpies}>
-          <Capture />
-          <Thread commands={[]} />
-        </SpyRuntime>
+        {permissionApi ? (
+          <PermissionCancellationProvider api={permissionApi} sessionId="session-1" store={live}>
+            <SpyRuntime store={live} spies={runtimeSpies}>
+              <Capture />
+              <Thread commands={[]} />
+            </SpyRuntime>
+          </PermissionCancellationProvider>
+        ) : (
+          <SpyRuntime store={live} spies={runtimeSpies}>
+            <Capture />
+            <Thread commands={[]} />
+          </SpyRuntime>
+        )}
       </ChatStoreProvider>,
     );
   });
@@ -169,6 +184,29 @@ describe("composer send, queue, Stop and Send Now on the chat store", () => {
 
     expect(store.stop).toHaveBeenCalledTimes(1);
     expect(runtimeSpies.onCancel).not.toHaveBeenCalled();
+  });
+
+  it("shows a visible error when stopping a pending permission fails", async () => {
+    const permissionRow: ChatRow = {
+      id: "permission-row", seq: 1, kind: "tool", role: "assistant", turn_id: "turn-1", status: "complete",
+      parts: [{
+        type: "tool-call", tool_call_id: "call-1", tool_name: "request_permission",
+        args: { tool_id: "shell-1", request_id: "parent-1", details: { source: "acp", parked: false } },
+      }],
+      created_at: "2026-11-25T00:00:00Z",
+    };
+    const { live } = fakeStore([permissionRow], {}, false);
+    const api = {
+      getPermissions: vi.fn(async () => { throw new Error("offline"); }),
+      cancelOwned: vi.fn(async () => ({ cancelled: true })),
+    } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
+    const container = mount(live, spies(), api);
+
+    await click(byLabel(container, "Stop generating"));
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      "Could not stop the pending permission. Try again.",
+    );
   });
 
   it("Send Now calls store.sendNow with the queued input's id", async () => {
