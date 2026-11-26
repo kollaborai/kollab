@@ -882,6 +882,69 @@ def test_snapshot_translates_canonical_transcript_images_to_chat_parts():
     ]
 
 
+def test_snapshot_restores_queue_handoff_images_from_text_only_history(tmp_path):
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content="inspect [image1]",
+            metadata={
+                "request_id": "web-handoff-image",
+                "queue_handoff": {
+                    "request_id": "web-handoff-image",
+                    "media_refs": [
+                        {"source_ref": "attachment-source-a", "ref": "20261125-120000-a1b2"}
+                    ],
+                },
+            },
+        )
+    ]
+
+    _snapshot, rows = _snapshot_rows(ChatStreamService(state))
+
+    assert rows[0]["id"] == "web-handoff-image"
+    assert rows[0]["parts"] == [
+        {"type": "text", "text": "inspect [image1]"},
+        {"type": "image", "url": "/media/20261125-120000-a1b2"},
+    ]
+
+
+def test_snapshot_persists_managed_upload_without_handoff_as_authenticated_media(tmp_path):
+    from kollabor_ai.message_content import EphemeralImageStore
+    from kollabor_engine.media_store import open_media
+
+    state = _State()
+    image_store = EphemeralImageStore()
+    media_id = image_store.add_data_url("data:image/png;base64,AQID")
+    state._llm_service._image_store = image_store
+    state._llm_service.conversation_logger = SimpleNamespace(
+        conversations_dir=tmp_path,
+        session_id="s1",
+    )
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content=[
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image",
+                    "source": {"kind": "managed_upload", "media_id": media_id},
+                },
+            ],
+            metadata={"request_id": "native-managed-image"},
+        )
+    ]
+
+    snapshot, rows = _snapshot_rows(ChatStreamService(state))
+
+    assert rows[0]["parts"][0] == {"type": "text", "text": "look"}
+    assert rows[0]["parts"][1]["type"] == "image"
+    assert rows[0]["parts"][1]["url"].startswith("/media/")
+    assert "data:image" not in json.dumps(snapshot)
+    ref = rows[0]["parts"][1]["url"].removeprefix("/media/")
+    assert open_media(tmp_path, ref, session_id="s1") == (b"\x01\x02\x03", "image/png")
+
+
 def test_snapshot_resolves_uploaded_transcript_images_without_inline_data():
     state = _State()
     state._llm_service._image_store = SimpleNamespace(

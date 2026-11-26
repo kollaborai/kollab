@@ -9,6 +9,7 @@ import { toRepository } from "../src/chat-runtime";
 import { ChatStoreProvider, type ChatSnapshot, type LiveStore, type LocalGoalReply } from "../src/chat-store";
 import type { ChatRow, InputInfo } from "../src/chat-stream";
 import { Thread } from "../src/components/assistant-ui/thread";
+import { MediaImageProvider } from "../src/components/media/media-view";
 import { PermissionCancellationProvider } from "../src/permission-cancellation";
 import type { EngineApi } from "../src/api";
 
@@ -96,11 +97,15 @@ function Capture() {
 
 const roots: Root[] = [];
 const containers: HTMLElement[] = [];
+const unprotectedImageApi = {
+  request: async () => ({ ok: false, status: 404 }),
+} as unknown as EngineApi;
 
 function mount(
   live: LiveStore,
   runtimeSpies: Spies,
   permissionApi?: Pick<EngineApi, "getPermissions" | "cancelOwned">,
+  mediaApi: EngineApi = unprotectedImageApi,
 ): HTMLElement {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -110,6 +115,7 @@ function mount(
   act(() => {
     root.render(
       <ChatStoreProvider store={live}>
+        <MediaImageProvider api={mediaApi}>
         {permissionApi ? (
           <PermissionCancellationProvider api={permissionApi} sessionId="session-1" store={live}>
             <SpyRuntime store={live} spies={runtimeSpies}>
@@ -123,6 +129,7 @@ function mount(
             <Thread commands={[]} />
           </SpyRuntime>
         )}
+        </MediaImageProvider>
       </ChatStoreProvider>,
     );
   });
@@ -133,6 +140,7 @@ afterEach(() => {
   act(() => roots.splice(0).forEach((root) => root.unmount()));
   containers.splice(0).forEach((container) => container.remove());
   aui = undefined;
+  vi.unstubAllGlobals();
 });
 
 async function typeText(text: string) {
@@ -153,6 +161,39 @@ const byLabel = (container: HTMLElement, label: string) =>
   container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
 
 describe("composer send, queue, Stop and Send Now on the chat store", () => {
+  it("loads protected images in a stream row through the authenticated media API", async () => {
+    const NativeURL = URL;
+    const URLWithObjectUrls = class extends NativeURL {};
+    Object.defineProperty(URLWithObjectUrls, "createObjectURL", {
+      value: vi.fn(() => "blob:authenticated-chat-image"),
+    });
+    Object.defineProperty(URLWithObjectUrls, "revokeObjectURL", { value: vi.fn() });
+    vi.stubGlobal("URL", URLWithObjectUrls);
+    const request = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["image"]),
+    }));
+    const mediaApi = { request } as unknown as EngineApi;
+    const imageRow: ChatRow = {
+      ...row("stream-image", ""),
+      parts: [{ type: "image", url: "/media/opaque-image-ref" }],
+    };
+    const { live } = fakeStore([imageRow], {}, false);
+    const container = mount(live, spies(), undefined, mediaApi);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(request).toHaveBeenCalledWith("/media/opaque-image-ref");
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "blob:authenticated-chat-image",
+    );
+    expect(container.querySelector("img")?.getAttribute("src")).not.toBe(
+      "/media/opaque-image-ref",
+    );
+  });
+
   it("while running with content, Send calls store.send once with a new id", async () => {
     const { store, live } = fakeStore([], {}, true);
     const runtimeSpies = spies();
