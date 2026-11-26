@@ -460,6 +460,21 @@ describe("toThreadMessageLike", () => {
 });
 
 describe("toRepository", () => {
+  it("puts a turn's consecutive tool rows in one message so the thread groups them (#1451)", () => {
+    const tool = (id: string, turn: string | null) => ({
+      ...row(id, [{ type: "tool-call" as const, tool_call_id: `call-${id}`, tool_name: "read_file", args: {} }]),
+      kind: "tool" as const,
+      turn_id: turn,
+    }) as ChatRow;
+    const reply = { ...row("reply-1", [{ type: "text" as const, text: "checking" }]), turn_id: "t1" } as ChatRow;
+    const rows = [reply, tool("a", "t1"), tool("b", "t1"), tool("c", "t1"), tool("d", "t2")];
+    const messages = toRepository(rows).messages.map((m) => m.message);
+
+    expect(messages.map((m) => m.id)).toEqual(["reply-1", "a", "d"]);
+    expect(messages[1].content.map((part) => part.type === "tool-call" ? part.toolCallId : part.type))
+      .toEqual(["call-a", "call-b", "call-c"]);
+  });
+
   it("treats an externalized result as complete through assistant-ui and keeps failures visible", () => {
     const resultPreview = {
       kind: "chat-stream-tool-output-preview" as const,
