@@ -416,3 +416,72 @@ async def test_resume_reused_uid_restores_completed_input_over_stale_started_pro
     assert snapshot_input.get("outcome") == "completed"
     assert snapshot_input.get("turn_id") != "later-turn"
     assert stream._admission_inputs[uid][input_id]["state"] == "ended"
+
+
+@pytest.mark.asyncio
+async def test_resume_reconciles_admission_outside_snapshot_window_and_keeps_owner_retry(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("kollabor.state.chat_stream.REPLAY_WINDOW", 2)
+    state, _tap = _state_with_saved_session(tmp_path, saved_message_count=4)
+    state._llm_service.is_processing = True
+    server = RpcServer()
+    register_state_handlers(server, state)
+    runtime = register_web_message_queue_runtime(server, state)
+    input_id = "saved-session-input-0"
+
+    async def call(method, params):
+        response = await server.handle_wire(
+            {
+                "action": "rpc_request",
+                "request_id": f"{method}-{input_id}",
+                "method": method,
+                "params": params,
+            },
+            caller_context=RpcCallerContext.from_unix_peer(501),
+        )
+        assert response["error"] is None
+        return response["result"]
+
+    try:
+        await state.resume_conversation("saved-session")
+        uid = state.get_conversation_uid()
+        text = "saved session transcript"
+        assert await call(
+            "state.chat_stream.add_input",
+            {"id": input_id, "text": text, "attachments": []},
+        ) == {"id": input_id, "state": "queued"}
+        scope = state.chat_stream._input_scopes[(uid, input_id)]
+        turn_id = state.chat_stream.begin_ordered_command(
+            input_id, uid, scope[0]
+        )
+        assert turn_id is not None
+        state.chat_stream._upsert(
+            uid,
+            {
+                "id": "stale-later-note",
+                "seq": 0,
+                "kind": "note",
+                "role": "system",
+                "turn_id": turn_id,
+                "status": "done",
+                "parts": [{"type": "text", "text": "stale later note"}],
+                "created_at": "2026-11-27T00:00:00Z",
+            },
+        )
+
+        await state.resume_conversation("saved-session")
+
+        snapshot = state.chat_stream._snapshot(uid)
+        assert all(row["id"] != "stale-later-note" for row in snapshot["rows"])
+        assert all(row["id"] != input_id for row in snapshot["rows"])
+        assert (
+            state.chat_stream._admission_inputs[uid][input_id]["state"]
+            == "ended"
+        )
+        assert await call(
+            "state.chat_stream.add_input",
+            {"id": input_id, "text": text, "attachments": []},
+        ) == {"id": input_id, "state": "ended"}
+    finally:
+        await runtime.close()
