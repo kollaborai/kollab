@@ -690,6 +690,98 @@ describe("chat stream part recovery", () => {
     }
   });
 
+  it.each(["whole-row page", "per-part preview"] as const)(
+    "keeps a pending request_permission actionable with a null optional result preview in a %s",
+    async (recoveryPath) => {
+      const rowId = `row-pending-null-result-preview-${recoveryPath.replaceAll(" ", "-")}`;
+      const owner = {
+        tool_id: "pending-null-preview-tool",
+        permission_id: "pending-null-preview-permission",
+        request_id: "pending-null-preview-request",
+        source: "acp",
+        parked: false,
+        tool_name: "terminal",
+        command: "pytest -q still pending",
+      };
+      const part = {
+        type: "tool-call",
+        tool_call_id: "pending-null-preview-call",
+        tool_name: "request_permission",
+        args: owner,
+        chat_stream_result_preview: null,
+      };
+      const row: ChatRow = {
+        id: rowId,
+        seq: 10,
+        kind: "tool" as const,
+        role: "assistant" as const,
+        turn_id: "turn-pending-null-preview",
+        status: "requires-action" as const,
+        parts: [{ type: "text" as const, text: "[Large recovered content]" }],
+        created_at: "2026-11-25T00:00:00Z",
+      };
+      const pageMarker = { ...partsMarker(rowId), part_count: 1 };
+      let recoveredContentMarker: ChatStreamPartPreviewMarker | undefined;
+
+      if (recoveryPath === "whole-row page") {
+        mocks.getChatStreamParts.mockResolvedValueOnce({
+          row_id: rowId,
+          offset: 0,
+          next_offset: 1,
+          total_parts: 1,
+          output_revision: pageMarker.output_revision,
+          parts: [part],
+          done: true,
+        });
+      } else {
+        const serialized = JSON.stringify(part);
+        recoveredContentMarker = {
+          ...partMarker(rowId, 0),
+          output_bytes: new TextEncoder().encode(serialized).length,
+          output_chars: Array.from(serialized).length,
+          preview: "[Large part]",
+        };
+        mocks.getChatStreamContent.mockResolvedValueOnce(
+          contentChunk(rowId, 0, recoveredContentMarker.output_revision, serialized),
+        );
+        row.parts = [{ type: "text", text: "[Large recovered content]", chat_stream_part_preview: recoveredContentMarker }];
+      }
+
+      const permissionApi = {
+        getPermissions: vi.fn(async () => ({ pending_prompts: [owner] })),
+        cancelOwned: vi.fn(async () => ({ cancelled: true })),
+      } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
+      const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+      const ui = mount();
+      try {
+        await ui.render(
+          <PermissionRecovery row={row} sessionId="session-1" api={permissionApi} respond={respond}>
+            {recoveryPath === "whole-row page"
+              ? <ChatStreamPartsPreview marker={pageMarker} />
+              : <ChatStreamPartPreview marker={recoveredContentMarker!} />}
+          </PermissionRecovery>,
+        );
+        await clickButton(ui, recoveryPath === "whole-row page" ? "Load full row" : "Expand full part");
+        await vi.waitFor(() => expect(ui.host.textContent).toContain("Permission required: terminal"));
+        expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent?.trim() === "Stop")).toBe(true);
+
+        if (recoveryPath === "whole-row page") {
+          await clickButton(ui, "Allow once");
+          expect(respond).toHaveBeenCalledWith(
+            "pending-null-preview-call",
+            expect.objectContaining(owner),
+            expect.objectContaining({ permission_id: owner.permission_id, decision: "approve" }),
+          );
+        } else {
+          await clickButton(ui, "Stop");
+          expect(permissionApi.cancelOwned).toHaveBeenCalledWith("session-1", owner.request_id);
+        }
+      } finally {
+        await ui.unmount();
+      }
+    },
+  );
+
   it("rejects tool result previews whose top-level identity does not match the paged tool call", async () => {
     const marker = partsMarker("row-tool-result");
     mocks.getChatStreamParts.mockResolvedValueOnce({
