@@ -1125,6 +1125,35 @@ describe("chat recorder analysis", () => {
     expect(JSON.stringify({ net: rec.net, marks: rec.marks })).not.toContain("private-objective-marker");
   });
 
+  it("captures the private goal capability from the actual message request without recording it", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    const privateReply = "goal goal-short created\nobjective: private-objective-marker";
+    const window = {
+      fetch: async () => new Response(`data: ${JSON.stringify({ type: "token", text: privateReply })}\n\n`),
+    };
+    const install = runInNewContext(`(${body})`, {
+      window, Request, Response, ReadableStream, TextDecoder, URL, performance,
+      location: { href: "http://localhost/" },
+      sessionStorage: { getItem: () => null, removeItem: () => {} },
+      requestAnimationFrame: () => {},
+    });
+    install({ wall0: Date.now(), sessionStreamSuffix: chatRecorderStreamSuffix("target"), user: [], reply: [] });
+    const rec = (window as any).__rec;
+    rec.mark("PAGE START GOAL");
+    const response = await (window.fetch as any)("http://localhost/sessions/target/message", {
+      method: "POST",
+      body: JSON.stringify({
+        request_id: "goal-input", content: [{ type: "text", text: "/goal private-objective-marker" }],
+        goal_reply_id: privateGoalReplyId,
+      }),
+    });
+    await response.text();
+    expect(rec.goalReplyId).toBe(privateGoalReplyId);
+    expect(JSON.stringify({ net: rec.net, marks: rec.marks })).not.toContain(privateGoalReplyId);
+    expect(JSON.stringify({ net: rec.net, marks: rec.marks })).not.toContain("private-objective-marker");
+  });
+
   it("requires a known approval mode before the prompt flow changes it", () => {
     expect(requireRecorderApprovalMode("trust_all")).toBe("trust_all");
     expect(requireRecorderApprovalMode("confirm_all")).toBe("confirm_all");
