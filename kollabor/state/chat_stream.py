@@ -35,6 +35,7 @@ from .chat_stream_rows import (
     bounded_chat_stream_part,
     bounded_chat_stream_row,
     bounded_chat_stream_rows,
+    chat_stream_content_text,
     chat_stream_tool_output_revision,
     chat_stream_wire_bytes,
     merge_chat_stream_rows,
@@ -2598,7 +2599,9 @@ class ChatStreamService:
                         uid, row_id, part_index, field, value
                     )
                 except (TypeError, ValueError):
-                    content, output_type = str(value), "text"
+                    content, output_type = chat_stream_content_text(
+                        str(value), field
+                    )
                     current_revision = chat_stream_tool_output_revision(
                         content, output_type
                     )
@@ -2907,7 +2910,7 @@ class ChatStreamService:
                 if cached is not None:
                     self._content_cache_bytes -= cached[4]
                     del self._content_cache[key]
-                content, output_type = self._tool_output_text(value)
+                content, output_type = chat_stream_content_text(value, field)
                 revision = chat_stream_tool_output_revision(content, output_type)
                 output_bytes = len(content.encode("utf-8", errors="replace"))
                 if output_bytes <= _CHAT_STREAM_TOOL_OUTPUT_CACHE_BYTES:

@@ -53,6 +53,30 @@ def _tool_output_text(value: Any) -> tuple[str, str]:
     )
 
 
+def chat_stream_content_text(value: Any, field: str) -> tuple[str, str]:
+    """Serialize structured fields as JSON, including scalar string args."""
+    if field not in {"args", "part"}:
+        return _tool_output_text(value)
+    try:
+        content = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            default=str,
+            separators=(",", ":"),
+        )
+    except (OverflowError, TypeError, ValueError):
+        # Preserve an invalid legacy scalar as a valid JSON string so clients
+        # can still recover it through the structured argument contract.
+        content = json.dumps(
+            str(value),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    return content, "json"
+
+
 def chat_stream_tool_output_revision(content: str, output_type: str) -> str:
     """Fingerprint the exact full-output representation returned by the API."""
     payload = output_type.encode("ascii") + b"\0" + content.encode(
@@ -145,14 +169,14 @@ def bounded_chat_stream_row(
         ensure_retrievable_row_id()
         try:
             if content_resolver is None:
-                content, output_type = _tool_output_text(value)
+                content, output_type = chat_stream_content_text(value, field)
                 revision = chat_stream_tool_output_revision(content, output_type)
             else:
                 content, output_type, revision = content_resolver(
                     row_id, part_index, field, value
                 )
         except (TypeError, ValueError):
-            content, output_type = str(value), "text"
+            content, output_type = chat_stream_content_text(str(value), field)
             revision = chat_stream_tool_output_revision(content, output_type)
         return (
             {
