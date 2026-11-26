@@ -153,9 +153,11 @@ describe("chat recorder analysis", () => {
       }, U: () => "u", R: () => "r",
     });
     await expect(flow()).rejects.toThrow(/goal reload proof inconclusive/i);
+    let successReads = 0;
     const success = runInNewContext(`({${body}})["goal-reload"]`, {
       activeRuntime: "native", command: async () => {}, mark: async () => {}, hasMatchingGoalTurn,
-      readPersistedGoal: async () => persisted, currentStreamState: async () => stream,
+      readPersistedGoal: async () => ++successReads <= 2 ? persisted : null,
+      currentStreamState: async () => stream,
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
         await check.after(turn, stream, stream);
@@ -527,9 +529,11 @@ describe("chat recorder analysis", () => {
     const turn = { turn_id: "goal-turn", input_ids: [], origin: { type: "goal" } };
     const goal = { conversation_uid: "conversation", goal: { goal_id: "g", attempt: { attempt_id: "a", turn_id: "goal-turn" } } };
     const stream = { conversation_uid: "conversation", turns: [turn] };
+    let goalReads = 0;
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
       activeRuntime: "native", command: async () => {}, U: () => "u", R: () => "r",
-      readPersistedGoal: async () => goal, currentStreamState: async () => stream,
+      readPersistedGoal: async () => ++goalReads <= 2 ? goal : null,
+      currentStreamState: async () => stream,
       hasMatchingGoalTurn: () => true, mark: async () => {},
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
