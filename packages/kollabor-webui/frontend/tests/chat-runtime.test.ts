@@ -70,6 +70,59 @@ describe("toThreadMessageLike", () => {
     ]);
   });
 
+  it("preserves the full-text retrieval marker beside a bounded text part", () => {
+    const marker = {
+      kind: "chat-stream-content-preview",
+      session_id: "session-1",
+      row_id: "row-2",
+      part_index: 0,
+      field: "text",
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "text",
+      output_revision: "a".repeat(64),
+      preview: "visible prefix",
+    };
+    const part = {
+      type: "text" as const,
+      text: "visible prefix",
+      chat_stream_content_preview: marker,
+    } as unknown as ChatRow["parts"][number];
+
+    const message = toThreadMessageLike(row("row-2", [part]));
+
+    expect(message.content[0]).toMatchObject({
+      type: "text",
+      text: "visible prefix",
+      providerMetadata: { kollab: { chat_stream_content_preview: marker } },
+    });
+  });
+
+  it("preserves an argument preview marker on the tool call", () => {
+    const marker = {
+      kind: "chat-stream-content-preview",
+      session_id: "session-1",
+      row_id: "row-3",
+      part_index: 1,
+      field: "args",
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "json",
+      output_revision: "b".repeat(64),
+      preview: '{"command":"echo..."}',
+    };
+    const message = toThreadMessageLike(
+      row("row-3", [{
+        type: "tool-call",
+        tool_call_id: "call-1",
+        tool_name: "terminal",
+        args: marker,
+      }]),
+    );
+
+    expect(message.content[0]).toMatchObject({ type: "tool-call", args: marker });
+  });
+
   it("maps a tool-call part to toolCallId, toolName, args, argsText and isError", () => {
     const message = toThreadMessageLike(
       row("row-3", [

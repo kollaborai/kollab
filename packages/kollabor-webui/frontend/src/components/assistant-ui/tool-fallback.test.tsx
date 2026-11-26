@@ -11,10 +11,16 @@ import {
   fetchHistoryOutput,
 } from "./tool-fallback";
 import * as toolFallback from "./tool-fallback";
+import {
+  ChatStreamContentPreview,
+  fetchChatStreamContent,
+  type ChatStreamContentPreviewMarker,
+} from "../../chat-stream-content";
 
 const mocks = vi.hoisted(() => ({
   getHistoryOutput: vi.fn(),
   getChatStreamToolOutput: vi.fn(),
+  getChatStreamContent: vi.fn(),
 }));
 
 vi.mock("@/api", () => ({
@@ -22,6 +28,7 @@ vi.mock("@/api", () => ({
   EngineApi: class {
     getHistoryOutput = mocks.getHistoryOutput;
     getChatStreamToolOutput = mocks.getChatStreamToolOutput;
+    getChatStreamContent = mocks.getChatStreamContent;
   },
 }));
 
@@ -150,6 +157,93 @@ describe("expanding a tool loads its full output", () => {
     expect(recovered).toContain("Output:");
     expect(recovered).toContain("output after retry");
     expect(recovered).not.toContain(errorMessage);
+  });
+});
+
+describe("recovering bounded chat stream content", () => {
+  beforeEach(() => {
+    mocks.getChatStreamContent.mockReset();
+  });
+
+  const revision = "c".repeat(64);
+  const contentMarker: ChatStreamContentPreviewMarker = {
+    kind: "chat-stream-content-preview",
+    session_id: "session-1",
+    row_id: "row-1",
+    part_index: 0,
+    field: "text",
+    output_bytes: 40_000,
+    output_chars: 3,
+    output_type: "text",
+    output_revision: revision,
+    preview: "short",
+  };
+
+  it("fetches the exact row part in code-point chunks and assembles full text", async () => {
+    mocks.getChatStreamContent
+      .mockResolvedValueOnce({
+        row_id: "row-1", part_index: 0, field: "text", output_revision: revision,
+        offset: 0, next_offset: 2, total_chars: 3, output_type: "text", content: "🦊a", done: false,
+      })
+      .mockResolvedValueOnce({
+        row_id: "row-1", part_index: 0, field: "text", output_revision: revision,
+        offset: 2, next_offset: 3, total_chars: 3, output_type: "text", content: "b", done: true,
+      });
+
+    await expect(fetchChatStreamContent({ ...contentMarker, output_bytes: 6 })).resolves.toBe("🦊ab");
+    expect(mocks.getChatStreamContent).toHaveBeenNthCalledWith(
+      1, "session-1", "row-1", 0, "text", revision, { offset: 0, limit: 32768 },
+    );
+    expect(mocks.getChatStreamContent).toHaveBeenNthCalledWith(
+      2, "session-1", "row-1", 0, "text", revision, { offset: 2, limit: 32768 },
+    );
+  });
+
+  it("rejects a revision change rather than mixing text from two row versions", async () => {
+    mocks.getChatStreamContent
+      .mockResolvedValueOnce({
+        row_id: "row-1", part_index: 0, field: "text", output_revision: revision,
+        offset: 0, next_offset: 2, total_chars: 4, output_type: "text", content: "ab", done: false,
+      })
+      .mockResolvedValueOnce({
+        row_id: "row-1", part_index: 0, field: "text", output_revision: "d".repeat(64),
+        offset: 2, next_offset: 4, total_chars: 4, output_type: "text", content: "cd", done: true,
+      });
+
+    await expect(fetchChatStreamContent({ ...contentMarker, output_chars: 4 })).rejects.toThrow(
+      "Chat stream content chunk does not match the requested part.",
+    );
+  });
+
+  it("replaces the clipped text part with recovered content when mounted", async () => {
+    const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>");
+    const rootElement = dom.window.document.getElementById("root");
+    if (!rootElement) throw new Error("test root element is missing");
+    vi.stubGlobal("window", dom.window);
+    vi.stubGlobal("document", dom.window.document);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const root = createRoot(rootElement);
+    mocks.getChatStreamContent.mockResolvedValueOnce({
+      row_id: "row-1", part_index: 0, field: "text", output_revision: revision,
+      offset: 0, next_offset: 18, total_chars: 18, output_type: "text", content: "complete long text", done: true,
+    });
+
+    try {
+      await act(async () => {
+        root.render(
+          <ChatStreamContentPreview marker={{ ...contentMarker, output_chars: 18 }}>
+            {(text) => <span data-testid="recovered-text">{text}</span>}
+          </ChatStreamContentPreview>,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(rootElement.textContent).toContain("complete long text");
+      expect(rootElement.textContent).not.toContain("short");
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+      dom.window.close();
+    }
   });
 });
 

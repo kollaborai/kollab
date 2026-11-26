@@ -92,6 +92,61 @@ test("chat stream tool output reads one bounded, identity-bound chunk", async ()
   }]);
 });
 
+test("chat stream content reads bounded chunks for a row part and field", async () => {
+  const requests: string[] = [];
+  const revision = "b".repeat(64);
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "/api/config") {
+      return new Response(JSON.stringify({ engine_url: "http://engine" }), { status: 200 });
+    }
+    requests.push(url);
+    return new Response(JSON.stringify({
+      row_id: "row/one",
+      part_index: 2,
+      field: "reasoning",
+      output_revision: revision,
+      offset: 0,
+      next_offset: 5,
+      total_chars: 5,
+      output_type: "text",
+      content: "think",
+      done: true,
+    }), { status: 200 });
+  });
+
+  const api = new EngineApi("http://engine");
+  const chunk = await (api as unknown as {
+    getChatStreamContent: (
+      sessionId: string,
+      rowId: string,
+      partIndex: number,
+      field: "text" | "reasoning" | "args",
+      outputRevision: string,
+      options: { offset: number; limit: number },
+    ) => Promise<unknown>;
+  }).getChatStreamContent("session/one", "row/one", 2, "reasoning", revision, {
+    offset: 0,
+    limit: 32768,
+  });
+
+  expect(chunk).toMatchObject({
+    row_id: "row/one",
+    part_index: 2,
+    field: "reasoning",
+    output_revision: revision,
+    offset: 0,
+    next_offset: 5,
+    total_chars: 5,
+    output_type: "text",
+    content: "think",
+    done: true,
+  });
+  expect(requests).toEqual([
+    `http://engine/sessions/session%2Fone/chat-stream/rows/row%2Fone/content?part_index=2&field=reasoning&output_revision=${revision}&offset=0&limit=32768`,
+  ]);
+});
+
 test("snapshot cursor uses next_seq minus one and keeps the generation", () => {
   expect(chatStreamCursorAfter({
     seq: 0,
