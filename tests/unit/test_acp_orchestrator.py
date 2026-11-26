@@ -9,12 +9,14 @@ import pytest
 from kollabor_voice.voice_context import VOICE_NUDGE, VOICE_RULES_MARK, voice_preamble
 
 from kollabor.llm import acp_orchestrator as mod
+from kollabor.state.chat_stream import ChatStreamService
 from kollabor.state.local import LocalStateService
 from kollabor_agent.voice_admission import issue_voice_admission_context
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_events.data_models import ConversationMessage
+from kollabor_events.chat_stream import sequence_problems
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.models import HubMessage
 
@@ -78,6 +80,95 @@ async def test_operator_input_provenance_is_persisted_only_for_trusted_sources(
         assert human_row["metadata"]["operator_inputs"] == [record]
         assert "operator_inputs" not in peer_row["metadata"]
         assert llm.conversation_history[0].metadata["operator_inputs"] == [record]
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "outcome"),
+    [("ACP turn cancelled", "cancelled"), ("provider failed", "failed")],
+)
+async def test_no_result_acp_failure_persists_ended_lifecycle_for_resume(
+    tmp_path, monkeypatch, failure, outcome
+):
+    class InterruptedRunner(FakeRunner):
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None):
+            future = asyncio.get_running_loop().create_future()
+            return mod.ACPAdmission(
+                request_id,
+                source,
+                thread_id,
+                1,
+                9,
+                text,
+                future,
+                origin or {},
+                history_key="no-result-turn-key",
+            )
+
+    monkeypatch.setattr(mod, "ACPRunner", InterruptedRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
+    )
+    logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, logger)
+    history = []
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=logger,
+        conversation_history=history,
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        admission = orchestrator.admit(
+            "cancel before output", request_id="no-result-request", source="rpc"
+        )
+        await asyncio.gather(*tuple(orchestrator._history_tasks))
+        admission.future.set_exception(mod.ACPError(failure))
+        await asyncio.gather(*tuple(orchestrator._completion_tasks))
+
+        resumed_manager = ConversationManager(configuration)
+        assert resumed_manager.load_session(logger.session_id)
+        resumed_history = [
+            ConversationMessage(
+                role=message["role"],
+                content=message["content"],
+                metadata=message["metadata"],
+            )
+            for message in resumed_manager.messages
+        ]
+        resumed_llm = SimpleNamespace(
+            conversation_manager=resumed_manager,
+            conversation_history=resumed_history,
+        )
+        resumed_state = SimpleNamespace(
+            _event_bus=bus,
+            _llm_service=resumed_llm,
+            get_conversation_uid=lambda: logger.session_id,
+        )
+        snapshot = ChatStreamService(resumed_state).subscribe(
+            {"after": None, "conversation_uid": None}
+        )["events"][0]
+
+        assert sequence_problems([snapshot]) == []
+        assert snapshot["data"]["inputs"] == [
+            {
+                "id": "no-result-request",
+                "state": "ended",
+                "turn_id": "9",
+                "outcome": outcome,
+            }
+        ]
+        assert snapshot["data"]["turns"] == [
+            {"turn_id": "9", "state": "ended", "input_ids": ["no-result-request"]}
+        ]
+        user = next(message for message in resumed_manager.messages if message["role"] == "user")
+        assert user["metadata"]["chat_stream_outcome"] == outcome
     finally:
         await orchestrator.close()
 
