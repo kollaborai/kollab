@@ -618,6 +618,51 @@ def test_snapshot_translates_canonical_transcript_images_to_chat_parts():
     ]
 
 
+def test_snapshot_omits_hidden_voice_transcript_instruction():
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content="hidden voice instruction",
+            metadata={"hidden": True},
+        ),
+        ConversationMessage(
+            role="user",
+            content="visible user message",
+            metadata={"request_id": "visible-user-message"},
+        ),
+    ]
+
+    snapshot, rows = _snapshot_rows(ChatStreamService(state))
+
+    assert [row["id"] for row in rows] == ["visible-user-message"]
+    assert "hidden voice instruction" not in str(snapshot["data"]["rows"])
+
+
+def test_rows_pager_omits_hidden_voice_instruction_from_older_history():
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content="hidden voice instruction",
+            metadata={"hidden": True},
+        ),
+        *[
+            ConversationMessage(
+                role="user",
+                content=f"visible message {index}",
+                metadata={"request_id": f"visible-message-{index}"},
+            )
+            for index in range(REPLAY_WINDOW + 1)
+        ],
+    ]
+    stream = ChatStreamService(state)
+
+    page = stream.row_pager().read(before=None, limit=10)
+
+    assert [row["id"] for row in page["rows"]] == ["visible-message-0"]
+
+
 def test_retained_transcript_row_keeps_its_id_when_compaction_changes_its_index():
     state = _State()
     retained = ConversationMessage(role="assistant", content="kept reply")
