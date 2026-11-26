@@ -44,7 +44,7 @@ vi.mock("@/components/agents/Avatar", () => ({
   Avatar: ({ gem }: { gem: string }) => createElement("span", { "data-test-gem": gem }),
 }));
 
-import { HubNoteMessage, hubNoteOf, HubNoteView, WelcomeContext } from "../src/components/Thread";
+import { HubNoteInputMessage, HubNoteMessage, hubNoteOf, HubNoteView, WelcomeContext } from "../src/components/Thread";
 
 // The chat store's row for a hub note: the note is the row's hub-note part, not
 // message metadata (decision s, #1451).
@@ -145,10 +145,10 @@ afterEach(async () => {
   container.remove();
 });
 
-async function renderHubRow(row: ChatRow) {
+async function renderHubRow(row: ChatRow, component: typeof HubNoteMessage = HubNoteMessage) {
   state.rows = [row];
   state.messageId = row.id;
-  await act(async () => root.render(createElement(HubNoteMessage)));
+  await act(async () => root.render(createElement(component)));
 }
 
 test("structured hub-note text renders from a note row", async () => {
@@ -160,7 +160,10 @@ test("structured hub-note text renders from a note row", async () => {
 });
 
 test("structured hub-note text renders from an input row", async () => {
-  await renderHubRow({ ...hubRow, id: "hub-input-7", kind: "input", role: "user", turn_id: "turn-7" });
+  await renderHubRow(
+    { ...hubRow, id: "hub-input-7", kind: "input", role: "user", turn_id: "turn-7" },
+    HubNoteInputMessage,
+  );
 
   const hubMessage = container.querySelector('[data-slot="kollab_hub-message"]');
   expect(hubMessage?.textContent).toContain("Build completed; the report is ready.");

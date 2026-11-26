@@ -10,9 +10,10 @@ import {
   ComposerPlaceholderContext,
   ComposerLockContext,
   ComposerHubContext,
+  SystemMessage as AssistantSystemMessage,
   Thread as AssistantThread,
+  UserMessage as AssistantUserMessage,
 } from "@/components/assistant-ui/thread";
-import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { ToolFallback, toolErrorLine } from "@/components/assistant-ui/tool-fallback";
 import { ToolGroup } from "@/components/assistant-ui/tool-group";
 import {
@@ -180,7 +181,7 @@ export const HubNoteView: FC<{
         <div className="text-muted-foreground mb-1 flex flex-wrap items-center gap-1 text-xs font-medium">
           <span>{label}</span>
         </div>
-        <div className="text-foreground leading-relaxed wrap-break-word pointer-fine:text-sm">{children}</div>
+        <div className="text-foreground leading-relaxed whitespace-pre-wrap wrap-break-word pointer-fine:text-sm">{children}</div>
         {footer}
       </div>
     </div>
@@ -265,19 +266,20 @@ function noteOf(part: Extract<ChatPart, { type: "hub-note" }>): HubNote {
   };
 }
 
-export const HubNoteMessage: FC = () => {
-  // The message's row is the note row the store holds under the same id.
-  const id = useAuiState((s) => s.message.id);
-  const { rows } = useChatStore();
-  const row = rows.find((candidate) => candidate.id === id);
+export const HubNoteRowMessage: FC<{
+  row: ChatRow | undefined;
+  fallback: ReactNode;
+}> = ({ row, fallback }) => {
   const part = row ? hubNoteOf(row) : undefined;
-  const note = part ? noteOf(part) : undefined;
+  if (!row || !part) return <>{fallback}</>;
+  const note = noteOf(part);
   if (note?.presence) {
     // A run of presence chips stacks tight instead of taking a thread gap each.
     return (
       <MessagePrimitive.Root
         data-slot="kollab_hub-message"
-        data-role="system"
+        data-role={row.role}
+        data-chat-row-id={row.id}
         data-presence={note.presence}
         className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150 [[data-presence]+&]:-mt-5"
       >
@@ -288,18 +290,33 @@ export const HubNoteMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="kollab_hub-message"
-      data-role="system"
+      data-role={row.role}
+      data-chat-row-id={row.id}
       className={cn(
         "fade-in slide-in-from-bottom-1 animate-in px-2 duration-150",
         note?.observed && "opacity-60",
       )}
     >
       <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo} isDirect={note?.isDirect}>
-        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
+        {note.text}
       </HubNoteView>
     </MessagePrimitive.Root>
   );
 };
+
+function useCurrentChatRow(): ChatRow | undefined {
+  const id = useAuiState((s) => s.message.id);
+  const { rows } = useChatStore();
+  return rows.find((candidate) => candidate.id === id);
+}
+
+export const HubNoteMessage: FC = () => (
+  <HubNoteRowMessage row={useCurrentChatRow()} fallback={<AssistantSystemMessage />} />
+);
+
+export const HubNoteInputMessage: FC = () => (
+  <HubNoteRowMessage row={useCurrentChatRow()} fallback={<AssistantUserMessage />} />
+);
 
 type HubSendArgs = { to?: string; target?: string; message?: string; content?: string; thread?: string; thread_id?: string; reply_to?: string; replyTo?: string };
 
@@ -394,7 +411,13 @@ export const Thread: FC<{
         <PermissionToolUI />
         <ComposerLockContext.Provider value={locked}>
           <AssistantThread
-            components={{ Welcome, ComposerLeading: ComposerGem, ToolGroup, SystemMessage: HubNoteMessage }}
+            components={{
+              Welcome,
+              ComposerLeading: ComposerGem,
+              ToolGroup,
+              UserMessage: HubNoteInputMessage,
+              SystemMessage: HubNoteMessage,
+            }}
             agents={agents}
             commands={commands}
             commandCatalogStatus={commandCatalogStatus}

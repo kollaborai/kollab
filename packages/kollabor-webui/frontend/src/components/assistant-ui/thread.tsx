@@ -116,6 +116,8 @@ export type ThreadComponents = {
   ComposerLeading?: ComponentType | undefined;
   AssistantMessage?: ComponentType | undefined;
   Welcome?: ComponentType | undefined;
+  /** A user message, including an input row carrying structured hub data. */
+  UserMessage?: ComponentType | undefined;
   ToolFallback?: ToolCallMessagePartComponent | undefined;
   ToolGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
@@ -420,14 +422,15 @@ const ThreadMessage: FC = () => {
   const {
     AssistantMessage: AssistantMessageComponent = AssistantMessage,
     SystemMessage: SystemMessageComponent = SystemMessage,
+    UserMessage: UserMessageComponent = UserMessage,
   } = useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
-  if (role === "user") return <UserMessage />;
+  if (role === "user") return <UserMessageComponent />;
   if (role === "system") return <SystemMessageComponent />;
   return <AssistantMessageComponent />;
 };
 
-const SystemMessage: FC = () => (
+export const SystemMessage: FC = () => (
   <MessagePrimitive.Root
     data-slot="aui_system-message-root"
     data-role="system"
@@ -1596,7 +1599,7 @@ const QueuedMessageNote: FC<{ inputId: string }> = ({ inputId }) => {
   );
 };
 
-const UserMessage: FC = () => {
+export const UserMessage: FC = () => {
   const id = useAuiState((s) => s.message.id);
   const failed = useAuiState((s) => s.message.metadata.custom.chatRowStatus === "failed");
   const queued = useContext(QueuedIdsContext).has(id);
