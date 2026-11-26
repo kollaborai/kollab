@@ -222,3 +222,23 @@ async def test_send_now_retry_handles_input_moving_during_queue_lookup():
         "state": "started",
         "turn_id": "turn-1",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["started", "joined", "ended"])
+async def test_send_now_retry_hides_unowned_input_moving_during_lookup(lifecycle):
+    state = _State()
+    stream = ChatStreamService(state)
+
+    async def moved_during_lookup(params):
+        stream._set_input_state(
+            "conv-1",
+            params["id"],
+            lifecycle,
+            turn_id="turn-secret",
+            outcome="completed" if lifecycle == "ended" else None,
+        )
+        return {"found": False}
+
+    state._queue_runtime.send_now = moved_during_lookup
+    assert await stream.send_now({"id": "web-unowned"}) == {"found": False}
