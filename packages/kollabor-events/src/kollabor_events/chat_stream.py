@@ -279,6 +279,8 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
 
     def note_state(seq: Any, info: dict[str, Any]) -> None:
         seen = states.setdefault(info["id"], [])
+        if "ended" in seen:
+            problems.append(f"seq {seq}: input {info['id']} changed after it ended")
         previous_state = seen[-1] if seen else None
         if seen and "ended" not in seen:
             last, state = seen[-1], info["state"]
@@ -366,8 +368,6 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
             elif kind == "row.delete":
                 rows.discard(data["id"])
         elif kind == "input.state":
-            if "ended" in states.get(data["id"], []):
-                problems.append(f"seq {seq}: input {data['id']} changed after it ended")
             note_state(seq, data)
             turn = turn_of.get(data["id"])
             if data["state"] == "ended" and turn and turn not in ended_turns:
