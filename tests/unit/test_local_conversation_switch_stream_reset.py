@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
+from kollabor.state.goal_replies import GoalReplyMailbox
+from kollabor.state.handlers import register_state_handlers
 from kollabor.state.local import LocalStateService
+from kollabor.state.web_message_queue_runtime import register_web_message_queue_runtime
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_events import EventBus
 from kollabor_events.data_models import ConversationMessage
+from kollabor_rpc import RpcCallerContext, RpcServer
 from kollabor_tui.display_tap import DisplayTap
 
 
@@ -247,3 +252,133 @@ async def test_resume_reused_uid_discards_stale_stream_state_and_rotates_generat
     assert [row["id"] for row in current_older_page["rows"]] == [
         row["id"] for row in expected_older_page["rows"]
     ]
+
+
+@pytest.mark.asyncio
+async def test_resume_reused_uid_preserves_queue_ledger_and_goal_owner(tmp_path):
+    state, _tap = _state_with_saved_session(tmp_path)
+    state._llm_service.is_processing = True
+    server = RpcServer()
+    register_state_handlers(server, state)
+    runtime = register_web_message_queue_runtime(server, state)
+    uid = state.get_conversation_uid()
+    reply_id = "goal-" + "d" * 32
+    input_id = "queued-goal-input"
+    terminal_input_id = "cancelled-before-reset"
+
+    async def call(method, params, *, principal=501):
+        response = await server.handle_wire(
+            {
+                "action": "rpc_request",
+                "request_id": f"{method}-{principal}-{input_id}",
+                "method": method,
+                "params": params,
+            },
+            caller_context=RpcCallerContext.from_unix_peer(principal),
+        )
+        assert response["error"] is None
+        return response["result"]
+
+    release_reply = asyncio.Event()
+
+    async def pending_private_reply():
+        await release_reply.wait()
+        return {"success": True, "message": "owner-only result"}
+
+    pending_task = asyncio.create_task(pending_private_reply())
+    try:
+        await state.resume_conversation("saved-session")
+        uid = state.get_conversation_uid()
+        queued = await call(
+            "state.chat_stream.add_input",
+            {
+                "id": input_id,
+                "text": "/goal show",
+                "attachments": [],
+                "goal_reply_id": reply_id,
+            },
+        )
+        assert queued == {"id": input_id, "state": "queued"}
+        scope = state.chat_stream._input_scopes[(uid, input_id)]
+        mailbox = GoalReplyMailbox()
+        mailbox.register(uid, pending_task, reply_id)
+        state._goal_reply_mailbox = mailbox
+
+        terminal = await call(
+            "state.chat_stream.add_input",
+            {
+                "id": terminal_input_id,
+                "text": "ordinary queued input",
+                "attachments": [],
+            },
+        )
+        assert terminal == {"id": terminal_input_id, "state": "queued"}
+        cancelled = await call(
+            "state.chat_stream.cancel_queued_input", {"id": terminal_input_id}
+        )
+        assert cancelled == {"found": True, "cancelled": True}
+        assert await call(
+            "state.poll_goal_reply", {"reply_id": reply_id}
+        ) == {"status": "pending"}
+        assert await call(
+            "state.poll_goal_reply", {"reply_id": reply_id}, principal=502
+        ) == {"status": "missing", "message": "goal reply expired or is unavailable"}
+
+        await state.resume_conversation("saved-session")
+
+        # A same-UID restore invalidates later transcript rows but leaves the
+        # accepted queue entry, retry binding, and reply principal intact.
+        snapshot = state.chat_stream._snapshot(uid)
+        queued_row = next(row for row in snapshot["rows"] if row["id"] == input_id)
+        assert queued_row["status"] == "queued"
+        assert any(
+            item["id"] == input_id and item["state"] == "queued"
+            for item in snapshot["inputs"]
+        )
+        assert all(row["id"] != terminal_input_id for row in snapshot["rows"])
+        assert state.chat_stream._inputs[uid][terminal_input_id]["outcome"] == "cancelled"
+        assert state.chat_stream._input_scopes[(uid, input_id)] == scope
+        assert await call(
+            "state.chat_stream.add_input",
+            {
+                "id": input_id,
+                "text": "/goal show",
+                "attachments": [],
+                "goal_reply_id": reply_id,
+            },
+        ) == {"id": input_id, "state": "queued"}
+        assert await call(
+            "state.chat_stream.add_input",
+            {
+                "id": terminal_input_id,
+                "text": "ordinary queued input",
+                "attachments": [],
+            },
+        ) == {"id": terminal_input_id, "state": "ended"}
+        assert await call(
+            "state.chat_stream.add_input",
+            {
+                "id": input_id,
+                "text": "/goal show",
+                "attachments": [],
+                "goal_reply_id": reply_id,
+            },
+            principal=502,
+        ) == {"error": "input was not admitted"}
+        assert await call(
+            "state.poll_goal_reply", {"reply_id": reply_id}
+        ) == {"status": "pending"}
+        assert await call(
+            "state.poll_goal_reply", {"reply_id": reply_id}, principal=502
+        ) == {"status": "missing", "message": "goal reply expired or is unavailable"}
+
+        turn_id = state.chat_stream.begin_ordered_command(
+            input_id, uid, scope[0]
+        )
+        assert turn_id is not None
+    finally:
+        release_reply.set()
+        if not pending_task.done():
+            pending_task.cancel()
+        await asyncio.gather(pending_task, return_exceptions=True)
+        await runtime.close()
