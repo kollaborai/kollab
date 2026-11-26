@@ -4,6 +4,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import type { ReactNode } from "react";
 import { ChatStoreProvider, LiveChatStore, useChatStore } from "./chat-store";
+import { browserChatRowCache } from "./chat-row-cache";
 import { useChatRuntime } from "./chat-runtime";
 import { PermissionCancellationProvider } from "./permission-cancellation";
 import { respondToPermission } from "./permission-respond";
@@ -184,7 +185,7 @@ function ChatSession({ api: engine, sessionId, onOutdated, children }: {
   onOutdated?: (sessionId: string, outdated: boolean) => void;
   children: ReactNode;
 }) {
-  const [store] = useState(() => new LiveChatStore(engine, sessionId));
+  const [store] = useState(() => new LiveChatStore(engine, sessionId, { cache: browserChatRowCache }));
   useEffect(() => {
     store.start();
     return () => store.dispose();
