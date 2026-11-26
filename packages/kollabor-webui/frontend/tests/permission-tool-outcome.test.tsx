@@ -3,11 +3,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const streamMocks = vi.hoisted(() => ({ getChatStreamContent: vi.fn() }));
+const streamMocks = vi.hoisted(() => ({ getChatStreamContent: vi.fn(), getChatStreamToolOutput: vi.fn() }));
 vi.mock("@/api", () => ({
   CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE: 32768,
   EngineApi: class {
     getChatStreamContent = streamMocks.getChatStreamContent;
+    getChatStreamToolOutput = streamMocks.getChatStreamToolOutput;
   },
 }));
 
@@ -101,6 +102,18 @@ function renderPrompt(props: PartProps, respond: PermissionResponseHandler): HTM
   return container;
 }
 
+function rerenderPrompt(props: PartProps, respond: PermissionResponseHandler): HTMLElement {
+  if (!mounted) throw new Error("no mounted permission prompt");
+  act(() => {
+    mounted!.root.render(
+      <PermissionResponseContext.Provider value={respond}>
+        <PermissionPrompt {...props} />
+      </PermissionResponseContext.Provider>,
+    );
+  });
+  return mounted.container;
+}
+
 afterEach(() => {
   if (!mounted) return;
   const { root, container } = mounted;
@@ -122,6 +135,71 @@ async function click(container: HTMLElement, label: string): Promise<void> {
 }
 
 describe("permission prompt outcome from the tool-call row", () => {
+  it("hides Sending decision when the row resolves with an external result preview", async () => {
+    let resolveResponse!: (value: "answered") => void;
+    const respond = vi.fn<PermissionResponseHandler>(() => new Promise((resolve) => {
+      resolveResponse = resolve;
+    }));
+    const initial = partProps();
+    const container = renderPrompt(initial, respond);
+    await click(container, "Allow once");
+    expect(container.textContent).toContain("Sending decision");
+    const revision = "a".repeat(64);
+    streamMocks.getChatStreamToolOutput.mockReset().mockResolvedValueOnce({
+      row_id: "row-1",
+      tool_call_id: "call-1",
+      output_revision: revision,
+      offset: 0,
+      next_offset: 4,
+      total_chars: 4,
+      output_type: "text",
+      content: "done",
+      done: true,
+    });
+
+    rerenderPrompt(partProps({
+      providerMetadata: { kollab: { chat_stream_result_preview: {
+        kind: "chat-stream-tool-output-preview",
+        session_id: "session-1",
+        row_id: "row-1",
+        tool_call_id: "call-1",
+        output_bytes: 4,
+        output_chars: 4,
+        output_type: "text",
+        output_revision: revision,
+        preview: "finished",
+      } } },
+    }), respond);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(container.textContent).not.toContain("Sending decision");
+    act(() => mounted?.root.unmount());
+    mounted?.container.remove();
+    mounted = null;
+    resolveResponse("answered");
+  });
+
+  it("hides Sending decision when an own non-decision result resolves the row", async () => {
+    let resolveResponse!: (value: "answered") => void;
+    const respond = vi.fn<PermissionResponseHandler>(() => new Promise((resolve) => {
+      resolveResponse = resolve;
+    }));
+    const container = renderPrompt(partProps(), respond);
+    await click(container, "Allow once");
+    expect(container.textContent).toContain("Sending decision");
+
+    rerenderPrompt(partProps({ result: "completed" as unknown as PartProps["result"] }), respond);
+
+    expect(container.textContent).toContain("Permission resolved");
+    expect(container.textContent).not.toContain("Sending decision");
+    act(() => mounted?.root.unmount());
+    mounted?.container.remove();
+    mounted = null;
+    resolveResponse("answered");
+  });
+
   it("treats an external result preview as resolved and a null optional preview as pending", () => {
     const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
     const resultPreview = {
