@@ -2699,6 +2699,26 @@ class LLMService:
             and isinstance(item.history_row_uuid, str)
             and item.history_row_uuid
         )
+        # Capture each input's original content and exact JSONL row before a
+        # pending HUD note folds the batch into one model payload. The stream
+        # projection and terminal persistence still need the per-input view.
+        stream_inputs = tuple(
+            {
+                "request_id": request_id,
+                "history_row_uuid": item.history_row_uuid,
+                "content": item.content,
+            }
+            for item in messages
+            if isinstance(item, (QueuedInput, TaggedInput))
+            for request_id in item.request_ids
+        )
+        # ``messages`` can also contain an untracked item that has no
+        # request ID. Preserve the count before HUD rebatching so legacy
+        # projection can distinguish a genuinely single-input history row
+        # from a mixed batch with only one tracked request.
+        stream_input_count = max(
+            len(messages), len(request_ids), len(stream_inputs)
+        )
         # Keep the admission-time capture through the rebatch (#676): the
         # most recent capture, since the pointer today lands on the last row
         # admitted into the batch. Read BEFORE the rebatch so the non-voice
@@ -2800,6 +2820,8 @@ class LLMService:
             messages=messages,
             current_parent_uuid=batch_parent_uuid,
             request_ids=request_ids,
+            stream_inputs=stream_inputs,
+            stream_input_count=stream_input_count,
         )
         # Seed the chain-local tail for this batch's tool-loop continuations
         # (#676), under the same discipline as the continue ticket: an older

@@ -34,6 +34,7 @@ from kollabor_ai.providers.errors import (
 from kollabor_ai.providers.errors import (
     is_context_overflow as is_context_overflow_info,
 )
+from kollabor_events.chat_stream import outcome_for_stop_reason
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
@@ -57,6 +58,41 @@ from .yes_approval import YesApprovals
 logger = logging.getLogger(__name__)
 
 CancellationOrigin = Literal["human", "remote_task", "external"]
+
+
+def _native_chat_stream_parts(content: Any) -> list[dict[str, Any]]:
+    """Return restart-safe transcript parts for one native input.
+
+    Managed uploads intentionally remain process-local. Their live projection
+    resolves from the per-input content while the daemon is running; only
+    HTTPS image references are stored in JSONL.
+    """
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    if not isinstance(content, list):
+        return []
+
+    parts: list[dict[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                parts.append({"type": "text", "text": text})
+            continue
+        if item.get("type") not in {"image", "image_url"}:
+            continue
+        source = item.get("source")
+        url = source.get("url") if isinstance(source, dict) and source.get("kind") == "url" else None
+        if url is None and item.get("type") == "image_url":
+            image_url = item.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else image_url
+        if url is None:
+            url = item.get("image")
+        if isinstance(url, str) and url.lower().startswith("https://"):
+            parts.append({"type": "image", "url": url})
+    return parts
 
 
 def publish_turn_error(
@@ -642,6 +678,9 @@ class QueueProcessor:
         self._streaming_handler = streaming_handler
         self._native_tools_handler = native_tools_handler
         self._add_message_fn = add_message_fn
+        self._native_stream_inputs: dict[str, dict[str, Any]] = {}
+        self._native_stream_messages: dict[str, list[ConversationMessage]] = {}
+        self._persisted_native_stream_ids: set[str] = set()
 
         # Tool output has a producer-level spill boundary and a batch-level
         # packing boundary. The artifact root is session/project scoped so the
@@ -1409,12 +1448,14 @@ class QueueProcessor:
             self.renderer, "turn_complete", stop_reason="error", request_ids=ids
         )
 
-    def _end_requests(self, why: str) -> None:
+    async def _end_requests(self, why: str) -> None:
         """A chain stopped short of its turn's completion still ends the requests
         it answers: their streams wait for one, and the next turn would name them."""
         if not self.active_request_ids:
             return
-        self._publish_ended(self.active_request_ids, why)
+        request_ids = self.active_request_ids
+        await self._persist_native_input_outcomes(request_ids, "error")
+        self._publish_ended(request_ids, why)
         self.active_request_ids = ()
         self._stamp_turn(None)
 
@@ -1763,7 +1804,7 @@ class QueueProcessor:
                         )
                         self.message_display_service.display_error_message(why)
                         self.turn_completed = True
-                        self._end_requests(why)
+                        await self._end_requests(why)
                         break
 
                     try:
@@ -1786,7 +1827,7 @@ class QueueProcessor:
                             why = f"Stuck loop detected: same tool error repeated {stuck.count} times. Breaking."
                             self.message_display_service.display_error_message(why)
                             self.turn_completed = True
-                            self._end_requests(why)
+                            await self._end_requests(why)
                             break
 
                     except Exception as e:
@@ -1800,7 +1841,7 @@ class QueueProcessor:
                             f"conversation failed on turn {turn_count}: {e}"
                         )
                         self.turn_completed = True
-                        self._end_requests(self.last_turn_error)
+                        await self._end_requests(self.last_turn_error)
                         break
 
                 # Done, cancelled or cut off by new input: no round of it is left.
@@ -1891,6 +1932,8 @@ class QueueProcessor:
         messages: List[MessageContent],
         current_parent_uuid: str,
         request_ids: tuple[str, ...] | None = None,
+        stream_inputs: tuple[dict[str, Any], ...] | None = None,
+        stream_input_count: int | None = None,
     ) -> str:
         """Process a batch of messages.
 
@@ -1899,6 +1942,11 @@ class QueueProcessor:
             current_parent_uuid: Current parent UUID for message threading
             request_ids: What the batch answers, when the caller merged its
                 TaggedInputs away; else read from ``messages``
+            stream_inputs: Original input content and durable row identities,
+                captured before a caller merges HUD context into the batch.
+            stream_input_count: Number of original batch items before a
+                caller merges or combines them. This is persisted as evidence
+                for legacy transcript image attribution.
 
         Returns:
             Updated parent UUID
@@ -1918,6 +1966,55 @@ class QueueProcessor:
         # Taken up once this batch's turn holds the lock (#551): a turn still
         # running clears what it answered as it ends, never these.
         batch_ids = batch_request_ids(messages) if request_ids is None else request_ids
+        if (
+            not isinstance(stream_input_count, int)
+            or isinstance(stream_input_count, bool)
+            or stream_input_count < 1
+        ):
+            stream_input_count = max(
+                len(messages), len(batch_ids), len(stream_inputs or ())
+            )
+        if stream_inputs is None:
+            stream_inputs = tuple(
+                {
+                    "request_id": request_id,
+                    "history_row_uuid": getattr(item, "history_row_uuid", None),
+                    "content": deepcopy(item.content),
+                }
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for request_id in item.request_ids
+            )
+        native_stream_inputs = [
+            {
+                "request_id": record.get("request_id"),
+                "content": deepcopy(record.get("content")),
+            }
+            for record in stream_inputs
+            if isinstance(record, dict)
+            and isinstance(record.get("request_id"), str)
+            and record.get("request_id")
+            and "content" in record
+        ]
+        if not hasattr(self, "_native_stream_inputs"):
+            self._native_stream_inputs = {}
+        if not hasattr(self, "_native_stream_messages"):
+            self._native_stream_messages = {}
+        if not hasattr(self, "_persisted_native_stream_ids"):
+            self._persisted_native_stream_ids = set()
+        else:
+            self._persisted_native_stream_ids.clear()
+        for record in stream_inputs:
+            if not isinstance(record, dict):
+                continue
+            input_id = record.get("request_id")
+            row_uuid = record.get("history_row_uuid")
+            if not isinstance(input_id, str) or not input_id:
+                continue
+            self._native_stream_inputs[input_id] = {
+                "history_row_uuid": row_uuid if isinstance(row_uuid, str) else None,
+                "content": deepcopy(record.get("content")),
+            }
         try:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
             self.active_voice = voice_inputs[-1].voice if voice_inputs else None
@@ -1992,6 +2089,10 @@ class QueueProcessor:
             if batch_ids:
                 metadata["request_id"] = batch_ids[0]
                 metadata["request_ids"] = list(batch_ids)
+            if stream_input_count > 0:
+                metadata["chat_stream_input_count"] = stream_input_count
+            if native_stream_inputs:
+                metadata["chat_stream_inputs"] = native_stream_inputs
             active_turn_id = current_turn.get().get("turn_id")
             if (
                 isinstance(active_turn_id, (str, int))
@@ -2001,30 +2102,132 @@ class QueueProcessor:
                 metadata["turn_id"] = str(active_turn_id)
 
             # Add user message to conversation history
+            stream_message = ConversationMessage(
+                role="user", content=combined_message, metadata=metadata
+            )
+            for record in native_stream_inputs:
+                self._native_stream_messages.setdefault(
+                    record["request_id"], []
+                ).append(stream_message)
             self._add_message_fn(
-                ConversationMessage(role="user", content=combined_message, metadata=metadata),
+                stream_message,
                 parent_uuid=current_parent_uuid,
             )
         except Exception as exc:
             # No turn took its requests up: they end here, or their streams
             # wait for a completion that never comes (#551).
             if batch_ids:
+                await self._persist_native_input_outcomes(batch_ids, "error")
                 self._publish_ended(batch_ids, str(exc) or type(exc).__name__)
             raise
 
         # Execute LLM turn with user message
-        if self.active_origin_context is not None:
-            return await self._execute_llm_turn(
-                user_message_provided=True,
-                current_parent_uuid=current_parent_uuid,
-                execution_context=self.active_origin_context,
-                request_ids=batch_ids,
+        try:
+            if self.active_origin_context is not None:
+                result = await self._execute_llm_turn(
+                    user_message_provided=True,
+                    current_parent_uuid=current_parent_uuid,
+                    execution_context=self.active_origin_context,
+                    request_ids=batch_ids,
+                )
+            else:
+                result = await self._execute_llm_turn(
+                    user_message_provided=True,
+                    current_parent_uuid=current_parent_uuid,
+                    request_ids=batch_ids,
+                )
+        finally:
+            # The real turn path persists before publishing turn_complete.
+            # This fallback also covers injected/test turn drivers that do not
+            # own the terminal event lifecycle.
+            is_terminal = bool(
+                getattr(self, "turn_completed", False)
+                or getattr(self, "_cancel_processing", False)
+                or getattr(self, "last_turn_error", None)
             )
-        return await self._execute_llm_turn(
-            user_message_provided=True,
-            current_parent_uuid=current_parent_uuid,
-            request_ids=batch_ids,
-        )
+            pending_ids = tuple(
+                input_id
+                for input_id in batch_ids
+                if input_id not in self._persisted_native_stream_ids
+            )
+            if is_terminal and pending_ids:
+                await self._persist_native_input_outcomes(
+                    pending_ids, self._terminal_stop_reason()
+                )
+            if is_terminal:
+                for input_id in batch_ids:
+                    getattr(self, "_native_stream_inputs", {}).pop(input_id, None)
+                    getattr(self, "_native_stream_messages", {}).pop(input_id, None)
+                    self._persisted_native_stream_ids.discard(input_id)
+        return result
+
+    async def _persist_native_input_outcomes(
+        self, request_ids: tuple[str, ...], stop_reason: str
+    ) -> None:
+        """Persist native input outcomes on each exact admission row.
+
+        The per-input rows are written before the terminal event is published,
+        so a reconnect or daemon restart observes the same result as a live
+        subscriber. Combined turn history is updated too for the live
+        projection.
+        """
+        outcome = outcome_for_stop_reason(stop_reason)
+        turn_id = current_turn.get().get("turn_id")
+        updates_base: dict[str, Any] = {"chat_stream_outcome": outcome}
+        if isinstance(turn_id, (str, int)) and not isinstance(turn_id, bool) and str(turn_id):
+            updates_base["turn_id"] = str(turn_id)
+
+        for input_id in request_ids:
+            for message in getattr(self, "_native_stream_messages", {}).get(
+                input_id, ()
+            ):
+                message.metadata["chat_stream_outcome"] = outcome
+                if "turn_id" in updates_base:
+                    message.metadata["turn_id"] = updates_base["turn_id"]
+
+        logger_service = getattr(self, "conversation_logger", None)
+        update_metadata = getattr(logger_service, "update_user_message_metadata", None)
+        for input_id in request_ids:
+            record = getattr(self, "_native_stream_inputs", {}).get(input_id)
+            if not isinstance(record, dict):
+                continue
+            row_uuid = record.get("history_row_uuid")
+            if isinstance(row_uuid, str) and row_uuid and callable(update_metadata):
+                updates = dict(updates_base)
+                parts = _native_chat_stream_parts(record.get("content"))
+                # Persist remote HTTPS images, which remain addressable after
+                # restart. Managed uploads stay in the bounded image store and
+                # are projected live from the original per-input content.
+                if parts:
+                    updates["chat_stream_parts"] = parts
+                try:
+                    persisted = await update_metadata(
+                        row_uuid,
+                        expected_metadata={"request_id": input_id},
+                        updates=updates,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not persist native input outcome for %s", input_id
+                    )
+                else:
+                    if persisted is not True:
+                        logger.warning(
+                            "Native input outcome row did not match admission %s",
+                            input_id,
+                        )
+                    else:
+                        getattr(self, "_persisted_native_stream_ids", set()).add(
+                            input_id
+                        )
+                        getattr(self, "_native_stream_inputs", {}).pop(input_id, None)
+                        getattr(self, "_native_stream_messages", {}).pop(input_id, None)
+            else:
+                # No durable admission row exists, but the live combined row
+                # was still stamped above and there is nothing to retry.
+                getattr(self, "_persisted_native_stream_ids", set()).add(input_id)
+                getattr(self, "_native_stream_inputs", {}).pop(input_id, None)
+                getattr(self, "_native_stream_messages", {}).pop(input_id, None)
 
     async def _goal_scoped_call_llm(self, **kwargs):
         # Only the owning queue's provider calls may use goal image parts;
@@ -2172,9 +2375,13 @@ class QueueProcessor:
                             code=getattr(self, "last_turn_error_code", None),
                             retryable=False,
                         )
+                    stop_reason = self._terminal_stop_reason()
+                    await self._persist_native_input_outcomes(
+                        self.active_request_ids, stop_reason
+                    )
                     publish_semantic(
                         self.renderer, "turn_complete",
-                        stop_reason="error" if self.last_turn_error else "end_turn",
+                        stop_reason=stop_reason,
                     )
                     self.active_request_ids = ()
                     self._stamp_turn(None)
@@ -3322,6 +3529,10 @@ class QueueProcessor:
             revoke_voice_admission_context(self.active_origin_context)
             self.active_origin_context = None
             self._error_retried = False
+            stop_reason = self._terminal_stop_reason()
+            await self._persist_native_input_outcomes(
+                self.active_request_ids, stop_reason
+            )
             self.active_request_ids = ()  # stamped already; a later chain answers none
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
@@ -3340,7 +3551,7 @@ class QueueProcessor:
                 input_tokens=self.session_stats.get("input_tokens", 0),
                 output_tokens=self.session_stats.get("output_tokens", 0),
                 tool_calls=self.tool_executor.take_executed_count(),
-                stop_reason=self._terminal_stop_reason(),
+                stop_reason=stop_reason,
             )
             self._stamp_turn(None)
 
@@ -3384,11 +3595,14 @@ class QueueProcessor:
 
     def _terminal_stop_reason(self) -> str:
         """Separate a user Stop from a provider's normal `stop` finish reason."""
-        if self.cancel_processing:
+        if getattr(self, "_cancel_processing", False):
             return "cancelled"
-        if self.last_turn_error:
+        if getattr(self, "last_turn_error", None):
             return "error"
-        reason = str(getattr(self.api_service, "last_stop_reason", "") or "").strip().lower()
+        reason = str(
+            getattr(getattr(self, "api_service", None), "last_stop_reason", "")
+            or ""
+        ).strip().lower()
         if reason in {"", "stop", "tool_calls"}:
             return "end_turn"
         return reason

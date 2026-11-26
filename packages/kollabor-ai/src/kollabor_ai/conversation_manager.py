@@ -1212,6 +1212,20 @@ class ConversationManager:
                             message["metadata"].update(
                                 _acp_input_metadata(logged_metadata)
                             )
+                            if isinstance(logged_metadata, dict):
+                                outcome = logged_metadata.get("chat_stream_outcome")
+                                if outcome in {"completed", "failed", "cancelled"}:
+                                    message["metadata"]["chat_stream_outcome"] = outcome
+                                turn_id = logged_metadata.get("turn_id")
+                                if isinstance(turn_id, str) and turn_id:
+                                    message["metadata"]["turn_id"] = turn_id
+                                stream_parts = logged_metadata.get("chat_stream_parts")
+                                if isinstance(stream_parts, list) and all(
+                                    isinstance(part, dict) for part in stream_parts
+                                ):
+                                    message["metadata"]["chat_stream_parts"] = deepcopy(
+                                        stream_parts
+                                    )
                         # The logger stores initial system context as a user
                         # record. Preserve that wire role and recover only its
                         # explicit provenance, never classify by prompt text.

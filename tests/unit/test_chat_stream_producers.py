@@ -851,7 +851,10 @@ def test_snapshot_translates_canonical_transcript_images_to_chat_parts():
                     "source": {"kind": "url", "url": "https://example.test/image.png"},
                 },
             ],
-            metadata={"request_id": "web-image-snapshot"},
+            metadata={
+                "request_id": "web-image-snapshot",
+                "chat_stream_input_count": 1,
+            },
         )
     ]
 
