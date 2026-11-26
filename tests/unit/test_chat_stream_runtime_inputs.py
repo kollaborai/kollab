@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 
 import pytest
@@ -343,3 +344,70 @@ async def test_queue_batch_send_now_retains_owner_for_lifecycle_retry(during_dis
     assert [handoff.request_id for _, handoff, _ in state.dispatches] == [
         "web-selected"
     ]
+
+
+@pytest.mark.asyncio
+async def test_colliding_queue_ids_never_dispatch_for_two_principals():
+    from kollabor.state.web_message_queue import WebMessage
+
+    server, state, runtime = _server_and_runtime()
+    stream = state._event_bus.get_service("chat_stream")
+    for principal in (501, 502):
+        response = await server.handle_wire(
+            {
+                "action": "rpc_request",
+                "request_id": str(principal),
+                "method": "state.chat_stream.add_input",
+                "params": {
+                    "id": f"seed-{principal}",
+                    "text": "seed",
+                    "attachments": [],
+                },
+            },
+            caller_context=RpcCallerContext.from_unix_peer(principal),
+        )
+        assert response["error"] is None
+    for scope in await runtime.registry.known_scopes():
+        async with runtime.registry.acquire_existing_scope(scope) as queue:
+            await queue.enqueue_batch(
+                queue.new_operation_id(),
+                queue.new_batch_id(),
+                (WebMessage("web-same", b'{"text":"collision"}'),),
+            )
+
+    original = state.submit_queue_message
+
+    async def dispatch(message, *, queue_handoff, batch_lease=None):
+        result = await original(
+            message, queue_handoff=queue_handoff, batch_lease=batch_lease
+        )
+        if len(state.dispatches) > 1:
+            stream._set_input_state(
+                "conversation-a", "web-same", "started", turn_id="turn-1"
+            )
+        return result
+
+    state.submit_queue_message = dispatch
+
+    async def send(principal):
+        return await server.handle_wire(
+            {
+                "action": "rpc_request",
+                "request_id": str(principal),
+                "method": "state.chat_stream.send_now",
+                "params": {"id": "web-same"},
+            },
+            caller_context=RpcCallerContext.from_unix_peer(principal),
+        )
+
+    results = await asyncio.gather(send(501), send(502))
+    assert (
+        sum(result.get("result", {}).get("accepted") is True for result in results) == 1
+    )
+    assert len(state.dispatches) == 1
+    owner = 501 if results[0]["result"].get("accepted") else 502
+    other = 502 if owner == 501 else 501
+    stream._set_input_state("conversation-a", "web-same", "started", turn_id="turn-1")
+    assert (await send(owner))["result"]["turn_id"] == "turn-1"
+    assert (await send(other))["result"] == {"found": False}
+    assert len(state.dispatches) == 1
