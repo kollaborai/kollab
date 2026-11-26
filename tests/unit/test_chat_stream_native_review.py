@@ -846,6 +846,44 @@ async def test_plugin_send_now_recovers_turn_id_when_input_starts_during_gate(tm
 
 
 @pytest.mark.asyncio
+async def test_plugin_send_now_reports_cancelled_input_when_cancel_wins_gate(tmp_path):
+    state = _State()
+    _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "cancel during send gate")
+    original_begin = processor.begin_forced_send
+    gate_entered = asyncio.Event()
+    release_gate = asyncio.Event()
+
+    async def hold_gate_after_acquire():
+        token = await original_begin()
+        gate_entered.set()
+        await release_gate.wait()
+        return token
+
+    processor.begin_forced_send = hold_gate_after_acquire
+    send_task = asyncio.create_task(
+        _rpc_call(rpc, "state.chat_stream.send_now", {"id": input_id})
+    )
+    await asyncio.wait_for(gate_entered.wait(), timeout=1)
+
+    cancelled = await _rpc_call(
+        rpc, "state.chat_stream.cancel_queued_input", {"id": input_id}
+    )
+    assert cancelled == {"found": True, "cancelled": True}
+
+    release_gate.set()
+    result = await send_task
+
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": "ended",
+    }
+
+
+@pytest.mark.asyncio
 async def test_plugin_send_now_prefers_recorded_joined_turn_over_coordinator_started(
     tmp_path,
 ):
