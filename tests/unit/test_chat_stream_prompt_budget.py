@@ -62,18 +62,25 @@ def test_large_permission_prompt_stays_actionable_and_full_payload_is_fetchable(
     assert len(prompt["data"]["command"]) < 16_384
 
     marker = prompt["chat_stream_part_preview"]
-    response = service.get_content(
-        {
-            "row_id": projected["id"],
-            "part_index": marker["part_index"],
-            "field": "part",
-            "output_revision": marker["output_revision"],
-            "offset": 0,
-            "limit": 32_768,
-        }
-    )
-    assert response["output_type"] == "json"
-    assert json.loads(response["content"])["data"]["command"] == details["command"]
+    chunks = []
+    offset = 0
+    while True:
+        response = service.get_content(
+            {
+                "row_id": projected["id"],
+                "part_index": marker["part_index"],
+                "field": "part",
+                "output_revision": marker["output_revision"],
+                "offset": offset,
+                "limit": 32_768,
+            }
+        )
+        assert response["output_type"] == "json"
+        chunks.append(response["content"])
+        if response["done"]:
+            break
+        offset = response["next_offset"]
+    assert json.loads("".join(chunks))["data"]["command"] == details["command"]
 
 
 def test_compact_fallback_preserves_non_string_text_parts_and_original_indexes():
@@ -99,4 +106,3 @@ def test_compact_fallback_preserves_non_string_text_parts_and_original_indexes()
     assert len(projected["parts"]) == len(parts)
     assert projected["parts"][17] == unusual_part
     assert projected["parts"][18]["text"].startswith("part 17:")
-

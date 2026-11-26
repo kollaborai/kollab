@@ -27,6 +27,7 @@ import {
   RecoveredChatPart,
   fetchChatStreamPartsPage,
 } from "./chat-stream-parts";
+import { canExportChatStreamMarkdown } from "./chat-stream-content";
 import type { ChatStreamPartPreviewMarker, ChatStreamPartsPreviewMarker } from "./chat-stream";
 
 const revision = "a".repeat(64);
@@ -330,5 +331,50 @@ describe("chat stream part recovery", () => {
     } finally {
       await ui.unmount();
     }
+  });
+});
+
+describe("chat stream markdown export", () => {
+  it("hides export when message text is only a bounded preview", () => {
+    const text = [{
+      type: "text",
+      text: "preview only",
+      providerMetadata: {
+        kollab: {
+          chat_stream_content_preview: {
+            kind: "chat-stream-content-preview",
+            session_id: "session-1",
+            row_id: "row-clipped",
+            part_index: 0,
+            field: "text",
+            output_bytes: 200_000,
+            output_chars: 200_000,
+            output_type: "text",
+            output_revision: "a".repeat(64),
+            preview: "preview only",
+          },
+        },
+      },
+    }];
+    expect(canExportChatStreamMarkdown({}, text)).toBe(false);
+  });
+
+  it("hides export for a whole-row paging placeholder", () => {
+    expect(canExportChatStreamMarkdown({
+      chatStreamPartsPreview: {
+        kind: "chat-stream-parts-preview",
+        session_id: "session-1",
+        row_id: "row-paged",
+        part_count: 400,
+        output_bytes: 10_000_000,
+        output_chars: 9_000_000,
+        output_type: "json",
+        output_revision: "a".repeat(64),
+      },
+    }, [{ type: "text", text: "[Large chat row. Expand to load all content.]" }])).toBe(false);
+  });
+
+  it("keeps markdown export available when all text is inline", () => {
+    expect(canExportChatStreamMarkdown({}, [{ type: "text", text: "complete answer" }])).toBe(true);
   });
 });
