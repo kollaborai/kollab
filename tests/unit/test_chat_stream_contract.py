@@ -617,3 +617,21 @@ def test_snapshot_rejects_terminal_input_states_that_cannot_have_occurred(
 
     problems = sequence_problems([snapshot])
     assert any(needle in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_snapshot_can_repeat_an_unchanged_ended_input(outcome):
+    info = {"id": "i", "state": "ended", "turn_id": "t", "outcome": outcome}
+    row = {**ROW, "id": "i", "seq": 1, "turn_id": "t", "status": "ended"}
+    turns = [{"turn_id": "t", "state": "ended", "input_ids": ["i"]}]
+    snapshot = {**SNAPSHOT, "rows": [row], "turns": turns, "inputs": [info]}
+    events = [
+        _event("snapshot", SNAPSHOT, seq=0),
+        _event("row.upsert", row, seq=1),
+        _event("input.state", {"id": "i", "state": "started", "turn_id": "t"}, seq=2),
+        _event("turn.state", turns[0], seq=3),
+        _event("input.state", info, seq=4),
+        _event("snapshot", {**snapshot, "next_seq": 6}, seq=5),
+    ]
+
+    assert sequence_problems(events) == []
