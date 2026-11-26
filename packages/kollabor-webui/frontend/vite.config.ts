@@ -252,6 +252,7 @@ const mainConfig = defineConfig({
       "tests/chat-stream-contract.test.ts",
       "tests/chat-store.test.ts",
       "tests/chat-runtime.test.ts",
+      "tests/chat-row-cache.test.ts",
       "tests/chat-store-provider.test.ts",
       "tests/chat-recorder-analysis.test.ts",
       "tests/chat-stream-api.test.ts",
