@@ -710,6 +710,7 @@ describe("chat stream part recovery", () => {
         args: owner,
         chat_stream_result_preview: null,
       };
+      const pageMarker = { ...partsMarker(rowId), part_count: 1 };
       const row: ChatRow = {
         id: rowId,
         seq: 10,
@@ -718,9 +719,9 @@ describe("chat stream part recovery", () => {
         turn_id: "turn-pending-null-preview",
         status: "requires-action" as const,
         parts: [{ type: "text" as const, text: "[Large recovered content]" }],
+        ...(recoveryPath === "whole-row page" ? { chat_stream_parts_preview: pageMarker } : {}),
         created_at: "2026-11-25T00:00:00Z",
       };
-      const pageMarker = { ...partsMarker(rowId), part_count: 1 };
       let recoveredContentMarker: ChatStreamPartPreviewMarker | undefined;
 
       if (recoveryPath === "whole-row page") {
