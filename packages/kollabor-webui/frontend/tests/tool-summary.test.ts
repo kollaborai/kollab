@@ -61,3 +61,11 @@ test("a call the agent asked the user to OK is not a failure", () => {
   assert.equal(askedForOk("Exit code 1: no such file"), false);
   assert.equal(askedForOk(undefined), false);
 });
+
+test("a redirect target is not the file a command works on", () => {
+  const run = (command: string) =>
+    summarizeToolCall("terminal", JSON.stringify({ command }));
+  assert.equal(run("ls -la ~/.kollab/agents/lapis 2>/dev/null"), "List Files · lapis");
+  assert.equal(run("ls -la 2>/dev/null"), "List Files");
+  assert.equal(run("ls src/app > /tmp/out.txt"), "List Files · app");
+});
