@@ -10,6 +10,14 @@ import {
   type ComposerPaletteItem,
 } from "@/components/assistant-ui/composer-palette";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import {
+  ChatStreamContentPreview,
+  chatStreamContentIdentity,
+  chatStreamContentPreviewFromMetadata,
+  chatStreamPartPreviewFromMetadata,
+  chatStreamPartsPreviewFromCustom,
+} from "@/chat-stream-content";
+import { ChatStreamPartPreview, ChatStreamPartsPreview } from "@/chat-stream-parts";
 import { MessageTimingBadge } from "@/components/assistant-ui/message-timing";
 import {
   Reasoning,
@@ -83,6 +91,7 @@ import {
   type ToolCallMessagePartComponent,
   useAui,
   useAuiState,
+  TextMessagePartProvider,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -458,7 +467,7 @@ export const SystemMessage: FC = () => (
     data-role="system"
     className="fade-in slide-in-from-bottom-1 animate-in text-muted-foreground px-2 text-center text-sm duration-150"
   >
-    <MessagePrimitive.Parts components={{ Image: AuthenticatedMessageImage }} />
+    <MessagePrimitive.Parts components={{ Text: UserText, Image: AuthenticatedMessageImage }} />
   </MessagePrimitive.Root>
 );
 
@@ -1370,6 +1379,9 @@ const AssistantMessage: FC = () => {
     const value = s.message.metadata.custom.chatTurnId;
     return typeof value === "string" ? value : undefined;
   });
+  const partsPreview = chatStreamPartsPreviewFromCustom(
+    useAuiState((s) => s.message.metadata.custom),
+  );
 
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
@@ -1429,10 +1441,47 @@ const AssistantMessage: FC = () => {
                   </ReasoningRoot>
                 );
               }
-              case "text":
-                return <MarkdownText />;
-              case "reasoning":
-                return <Reasoning {...part} />;
+              case "text": {
+                if (partsPreview) {
+                  return (
+                    <ChatStreamPartsPreview
+                      key={`${partsPreview.row_id}:${partsPreview.output_revision}`}
+                      marker={partsPreview}
+                    />
+                  );
+                }
+                const partPreview = chatStreamPartPreviewFromMetadata(part.providerMetadata);
+                if (partPreview) {
+                  return (
+                    <ChatStreamPartPreview
+                      key={`${partPreview.row_id}:${partPreview.part_index}:${partPreview.output_revision}`}
+                      marker={partPreview}
+                    />
+                  );
+                }
+                const preview = chatStreamContentPreviewFromMetadata(part.providerMetadata, "text");
+                return preview ? (
+                  <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+                    {(text) => (
+                      <TextMessagePartProvider text={text}>
+                        <MarkdownText />
+                      </TextMessagePartProvider>
+                    )}
+                  </ChatStreamContentPreview>
+                ) : <MarkdownText />;
+              }
+              case "reasoning": {
+                const preview = chatStreamContentPreviewFromMetadata(part.providerMetadata, "reasoning");
+                return preview ? (
+                  <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+                    {(text) => (
+                      <TextMessagePartProvider text={text}>
+                        <Reasoning {...part} />
+                      </TextMessagePartProvider>
+                    )}
+                  </ChatStreamContentPreview>
+                ) : <Reasoning {...part} />;
+              }
               case "tool-call":
                 return (
                   <div
@@ -1529,7 +1578,39 @@ const AssistantActionBar: FC = () => {
  * A live row carries its pictures as image parts, so there the tokens render
  * as nothing instead of duplicating the picture next to them.
  */
-export const UserText: FC<{ text?: string }> = ({ text }) => {
+export const UserText: FC<{ text?: string; providerMetadata?: unknown }> = ({ text, providerMetadata }) => {
+  const partsPreview = chatStreamPartsPreviewFromCustom(
+    useAuiState((s) => s.message.metadata.custom),
+  );
+  if (partsPreview) {
+    return (
+      <ChatStreamPartsPreview
+        key={`${partsPreview.row_id}:${partsPreview.output_revision}`}
+        marker={partsPreview}
+      />
+    );
+  }
+  const partPreview = chatStreamPartPreviewFromMetadata(providerMetadata);
+  if (partPreview) {
+    return (
+      <ChatStreamPartPreview
+        key={`${partPreview.row_id}:${partPreview.part_index}:${partPreview.output_revision}`}
+        marker={partPreview}
+      />
+    );
+  }
+  const preview = chatStreamContentPreviewFromMetadata(providerMetadata, "text");
+  if (preview) {
+    return (
+      <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+        {(fullText) => <UserTextBody text={fullText} />}
+      </ChatStreamContentPreview>
+    );
+  }
+  return <UserTextBody text={text} />;
+};
+
+const UserTextBody: FC<{ text?: string }> = ({ text }) => {
   const media = useAuiState(
     (s) => s.message.metadata?.custom?.media,
   ) as MediaEntry[] | undefined;

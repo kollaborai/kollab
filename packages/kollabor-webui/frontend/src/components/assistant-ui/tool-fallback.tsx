@@ -31,6 +31,12 @@ import {
   summarizeToolCall,
 } from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
+import { isChatStreamContentPreviewMarker } from "@/chat-stream";
+import {
+  ChatStreamContentPreview,
+  chatStreamContentIdentity,
+  type ChatStreamContentPreviewMarker,
+} from "@/chat-stream-content";
 
 import {
   CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE,
@@ -483,11 +489,30 @@ function ToolFallbackContent({
 
 function ToolFallbackArgs({
   argsText,
+  preview,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
   argsText?: string;
+  preview?: ChatStreamContentPreviewMarker;
 }) {
+  if (preview) {
+    return (
+      <div
+        data-slot="tool-fallback-args"
+        className={cn("aui-tool-fallback-args", className)}
+        {...props}
+      >
+        <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+          {(content) => (
+            <pre className="aui-tool-fallback-args-value bg-muted/50 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
+              {formatContent(content)}
+            </pre>
+          )}
+        </ChatStreamContentPreview>
+      </div>
+    );
+  }
   if (!argsText) return null;
 
   return (
@@ -1035,6 +1060,7 @@ function ToolFallbackApproval({
 
 const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   toolName,
+  args,
   argsText,
   result,
   isError,
@@ -1045,6 +1071,9 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   approval,
   respondToApproval,
 }) => {
+  const argsPreview = isChatStreamContentPreviewMarker(args) && args.field === "args"
+    ? args
+    : undefined;
   const card = harnessCard(result);
   const cardTitle =
     typeof card?.title === "string" && card.title.trim() ? card.title.trim() : undefined;
@@ -1136,7 +1165,8 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
         {/* A harness diff already shows the edit as Before/After; its raw args repeat it. */}
         {!(Array.isArray(card?.content) && card.content.some((block) => asRecord(block)?.type === "diff")) && (
           <ToolFallbackArgs
-            argsText={argsText}
+            argsText={argsPreview ? undefined : argsText}
+            preview={argsPreview}
             className={cn(isCancelled && "opacity-60")}
           />
         )}

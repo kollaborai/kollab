@@ -70,6 +70,128 @@ describe("toThreadMessageLike", () => {
     ]);
   });
 
+  it("preserves the full-text retrieval marker beside a bounded text part", () => {
+    const marker = {
+      kind: "chat-stream-content-preview",
+      session_id: "session-1",
+      row_id: "row-2",
+      part_index: 0,
+      field: "text",
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "text",
+      output_revision: "a".repeat(64),
+      preview: "visible prefix",
+    };
+    const part = {
+      type: "text" as const,
+      text: "visible prefix",
+      chat_stream_content_preview: marker,
+    } as unknown as ChatRow["parts"][number];
+
+    const message = toThreadMessageLike(row("row-2", [part]));
+
+    expect(message.content[0]).toMatchObject({
+      type: "text",
+      text: "visible prefix",
+      providerMetadata: { kollab: { chat_stream_content_preview: marker } },
+    });
+  });
+
+  it("preserves the full-text retrieval marker beside a bounded reasoning part", () => {
+    const marker = {
+      kind: "chat-stream-content-preview",
+      session_id: "session-1",
+      row_id: "row-reasoning",
+      part_index: 0,
+      field: "reasoning",
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "text",
+      output_revision: "c".repeat(64),
+      preview: "reasoning prefix",
+    };
+    const part = {
+      type: "reasoning" as const,
+      text: "reasoning prefix",
+      chat_stream_content_preview: marker,
+    } as unknown as ChatRow["parts"][number];
+
+    const message = toThreadMessageLike(row("row-reasoning", [part]));
+
+    expect(message.content[0]).toMatchObject({
+      type: "reasoning",
+      text: "reasoning prefix",
+      providerMetadata: { kollab: { chat_stream_content_preview: marker } },
+    });
+  });
+
+  it("carries a row-parts page marker in message metadata and part recovery in provider metadata", () => {
+    const partsPreview = {
+      kind: "chat-stream-parts-preview",
+      session_id: "session-1",
+      row_id: "row-large",
+      part_count: 120,
+      output_bytes: 500_000,
+      output_chars: 420_000,
+      output_type: "json" as const,
+      output_revision: "d".repeat(64),
+    };
+    const partPreview = {
+      kind: "chat-stream-part-preview",
+      session_id: "session-1",
+      row_id: "row-large",
+      part_index: 0,
+      output_bytes: 50_000,
+      output_chars: 30_000,
+      output_type: "json" as const,
+      output_revision: "e".repeat(64),
+      preview: "[Large part. Expand to load full content.]",
+    };
+    const largeRow = {
+      ...row("row-large", [{
+        type: "text" as const,
+        text: partPreview.preview,
+        chat_stream_part_preview: partPreview,
+      }]),
+      chat_stream_parts_preview: partsPreview,
+    } as unknown as ChatRow;
+
+    const message = toThreadMessageLike(largeRow);
+
+    expect(message.metadata?.custom).toMatchObject({ chatStreamPartsPreview: partsPreview });
+    expect(message.content[0]).toMatchObject({
+      type: "text",
+      text: partPreview.preview,
+      providerMetadata: { kollab: { chat_stream_part_preview: partPreview } },
+    });
+  });
+
+  it("preserves an argument preview marker on the tool call", () => {
+    const marker = {
+      kind: "chat-stream-content-preview",
+      session_id: "session-1",
+      row_id: "row-3",
+      part_index: 1,
+      field: "args",
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "json",
+      output_revision: "b".repeat(64),
+      preview: '{"command":"echo..."}',
+    };
+    const message = toThreadMessageLike(
+      row("row-3", [{
+        type: "tool-call",
+        tool_call_id: "call-1",
+        tool_name: "terminal",
+        args: marker,
+      }]),
+    );
+
+    expect(message.content[0]).toMatchObject({ type: "tool-call", args: marker });
+  });
+
   it("maps a tool-call part to toolCallId, toolName, args, argsText and isError", () => {
     const message = toThreadMessageLike(
       row("row-3", [

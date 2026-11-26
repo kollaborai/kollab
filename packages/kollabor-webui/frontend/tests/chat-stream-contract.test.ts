@@ -25,6 +25,40 @@ const upsert = (data: unknown) => ({ seq: 1, conversation_uid: "c", generation: 
 const snapshot = (data: unknown) => ({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "snapshot", data });
 const withGeneration = (value: Record<string, unknown>) => ({ ...value, generation: "daemon-1" });
 
+const contentPreview = (field: string, rowId = "r1") => ({
+  kind: "chat-stream-content-preview",
+  session_id: "session-1",
+  row_id: rowId,
+  part_index: 0,
+  field,
+  output_bytes: 40_000,
+  output_chars: 40_000,
+  output_type: field === "args" || field === "part" ? "json" : "text",
+  output_revision: "a".repeat(64),
+  preview: "bounded preview",
+});
+const partPreview = (rowId = "r1") => ({
+  kind: "chat-stream-part-preview",
+  session_id: "session-1",
+  row_id: rowId,
+  part_index: 0,
+  output_bytes: 40_000,
+  output_chars: 40_000,
+  output_type: "json",
+  output_revision: "b".repeat(64),
+  preview: "[Large part. Expand to load full content.]",
+});
+const partsPreview = (rowId = "r1") => ({
+  kind: "chat-stream-parts-preview",
+  session_id: "session-1",
+  row_id: rowId,
+  part_count: 120,
+  output_bytes: 500_000,
+  output_chars: 420_000,
+  output_type: "json",
+  output_revision: "c".repeat(64),
+});
+
 describe("chat stream contract", () => {
   it("reads all eight fixtures", () => {
     expect(cases.map((c) => c.name).sort()).toEqual([
@@ -35,6 +69,34 @@ describe("chat stream contract", () => {
 
   it("accepts a row that carries every part type", () => {
     expect(isChatStreamEvent(upsert({ ...ROW, parts: PARTS }))).toBe(true);
+  });
+
+  it("accepts row paging and per-part retrieval markers on bounded placeholders", () => {
+    const row = {
+      ...ROW,
+      parts: [{ type: "text", text: "[Large chat row. Expand to load all content.]", chat_stream_part_preview: partPreview() }],
+      chat_stream_parts_preview: partsPreview(),
+    };
+    expect(isChatStreamEvent(upsert(row))).toBe(true);
+    expect(isChatStreamEvent(upsert({
+      ...ROW,
+      parts: [{ type: "text", text: "prefix", chat_stream_content_preview: contentPreview("text") }],
+    }))).toBe(true);
+    expect(isChatStreamEvent(upsert({
+      ...ROW,
+      parts: [{ type: "text", text: "[Large part]", chat_stream_part_preview: partPreview() }],
+    }))).toBe(true);
+  });
+
+  it("rejects preview markers whose row identity disagrees with their row", () => {
+    expect(isChatStreamEvent(upsert({
+      ...ROW,
+      chat_stream_parts_preview: partsPreview("another-row"),
+    }))).toBe(false);
+    expect(isChatStreamEvent(upsert({
+      ...ROW,
+      parts: [{ type: "text", text: "x", chat_stream_part_preview: partPreview("another-row") }],
+    }))).toBe(false);
   });
 
   it.each([
