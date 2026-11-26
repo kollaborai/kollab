@@ -20,6 +20,8 @@ from kollabor_agent.queue_processor import (
 )
 from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.message_content import content_to_text
+from kollabor_tui.display_tap import publish_semantic
+from kollabor_tui.turn_context import current_turn
 
 from .agent_hud import agent_hud_hub_metadata, format_agent_hud
 
@@ -65,6 +67,147 @@ class MessageHandler:
         self._coordinator = coordinator
         self._hub_continue_paused_until: float = 0.0
         self._retry_pending: bool = False
+        self._retry_wake_data: dict[str, Any] | None = None
+
+    @staticmethod
+    def _merge_retry_wake_data(
+        current: dict[str, Any] | None, incoming: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Retain every hub id and structured note while one retry is pending."""
+        merged = {**(current or {}), **incoming}
+        request_ids: list[str] = []
+        notes: dict[str, dict[str, Any]] = {}
+        for source in (current or {}, incoming):
+            values = source.get("pending_hub_message_ids")
+            if isinstance(values, list):
+                request_ids.extend(
+                    value for value in values if isinstance(value, str) and value
+                )
+            for key in ("hub_message_id", "request_id"):
+                value = source.get(key)
+                if isinstance(value, str) and value and (
+                    source.get("hub_message_id")
+                    or isinstance(source.get("hub_note"), dict)
+                    or source.get("input_source") == "hub"
+                ):
+                    request_ids.append(value)
+            entries = source.get("pending_hub_notes")
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    message_id = entry.get("message_id")
+                    hub_note = entry.get("hub_note")
+                    if (
+                        isinstance(message_id, str)
+                        and message_id
+                        and isinstance(hub_note, dict)
+                    ):
+                        notes[message_id] = entry
+            message_id = source.get("hub_message_id") or source.get("request_id")
+            hub_note = source.get("hub_note")
+            if isinstance(message_id, str) and message_id and isinstance(hub_note, dict):
+                notes[message_id] = {
+                    "message_id": message_id,
+                    "hub_note": hub_note,
+                    "admission": source.get("hub_admission", "input"),
+                }
+        merged["pending_hub_message_ids"] = list(dict.fromkeys(request_ids))
+        if notes:
+            merged["pending_hub_notes"] = list(notes.values())
+        primary = current or incoming
+        primary_id = primary.get("hub_message_id") or primary.get("request_id")
+        if isinstance(primary_id, str) and primary_id:
+            merged["hub_message_id"] = primary_id
+            merged["request_id"] = primary_id
+            primary_note = primary.get("hub_note")
+            if isinstance(primary_note, dict):
+                merged["hub_note"] = primary_note
+                merged["hub_admission"] = primary.get("hub_admission", "input")
+        return merged
+
+    @staticmethod
+    def _hub_input_ids(
+        data: dict[str, Any], hud_metadata: dict[str, Any] | None = None
+    ) -> list[str]:
+        """Get the hub inputs that should share the native wake's lifecycle."""
+        is_hub_wake = bool(
+            data.get("hub_message_id")
+            or isinstance(data.get("hub_note"), dict)
+            or data.get("input_source") == "hub"
+            or isinstance(data.get("pending_hub_message_ids"), list)
+        )
+        if not is_hub_wake:
+            return []
+        ids: list[str] = []
+        candidates = data.get("pending_hub_message_ids")
+        if isinstance(candidates, list):
+            ids.extend(value for value in candidates if isinstance(value, str) and value)
+        candidates = data.get("request_ids")
+        if isinstance(candidates, list):
+            ids.extend(value for value in candidates if isinstance(value, str) and value)
+        for key in ("hub_message_id", "request_id"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                ids.append(value)
+        ids = list(dict.fromkeys(ids))
+
+        admissions: dict[str, str] = {}
+        sources = [data]
+        if isinstance(hud_metadata, dict):
+            sources.append(hud_metadata)
+        for source in sources:
+            entries = source.get("pending_hub_notes")
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    message_id = entry.get("message_id")
+                    admission = entry.get("admission")
+                    if isinstance(message_id, str) and isinstance(admission, str):
+                        admissions[message_id] = admission
+            entries = source.get("hub_notes")
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    message_id = entry.get("id")
+                    admission = entry.get("admission")
+                    if isinstance(message_id, str) and isinstance(admission, str):
+                        admissions[message_id] = admission
+            message_id = source.get("hub_message_id")
+            admission = source.get("hub_admission")
+            if isinstance(message_id, str) and isinstance(admission, str):
+                admissions[message_id] = admission
+        return [message_id for message_id in ids if admissions.get(message_id) != "note"]
+
+    def _downgrade_hub_wake(self, data: dict[str, Any]) -> None:
+        """Keep a wake visible as a note when it did not start its own turn."""
+        coord = self._coordinator
+        notes: dict[str, dict[str, Any]] = {}
+        entries = data.get("pending_hub_notes")
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                message_id = entry.get("message_id")
+                hub_note = entry.get("hub_note")
+                if isinstance(message_id, str) and isinstance(hub_note, dict):
+                    notes[message_id] = hub_note
+        message_id = data.get("hub_message_id") or data.get("request_id")
+        hub_note = data.get("hub_note")
+        if isinstance(message_id, str) and message_id and isinstance(hub_note, dict):
+            notes[message_id] = hub_note
+        for message_id, note in notes.items():
+            publish_semantic(
+                coord.event_bus,
+                "hub_message",
+                message_id=message_id,
+                request_id=message_id,
+                input_source="hub",
+                hub_note=note,
+                hub_admission="note",
+            )
 
     async def _report_detached_chain_break(self, reason: str) -> None:
         """Notify a detached agent's parent when the tool loop is abandoned."""
@@ -531,11 +674,13 @@ class MessageHandler:
         renderer = coord.renderer
         if hasattr(renderer, "pipe_mode") and getattr(renderer, "pipe_mode", False):
             logger.info("TRIGGER_LLM_CONTINUE: Pipe mode active, skipping")
+            self._downgrade_hub_wake(data)
             return {"status": "pipe_mode"}
 
         # ACP owns the chat: a native continuation, now or from a retry, would
         # answer behind the ACP agent's back. Refuse before scheduling anything (#579).
         if self._acp_owns_chat():
+            self._downgrade_hub_wake(data)
             coord.message_display_service.display_error_message(
                 "A message from another agent or a background task was not run natively, "
                 "because ACP owns this chat. Send it from the chat to reach the ACP agent."
@@ -551,17 +696,20 @@ class MessageHandler:
             # Hub continue: wraps _continue_conversation in a tool loop
             # so that if the LLM executes tools, it processes the results
             # (mirrors the process_queue continuation loop behavior).
-            async def _hub_continue():
+            async def _hub_continue(wake_data: dict[str, Any] | None = None):
+                wake_data = wake_data if isinstance(wake_data, dict) else data
                 qp = coord._queue_processor
                 if qp.cancel_processing:
                     if qp.is_processing or qp.cancel_origin == "remote_task":
                         logger.info("Hub continue: cancel flag set, skipping")
+                        self._downgrade_hub_wake(wake_data)
                         return
                     # ESC latch from a drain that already stopped: the cooldown
                     # gave the human their window, so a new wake runs.
                     qp.cancel_processing = False
                 if qp.is_processing:
                     logger.info("Hub continue: a turn is already running, it sees the message")
+                    self._downgrade_hub_wake(wake_data)
                     return
                 # The hub wake is a new admitted turn. Its HUD row and all
                 # continuation writes must use a fresh ticket, not whichever
@@ -590,9 +738,6 @@ class MessageHandler:
                 # (#357).
                 qp._stop_hook_active = False
                 qp._stop_hook_continuations = 0
-                hub_input_id = data.get("hub_message_id") or data.get("request_id")
-                if not isinstance(data.get("hub_note"), dict):
-                    hub_input_id = None
                 # Wall-clock checkpoints only — never kill a working chain.
                 # Force-completing on a timer orphaned the last turn's tool
                 # results (they were in history but the LLM never got called
@@ -616,11 +761,33 @@ class MessageHandler:
                     drain = getattr(coord, "drain_pending_agent_hud", None)
                     hud = drain() if callable(drain) else ""
                     hud_metadata = {}
+                input_ids = self._hub_input_ids(wake_data, hud_metadata)
+                turn_id = f"native-{uuid.uuid4().hex}" if input_ids else None
+                turn_context_token = None
+                previous_active_request_ids = getattr(qp, "active_request_ids", ())
+                if turn_id is not None:
+                    qp.active_request_ids = tuple(input_ids)
+                    current_turn_context = {
+                        **current_turn.get(),
+                        "turn_id": turn_id,
+                        "request_id": input_ids[0],
+                        "request_ids": list(input_ids),
+                        "input_source": "hub",
+                    }
+                    turn_context_token = current_turn.set(current_turn_context)
+                    publish_semantic(
+                        coord.event_bus,
+                        "turn_start",
+                        request_id=input_ids[0],
+                        request_ids=list(input_ids),
+                        turn_id=turn_id,
+                        input_source="hub",
+                    )
                 if isinstance(hud, str) and hud:
                     from kollabor_events.data_models import ConversationMessage
 
-                    hub_note = data.get("hub_note")
-                    hub_message_id = data.get("hub_message_id") or data.get("request_id")
+                    hub_note = wake_data.get("hub_note")
+                    hub_message_id = wake_data.get("hub_message_id") or wake_data.get("request_id")
                     metadata = {
                         "agent_hud": True,
                         "agent_hud_sources": ["hub"],
@@ -645,33 +812,6 @@ class MessageHandler:
                         publish_user_event=False,
                     )
                     coord.publish_cursor(hud_uuid, turn_serial)
-                turn_context = None
-                turn_context_token = None
-                if isinstance(hub_input_id, str) and hub_input_id:
-                    from kollabor_tui.display_tap import publish_semantic
-                    from kollabor_tui.turn_context import current_turn
-
-                    turn_id = f"native-{uuid.uuid4().hex}"
-                    input_ids = [hub_input_id]
-                    qp.active_request_ids = tuple(input_ids)
-                    turn_context = current_turn
-                    turn_context_token = current_turn.set(
-                        {
-                            **current_turn.get(),
-                            "request_id": hub_input_id,
-                            "request_ids": input_ids,
-                            "turn_id": turn_id,
-                            "input_source": "hub",
-                        }
-                    )
-                    publish_semantic(
-                        coord.renderer,
-                        "turn_start",
-                        request_id=hub_input_id,
-                        request_ids=input_ids,
-                        turn_id=turn_id,
-                        input_source="hub",
-                    )
                 try:
                     try:
                         await coord._continue_conversation()
@@ -750,8 +890,16 @@ class MessageHandler:
                             qp.turn_completed = True
                             break
                 finally:
-                    if turn_context is not None and turn_context_token is not None:
-                        turn_context.reset(turn_context_token)
+                    if turn_context_token is not None:
+                        try:
+                            current_turn.reset(turn_context_token)
+                        except (RuntimeError, ValueError):
+                            pass
+                    if (
+                        turn_id is not None
+                        and getattr(qp, "active_request_ids", ()) == tuple(input_ids)
+                    ):
+                        qp.active_request_ids = previous_active_request_ids
                     qp.is_processing = False  # ends the chain (note_chain_end)
                     # User messages arrive via process_user_input(), which
                     # enqueues them to processing_queue but SKIPS creating
@@ -779,12 +927,16 @@ class MessageHandler:
                 # by the hub plugin before this handler runs, so a single
                 # post-processing continuation will see all of them.
                 if self._retry_pending:
+                    self._retry_wake_data = self._merge_retry_wake_data(
+                        self._retry_wake_data, data
+                    )
                     logger.info(
                         "TRIGGER_LLM_CONTINUE: retry already queued, coalescing"
                     )
                     return {"status": "coalesced"}
 
                 self._retry_pending = True
+                self._retry_wake_data = self._merge_retry_wake_data(None, data)
                 logger.info(
                     "TRIGGER_LLM_CONTINUE: %s, queuing for retry",
                     blocked or "Processing active",
@@ -818,12 +970,18 @@ class MessageHandler:
                                 logger.info(
                                     "TRIGGER_LLM_CONTINUE: a later turn took the message"
                                 )
+                                self._downgrade_hub_wake(
+                                    self._retry_wake_data or data
+                                )
                                 return
                             if now > give_up_at:
                                 logger.warning(
                                     "TRIGGER_LLM_CONTINUE: processing busy for "
                                     ">1h, dropping retry (message remains in "
                                     "history for the next turn)"
+                                )
+                                self._downgrade_hub_wake(
+                                    self._retry_wake_data or data
                                 )
                                 return
                             if now > checkpoint_at:
@@ -838,8 +996,10 @@ class MessageHandler:
                             "TRIGGER_LLM_CONTINUE: Retrying after processing completed"
                         )
                         if not coord.is_processing:
+                            retry_data = self._retry_wake_data or data
                             if self._acp_owns_chat():
                                 # ACP was selected while this retry waited (#579).
+                                self._downgrade_hub_wake(retry_data)
                                 coord.message_display_service.display_error_message(
                                     "ACP took over this chat while a native reply was waiting, "
                                     "so that reply was not started. Send your message from the "
@@ -847,11 +1007,12 @@ class MessageHandler:
                                 )
                                 return
                             coord.create_background_task(
-                                lambda: _hub_continue(),
+                                lambda: _hub_continue(retry_data),
                                 name="continue_conversation_retry",
                             )
                     finally:
                         self._retry_pending = False
+                        self._retry_wake_data = None
 
                 coord.create_background_task(
                     lambda: _retry_continue(), name="trigger_continue_retry"
@@ -860,7 +1021,7 @@ class MessageHandler:
 
             if not coord.is_processing:
                 coord.create_background_task(
-                    lambda: _hub_continue(), name="continue_conversation_hub"
+                    lambda: _hub_continue(data), name="continue_conversation_hub"
                 )
 
             logger.info("TRIGGER_LLM_CONTINUE: Triggered LLM processing")
@@ -868,6 +1029,7 @@ class MessageHandler:
 
         except Exception as e:
             logger.error(f"Error in TRIGGER_LLM_CONTINUE handler: {e}")
+            self._downgrade_hub_wake(data)
             return {"status": "error", "error": str(e)}
 
     def _acp_owns_chat(self) -> bool:

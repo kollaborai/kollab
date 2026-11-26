@@ -1143,6 +1143,23 @@ class ChatStreamService:
             return
         is_input = event.get("hub_admission") == "input"
         prior = self._inputs.setdefault(uid, {}).get(row_id)
+        if prior is not None and not is_input:
+            prior_state = prior.get("state")
+            if prior_state in {"started", "joined", "ended"}:
+                # A late note update must not turn an already-running or
+                # completed input back into a note row.
+                is_input = True
+            elif prior_state == "queued":
+                # The wake was retained for display but will not start a
+                # native turn. End its admission before downgrading its row.
+                self._set_input_state(
+                    uid,
+                    row_id,
+                    "ended",
+                    turn_id=prior.get("turn_id"),
+                    outcome="cancelled",
+                )
+                prior = self._inputs[uid][row_id]
         turn_id = (prior or {}).get("turn_id") or self._event_turn_id(event)
         if is_input:
             state = (prior or {}).get("state") or "queued"
