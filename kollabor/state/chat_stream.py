@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -26,12 +26,20 @@ from kollabor_events.chat_stream_emit import emit_chat_event
 
 from .chat_stream_history import turn_history_key_index
 from .chat_stream_rows import (
+    CHAT_STREAM_MAX_RESPONSE_BYTES,
+    CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS,
     ChatStreamRowPager,
+    bounded_chat_stream_row,
+    bounded_chat_stream_rows,
+    chat_stream_tool_output_revision,
+    chat_stream_wire_bytes,
     merge_chat_stream_rows,
     register_chat_stream_rows_handler,
 )
 
 logger = logging.getLogger(__name__)
+
+_CHAT_STREAM_TOOL_OUTPUT_CACHE_BYTES = 32 * 1024 * 1024
 
 
 def _parse_chat_timestamp(value: Any) -> datetime | None:
@@ -177,7 +185,10 @@ class ChatStreamLog:
             first_seq = events[0]["seq"] if events else self._last_seq + 1
             if after < first_seq - 1:
                 return [self._snapshot_event_locked()]
-            return [copy.deepcopy(event) for event in events if event["seq"] > after]
+            replay = [copy.deepcopy(event) for event in events if event["seq"] > after]
+            if chat_stream_wire_bytes({"events": replay}) > CHAT_STREAM_MAX_RESPONSE_BYTES:
+                return [self._snapshot_event_locked()]
+            return replay
 
     def _snapshot_event_locked(self) -> Event:
         state = copy.deepcopy(self._snapshot_provider() or {})
@@ -208,6 +219,8 @@ class ChatStreamLog:
         problems = event_problems(event)
         if problems:
             raise ValueError("; ".join(problems))
+        if chat_stream_wire_bytes({"events": [event]}) > CHAT_STREAM_MAX_RESPONSE_BYTES:
+            raise ValueError("chat stream snapshot exceeds the response byte budget")
         return event
 
     def _record_locked(self, event: Event) -> None:
@@ -252,6 +265,11 @@ class ChatStreamService:
         self._event_bus = getattr(state_service, "_event_bus", None)
         self._logs: dict[str, ChatStreamLog] = {}
         self._rows: dict[str, dict[str, dict[str, Any]]] = {}
+        self._tool_output_lock = threading.RLock()
+        self._tool_output_cache: OrderedDict[
+            tuple[str, str, str], tuple[Any, str, str, str, int]
+        ] = OrderedDict()
+        self._tool_output_cache_bytes = 0
         # Snapshot lifecycle projection. This is rebuilt when an older saved
         # transcript is restored, so stale running states cannot shadow it.
         self._inputs: dict[str, dict[str, dict[str, Any]]] = {}
@@ -816,18 +834,29 @@ class ChatStreamService:
     def record_event(self, event_type: str, data: dict[str, Any]) -> Event:
         """Record one producer event for the active daemon conversation."""
         uid = self._conversation_uid()
-        with self._log(uid)._lock:
+        log = self._log(uid)
+        with log._lock:
+            if event_type in {"row.upsert", "replace"}:
+                with self._tool_output_lock:
+                    if event_type == "row.upsert":
+                        self._invalidate_tool_output_row(uid, data.get("id"))
+                    else:
+                        self._clear_tool_output_cache(uid)
+                    return self._record_event_locked(uid, event_type, data)
             return self._record_event_locked(uid, event_type, data)
 
     def _record_event_locked(
         self, uid: str, event_type: str, data: dict[str, Any]
     ) -> Event:
+        raw_row = None
+        publish_data = data
         if event_type == "turn.state":
             prior = self._turns.get(uid, {}).get(data.get("turn_id"))
             if prior is not None and prior.get("origin") != data.get("origin"):
                 raise ValueError("turn origin is immutable")
         if event_type == "row.upsert":
-            self._rows.setdefault(uid, {})[data["id"]] = copy.deepcopy(data)
+            raw_row = copy.deepcopy(data)
+            publish_data = self._project_chat_stream_row(uid, raw_row)
         elif event_type == "row.append":
             row = self._rows.setdefault(uid, {}).get(data["id"])
             if row is not None:
@@ -840,12 +869,25 @@ class ChatStreamService:
                     part = {"type": "text", "text": ""}
                     parts[part_index] = part
                 part["text"] = str(part.get("text") or "") + data["text"]
+                if chat_stream_wire_bytes(data) > 256 * 1024:
+                    raw_row = copy.deepcopy(row)
+                    publish_data = self._project_chat_stream_row(uid, raw_row)
+                    event_type = "row.upsert"
         elif event_type == "replace":
             rows = data.get("rows", [])
-            self._rows[uid] = {
-                row["id"]: copy.deepcopy(row)
+            raw_rows = [
+                copy.deepcopy(row)
                 for row in rows
                 if isinstance(row, dict) and isinstance(row.get("id"), str)
+            ]
+            self._rows[uid] = {
+                row["id"]: row for row in raw_rows
+            }
+            publish_data = {
+                **data,
+                "rows": self._project_chat_stream_rows(
+                    uid, raw_rows, max_bytes=3 * 1024 * 1024
+                ),
             }
         elif event_type == "turn.state":
             turn_id = data.get("turn_id")
@@ -859,7 +901,17 @@ class ChatStreamService:
                 self._admission_inputs.setdefault(uid, {})[
                     input_id
                 ] = copy.deepcopy(copied)
-        return self._log(uid).publish(event_type, data)
+        def store_raw_row(event: Event) -> None:
+            if raw_row is None:
+                return
+            raw_row["seq"] = event["seq"]
+            self._rows.setdefault(uid, {})[raw_row["id"]] = raw_row
+
+        return self._log(uid).publish(
+            event_type,
+            publish_data,
+            on_commit=store_raw_row if raw_row is not None else None,
+        )
 
     def attach_display_tap(self) -> None:
         """Listen to daemon semantic events and translate turns into rows."""
@@ -1938,6 +1990,7 @@ class ChatStreamService:
     def replace_transcript(self) -> Event:
         """Replace the row window after a daemon transcript compaction."""
         uid = self._conversation_uid()
+        self._clear_tool_output_cache(uid)
         llm_service = getattr(self._state_service, "_llm_service", None)
         manager = getattr(llm_service, "conversation_manager", None)
         history = getattr(llm_service, "conversation_history", None)
@@ -2221,7 +2274,13 @@ class ChatStreamService:
         if marker["turn_id"] is None:
             marker["turn_id"] = active_turn
         replacement_rows = [marker, *rows][-REPLAY_WINDOW:]
-        event = self._log(uid).publish("replace", {"rows": replacement_rows})
+        projected_rows = self._project_chat_stream_rows(
+            uid,
+            replacement_rows,
+            max_bytes=3 * 1024 * 1024,
+            max_rows=REPLAY_WINDOW,
+        )
+        event = self._log(uid).publish("replace", {"rows": projected_rows})
         self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in replacement_rows}
         return event
 
@@ -2235,17 +2294,13 @@ class ChatStreamService:
         self._logs.pop(uid, None)
         rows = self._snapshot_rows(uid)
 
-        def store_rows(_event: Event) -> None:
-            self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in rows}
-
         # The engine detects the new conversation UID on this live event and
         # asks the daemon for a full snapshot, which also carries turns/inputs.
-        return self._log(uid).publish(
-            "replace", {"rows": rows}, on_commit=store_rows
-        )
+        return self._log(uid).publish("replace", {"rows": rows})
 
     def _reset_conversation_cache(self, uid: str) -> None:
         """Rebuild transcript projections while retaining admission ownership."""
+        self._clear_tool_output_cache(uid)
         previous_rows = self._rows.get(uid, {})
         admitted_inputs = self._admission_inputs.get(uid, {})
         queued_ids = {
@@ -2343,6 +2398,137 @@ class ChatStreamService:
         """Build a pager over this conversation's transcript and live rows."""
         return self._row_pager(uid=uid)
 
+    def get_tool_output(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return one bounded chunk of a tool result by row and call identity."""
+        if not isinstance(params, dict):
+            return {"error": "invalid_request"}
+        row_id = params.get("row_id")
+        tool_call_id = params.get("tool_call_id")
+        output_revision = params.get("output_revision")
+        offset = params.get("offset", 0)
+        limit = params.get("limit", CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS)
+        if (
+            not isinstance(row_id, str)
+            or not row_id
+            or len(row_id) > 512
+            or not isinstance(tool_call_id, str)
+            or not tool_call_id
+            or len(tool_call_id) > 512
+            or not isinstance(output_revision, str)
+            or len(output_revision) != 64
+            or any(character not in "0123456789abcdef" for character in output_revision)
+            or isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or offset < 0
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS
+        ):
+            return {"error": "invalid_request"}
+
+        uid = self._conversation_uid()
+        key = (uid, row_id, tool_call_id)
+        with self._tool_output_lock:
+            cached = self._tool_output_cache.get(key)
+            if cached is not None:
+                self._tool_output_cache.move_to_end(key)
+                _result, content, output_type, current_revision, _size = cached
+            else:
+                candidates = []
+                live = self._rows.get(uid, {}).get(row_id)
+                if isinstance(live, dict):
+                    candidates.append(live)
+                candidates.extend(
+                    row
+                    for row in self._transcript_rows(uid)
+                    if isinstance(row, dict) and row.get("id") == row_id
+                )
+                result = None
+                for row in candidates:
+                    parts = row.get("parts")
+                    if not isinstance(parts, list):
+                        continue
+                    for part in parts:
+                        if (
+                            isinstance(part, dict)
+                            and part.get("type") == "tool-call"
+                            and part.get("tool_call_id") == tool_call_id
+                            and "result" in part
+                        ):
+                            result = part["result"]
+                            break
+                    if result is not None:
+                        break
+                if result is None or (
+                    isinstance(result, dict)
+                    and result.get("kind") == "chat-stream-tool-output-preview"
+                ):
+                    return {"error": "not_found"}
+                try:
+                    content, output_type, current_revision = self._cached_tool_output(
+                        uid, row_id, tool_call_id, result
+                    )
+                except (TypeError, ValueError):
+                    content, output_type = str(result), "text"
+                    current_revision = chat_stream_tool_output_revision(
+                        content, output_type
+                    )
+        if output_revision != current_revision:
+            return {"error": "output_changed"}
+        total_chars = len(content)
+        if offset > total_chars:
+            return {"error": "invalid_request"}
+        next_offset = self._tool_output_chunk_end(content, offset, limit)
+        chunk = {
+            "row_id": row_id,
+            "tool_call_id": tool_call_id,
+            "offset": offset,
+            "next_offset": next_offset,
+            "total_chars": total_chars,
+            "output_type": output_type,
+            "output_revision": current_revision,
+            "content": content[offset:next_offset],
+            "done": next_offset >= total_chars,
+        }
+        if chat_stream_wire_bytes(chunk) > 256 * 1024:
+            # A 32k-character Unicode chunk can be large when JSON escaped.
+            # Return a smaller chunk rather than relying on the RPC hard cap.
+            safe_limit = max(1, limit // 4)
+            next_offset = self._tool_output_chunk_end(content, offset, safe_limit)
+            chunk["next_offset"] = next_offset
+            chunk["content"] = content[offset:next_offset]
+            chunk["done"] = next_offset >= total_chars
+        return chunk
+
+    @staticmethod
+    def _tool_output_chunk_end(content: str, offset: int, max_chars: int) -> int:
+        """Find the largest chunk fitting both char and UTF-8 byte limits."""
+        low = 0
+        high = min(max_chars, len(content) - offset)
+        while low < high:
+            middle = (low + high + 1) // 2
+            size = len(content[offset : offset + middle].encode("utf-8", errors="replace"))
+            if size <= CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS:
+                low = middle
+            else:
+                high = middle - 1
+        return offset + low
+
+    @staticmethod
+    def _tool_output_text(value: Any) -> tuple[str, str]:
+        if isinstance(value, str):
+            return value, "text"
+        return (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                default=str,
+                separators=(",", ":"),
+            ),
+            "json",
+        )
+
     def _row_pager(
         self,
         *,
@@ -2373,6 +2559,97 @@ class ChatStreamService:
             ),
             row_log_provider=lambda: list(self._rows.get(current_uid(), {}).values()),
             compaction_seq_provider=current_compaction_seq,
+            row_projector=lambda row: self._project_chat_stream_row(
+                current_uid(), row
+            ),
+        )
+
+    def _invalidate_tool_output_row(self, uid: str, row_id: str | None) -> None:
+        """Drop cached output projections for one row after an upsert."""
+        if not isinstance(row_id, str):
+            return
+        with self._tool_output_lock:
+            for key in tuple(self._tool_output_cache):
+                if key[0] == uid and key[1] == row_id:
+                    entry = self._tool_output_cache.pop(key)
+                    self._tool_output_cache_bytes -= entry[4]
+
+    def _clear_tool_output_cache(self, uid: str) -> None:
+        """Drop cached output projections when a transcript is replaced."""
+        with self._tool_output_lock:
+            for key in tuple(self._tool_output_cache):
+                if key[0] == uid:
+                    entry = self._tool_output_cache.pop(key)
+                    self._tool_output_cache_bytes -= entry[4]
+
+    def _cached_tool_output(
+        self,
+        uid: str,
+        row_id: str | None,
+        tool_call_id: str | None,
+        result: Any,
+    ) -> tuple[str, str, str]:
+        """Serialize and fingerprint a result once for all projections/chunks."""
+        if not isinstance(row_id, str) or not isinstance(tool_call_id, str):
+            content, output_type = self._tool_output_text(result)
+            return (
+                content,
+                output_type,
+                chat_stream_tool_output_revision(content, output_type),
+            )
+        key = (uid, row_id, tool_call_id)
+        with self._tool_output_lock:
+            cached = self._tool_output_cache.get(key)
+            if cached is not None and cached[0] is result:
+                self._tool_output_cache.move_to_end(key)
+                return cached[1], cached[2], cached[3]
+            if cached is not None:
+                self._tool_output_cache_bytes -= cached[4]
+                del self._tool_output_cache[key]
+
+            content, output_type = self._tool_output_text(result)
+            revision = chat_stream_tool_output_revision(content, output_type)
+            output_bytes = len(content.encode("utf-8", errors="replace"))
+            if output_bytes <= _CHAT_STREAM_TOOL_OUTPUT_CACHE_BYTES:
+                self._tool_output_cache[key] = (
+                    result,
+                    content,
+                    output_type,
+                    revision,
+                    output_bytes,
+                )
+                self._tool_output_cache_bytes += output_bytes
+                while (
+                    self._tool_output_cache_bytes
+                    > _CHAT_STREAM_TOOL_OUTPUT_CACHE_BYTES
+                ):
+                    _old_key, old_entry = self._tool_output_cache.popitem(last=False)
+                    self._tool_output_cache_bytes -= old_entry[4]
+            return content, output_type, revision
+
+    def _project_chat_stream_row(
+        self, uid: str, row: dict[str, Any]
+    ) -> dict[str, Any]:
+        return bounded_chat_stream_row(
+            row,
+            output_resolver=lambda row_id, call_id, result: self._cached_tool_output(
+                uid, row_id, call_id, result
+            ),
+        )
+
+    def _project_chat_stream_rows(
+        self,
+        uid: str,
+        rows: list[dict[str, Any]],
+        *,
+        max_bytes: int = CHAT_STREAM_MAX_RESPONSE_BYTES,
+        max_rows: int | None = None,
+    ) -> list[dict[str, Any]]:
+        return bounded_chat_stream_rows(
+            rows,
+            max_bytes=max_bytes,
+            max_rows=max_rows,
+            row_projector=lambda row: self._project_chat_stream_row(uid, row),
         )
 
     def _snapshot_components(
@@ -2380,6 +2657,7 @@ class ChatStreamService:
         uid: str,
         *,
         transcript_rows: list[dict[str, Any]] | None = None,
+        row_byte_budget: int = 3 * 1024 * 1024,
     ) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
@@ -2422,7 +2700,12 @@ class ChatStreamService:
             if isinstance(item, dict) and item.get("id")
         }
         inputs.update(copy.deepcopy(self._inputs.get(uid, {})))
-        snapshot_rows = list(rows_by_id.values())[-REPLAY_WINDOW:]
+        snapshot_rows = self._project_chat_stream_rows(
+            uid,
+            list(rows_by_id.values()),
+            max_bytes=row_byte_budget,
+            max_rows=REPLAY_WINDOW,
+        )
         visible_input_ids = {
             row["id"] for row in snapshot_rows if row.get("kind") == "input"
         }
@@ -2550,20 +2833,43 @@ class ChatStreamService:
 
     def _snapshot(self, uid: str) -> dict[str, Any]:
         transcript_rows = self._transcript_rows(uid)
-        rows, turns, inputs, state = self._snapshot_components(
-            uid, transcript_rows=transcript_rows
-        )
-        older = self._row_pager(
-            uid=uid,
-            snapshot_rows=rows,
-            transcript_rows=transcript_rows,
-        ).snapshot_older_cursor()
-        return {
-            "rows": rows,
-            "turns": turns,
-            "inputs": inputs,
-            "older": older if older is not None else state.get("older"),
-        }
+        row_budget = 3 * 1024 * 1024
+        while True:
+            rows, turns, inputs, state = self._snapshot_components(
+                uid,
+                transcript_rows=transcript_rows,
+                row_byte_budget=row_budget,
+            )
+            older = self._row_pager(
+                uid=uid,
+                snapshot_rows=rows,
+                transcript_rows=transcript_rows,
+            ).snapshot_older_cursor()
+            snapshot = {
+                "rows": rows,
+                "turns": turns,
+                "inputs": inputs,
+                "older": older if older is not None else state.get("older"),
+            }
+            log = self._logs.get(uid)
+            snapshot_event = {
+                "seq": 0,
+                "conversation_uid": uid,
+                "generation": log.generation if log is not None else "0" * 32,
+                "type": "snapshot",
+                "data": {
+                    **snapshot,
+                    "next_seq": log.next_seq if log is not None else 1,
+                },
+            }
+            if (
+                chat_stream_wire_bytes({"events": [snapshot_event]})
+                <= CHAT_STREAM_MAX_RESPONSE_BYTES
+            ):
+                return snapshot
+            if row_budget == 0:
+                raise ValueError("chat stream snapshot metadata exceeds the response byte budget")
+            row_budget = max(0, row_budget // 2)
 
     def _transcript_rows(self, uid: str) -> list[dict[str, Any]]:
         if uid != self._conversation_uid():
@@ -3407,12 +3713,21 @@ class ChatStreamService:
         log.publish("turn.state", data)
 
     def _upsert(self, uid: str, row: dict[str, Any]) -> None:
-        def store_row(event: Event) -> None:
-            self._rows.setdefault(uid, {})[event["data"]["id"]] = copy.deepcopy(
-                event["data"]
-            )
+        raw_row = copy.deepcopy(row)
+        log = self._log(uid)
 
-        self._log(uid).publish("row.upsert", row, on_commit=store_row)
+        def store_row(event: Event) -> None:
+            raw_row["seq"] = event["seq"]
+            self._rows.setdefault(uid, {})[raw_row["id"]] = copy.deepcopy(raw_row)
+
+        with log._lock:
+            with self._tool_output_lock:
+                self._invalidate_tool_output_row(uid, raw_row.get("id"))
+                log.publish(
+                    "row.upsert",
+                    self._project_chat_stream_row(uid, raw_row),
+                    on_commit=store_row,
+                )
 
     def _publish_live(self, event: Event) -> None:
         get_service = getattr(self._event_bus, "get_service", None)
@@ -3539,6 +3854,7 @@ def register_chat_stream_handlers(
         "state.chat_stream.add_input": stream_service.add_input,
         "state.chat_stream.cancel_queued_input": stream_service.cancel_queued_input,
         "state.chat_stream.send_now": stream_service.send_now,
+        "state.chat_stream.tool_output": stream_service.get_tool_output,
     }
     for method, handler in handlers.items():
         try:

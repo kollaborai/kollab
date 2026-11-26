@@ -24,6 +24,7 @@ class _Rpc:
             "state": "started",
             "turn_id": "turn-1",
         }
+        self.tool_output_result = None
         self.subscribe_results = []
 
     async def call(self, method: str, params: dict, *, timeout: float | None = None):
@@ -57,6 +58,8 @@ class _Rpc:
             return {"found": False, "cancelled": False}
         if method == "state.chat_stream.send_now":
             return self.send_now_result
+        if method == "state.chat_stream.tool_output":
+            return self.tool_output_result
         raise AssertionError(f"unexpected daemon method: {method}")
 
 
@@ -969,8 +972,34 @@ def test_stream_recovers_dropped_tail_even_without_a_later_chat_event(monkeypatc
     session = _Session()
     session.queue = DaemonEventQueue()
     session.rpc.subscribe_results = [
-        {"events": [{"seq": 7, "conversation_uid": "conv-1", "generation": "daemon-1", "type": "snapshot", "data": {"rows": [], "next_seq": 8, "older": None, "turns": [], "inputs": []}}]},
-        {"events": [{"seq": 8, "conversation_uid": "conv-1", "generation": "daemon-1", "type": "row.delete", "data": {"id": "lost"}}]},
+        {
+            "events": [
+                {
+                    "seq": 7,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 8,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        },
+        {
+            "events": [
+                {
+                    "seq": 8,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "row.delete",
+                    "data": {"id": "lost"},
+                }
+            ]
+        },
     ]
     monkeypatch.setattr(stream, "_get_rpc", lambda _session_id: (session, session.rpc))
 
@@ -995,3 +1024,111 @@ def test_stream_recovers_dropped_tail_even_without_a_later_chat_event(monkeypatc
     recovered = asyncio.run(run())
     assert recovered is not None
     assert json.loads(recovered["data"])["seq"] == 8
+
+
+def test_tool_output_route_returns_a_validated_chunk(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.tool_output_result = {
+        "row_id": "row-1",
+        "tool_call_id": "call-1",
+        "output_revision": "a" * 64,
+        "offset": 4,
+        "next_offset": 7,
+        "total_chars": 9,
+        "output_type": "text",
+        "content": "abc",
+        "done": False,
+    }
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/tool-output",
+        params={
+            "tool_call_id": "call-1",
+            "output_revision": "a" * 64,
+            "offset": 4,
+            "limit": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == session.rpc.tool_output_result
+    assert session.rpc.calls[-1] == (
+        "state.chat_stream.tool_output",
+        {
+            "row_id": "row-1",
+            "tool_call_id": "call-1",
+            "output_revision": "a" * 64,
+            "offset": 4,
+            "limit": 3,
+        },
+    )
+
+
+def test_tool_output_route_rejects_a_changed_output_revision(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.tool_output_result = {"error": "output_changed"}
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/tool-output",
+        params={"tool_call_id": "call-1", "output_revision": "a" * 64},
+    )
+
+    assert response.status_code == 409
+
+
+def test_snapshot_materializes_tool_output_marker_with_session_id(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.subscribe_results = [
+        {
+            "events": [
+                {
+                    "seq": 0,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [
+                            {
+                                "id": "row-1",
+                                "seq": 1,
+                                "kind": "tool",
+                                "role": "assistant",
+                                "turn_id": "turn-1",
+                                "status": "completed",
+                                "parts": [
+                                    {
+                                        "type": "tool-call",
+                                        "tool_call_id": "call-1",
+                                        "result": {
+                                            "kind": "chat-stream-tool-output-preview",
+                                            "row_id": "row-1",
+                                            "tool_call_id": "call-1",
+                                            "output_bytes": 100,
+                                            "output_chars": 100,
+                                            "output_type": "text",
+                                            "output_revision": "a" * 64,
+                                            "preview": "preview",
+                                        },
+                                    }
+                                ],
+                                "created_at": "2026-11-01T00:00:00Z",
+                            }
+                        ],
+                        "next_seq": 1,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        }
+    ]
+
+    response = client.get("/sessions/s1/stream")
+    data_line = next(
+        line[6:] for line in response.text.splitlines() if line.startswith("data: ")
+    )
+    marker = json.loads(data_line)["data"]["rows"][0]["parts"][0]["result"]
+
+    assert response.status_code == 200
+    assert marker["session_id"] == "s1"

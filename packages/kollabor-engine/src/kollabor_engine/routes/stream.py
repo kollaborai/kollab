@@ -22,6 +22,8 @@ from ..session_context import PHONE_STREAM_REVOKED, SESSION_READ_CONTEXT_SCOPE_K
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["chat-stream"])
+_TOOL_OUTPUT_CHUNK_CHARS = 32 * 1024
+_TOOL_OUTPUT_RPC_BYTES = 256 * 1024
 _ROW_FIELDS = frozenset(
     {"id", "seq", "kind", "role", "turn_id", "status", "parts", "created_at"}
 )
@@ -219,7 +221,21 @@ def _materialize_row_images(rows: Any, session_id: str) -> None:
         parts = []
         for part in row["parts"]:
             if not isinstance(part, dict) or part.get("type") != "image":
-                parts.append(part)
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "tool-call"
+                    and isinstance(part.get("result"), dict)
+                    and part["result"].get("kind")
+                    == "chat-stream-tool-output-preview"
+                ):
+                    parts.append(
+                        {
+                            **part,
+                            "result": {**part["result"], "session_id": session_id},
+                        }
+                    )
+                else:
+                    parts.append(part)
                 continue
             resolved = _resolved_image_url(part.get("url"), session_id)
             if resolved is not None:
@@ -279,6 +295,86 @@ async def older_rows(
         )
     _materialize_row_images(rows, session_id)
     return {"rows": rows, "older": older}
+
+
+@router.get("/{session_id}/chat-stream/rows/{row_id}/tool-output")
+async def chat_stream_tool_output(
+    session_id: str,
+    row_id: str,
+    tool_call_id: str = Query(min_length=1, max_length=512),
+    output_revision: str = Query(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=_TOOL_OUTPUT_CHUNK_CHARS, ge=1, le=_TOOL_OUTPUT_CHUNK_CHARS),
+):
+    """Return a bounded chunk of one tool result for an authenticated session."""
+    result = await _call_daemon(
+        session_id,
+        "state.chat_stream.tool_output",
+        {
+            "row_id": row_id,
+            "tool_call_id": tool_call_id,
+            "output_revision": output_revision,
+            "offset": offset,
+            "limit": limit,
+        },
+    )
+    if isinstance(result, dict):
+        error = result.get("error")
+        if error == "not_found":
+            raise HTTPException(status_code=404, detail="Tool output not found.")
+        if error == "invalid_request":
+            raise HTTPException(status_code=400, detail="Invalid tool output request.")
+        if error == "output_changed":
+            raise HTTPException(
+                status_code=409,
+                detail="The tool output changed. Reload the current chat row.",
+            )
+    content = result.get("content") if isinstance(result, dict) else None
+    next_offset = result.get("next_offset") if isinstance(result, dict) else None
+    total_chars = result.get("total_chars") if isinstance(result, dict) else None
+    output_type = result.get("output_type") if isinstance(result, dict) else None
+    returned_revision = result.get("output_revision") if isinstance(result, dict) else None
+    done = result.get("done") if isinstance(result, dict) else None
+    if (
+        not isinstance(result, dict)
+        or result.get("row_id") != row_id
+        or result.get("tool_call_id") != tool_call_id
+        or result.get("offset") != offset
+        or not isinstance(content, str)
+        or len(content) > limit
+        or isinstance(next_offset, bool)
+        or not isinstance(next_offset, int)
+        or isinstance(total_chars, bool)
+        or not isinstance(total_chars, int)
+        or total_chars < 0
+        or output_type not in {"text", "json"}
+        or returned_revision != output_revision
+        or not isinstance(done, bool)
+        or next_offset != offset + len(content)
+        or next_offset > total_chars
+        or done != (next_offset >= total_chars)
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon returned an invalid tool output chunk.",
+        )
+    payload = {
+        "row_id": row_id,
+        "tool_call_id": tool_call_id,
+        "offset": offset,
+        "next_offset": next_offset,
+        "total_chars": total_chars,
+        "output_type": output_type,
+        "output_revision": output_revision,
+        "content": content,
+        "done": done,
+    }
+    if len(json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) > _TOOL_OUTPUT_RPC_BYTES:
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon returned an oversized tool output chunk.",
+        )
+    return payload
 
 
 @router.get("/{session_id}/stream")

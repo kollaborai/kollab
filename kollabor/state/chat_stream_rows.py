@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
+import hashlib
 import json
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -12,6 +13,192 @@ from typing import Any
 
 _MAX_CURSOR_LENGTH = 8192
 _MAX_PAGE_SIZE = 100
+CHAT_STREAM_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+CHAT_STREAM_MAX_ROW_BYTES = 256 * 1024
+CHAT_STREAM_INLINE_TOOL_OUTPUT_BYTES = 8 * 1024
+CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS = 1024
+CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS = 32 * 1024
+
+
+def chat_stream_wire_bytes(value: Any) -> int:
+    """Measure a conservative compact-JSON RPC representation."""
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            default=str,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def _tool_output_text(value: Any) -> tuple[str, str]:
+    if isinstance(value, str):
+        return value, "text"
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            default=str,
+            separators=(",", ":"),
+        ),
+        "json",
+    )
+
+
+def chat_stream_tool_output_revision(content: str, output_type: str) -> str:
+    """Fingerprint the exact full-output representation returned by the API."""
+    payload = output_type.encode("ascii") + b"\0" + content.encode(
+        "utf-8", errors="replace"
+    )
+    return hashlib.sha256(payload).hexdigest()
+
+
+def bounded_chat_stream_row(
+    row: dict[str, Any],
+    *,
+    output_resolver: Callable[
+        [str | None, str | None, Any], tuple[str, str, str]
+    ]
+    | None = None,
+) -> dict[str, Any]:
+    """Make a transport copy with large tool results replaced by previews.
+
+    The daemon keeps the original row for paging and on-demand output reads.
+    This projection is only for RPC, HTTP and SSE payloads.
+    """
+    copied = copy.deepcopy(row)
+    parts = copied.get("parts")
+    if not isinstance(parts, list):
+        return copied
+    for part in parts:
+        if not isinstance(part, dict) or part.get("type") != "tool-call":
+            continue
+        result = part.get("result")
+        if result is None or (
+            isinstance(result, dict)
+            and result.get("kind") == "chat-stream-tool-output-preview"
+        ):
+            continue
+        try:
+            if output_resolver is None:
+                content, output_type = _tool_output_text(result)
+                output_revision = chat_stream_tool_output_revision(
+                    content, output_type
+                )
+            else:
+                content, output_type, output_revision = output_resolver(
+                    copied.get("id"), part.get("tool_call_id"), result
+                )
+        except (TypeError, ValueError):
+            content, output_type = str(result), "text"
+            output_revision = chat_stream_tool_output_revision(
+                content, output_type
+            )
+        output_bytes = len(content.encode("utf-8", errors="replace"))
+        if output_bytes <= CHAT_STREAM_INLINE_TOOL_OUTPUT_BYTES:
+            continue
+        copied_part = part
+        tool_call_id = copied_part.get("tool_call_id")
+        copied_part["result"] = {
+            "kind": "chat-stream-tool-output-preview",
+            "row_id": copied.get("id"),
+            "tool_call_id": tool_call_id,
+            "output_bytes": output_bytes,
+            "output_chars": len(content),
+            "output_type": output_type,
+            "output_revision": output_revision,
+            "preview": content[:CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS],
+        }
+
+    # Other part types are expected to be small. Still cap free-form text as a
+    # last-resort wire guard so a single non-tool row cannot exceed the limit.
+    # Tool result content itself remains available through the chunk endpoint.
+    if chat_stream_wire_bytes(copied) > CHAT_STREAM_MAX_ROW_BYTES:
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            for field in ("text", "reasoning"):
+                value = part.get(field)
+                if (
+                    isinstance(value, str)
+                    and len(value.encode("utf-8", errors="replace")) > 16 * 1024
+                ):
+                    part[field] = (
+                        value[:CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS]
+                        + "\n… [chat stream preview clipped; full text remains in conversation history]"
+                    )
+            args = part.get("args")
+            if args is not None and chat_stream_wire_bytes(args) > 16 * 1024:
+                encoded_args = json.dumps(
+                    args,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    default=str,
+                    separators=(",", ":"),
+                )
+                part["args"] = {
+                    "kind": "chat-stream-tool-args-preview",
+                    "output_bytes": len(encoded_args.encode("utf-8", errors="replace")),
+                    "preview": encoded_args[:CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS],
+                }
+            if chat_stream_wire_bytes(copied) <= CHAT_STREAM_MAX_ROW_BYTES:
+                break
+    if chat_stream_wire_bytes(copied) > CHAT_STREAM_MAX_ROW_BYTES:
+        compact_parts = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "tool-call":
+                compact: dict[str, Any] = {
+                    "type": "tool-call",
+                    "tool_call_id": part.get("tool_call_id"),
+                    "tool_name": part.get("tool_name", "Tool"),
+                }
+                result = part.get("result")
+                if isinstance(result, dict) and result.get("kind") == "chat-stream-tool-output-preview":
+                    compact["result"] = result
+                compact_parts.append(compact)
+            elif part.get("type") in {"text", "reasoning"}:
+                field = "text" if part.get("type") == "text" else "reasoning"
+                value = part.get(field)
+                if isinstance(value, str):
+                    compact_parts.append(
+                        {
+                            "type": part["type"],
+                            field: value[:CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS],
+                        }
+                    )
+        copied["parts"] = compact_parts[:32]
+    if chat_stream_wire_bytes(copied) > CHAT_STREAM_MAX_ROW_BYTES:
+        copied["parts"] = [
+            {"type": "text", "text": "[row content omitted from chat stream preview]"}
+        ]
+    return copied
+
+
+def bounded_chat_stream_rows(
+    rows: list[dict[str, Any]],
+    *,
+    max_bytes: int,
+    max_rows: int | None = None,
+    row_projector: Callable[[dict[str, Any]], dict[str, Any]] = bounded_chat_stream_row,
+) -> list[dict[str, Any]]:
+    """Return the newest contiguous row suffix that fits a byte budget."""
+    source = rows[-max_rows:] if max_rows is not None else rows
+    projected = [row_projector(row) for row in source]
+    sizes = [chat_stream_wire_bytes(row) for row in projected]
+    total = 2 + sum(sizes) + max(0, len(projected) - 1)
+    start = 0
+    while start < len(projected) and total > max_bytes:
+        if start == len(projected) - 1:
+            total = 0
+        else:
+            total -= sizes[start] + 1
+        start += 1
+    return projected[start:]
 
 
 class InvalidRowCursor(ValueError):
@@ -115,12 +302,16 @@ class ChatStreamRowPager:
         transcript_rows_provider: Callable[[], list[dict[str, Any]]],
         row_log_provider: Callable[[], list[dict[str, Any]]],
         compaction_seq_provider: Callable[[], int],
+        row_projector: Callable[[dict[str, Any]], dict[str, Any]] = bounded_chat_stream_row,
+        max_response_bytes: int = CHAT_STREAM_MAX_RESPONSE_BYTES,
     ) -> None:
         self._conversation_uid_provider = conversation_uid_provider
         self._snapshot_rows_provider = snapshot_rows_provider
         self._transcript_rows_provider = transcript_rows_provider
         self._row_log_provider = row_log_provider
         self._compaction_seq_provider = compaction_seq_provider
+        self._row_projector = row_projector
+        self._max_response_bytes = max_response_bytes
 
     def read(self, *, before: str | None, limit: int) -> dict[str, Any]:
         """Return the oldest-first page before ``before`` or the current window."""
@@ -203,16 +394,35 @@ class ChatStreamRowPager:
 
         older_rows = all_rows[:boundary_index]
         page_rows = older_rows[-limit:]
-        older = None
-        if len(older_rows) > len(page_rows):
-            oldest = page_rows[0]
-            older = self._encode_cursor(
-                conversation_uid,
-                oldest["id"],
-                oldest["seq"],
-                compaction_seq,
+        projected_rows = [self._row_projector(row) for row in page_rows]
+        row_sizes = [chat_stream_wire_bytes(row) for row in projected_rows]
+        remaining_size = sum(row_sizes) + max(0, len(projected_rows) - 1)
+        start = 0
+        while start < len(projected_rows):
+            selected = projected_rows[start:]
+            older = None
+            if len(older_rows) > len(selected):
+                oldest = selected[0]
+                older = self._encode_cursor(
+                    conversation_uid,
+                    oldest["id"],
+                    oldest["seq"],
+                    compaction_seq,
+                )
+            response = {"rows": selected, "older": older}
+            empty_response_bytes = chat_stream_wire_bytes(
+                {"rows": [], "older": older}
             )
-        return {"rows": page_rows, "older": older}
+            if empty_response_bytes + remaining_size <= self._max_response_bytes:
+                return response
+            if start == len(projected_rows) - 1:
+                remaining_size = 0
+            else:
+                remaining_size -= row_sizes[start] + 1
+            start += 1
+        if not page_rows:
+            return {"rows": [], "older": None}
+        raise ValueError("chat stream row page exceeds the response byte budget")
 
     def snapshot_older_cursor(self) -> str | None:
         """Return the cursor immediately before the current snapshot window."""
