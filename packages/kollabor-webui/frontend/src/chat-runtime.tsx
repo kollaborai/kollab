@@ -58,6 +58,9 @@ function toPart(part: ChatPart): LikePart {
         argsText: JSON.stringify(part.args ?? {}),
         result: part.result,
         isError: part.is_error ?? undefined,
+        ...(part.chat_stream_args_preview
+          ? { providerMetadata: { kollab: { chat_stream_args_preview: part.chat_stream_args_preview } } }
+          : {}),
       };
     case "image":
       return { type: "image", image: part.url };

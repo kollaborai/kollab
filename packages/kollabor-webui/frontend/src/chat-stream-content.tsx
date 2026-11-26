@@ -34,6 +34,56 @@ export function chatStreamContentIdentity(marker: ChatStreamContentPreviewMarker
   ].join("\u0000");
 }
 
+/** Keep later row.append text after the immutable content snapshot is hydrated. */
+export function chatStreamStreamingText(
+  marker: ChatStreamContentPreviewMarker,
+  streamedText: string,
+  hydratedContent: string | undefined,
+): string {
+  const streamedTail = streamedText.startsWith(marker.preview)
+    ? streamedText.slice(marker.preview.length)
+    : "";
+  return `${hydratedContent ?? marker.preview}${streamedTail}`;
+}
+
+/** Whether assistant-ui's Copy action would omit recoverable stream content. */
+export function messageHasRecoverableChatStreamPreview(
+  custom: unknown,
+  parts: unknown,
+): boolean {
+  if (chatStreamPartsPreviewFromCustom(custom)) return true;
+  if (!Array.isArray(parts)) return false;
+  return parts.some((value) => {
+    if (!isRecord(value)) return false;
+    const providerMarker = chatStreamContentPreviewFromMetadata(
+      value.providerMetadata,
+      "text",
+    ) ?? chatStreamContentPreviewFromMetadata(value.providerMetadata, "reasoning");
+    const argsMarker = chatStreamArgsPreviewFromMetadata(value.providerMetadata);
+    return Boolean(
+      providerMarker ||
+      argsMarker ||
+      chatStreamPartPreviewFromMetadata(value.providerMetadata) ||
+      isRecoverableMarker(value.chat_stream_content_preview) ||
+      isRecoverableMarker(value.chat_stream_part_preview) ||
+      isRecoverableMarker(value.chat_stream_args_preview) ||
+      isRecoverableMarker(value.result),
+    );
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isRecoverableMarker(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return value.kind === "chat-stream-content-preview" ||
+    value.kind === "chat-stream-part-preview" ||
+    value.kind === "chat-stream-parts-preview" ||
+    value.kind === "chat-stream-tool-output-preview";
+}
+
 function characterCount(value: string): number {
   return Array.from(value).length;
 }
@@ -150,6 +200,19 @@ export function chatStreamContentPreviewFromMetadata(
   return isChatStreamContentPreviewMarker(marker) && marker.field === field ? marker : undefined;
 }
 
+/** Read the dedicated tool-argument preview marker without inspecting tool args. */
+export function chatStreamArgsPreviewFromMetadata(
+  providerMetadata: unknown,
+): ChatStreamContentPreviewMarker | undefined {
+  if (!providerMetadata || typeof providerMetadata !== "object" || Array.isArray(providerMetadata)) {
+    return undefined;
+  }
+  const namespace = (providerMetadata as Record<string, unknown>).kollab;
+  if (!namespace || typeof namespace !== "object" || Array.isArray(namespace)) return undefined;
+  const marker = (namespace as Record<string, unknown>).chat_stream_args_preview;
+  return isChatStreamContentPreviewMarker(marker) && marker.field === "args" ? marker : undefined;
+}
+
 export function chatStreamPartPreviewFromMetadata(providerMetadata: unknown): ChatStreamPartPreviewMarker | undefined {
   if (!providerMetadata || typeof providerMetadata !== "object" || Array.isArray(providerMetadata)) return undefined;
   const namespace = (providerMetadata as Record<string, unknown>).kollab;
@@ -236,5 +299,22 @@ export function ChatStreamContentPreview({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** Render the pinned full snapshot plus row.append deltas received after it. */
+export function ChatStreamStreamingContent({
+  marker,
+  text,
+  children,
+}: {
+  marker: ChatStreamContentPreviewMarker;
+  text: string;
+  children: (content: string) => ReactNode;
+}) {
+  return (
+    <ChatStreamContentPreview key={chatStreamContentIdentity(marker)} marker={marker}>
+      {(content) => children(chatStreamStreamingText(marker, text, content))}
+    </ChatStreamContentPreview>
   );
 }

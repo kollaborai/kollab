@@ -58,6 +58,7 @@ export type ChatPart =
       tool_call_id: string;
       tool_name: string;
       args: unknown;
+      chat_stream_args_preview?: ChatStreamContentPreviewMarker;
       result?: unknown;
       is_error?: boolean | null;
     }
@@ -197,8 +198,8 @@ const isPart = (value: unknown): boolean => {
         isChatStreamContentPreviewMarker(preview) && preview.field === "reasoning");
     case "tool-call":
       return isId(value.tool_call_id) && isStr(value.tool_name) && has(value, "args") &&
-        !(isRecord(value.args) && value.args.kind === "chat-stream-content-preview" &&
-          (!isChatStreamContentPreviewMarker(value.args) || value.args.field !== "args")) &&
+        optional(value, "chat_stream_args_preview", (preview) =>
+          isChatStreamContentPreviewMarker(preview) && preview.field === "args") &&
         optional(value, "is_error", isBool);
     case "image":
       return isId(value.url);
@@ -225,7 +226,9 @@ const isRow = (value: unknown): boolean =>
     optional(part, "chat_stream_part_preview", (preview) =>
       isChatStreamPartPreviewMarker(preview) && preview.row_id === value.id) &&
     optional(part, "chat_stream_content_preview", (preview) =>
-      isChatStreamContentPreviewMarker(preview) && preview.row_id === value.id));
+      isChatStreamContentPreviewMarker(preview) && preview.row_id === value.id) &&
+    optional(part, "chat_stream_args_preview", (preview) =>
+      isChatStreamContentPreviewMarker(preview) && preview.field === "args" && preview.row_id === value.id));
 
 const isTurnInfo = (value: unknown): boolean =>
   isRecord(value) && isId(value.turn_id) && (value.state === "running" || value.state === "ended") &&

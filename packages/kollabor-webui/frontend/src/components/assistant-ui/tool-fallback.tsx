@@ -31,9 +31,9 @@ import {
   summarizeToolCall,
 } from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
-import { isChatStreamContentPreviewMarker } from "@/chat-stream";
 import {
   ChatStreamContentPreview,
+  chatStreamArgsPreviewFromMetadata,
   chatStreamContentIdentity,
   type ChatStreamContentPreviewMarker,
 } from "@/chat-stream-content";
@@ -341,6 +341,8 @@ export const toolErrorLine = (result: unknown): string => {
   );
   const raw =
     typeof result === "string" ? result :
+      record?.kind === "chat-stream-tool-output-preview" && typeof record.preview === "string"
+        ? record.preview :
       record?.error || asRecord(asRecord(textBlock)?.content)?.text || record?.output;
   const text = typeof raw === "string" ? stripErrorPrefix(raw).trim() : "";
   return text.split(/\r?\n/, 1)[0] || "Tool call failed";
@@ -1062,6 +1064,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   toolName,
   args,
   argsText,
+  providerMetadata,
   result,
   isError,
   status,
@@ -1071,9 +1074,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   approval,
   respondToApproval,
 }) => {
-  const argsPreview = isChatStreamContentPreviewMarker(args) && args.field === "args"
-    ? args
-    : undefined;
+  const argsPreview = chatStreamArgsPreviewFromMetadata(providerMetadata);
   const card = harnessCard(result);
   const cardTitle =
     typeof card?.title === "string" && card.title.trim() ? card.title.trim() : undefined;

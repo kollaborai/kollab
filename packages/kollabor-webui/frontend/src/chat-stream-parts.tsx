@@ -80,13 +80,15 @@ function validPartIdentity(
       contentPreview.part_index !== expectedIndex
     ) return false;
   }
-  if (part.type === "tool-call" && isRecord(part.args) && part.args.kind === "chat-stream-content-preview") {
+  const argsPreview = part.chat_stream_args_preview;
+  if (argsPreview !== undefined && argsPreview !== null) {
     if (
-      !isChatStreamContentPreviewMarker(part.args) ||
-      part.args.field !== "args" ||
-      part.args.session_id !== marker.session_id ||
-      part.args.row_id !== marker.row_id ||
-      part.args.part_index !== expectedIndex
+      part.type !== "tool-call" ||
+      !isChatStreamContentPreviewMarker(argsPreview) ||
+      argsPreview.field !== "args" ||
+      argsPreview.session_id !== marker.session_id ||
+      argsPreview.row_id !== marker.row_id ||
+      argsPreview.part_index !== expectedIndex
     ) return false;
   }
   if (
@@ -168,8 +170,8 @@ export function RecoveredChatPart({ part }: { part: unknown }) {
     );
   }
   if (part.type === "tool-call") {
-    const argsPreview = isRecord(part.args) && isChatStreamContentPreviewMarker(part.args) && part.args.field === "args"
-      ? part.args
+    const argsPreview = isChatStreamContentPreviewMarker(part.chat_stream_args_preview) && part.chat_stream_args_preview.field === "args"
+      ? part.chat_stream_args_preview
       : undefined;
     return (
       <details>
