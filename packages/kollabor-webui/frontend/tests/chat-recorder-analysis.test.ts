@@ -315,11 +315,12 @@ describe("chat recorder analysis", () => {
     const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
     const turn = { turn_id: "turn-first", state: "running", input_ids: [], origin: { kind: "goal", goal_id: "goal-full", attempt_id: "attempt-first" } };
     const stream = { conversation_uid: "conv-owned", turns: [turn], inputs: [] };
-    const makePersisted = (attemptId: string, turnId: string) => ({
+    const makePersisted = (attemptId: string, turnId: string, objective: string) => ({
       conversation_uid: "conv-owned",
-      goal: { goal_id: "goal-full", objective: "private objective", status: "active", attempt: { attempt_id: attemptId, turn_id: turnId } },
+      goal: { goal_id: "goal-full", objective, status: "active", attempt: { attempt_id: attemptId, turn_id: turnId } },
     });
     let persisted: any = null;
+    let objective = "";
     const commands: string[] = [];
     const marks: string[] = [];
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
@@ -327,7 +328,10 @@ describe("chat recorder analysis", () => {
       command: async (text: string) => {
         commands.push(text);
         if (text === "/goal clear") persisted = null;
-        else persisted = makePersisted("attempt-first", "turn-first");
+        else {
+          objective = text.slice("/goal ".length);
+          persisted = makePersisted("attempt-first", "turn-first", objective);
+        }
       },
       mark: async (name: string) => { marks.push(name); },
       page: privateGoalPage("goal-ful", "conv-owned"),
@@ -337,7 +341,7 @@ describe("chat recorder analysis", () => {
       hasMatchingGoalTurn: () => true,
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
-        persisted = makePersisted("attempt-next", "turn-next");
+        persisted = makePersisted("attempt-next", "turn-next", objective);
         await check.after(turn, stream, stream);
       },
       sleep: async () => {},
@@ -347,7 +351,7 @@ describe("chat recorder analysis", () => {
     await expect(flow()).rejects.toThrow(/proof inconclusive|changed during reload/i);
     expect(commands).toEqual([expect.stringMatching(/^\/goal /), "/goal clear"]);
     expect(persisted).toBeNull();
-    expect(JSON.stringify(marks)).not.toContain("private objective");
+    expect(JSON.stringify(marks)).not.toContain(objective);
   });
 
   it("claims a goal from its private reply when the creation event was missed", async () => {
