@@ -1878,8 +1878,9 @@ class ChatStreamService:
         ]
         if compaction_markers:
             marker = copy.deepcopy(compaction_markers[-1])
-            compaction_marker_ids = {row["id"] for row in compaction_markers}
-            rows = [row for row in rows if row.get("id") not in compaction_marker_ids]
+            compaction_marker_ids = {
+                row["id"] for row in [*compaction_markers, *cached_compaction_markers]
+            }
             marker["seq"] = self._log(uid).next_seq
         elif cached_compaction_markers:
             marker = copy.deepcopy(cached_compaction_markers[-1])
@@ -2159,23 +2160,65 @@ class ChatStreamService:
             return normalize_tool_id(call.get("id") or call.get("tool_call_id"))
 
         pending_tool_calls: dict[str, list[tuple[int, int, str | None]]] = {}
+        pending_xml_tool_calls: dict[str, list[tuple[int, int, str | None]]] = {}
         tool_results: dict[tuple[int, int], dict[str, Any]] = {}
+        xml_tool_results: dict[tuple[int, int], dict[str, Any]] = {}
         for message_index, message in enumerate(messages):
             role = field(message, "role")
             metadata = field(message, "metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
             if role == "assistant":
                 calls = metadata.get("tool_calls")
-                if not isinstance(calls, list):
-                    continue
                 turn_id = self._event_turn_id(metadata)
-                for call_index, call in enumerate(calls):
-                    call_id = call_id_for(call)
-                    if call_id is None:
-                        continue
-                    pending_tool_calls.setdefault(call_id, []).append(
-                        (message_index, call_index, turn_id)
-                    )
+                if isinstance(calls, list):
+                    for call_index, call in enumerate(calls):
+                        call_id = call_id_for(call)
+                        if call_id is None:
+                            continue
+                        pending_tool_calls.setdefault(call_id, []).append(
+                            (message_index, call_index, turn_id)
+                        )
+                xml_calls = metadata.get("xml_tool_calls")
+                if isinstance(xml_calls, list):
+                    for call_index, call in enumerate(xml_calls):
+                        call_id = call_id_for(call)
+                        if call_id is None:
+                            continue
+                        pending_xml_tool_calls.setdefault(call_id, []).append(
+                            (message_index, call_index, turn_id)
+                        )
+                continue
+            if metadata.get("tool_output_batch") is True:
+                results = metadata.get("xml_tool_results")
+                if isinstance(results, list):
+                    for result in results:
+                        if not isinstance(result, dict):
+                            continue
+                        call_id = normalize_tool_id(result.get("id"))
+                        owners = (
+                            pending_xml_tool_calls.get(call_id)
+                            if call_id is not None
+                            else None
+                        )
+                        if not owners:
+                            continue
+                        result_turn_id = self._event_turn_id(metadata)
+                        owner_index = next(
+                            (
+                                candidate
+                                for candidate in range(len(owners))
+                                if result_turn_id is None
+                                or owners[candidate][2] == result_turn_id
+                            ),
+                            None,
+                        )
+                        if owner_index is None:
+                            continue
+                        assistant_index, call_index, _turn_id = owners.pop(owner_index)
+                        xml_tool_results[(assistant_index, call_index)] = {
+                            "result": copy.deepcopy(result.get("content", "")),
+                            "is_error": result.get("is_error") is True,
+                        }
                 continue
             if role != "tool":
                 continue
@@ -2315,7 +2358,8 @@ class ChatStreamService:
                         else "reply" if source_role == "assistant" else "note"
                     )
                 )
-            content = field(message, "content", "")
+            raw_content = field(message, "content", "")
+            content = metadata.get("display_content", raw_content)
             image_store = getattr(llm_service, "_image_store", None)
             resolve_image = getattr(image_store, "resolve", None)
             hub_note = self._hub_note_part(metadata.get("hub_note"))
@@ -2344,10 +2388,10 @@ class ChatStreamService:
                     isinstance(candidate_metadata, dict)
                     and candidate_metadata == metadata
                     and candidate_role == source_role
-                    and candidate_content == content
+                    and candidate_content == raw_content
                 ):
                     manager_uuid = field(candidate, "uuid")
-            fallback_identity = f"{uid}:{source_role}:{timestamp}:{content!r}"
+            fallback_identity = f"{uid}:{source_role}:{timestamp}:{raw_content!r}"
             history_key = metadata.get("acp_turn_key")
             if not isinstance(history_key, str) or not history_key:
                 history_key = None
@@ -2371,6 +2415,16 @@ class ChatStreamService:
             hub_message_id = metadata.get("hub_message_id")
             tool_id = metadata.get("tool_id")
             calls = metadata.get("tool_calls")
+            calls = calls if isinstance(calls, list) else []
+            xml_calls = metadata.get("xml_tool_calls")
+            xml_calls = xml_calls if isinstance(xml_calls, list) else []
+            display_calls = [
+                ("native", call_index, call)
+                for call_index, call in enumerate(calls)
+            ] + [
+                ("xml", call_index, call)
+                for call_index, call in enumerate(xml_calls)
+            ]
             explicit_input_row_ids = False
             if kind == "input":
                 if isinstance(hub_message_id, str) and hub_message_id:
@@ -2389,8 +2443,7 @@ class ChatStreamService:
                 skip_empty_tool_reply = (
                     source_role == "assistant"
                     and not parts
-                    and isinstance(calls, list)
-                    and bool(calls)
+                    and bool(display_calls)
                 )
                 if isinstance(turn_id, str) and turn_id and not skip_empty_tool_reply:
                     segment_key = (turn_id, history_key)
@@ -2536,8 +2589,7 @@ class ChatStreamService:
                     kind == "reply"
                     and source_role == "assistant"
                     and not parts
-                    and isinstance(calls, list)
-                    and bool(calls)
+                    and bool(display_calls)
                 ):
                     rows.append(
                         {
@@ -2551,9 +2603,9 @@ class ChatStreamService:
                             "created_at": timestamp,
                         }
                     )
-            if source_role != "assistant" or not isinstance(calls, list):
+            if source_role != "assistant" or not display_calls:
                 continue
-            for call_index, call in enumerate(calls):
+            for call_source, call_index, call in display_calls:
                 if not isinstance(call, dict):
                     continue
                 call_id = call_id_for(call)
@@ -2586,20 +2638,24 @@ class ChatStreamService:
                     "args": copy.deepcopy(args),
                 }
                 result = call.get("result")
-                native_result = tool_results.get((index, call_index))
-                if result is None and native_result is not None:
-                    result = native_result["result"]
+                call_result = (
+                    xml_tool_results.get((index, call_index))
+                    if call_source == "xml"
+                    else tool_results.get((index, call_index))
+                )
+                if result is None and call_result is not None:
+                    result = call_result["result"]
                 if result is not None:
                     part["result"] = copy.deepcopy(result)
                 is_error = call.get("is_error")
-                if native_result is not None:
-                    is_error = native_result["is_error"]
+                if call_result is not None:
+                    is_error = call_result["is_error"]
                 elif not isinstance(is_error, bool):
                     is_error = call.get("status") == "failed"
                 part["is_error"] = is_error
                 call_status = call.get("status")
-                if native_result is not None:
-                    tool_status = "failed" if native_result["is_error"] else "completed"
+                if call_result is not None:
+                    tool_status = "failed" if call_result["is_error"] else "completed"
                 elif call_status in {"running", "in_progress"}:
                     tool_status = "running"
                 elif call_status in {"failed", "completed", "cancelled"}:
