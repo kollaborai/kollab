@@ -590,3 +590,30 @@ def test_a_snapshot_cannot_reopen_an_ended_input(state, turn_id):
     ]
     problems = sequence_problems(events, complete=False)
     assert any("changed after it ended" in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("turn_state", "turn_id", "outcome", "needle"),
+    [
+        ("running", "t1", "completed", "completed before its turn t1 ended"),
+        (None, None, "completed", "ended without a turn"),
+    ],
+)
+def test_snapshot_rejects_terminal_input_states_that_cannot_have_occurred(
+    turn_state, turn_id, outcome, needle
+):
+    turns = (
+        [{"turn_id": turn_id, "state": turn_state, "input_ids": ["i"]}]
+        if turn_state
+        else []
+    )
+    row = {**ROW, "id": "i", "seq": 0, "turn_id": turn_id, "status": "ended"}
+    info = {"id": "i", "state": "ended", "turn_id": turn_id, "outcome": outcome}
+    snapshot = _event(
+        "snapshot",
+        {**SNAPSHOT, "next_seq": 1, "rows": [row], "turns": turns, "inputs": [info]},
+        seq=0,
+    )
+
+    problems = sequence_problems([snapshot])
+    assert any(needle in problem for problem in problems), problems
