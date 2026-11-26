@@ -886,6 +886,199 @@ async def test_acp_tool_rows_preserve_structured_args_results_and_rebuild_from_h
     ]
 
 
+@pytest.mark.asyncio
+async def test_native_tool_result_keeps_args_from_tool_executor_start():
+    from unittest.mock import AsyncMock
+
+    from kollabor_agent.tool_executor import ToolExecutionResult, ToolExecutor
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    executor = ToolExecutor(None, state._event_bus)
+    executor._execute_tool_inner = AsyncMock(
+        return_value=ToolExecutionResult(
+            "native-search-1",
+            "mcp_tool",
+            True,
+            output="found it",
+        )
+    )
+
+    await executor.execute_tool(
+        {
+            "id": "native-search-1",
+            "type": "mcp_tool",
+            "name": "search",
+            "input": {"query": "lunar eclipse"},
+        }
+    )
+
+    _, rows = _snapshot_rows(stream)
+    tool = next(row for row in rows if row["kind"] == "tool")
+    assert tool["parts"] == [
+        {
+            "type": "tool-call",
+            "tool_call_id": "native-search-1",
+            "tool_name": "search",
+            "args": {"query": "lunar eclipse"},
+            "result": "found it",
+            "is_error": False,
+        }
+    ]
+
+
+def test_sparse_tool_result_keeps_name_and_args_from_start():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+
+    _publish(
+        state,
+        "tool_start",
+        turn_id="native-sparse-tool-turn",
+        tool_id="native-sparse-tool-1",
+        tool_name="Search the web",
+        input={"query": "eclipse"},
+    )
+    _publish(
+        state,
+        "tool_result",
+        turn_id="native-sparse-tool-turn",
+        tool_id="native-sparse-tool-1",
+        success=True,
+        output={"count": 1},
+    )
+
+    _, rows = _snapshot_rows(stream)
+    tool = next(row for row in rows if row["kind"] == "tool")
+    assert tool["parts"][0]["tool_name"] == "Search the web"
+    assert tool["parts"][0]["args"] == {"query": "eclipse"}
+    assert tool["parts"][0]["result"] == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_native_hub_hud_context_is_not_a_second_input_and_hub_input_owns_turn():
+    import asyncio
+    from types import MethodType
+
+    from kollabor.llm.agent_hud import AgentHudEntry
+    from kollabor.llm.llm_coordinator import LLMService
+    from kollabor.llm.message_handler import MessageHandler
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    tap = state._event_bus.tap
+    input_id = "native-wake-hud-1"
+    hub_note = {
+        "type": "hub-note",
+        "from": "peer",
+        "to": "koordinator",
+        "text": "Please check the build.",
+        "observed": False,
+        "is_direct": True,
+    }
+    _publish(
+        state,
+        "hub_message",
+        message_id=input_id,
+        request_id=input_id,
+        input_source="hub",
+        hub_note=hub_note,
+        hub_admission="input",
+    )
+
+    qp = SimpleNamespace(
+        cancel_processing=False,
+        cancel_origin=None,
+        is_processing=False,
+        turn_completed=False,
+        _stop_hook_active=False,
+        _stop_hook_continuations=0,
+        _last_tool_error_sig=None,
+        last_turn_error=None,
+        processing_queue=asyncio.Queue(),
+        active_request_ids=(),
+    )
+    background_tasks = []
+    coordinator = SimpleNamespace(
+        event_bus=state._event_bus,
+        renderer=tap,
+        conversation_manager=None,
+        conversation_history=[],
+        current_parent_uuid="parent-1",
+        _queue_processor=qp,
+        _continue_serial=None,
+        _batch_tail_uuid=None,
+        is_processing=False,
+        message_display_service=SimpleNamespace(
+            display_error_message=lambda *_args, **_kwargs: None
+        ),
+        _is_hidden_voice_message=lambda _message: False,
+        _profile_selects_acp=lambda: (False, False),
+        _active_acp=lambda: None,
+        claim_turn_serial=lambda: 1,
+        publish_cursor=lambda _uuid, _serial: True,
+        pop_pending_agent_hud=lambda: [
+            AgentHudEntry(
+                section="hub",
+                label="peer->koordinator",
+                content="Please check the build.",
+                message_id=input_id,
+                hub_note=hub_note,
+                hub_admission="input",
+            )
+        ],
+    )
+    coordinator._add_conversation_message = MethodType(
+        LLMService._add_conversation_message, coordinator
+    )
+
+    async def continue_conversation():
+        tap.publish({"type": "token", "text": "I will check."})
+        tap.publish({"type": "turn_complete", "stop_reason": "end_turn"})
+        qp.turn_completed = True
+
+    coordinator._continue_conversation = continue_conversation
+    coordinator._process_queue = AsyncMock()
+    coordinator.create_background_task = lambda fn, name=None: background_tasks.append(
+        asyncio.create_task(fn())
+    )
+
+    handler = MessageHandler(coordinator)
+    result = await handler.handle_llm_continue(
+        {
+            "source": "hub:peer",
+            "request_id": input_id,
+            "hub_message_id": input_id,
+            "hub_note": hub_note,
+        },
+        None,
+    )
+    await asyncio.gather(*background_tasks)
+
+    assert result["status"] == "triggered"
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    rows = snapshot["data"]["rows"]
+    inputs = [row for row in rows if row["kind"] == "input"]
+    assert [row["id"] for row in inputs] == [input_id]
+    assert inputs[0]["status"] == "completed"
+    starts = [
+        event
+        for event in tap._history
+        if event.get("type") == "turn_start"
+    ]
+    assert len(starts) == 1
+    assert starts[0]["request_ids"] == [input_id]
+    assert starts[0]["input_source"] == "hub"
+    assert inputs[0]["turn_id"] == starts[0]["turn_id"]
+    assert snapshot["data"]["turns"] == [
+        {"turn_id": starts[0]["turn_id"], "state": "ended", "input_ids": [input_id]}
+    ]
+    assert sequence_problems([snapshot]) == []
+
+
 class _RpcServer:
     def __init__(self):
         self.handlers = {}

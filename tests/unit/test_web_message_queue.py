@@ -140,6 +140,48 @@ async def test_enqueue_batch_is_ordered_atomic_and_idempotent_without_exposing_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_id",
+    [
+        "abc",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "x" * 256,
+    ],
+)
+async def test_stream_contract_input_ids_survive_queue_admission_send_now_and_remove(
+    request_id,
+):
+    queue = WebMessageQueue(scope_id="conversation-owner-a")
+    batch_id = _batch_id(queue, f"batch-{request_id[:8]}")
+    receipt = await queue.enqueue_batch(
+        _op(queue, f"enqueue-{request_id[:8]}"),
+        batch_id,
+        (WebMessage(request_id, b'{"text":"hello"}'),),
+    )
+
+    assert receipt.request_ids == (request_id,)
+    claimed = await queue.claim_batch(
+        _op(queue, f"claim-{request_id[:8]}"),
+        batch_id,
+        send_now=True,
+        request_id=request_id,
+    )
+    assert claimed.request_ids == (request_id,)
+
+    removable = WebMessageQueue(scope_id="conversation-owner-b")
+    removable_batch = _batch_id(removable, f"remove-batch-{request_id[:8]}")
+    await removable.enqueue_batch(
+        _op(removable, f"remove-enqueue-{request_id[:8]}"),
+        removable_batch,
+        (WebMessage(request_id, b'{"text":"hello"}'),),
+    )
+    removed = await removable.remove_item(
+        _op(removable, f"remove-{request_id[:8]}"), request_id
+    )
+    assert removed.request_ids == (request_id,)
+
+
+@pytest.mark.asyncio
 async def test_oversized_iterable_is_bounded_before_materialization():
     queue = WebMessageQueue(scope_id="conversation-owner-a", max_batch_items=2)
     consumed = 0
