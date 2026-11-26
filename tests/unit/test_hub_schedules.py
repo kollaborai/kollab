@@ -288,6 +288,26 @@ async def test_timer_ignores_other_devices_schedules_and_keeps_them(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_timer_does_not_fire_bare_agent_shared_between_devices(tmp_path):
+    path = tmp_path / "schedules.json"
+    ScheduleStore(path).save([_row(agents=["lapis"])])
+    fires = {"device-a": Recorder(), "device-b": Recorder()}
+
+    for device, recorder in fires.items():
+        timer = ScheduleTimer(
+            ScheduleStore(path),
+            RunLog(tmp_path / f"{device}-runs.jsonl"),
+            recorder,
+            device_name=device,
+            clock=FakeClock(1000.0),
+        )
+        await timer.pass_due()
+
+    assert fires["device-a"].fires == []
+    assert fires["device-b"].fires == []
+
+
+@pytest.mark.asyncio
 async def test_timer_fires_only_owned_agents_of_a_mixed_row(tmp_path):
     clock = FakeClock(1000.0)
     fires = Recorder()
