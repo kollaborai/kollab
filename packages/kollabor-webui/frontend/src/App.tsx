@@ -177,12 +177,24 @@ function formatCost(cost: { amount?: string | number; currency?: string }): stri
 // One session's chat (#1451): its store, the assistant-ui runtime over the store,
 // and the permission and voice contexts the chat reads. App keys it by session,
 // so a switch starts a new store and thread; the page stays mounted.
-function ChatSession({ api: engine, sessionId, children }: { api: EngineApi; sessionId: string; children: ReactNode }) {
+function ChatSession({ api: engine, sessionId, onOutdated, children }: {
+  api: EngineApi;
+  sessionId: string;
+  /** Called when the chat stream finds the agent predates it (426) or recovers, so the page names the way out. */
+  onOutdated?: (sessionId: string, outdated: boolean) => void;
+  children: ReactNode;
+}) {
   const [store] = useState(() => new LiveChatStore(engine, sessionId));
   useEffect(() => {
     store.start();
     return () => store.dispose();
   }, [store]);
+  useEffect(() => {
+    if (!onOutdated) return;
+    const report = () => onOutdated(sessionId, store.connection === "outdated");
+    report();
+    return store.subscribe(report);
+  }, [store, sessionId, onOutdated]);
   return (
     <ChatStoreProvider store={store}>
       <ChatRuntime api={engine} sessionId={sessionId} store={store}>{children}</ChatRuntime>
@@ -963,9 +975,21 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     } finally { setUpdateBusy(false); }
   };
 
+  // Chats whose stream found an agent older than the chat stream; a new store for the session starts clean.
+  const [outdatedChats, setOutdatedChats] = useState<ReadonlySet<string>>(() => new Set());
+  const markChatOutdated = useCallback((sessionId: string, outdated: boolean) => {
+    setOutdatedChats((current) => {
+      if (current.has(sessionId) === outdated) return current;
+      const next = new Set(current);
+      if (outdated) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
   // The open chat's agent against the engine: older code gets a line above the chat (#968).
   const activeAgent = activeSession ? liveAgentOf(activeSession, liveAgents) : undefined;
-  const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents });
+  const chatOutdated = Boolean(activeSession && outdatedChats.has(activeSession.session_id));
+  const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents, chatOutdated });
   const agentIsCurrent = Boolean(activeAgent && engineVersion && activeAgent.version === engineVersion);
   const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
   const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
@@ -1646,7 +1670,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           ) : activeSession ? (
             // The voice room sits outside the chat: a chat's store changing does not stop it.
             <VoiceRoomProvider api={api} sessionId={activeSession.session_id}>
-              <ChatSession key={activeSession.session_id} api={api} sessionId={activeSession.session_id}>
+              <ChatSession key={activeSession.session_id} api={api} sessionId={activeSession.session_id} onOutdated={markChatOutdated}>
                 <RuntimeShell
                   session={activeSession}
                   profiles={profiles}

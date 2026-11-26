@@ -66,12 +66,22 @@ export function agentVersionNotice({
   engineVersion,
   agent,
   restartAgents,
+  chatOutdated = false,
 }: {
   engineVersion: string;
   agent: LiveAgent | undefined;
   restartAgents: boolean;
+  /** The chat stream answered 426: the agent predates it, so a typed /restart can never reach it (#1451). */
+  chatOutdated?: boolean;
 }): AgentVersionNoticeState | null {
   if (!agent) return null;
+  if (chatOutdated && !restartAgents) {
+    return {
+      kind: "unknown",
+      detail: `Agent ${agent.version || "(version unknown)"} · engine ${engineVersion || "(loading)"}`,
+      name: agent.name,
+    };
+  }
   const running = agent.version ?? "";
   if (!engineVersion) {
     if (running) return null;

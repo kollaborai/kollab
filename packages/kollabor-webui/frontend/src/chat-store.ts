@@ -5,7 +5,7 @@
 // Shapes: ./chat-stream.ts.
 
 import { createContext, createElement, useContext, useMemo, useSyncExternalStore, type ReactNode } from "react";
-import type { EngineApi } from "./api";
+import { ApiError, type EngineApi } from "./api";
 import {
   isChatStreamEvent,
   type ChatPart,
@@ -18,7 +18,8 @@ import {
   type TurnInfo,
 } from "./chat-stream";
 
-export type ConnectionState = "connecting" | "live" | "reconnecting" | "failed";
+/** `outdated`: the agent predates the chat stream (426) and needs a restart; the store stops retrying. */
+export type ConnectionState = "connecting" | "live" | "reconnecting" | "failed" | "outdated";
 
 export type OlderStatus = ChatStore["olderStatus"];
 
@@ -246,6 +247,7 @@ export class LiveChatStore implements LiveStore {
   private readonly enc: string;
   private readonly retryBaseMs: number;
   private readonly maxAttempts: number;
+  private readonly outdatedRetryMs: number;
   private readonly maxUnconfirmedGoalPolls: number;
   private readonly goalReplyPollIntervalMs: number;
   private snapshot: ChatSnapshot;
@@ -256,6 +258,7 @@ export class LiveChatStore implements LiveStore {
     options: {
       retryBaseMs?: number;
       maxAttempts?: number;
+      outdatedRetryMs?: number;
       maxUnconfirmedGoalPolls?: number;
       goalReplyPollIntervalMs?: number;
     } = {},
@@ -265,6 +268,7 @@ export class LiveChatStore implements LiveStore {
     this.enc = encodeURIComponent(sessionId);
     this.retryBaseMs = options.retryBaseMs ?? 500;
     this.maxAttempts = options.maxAttempts ?? 8;
+    this.outdatedRetryMs = options.outdatedRetryMs ?? 15_000;
     this.maxUnconfirmedGoalPolls = options.maxUnconfirmedGoalPolls ?? MAX_UNCONFIRMED_GOAL_POLLS;
     this.goalReplyPollIntervalMs = options.goalReplyPollIntervalMs ?? GOAL_REPLY_POLL_INTERVAL_MS;
     this.snapshot = this.snapshotOf();
@@ -769,8 +773,11 @@ export class LiveChatStore implements LiveStore {
             conversation_uid: this.state.conversationUid,
             generation: this.state.generation,
           };
-      this.connectionState = "connecting";
-      this.publish();
+      // An outdated chat stays outdated while it checks again, so its notice does not flicker.
+      if (this.connectionState !== "outdated") {
+        this.connectionState = "connecting";
+        this.publish();
+      }
       try {
         await this.transport.streamChatEvents(
           this.sessionId,
@@ -783,7 +790,18 @@ export class LiveChatStore implements LiveStore {
           },
           () => { if (this.controller === controller && !controller.signal.aborted) this.resync(); },
         );
-      } catch {
+      } catch (error) {
+        // An agent that predates the chat stream never will answer it: stop until it restarts.
+        if (error instanceof ApiError && error.status === 426 && !this.disposed) {
+          // Check again slowly: a restart on current code makes the next connection go live.
+          this.controller = null;
+          if (this.connectionState !== "outdated") {
+            this.connectionState = "outdated";
+            this.publish();
+          }
+          await this.sleep(this.outdatedRetryMs);
+          continue;
+        }
         // A refused, failed or aborted connection counts as a drop below.
       }
       this.controller = null;
