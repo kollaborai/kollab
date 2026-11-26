@@ -17,6 +17,7 @@ from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, YES_SOURCES
 from kollabor_agent.queue_processor import (
     MAX_CONTINUATION_TURNS,
     RepeatedToolErrorBreaker,
+    TaggedInput,
 )
 from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.message_content import content_to_text
@@ -647,6 +648,14 @@ class MessageHandler:
             )
             return {"success": False, "error": ACP_SUBMIT_REASON}
         parent_uuid = options.get("parent_uuid", self._coordinator.current_parent_uuid)
+        last_user_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if messages[index].get("role", "user") == "user"
+            ),
+            None,
+        )
 
         coord = self._coordinator
         mds = coord.message_display_service
@@ -659,24 +668,34 @@ class MessageHandler:
             display_sequence: List[tuple] = []
             # Messages whose history write failed. The batch still runs, but it is not a success.
             history_failures = 0
+            last_user_message = None
+            last_user_input_id = None
 
-            for msg in messages:
+            for message_index, msg in enumerate(messages):
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
+                display_text = _plugin_display_text(content)
+                plugin_input_id = None
 
                 # Add to conversation history
                 if add_to_history:
                     from kollabor_events.data_models import ConversationMessage
 
                     message_metadata = {}
-                    display_text = _plugin_display_text(content)
                     if role == "user" and display_messages and display_text.strip():
                         # This is the plugin's authored, displayable string,
                         # captured before any model-only context is merged.
                         # For structured content only text parts are copied,
                         # so content_to_text image placeholders cannot become
                         # chat input text.
+                        plugin_input_id = f"plugin-{uuid.uuid4().hex}"
+                        message_metadata["input_id"] = plugin_input_id
                         message_metadata["chat_stream_display_text"] = display_text
+                        if trigger_llm and message_index == last_user_index:
+                            message_metadata["chat_stream_trigger_llm"] = True
+                            message_metadata["status"] = "queued"
+                        else:
+                            message_metadata["chat_stream_outcome"] = "completed"
                     coord._add_conversation_message(
                         ConversationMessage(
                             role=role,
@@ -685,6 +704,10 @@ class MessageHandler:
                         ),
                         parent_uuid=parent_uuid,
                     )
+
+                if role == "user" and message_index == last_user_index:
+                    last_user_message = content
+                    last_user_input_id = plugin_input_id
 
                 # Log message. A failed write leaves the chain on the previous
                 # record; the rest of the batch still reaches history.
@@ -740,15 +763,13 @@ class MessageHandler:
 
             # Optionally trigger LLM response
             if trigger_llm:
-                # Find the last user message to process
-                last_user_msg = None
-                for msg in reversed(messages):
-                    if msg.get("role") == "user":
-                        last_user_msg = msg.get("content", "")
-                        break
-
-                if last_user_msg:
-                    await coord._enqueue_with_overflow_strategy(last_user_msg)
+                if last_user_message:
+                    queued_message = (
+                        TaggedInput(last_user_message, (last_user_input_id,))
+                        if isinstance(last_user_input_id, str) and last_user_input_id
+                        else last_user_message
+                    )
+                    await coord._enqueue_with_overflow_strategy(queued_message)
                     if not coord.is_processing:
                         # Trigger queue processing via background task
                         coord.create_background_task(
