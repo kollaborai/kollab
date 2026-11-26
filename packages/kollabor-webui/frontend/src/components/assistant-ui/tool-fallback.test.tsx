@@ -180,6 +180,7 @@ describe("collapsed failed tool previews", () => {
     );
     const markup = renderToStaticMarkup(
       <ToolFallback
+        type="tool-call"
         toolCallId="tool-call-1"
         toolName="read_file"
         args={{}}
@@ -188,9 +189,9 @@ describe("collapsed failed tool previews", () => {
         result={undefined}
         isError={true}
         status={{ type: "complete" }}
-        addResult={() => undefined}
+        addResult={async () => undefined}
         resume={() => undefined}
-        respondToApproval={() => undefined}
+        respondToApproval={async () => undefined}
       />,
     );
 
