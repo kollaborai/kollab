@@ -198,6 +198,32 @@ describe("collapsed failed tool previews", () => {
     expect(markup).toContain('data-slot="tool-fallback-trigger-error"');
     expect(markup).toContain("permission denied while reading file");
   });
+
+  it("shows Error and strips the error prefix for an externalized failed preview", () => {
+    const marker = chatStreamPreviewResult("session-error-header", "Error: permission denied");
+    const markup = renderToStaticMarkup(
+      <ToolFallbackResult resultPreview={marker} isError />,
+    );
+    const output = new JSDOM(markup).window.document.querySelector(
+      '[data-slot="chat-stream-tool-output-preview"]',
+    );
+
+    expect(output?.querySelector(".aui-tool-fallback-result-header")?.textContent).toBe("Error:");
+    expect(output?.querySelector("pre")?.textContent).toBe("permission denied");
+  });
+
+  it("preserves Not Run for an asked externalized result", () => {
+    const marker = chatStreamPreviewResult("session-asked-preview", "Error: user denied tool execution");
+    const markup = renderToStaticMarkup(
+      <ToolFallbackResult resultPreview={marker} isError asked />,
+    );
+    const output = new JSDOM(markup).window.document.querySelector(
+      '[data-slot="chat-stream-tool-output-preview"]',
+    );
+
+    expect(output?.querySelector(".aui-tool-fallback-result-header")?.textContent).toBe("Not Run:");
+    expect(output?.querySelector("pre")?.textContent).toBe("user denied tool execution");
+  });
 });
 
 describe("live streamed text previews", () => {
@@ -486,6 +512,40 @@ describe("expanding a chat stream tool output preview", () => {
     expect(markup).toContain("Output:");
     expect(markup).toContain("firstend");
     expect(markup).not.toContain("Output preview:");
+  });
+
+  it("keeps the Error header and strips the prefix after recovering an externalized failure", async () => {
+    const fetchOutput = fetchChatStreamToolOutput();
+    if (!fetchOutput) throw new Error("tool output fetch helper is missing");
+    const outputRevision = "e".repeat(64);
+    const fullOutput = "Error: permission denied after retrieval";
+    mocks.getChatStreamToolOutput.mockResolvedValueOnce({
+      row_id: "row-1",
+      tool_call_id: "tool-call-1",
+      output_revision: outputRevision,
+      offset: 0,
+      next_offset: fullOutput.length,
+      total_chars: fullOutput.length,
+      output_type: "text",
+      content: fullOutput,
+      done: true,
+    });
+
+    await expect(fetchOutput(
+      "session-loaded-error", "row-1", "tool-call-1", outputRevision, fullOutput.length, "text",
+    )).resolves.toBe(fullOutput);
+
+    const marker = chatStreamPreviewResult(
+      "session-loaded-error", "Error: bounded preview", outputRevision, fullOutput.length,
+    );
+    const markup = renderToStaticMarkup(
+      <ToolFallbackResult resultPreview={marker} isError />,
+    );
+    const output = new JSDOM(markup).window.document.querySelector(
+      '[data-slot="chat-stream-tool-output-preview"]',
+    );
+    expect(output?.querySelector(".aui-tool-fallback-result-header")?.textContent).toBe("Error:");
+    expect(output?.querySelector("pre")?.textContent).toBe("permission denied after retrieval");
   });
 
   it("counts chunk offsets in Unicode characters", async () => {
