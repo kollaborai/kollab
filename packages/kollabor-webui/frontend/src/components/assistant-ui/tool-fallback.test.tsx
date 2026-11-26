@@ -13,6 +13,7 @@ import {
   toolErrorLine,
 } from "./tool-fallback";
 import * as toolFallback from "./tool-fallback";
+import type { ChatStreamToolOutputPreviewMarker } from "../../chat-stream";
 import {
   ChatStreamStreamingContent,
   ChatStreamContentPreview,
@@ -51,7 +52,7 @@ function chatStreamPreviewResult(
   preview: string,
   outputRevision = "a".repeat(64),
   outputChars = 40_000,
-) {
+): ChatStreamToolOutputPreviewMarker {
   return {
     kind: "chat-stream-tool-output-preview",
     session_id: sessionId,
