@@ -54,6 +54,16 @@ describe("agentVersionNotice", () => {
       .toMatchObject({ kind: "unknown", name: "lapis" });
   });
 
+  it("never leaves an outdated chat without a notice (#1451 review)", () => {
+    const current = { ...agent, version: "0.21.0" };
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: current, restartAgents: true, chatOutdated: true }))
+      .toMatchObject({ kind: "button", name: "lapis" });
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: undefined, restartAgents: true, chatOutdated: true, chatName: "ruby" }))
+      .toMatchObject({ kind: "unknown", name: "ruby" });
+    expect(agentVersionNotice({ engineVersion: "", agent: undefined, restartAgents: false, chatOutdated: true, chatName: "ruby" }))
+      .toMatchObject({ kind: "unknown", name: "ruby" });
+  });
+
   it("is silent when either side does not say (no agent row, no engine version)", () => {
     expect(agentVersionNotice({ engineVersion: "0.21.0+aaaa1111", agent: undefined, restartAgents: true })).toBeNull();
     expect(agentVersionNotice({ engineVersion: "", agent: { ...agent, version: "0.20.0" }, restartAgents: true })).toBeNull();
