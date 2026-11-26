@@ -6,10 +6,10 @@ import unittest
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from kollabor_agent.queue_processor import TaggedInput
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 from kollabor.state.chat_stream import ChatStreamService
+from kollabor_agent.queue_processor import TaggedInput
 from kollabor_tui.display_tap import DisplayTap, publish_semantic
 
 
