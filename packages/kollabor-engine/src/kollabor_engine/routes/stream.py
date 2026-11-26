@@ -253,53 +253,29 @@ def _materialize_row_images(rows: Any, session_id: str) -> None:
             }
         parts = []
         for part in row["parts"]:
-            if not isinstance(part, dict) or part.get("type") != "image":
-                if not isinstance(part, dict):
-                    parts.append(part)
-                    continue
-                materialized = dict(part)
-                result_preview = part.get("chat_stream_result_preview")
-                if (
-                    isinstance(result_preview, dict)
-                    and result_preview.get("kind")
-                    == "chat-stream-tool-output-preview"
-                ):
-                    materialized["chat_stream_result_preview"] = {
-                        **result_preview,
-                        "session_id": session_id,
-                    }
-                args_preview = part.get("chat_stream_args_preview")
-                if (
-                    isinstance(args_preview, dict)
-                    and args_preview.get("kind") == "chat-stream-content-preview"
-                ):
-                    materialized["chat_stream_args_preview"] = {
-                        **args_preview,
-                        "session_id": session_id,
-                    }
-                content_preview = part.get("chat_stream_content_preview")
-                if (
-                    isinstance(content_preview, dict)
-                    and content_preview.get("kind") == "chat-stream-content-preview"
-                ):
-                    materialized["chat_stream_content_preview"] = {
-                        **content_preview,
-                        "session_id": session_id,
-                    }
-                part_preview = part.get("chat_stream_part_preview")
-                if (
-                    isinstance(part_preview, dict)
-                    and part_preview.get("kind") == "chat-stream-part-preview"
-                ):
-                    materialized["chat_stream_part_preview"] = {
-                        **part_preview,
-                        "session_id": session_id,
-                    }
+            if not isinstance(part, dict):
+                parts.append(part)
+                continue
+
+            materialized = dict(part)
+            for field, kind in (
+                ("chat_stream_result_preview", "chat-stream-tool-output-preview"),
+                ("chat_stream_args_preview", "chat-stream-content-preview"),
+                ("chat_stream_content_preview", "chat-stream-content-preview"),
+                ("chat_stream_part_preview", "chat-stream-part-preview"),
+            ):
+                marker = part.get(field)
+                if isinstance(marker, dict) and marker.get("kind") == kind:
+                    materialized[field] = {**marker, "session_id": session_id}
+
+            if part.get("type") != "image":
                 parts.append(materialized)
                 continue
-            resolved = _resolved_image_url(part.get("url"), session_id)
+
+            resolved = _resolved_image_url(materialized.get("url"), session_id)
             if resolved is not None:
-                parts.append({**part, "url": resolved})
+                materialized["url"] = resolved
+                parts.append(materialized)
             else:
                 parts.append(
                     {"type": "text", "text": "[Image attachment unavailable.]"}

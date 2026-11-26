@@ -4560,10 +4560,6 @@ class ChatStreamService:
                     ):
                         content_keys.append((uid, row_id, marker_index, field, revision))
                 result_marker = part.get("chat_stream_result_preview")
-                result = part.get("result")
-                if not isinstance(result_marker, dict) and isinstance(result, dict):
-                    # Compatibility with the pre-migration projected shape.
-                    result_marker = result if result.get("kind") == "chat-stream-tool-output-preview" else None
                 if isinstance(result_marker, dict):
                     tool_call_id = result_marker.get(
                         "tool_call_id", part.get("tool_call_id")
