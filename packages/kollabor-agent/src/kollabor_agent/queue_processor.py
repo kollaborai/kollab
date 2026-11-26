@@ -783,6 +783,8 @@ class QueueProcessor:
         self._forced_send_clear.set()
         self._forced_send_owner: object | None = None
         self._forced_priority_count = 0
+        self._forced_plugin_batch_request_id: str | None = None
+        self._published_plugin_stream_ids: set[str] = set()
         # Trusted multi-step admissions reserve capacity while writing the
         # matching durable user row. Ordinary producers count reservations as
         # occupied, so they cannot steal a promised slot during an await.
@@ -1463,6 +1465,7 @@ class QueueProcessor:
             if not self._has_unreserved_capacity():
                 raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
+            await self._publish_plugin_stream_input(message)
             self._queue_metrics["total_enqueue_successes"] += 1
             if self.task_config.queue.log_queue_events:
                 logger.debug("Message enqueued successfully")
@@ -1499,7 +1502,109 @@ class QueueProcessor:
             # until the next message, so it ends as the swept ones did.
             await self._end_queued_persisted(message)
             return False
+        await self._publish_plugin_stream_input(message)
         return True
+
+    async def _publish_plugin_stream_input(self, item: Any) -> None:
+        """Publish a triggered plugin row only after its queue outcome is known."""
+        if (
+            not isinstance(item, TaggedInput)
+            or isinstance(item, QueueHandoffInput)
+            or item.stream_origin != "plugin"
+            or len(item.request_ids) != 1
+            or not isinstance(item.request_ids[0], str)
+            or not item.request_ids[0]
+            or not isinstance(item.stream_display_content, str)
+            or not item.stream_display_content.strip()
+        ):
+            return
+        request_id = item.request_ids[0]
+        published = getattr(self, "_published_plugin_stream_ids", None)
+        if not isinstance(published, set):
+            published = self._published_plugin_stream_ids = set()
+        if request_id in published:
+            return
+        pending_record = getattr(self, "_native_stream_inputs", {}).get(request_id)
+        logger_service = getattr(self, "conversation_logger", None)
+        update_metadata = getattr(
+            logger_service, "update_user_message_metadata", None
+        )
+        row_uuid = item.history_row_uuid
+        target_outcome = next(
+            (
+                message.metadata.get("chat_stream_outcome")
+                for message in getattr(self, "conversation_history", ())
+                if isinstance(getattr(message, "metadata", None), dict)
+                and message.metadata.get("chat_stream_pending_input_id")
+                == request_id
+                and message.metadata.get("chat_stream_outcome")
+                in {"completed", "failed", "cancelled"}
+            ),
+            None,
+        )
+        for message in getattr(self, "conversation_history", ()):
+            metadata = getattr(message, "metadata", None)
+            if (
+                not isinstance(metadata, dict)
+                or metadata.get("chat_stream_pending_input_id") != request_id
+            ):
+                continue
+            metadata.pop("chat_stream_pending_input_id", None)
+            metadata.update(
+                {
+                    "input_id": request_id,
+                    "request_id": request_id,
+                    "chat_stream_display_text": item.stream_display_content,
+                    "chat_stream_trigger_llm": True,
+                    "status": target_outcome or "queued",
+                }
+            )
+        published.add(request_id)
+        publish_semantic(
+            self.renderer,
+            "user_message",
+            role="user",
+            text=content_to_text(item.content),
+            request_id=request_id,
+            input_id=request_id,
+            chat_stream_trigger_llm=True,
+            display_text=item.stream_display_content,
+        )
+        if (
+            isinstance(pending_record, dict)
+            and pending_record.get("plugin_pending_admission") is True
+            and isinstance(row_uuid, str)
+            and row_uuid
+            and callable(update_metadata)
+        ):
+            updates = {
+                "input_id": request_id,
+                "request_id": request_id,
+                "chat_stream_display_text": item.stream_display_content,
+                "chat_stream_trigger_llm": True,
+            }
+            if target_outcome is not None:
+                updates["chat_stream_outcome"] = target_outcome
+                updates["status"] = target_outcome
+            else:
+                updates["status"] = "queued"
+            try:
+                persisted = await update_metadata(
+                    row_uuid,
+                    expected_metadata={
+                        "chat_stream_pending_input_id": request_id
+                    },
+                    updates=updates,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not persist plugin input admission %s", request_id
+                )
+            else:
+                if persisted is not True:
+                    logger.warning(
+                        "Plugin input admission row did not match %s", request_id
+                    )
 
     def _track_native_stream_input(self, item: Any) -> None:
         """Register a durable single-input row before overflow can end it."""
@@ -1527,6 +1632,7 @@ class QueueProcessor:
                 else item.content
             ),
             "chat_stream_input_count": 1,
+            "plugin_pending_admission": item.stream_origin == "plugin",
         }
 
     def _queued_plugin_input(self, request_id: str) -> TaggedInput | None:
@@ -1562,8 +1668,11 @@ class QueueProcessor:
         return True
 
     def prioritize_queued_plugin_input(self, request_id: str) -> bool:
-        """Move one exact queued plugin input ahead of other native work."""
+        """Move one exact input forward and reserve its isolated next batch."""
         if not isinstance(request_id, str) or not request_id:
+            return False
+        forced_batch_id = getattr(self, "_forced_plugin_batch_request_id", None)
+        if forced_batch_id not in (None, request_id):
             return False
         item = self._queued_plugin_input(request_id)
         if item is None:
@@ -1571,9 +1680,18 @@ class QueueProcessor:
         queue = self.processing_queue
         entries = queue._queue
         if entries[0] is item:
+            self._forced_plugin_batch_request_id = request_id
             return True
         entries.remove(item)
         entries.appendleft(item)
+        self._forced_plugin_batch_request_id = request_id
+        return True
+
+    def clear_forced_plugin_batch(self, request_id: str) -> bool:
+        """Release an isolated batch reservation whose Send Now did not commit."""
+        if getattr(self, "_forced_plugin_batch_request_id", None) != request_id:
+            return False
+        self._forced_plugin_batch_request_id = None
         return True
 
     async def _end_dropped_persisted(
@@ -1585,6 +1703,7 @@ class QueueProcessor:
         request_ids = getattr(item, "request_ids", ())
         if isinstance(request_ids, tuple) and request_ids:
             await self._persist_native_input_outcomes(request_ids, "error")
+        await self._publish_plugin_stream_input(item)
         self._end_dropped(item, why)
 
     def _schedule_end_dropped_persisted(
@@ -1906,9 +2025,32 @@ class QueueProcessor:
                 while not self.processing_queue.empty() and not self.cancel_processing:
                     try:
                         messages = []
-                        while not self.processing_queue.empty():
-                            message = await self.processing_queue.get()
-                            messages.append(message)
+                        forced_request_id = getattr(
+                            self, "_forced_plugin_batch_request_id", None
+                        )
+                        if isinstance(forced_request_id, str):
+                            selected = self._queued_plugin_input(forced_request_id)
+                            self._forced_plugin_batch_request_id = None
+                            if selected is not None:
+                                self.processing_queue._queue.remove(selected)
+                                self.processing_queue._wakeup_next(
+                                    self.processing_queue._putters
+                                )
+                                messages.append(selected)
+
+                        if not messages:
+                            while not self.processing_queue.empty():
+                                message = await self.processing_queue.get()
+                                messages.append(message)
+                                self._drained_batch_messages = tuple(messages)
+                                self._drained_handoff_items = tuple(
+                                    item
+                                    for item in messages
+                                    if isinstance(item, QueueHandoffInput)
+                                )
+                                self._drained_handoff_started = False
+
+                        if messages:
                             self._drained_batch_messages = tuple(messages)
                             self._drained_handoff_items = tuple(
                                 item
@@ -2394,6 +2536,16 @@ class QueueProcessor:
                 message.metadata["chat_stream_outcome"] = outcome
                 if "turn_id" in updates_base:
                     message.metadata["turn_id"] = updates_base["turn_id"]
+            for message in getattr(self, "conversation_history", ()):
+                metadata = getattr(message, "metadata", None)
+                if (
+                    not isinstance(metadata, dict)
+                    or metadata.get("chat_stream_pending_input_id") != input_id
+                ):
+                    continue
+                metadata["chat_stream_outcome"] = outcome
+                if "turn_id" in updates_base:
+                    metadata["turn_id"] = updates_base["turn_id"]
 
         logger_service = getattr(self, "conversation_logger", None)
         update_metadata = getattr(logger_service, "update_user_message_metadata", None)
@@ -2427,10 +2579,24 @@ class QueueProcessor:
                     parts = _native_chat_stream_parts(content)
                     if parts:
                         updates["chat_stream_parts"] = parts
+                plugin_pending = record.get("plugin_pending_admission") is True
+                expected_metadata = {"request_id": input_id}
+                if plugin_pending:
+                    expected_metadata = {
+                        "chat_stream_pending_input_id": input_id
+                    }
+                    updates.update(
+                        {
+                            "input_id": input_id,
+                            "request_id": input_id,
+                            "chat_stream_display_text": content_to_text(content),
+                            "chat_stream_trigger_llm": True,
+                        }
+                    )
                 try:
                     persisted = await update_metadata(
                         row_uuid,
-                        expected_metadata={"request_id": input_id},
+                        expected_metadata=expected_metadata,
                         updates=updates,
                     )
                 except Exception:

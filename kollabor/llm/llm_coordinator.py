@@ -308,7 +308,15 @@ class LLMService:
         # conversation_manager: adds persistence, UUID tracking, metadata
         # both systems stay synchronized
         self.conversation_history.append(message)
-        if role == "user" and not hidden and publish_user_event:
+        pending_plugin_admission = (
+            role == "user"
+            and isinstance(getattr(message, "metadata", None), dict)
+            and (
+                message.metadata.get("chat_stream_trigger_llm") is True
+                or message.metadata.get("chat_stream_pending_input_id")
+            )
+        )
+        if role == "user" and not hidden and publish_user_event and not pending_plugin_admission:
             # What mirrors this conversation (the engine) follows it by these,
             # so a window opened mid-turn shows the message being answered.
             metadata = getattr(message, "metadata", None)
@@ -2715,10 +2723,11 @@ class LLMService:
         end = getattr(processor, "end_forced_send", None)
         find_queued = getattr(processor, "_queued_plugin_input", None)
         prioritize = getattr(processor, "prioritize_queued_plugin_input", None)
+        clear_batch = getattr(processor, "clear_forced_plugin_batch", None)
         clear = getattr(processor, "clear_force_cancellation", None)
         if not all(
             callable(method)
-            for method in (begin, end, find_queued, prioritize, clear)
+            for method in (begin, end, find_queued, prioritize, clear_batch, clear)
         ):
             return {"found": False}
 
@@ -2760,6 +2769,7 @@ class LLMService:
             if not prioritize(request_id):
                 return {"found": False}
             if generation is not None and not clear(generation):
+                clear_batch(request_id)
                 return {"found": True, "accepted": False, "state": "queued"}
             accepted = True
             return {"found": True, "accepted": True, "state": "queued"}

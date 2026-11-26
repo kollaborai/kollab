@@ -126,6 +126,7 @@ def _manager_config(conversations_dir):
 
 def _plugin_queue_processor(state: _State, logger, *, max_queue_size: int):
     processor = _processor(state)
+    processor.conversation_history = state._llm_service.conversation_history
     processor.processing_queue = asyncio.Queue(maxsize=max_queue_size)
     processor.max_queue_size = max_queue_size
     processor.task_config = SimpleNamespace(
@@ -746,17 +747,28 @@ async def test_plugin_queued_stream_control_is_not_published_before_queue_admiss
     )
     try:
         await asyncio.wait_for(logger_entered.wait(), timeout=1)
-        input_id = coordinator.conversation_history[0].metadata["input_id"]
+        input_id = coordinator.conversation_history[0].metadata[
+            "chat_stream_pending_input_id"
+        ]
         snapshot_event = next(
             event
             for event in stream.subscribe({})["events"]
             if event["type"] == "snapshot"
         )
-        assert snapshot_event["data"]["inputs"] == []
+        assert all(
+            item["id"] != input_id
+            for item in snapshot_event["data"]["inputs"]
+        )
         assert all(
             row["id"] != input_id
             for row in snapshot_event["data"]["rows"]
             if row["kind"] == "input"
+        )
+        assert all(
+            part.get("text") != "admit before controls"
+            for row in snapshot_event["data"]["rows"]
+            if row["kind"] == "input"
+            for part in row["parts"]
         )
     finally:
         release_logger.set()
@@ -766,6 +778,19 @@ async def test_plugin_queued_stream_control_is_not_published_before_queue_admiss
     input_id = coordinator.conversation_history[0].metadata["input_id"]
     assert [item.request_ids for item in processor.processing_queue._queue] == [
         (input_id,)
+    ]
+    admitted_snapshot = await _rpc_call(rpc, "state.chat_stream.subscribe", {})
+    admitted_data = next(
+        event["data"]
+        for event in admitted_snapshot["events"]
+        if event["type"] == "snapshot"
+    )
+    admitted_row = next(
+        row for row in admitted_data["rows"] if row["id"] == input_id
+    )
+    assert admitted_row["status"] == "queued"
+    assert admitted_data["inputs"] == [
+        {"id": input_id, "state": "queued", "turn_id": None}
     ]
     admitted = await _rpc_call(rpc, "state.chat_stream.cancel_queued_input", {"id": input_id})
     assert admitted == {"found": True, "cancelled": True}

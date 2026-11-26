@@ -2567,6 +2567,10 @@ class ChatStreamService:
                 metadata.get("hidden") is True
                 or metadata.get("system_initialization") is True
                 or metadata.get("tool_output_batch") is True
+                # A triggered plugin row has no queue controls until the
+                # matching TaggedInput is admitted. It joins the transcript
+                # projection when the queue publishes that admission.
+                or metadata.get("chat_stream_pending_input_id")
             ):
                 continue
             source_role = role

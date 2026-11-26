@@ -691,13 +691,17 @@ class MessageHandler:
                         # so content_to_text image placeholders cannot become
                         # chat input text.
                         plugin_input_id = f"plugin-{uuid.uuid4().hex}"
-                        message_metadata["input_id"] = plugin_input_id
-                        message_metadata["chat_stream_display_text"] = display_text
                         if trigger_llm and message_index == last_user_index:
-                            message_metadata["chat_stream_trigger_llm"] = True
-                            message_metadata["status"] = "queued"
-                            message_metadata["request_id"] = plugin_input_id
+                            # Keep this correlation marker private until the
+                            # native queue accepts the TaggedInput. A snapshot
+                            # must not advertise queued controls for work that
+                            # is still waiting on logger/display awaits.
+                            message_metadata["chat_stream_pending_input_id"] = (
+                                plugin_input_id
+                            )
                         else:
+                            message_metadata["input_id"] = plugin_input_id
+                            message_metadata["chat_stream_display_text"] = display_text
                             message_metadata["chat_stream_outcome"] = "completed"
                     coord._add_conversation_message(
                         ConversationMessage(
