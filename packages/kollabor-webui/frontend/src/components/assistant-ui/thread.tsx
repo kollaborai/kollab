@@ -271,7 +271,7 @@ const ThreadRoot: FC<{
   const store = useChatStore();
   const olderBanner = useOlderBanner(store.olderStatus);
   // Before the first snapshot nothing is on screen: the conversation's load line, or its failure, stands in for the banner.
-  const banner = olderBanner ?? initialHistoryBanner(store.connection, store.rows.length);
+  const banner = olderBanner ?? initialHistoryBanner(store.connection, store.rows.length, store.saved);
   // Retry: a failed connection reconnects; a failed page of older rows loads again.
   const retryBanner = () => {
     if (banner?.retry === "reconnect") store.retry();

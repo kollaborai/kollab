@@ -6,6 +6,7 @@
 
 import { createContext, createElement, useContext, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import type { EngineApi } from "./api";
+import { cacheableRows, type ChatRowCache } from "./chat-row-cache";
 import {
   isChatStreamEvent,
   type ChatPart,
@@ -169,6 +170,8 @@ export type ChatSnapshot = {
   readonly connection: ConnectionState;
   readonly hasEarlier: boolean;
   readonly olderStatus: OlderStatus;
+  /** The rows are the browser's saved copy: no snapshot has arrived yet. */
+  readonly saved?: boolean;
 };
 
 /** The store the chat renders from. LiveChatStore is the implementation. */
@@ -234,6 +237,10 @@ export class LiveChatStore implements LiveStore {
   private readonly confirmedGoalAdmissions = new Map<string, string>();
   private readonly goalReplyPolls = new Map<string, { ownerId: string; controller: AbortController }>();
   private goalReplies: Record<string, LocalGoalReply> = {};
+  // The browser's saved rows, shown until the first snapshot replaces them.
+  private savedRows: readonly ChatRow[] | null = null;
+  private synced = false;
+  private readonly cache: ChatRowCache | undefined;
   private attempts = 0;
   private started = false;
   private disposed = false;
@@ -258,10 +265,12 @@ export class LiveChatStore implements LiveStore {
       maxAttempts?: number;
       maxUnconfirmedGoalPolls?: number;
       goalReplyPollIntervalMs?: number;
+      cache?: ChatRowCache;
     } = {},
   ) {
     this.transport = transport;
     this.sessionId = sessionId;
+    this.cache = options.cache;
     this.enc = encodeURIComponent(sessionId);
     this.retryBaseMs = options.retryBaseMs ?? 500;
     this.maxAttempts = options.maxAttempts ?? 8;
@@ -307,7 +316,16 @@ export class LiveChatStore implements LiveStore {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
+    void this.showSaved();
     void this.run();
+  }
+
+  private async showSaved(): Promise<void> {
+    const rows = await this.cache?.load(this.sessionId).catch(() => null);
+    // A snapshot that arrived first wins.
+    if (this.disposed || this.synced || !rows?.length) return;
+    this.savedRows = rows;
+    this.publish();
   }
 
   /** Connects again after the connection has failed for good. */
@@ -725,8 +743,9 @@ export class LiveChatStore implements LiveStore {
   }
 
   private snapshotOf(): ChatSnapshot {
+    const rows = this.savedRows ?? this.state.rows;
     return {
-      rows: this.sends.size === 0 ? this.state.rows : [...this.state.rows, ...Array.from(this.sends.values(), (send) => send.row)],
+      rows: this.sends.size === 0 ? rows : [...rows, ...Array.from(this.sends.values(), (send) => send.row)],
       inputs: this.state.inputs,
       turns: this.state.turns,
       goalReplies: this.goalReplies,
@@ -734,6 +753,7 @@ export class LiveChatStore implements LiveStore {
       connection: this.connectionState,
       hasEarlier: this.state.olderCursor !== null && this.state.lastSeq !== null,
       olderStatus: this.paging,
+      ...(this.savedRows ? { saved: true } : {}),
     };
   }
 
@@ -822,6 +842,8 @@ export class LiveChatStore implements LiveStore {
         this.clearGoalReplies();
       }
       this.lastConversationUid = event.conversation_uid;
+      this.synced = true;
+      this.savedRows = null;
     }
     this.state = result.state;
     if (event.type === "snapshot") {
@@ -844,6 +866,8 @@ export class LiveChatStore implements LiveStore {
     if (event.type !== "snapshot") this.attempts = 0;
     if (event.type === "replace") this.resync();
     this.publish();
+    // Streaming text is saved when its row or turn settles, not on every append.
+    if (event.type !== "row.append") void this.cache?.save(this.sessionId, cacheableRows(this.state.rows)).catch(() => {});
   }
 
   /** A row event with a local send's id retires that send: the stream's row now stands in its place. */
