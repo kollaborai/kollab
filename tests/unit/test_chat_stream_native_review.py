@@ -674,6 +674,7 @@ async def test_plugin_send_now_rpc_prioritizes_exact_native_tagged_input(tmp_pat
     coordinator.create_background_task = lambda _task, *, name=None: scheduled.append(name)
     first_id = await _add_triggered_plugin_input(coordinator, "older plugin input")
     selected_id = await _add_triggered_plugin_input(coordinator, "send this plugin input now")
+    scheduled.clear()
 
     result = await _rpc_call(
         rpc, "state.chat_stream.send_now", {"id": selected_id}
