@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { toMessagePartStatus } from "@assistant-ui/core/internal";
 import fixture from "./fixtures/chat-stream/bad-gap.json";
 import { applyChatStreamEvent, initialStreamState } from "../src/chat-store";
 import type { ChatRow } from "../src/chat-stream";
@@ -11,6 +14,7 @@ import {
   toRepository,
   toThreadMessageLike,
 } from "../src/chat-runtime";
+import { ToolFallback } from "../src/components/assistant-ui/tool-fallback";
 
 const WHEN = "2026-11-25T10:00:00.000Z";
 
@@ -202,6 +206,23 @@ describe("toThreadMessageLike", () => {
     expect(messageHasRecoverableChatStreamPreview(undefined, [message.content[0]])).toBe(true);
   });
 
+  it("keeps marker-shaped ordinary tool results opaque", () => {
+    const result = {
+      kind: "chat-stream-tool-output-preview",
+      preview: "user supplied value",
+    };
+    const message = toThreadMessageLike(row("row-opaque-result", [{
+      type: "tool-call",
+      tool_call_id: "call-opaque-result",
+      tool_name: "inspect",
+      args: {},
+      result,
+    }]));
+
+    expect(message.content[0]).toMatchObject({ result });
+    expect(message.content[0]).not.toHaveProperty("providerMetadata");
+  });
+
   it("carries a row-parts page marker in message metadata and part recovery in provider metadata", () => {
     const partsPreview = {
       kind: "chat-stream-parts-preview",
@@ -382,6 +403,53 @@ describe("toThreadMessageLike", () => {
 });
 
 describe("toRepository", () => {
+  it("treats an externalized result as complete through assistant-ui and keeps failures visible", () => {
+    const resultPreview = {
+      kind: "chat-stream-tool-output-preview" as const,
+      session_id: "session-result",
+      row_id: "row-failed-result",
+      tool_call_id: "call-failed-result",
+      output_bytes: 80_000,
+      output_chars: 80_000,
+      output_type: "text" as const,
+      output_revision: "f".repeat(64),
+      preview: "Error: permission denied\nmore details",
+    };
+    const failedRow = {
+      ...row("row-failed-result", [{
+        type: "tool-call" as const,
+        tool_call_id: resultPreview.tool_call_id,
+        tool_name: "read_file",
+        args: {},
+        chat_stream_result_preview: resultPreview,
+        is_error: true,
+      }]),
+      status: "failed",
+    } as ChatRow;
+    const message = toRepository([failedRow]).messages[0].message;
+    const part = message.content[0];
+    const status = toMessagePartStatus(message, 0, part);
+
+    expect(part).toMatchObject({ result: null, isError: true });
+    expect(status).toEqual({ type: "complete" });
+    const markup = renderToStaticMarkup(createElement(ToolFallback, {
+      type: "tool-call",
+      toolCallId: "call-failed-result",
+      toolName: "read_file",
+      args: {},
+      argsText: "{}",
+      result: part.type === "tool-call" ? part.result : undefined,
+      isError: part.type === "tool-call" ? part.isError : undefined,
+      providerMetadata: part.type === "tool-call" ? part.providerMetadata : undefined,
+      status,
+      addResult: async () => undefined,
+      resume: () => undefined,
+      respondToApproval: async () => undefined,
+    }));
+    expect(markup).toContain('data-slot="tool-fallback-trigger-error"');
+    expect(markup).toContain("permission denied");
+  });
+
   it("tracks running assistant rows through turn end without marking completed rows active", () => {
     const active = { ...row("active", [
       { type: "reasoning" as const, text: "thinking" },

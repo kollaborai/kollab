@@ -166,11 +166,11 @@ describe("expanding a tool loads its full output", () => {
 });
 
 describe("collapsed failed tool previews", () => {
-  it("shows the first useful line from a bounded output marker", () => {
-    expect(toolErrorLine(chatStreamPreviewResult(
-      "session-error-preview",
-      "Error: permission denied while reading file\nremaining stack details",
-    ))).toBe("permission denied while reading file");
+  it("does not interpret an ordinary marker-shaped result object as metadata", () => {
+    expect(toolErrorLine({
+      kind: "chat-stream-tool-output-preview",
+      preview: "Error: user supplied data",
+    })).toBe("Tool call failed");
   });
 
   it("keeps the failure indicator when projection externalizes the result", () => {

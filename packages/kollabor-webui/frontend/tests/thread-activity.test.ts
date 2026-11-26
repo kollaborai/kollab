@@ -84,6 +84,42 @@ test("a tool call that has its result is no longer running: the model reads it n
   );
 });
 
+test("an externalized tool result no longer acts like a running tool", () => {
+  const complete = {
+    type: "tool-call" as const,
+    tool_call_id: "c2",
+    tool_name: "file_read",
+    args: {},
+    chat_stream_result_preview: {
+      kind: "chat-stream-tool-output-preview" as const,
+      session_id: "session-1",
+      row_id: "r2",
+      tool_call_id: "c2",
+      output_bytes: 80_000,
+      output_chars: 80_000,
+      output_type: "text" as const,
+      output_revision: "a".repeat(64),
+      preview: "done",
+    },
+  };
+  expect(threadActivityOf([input("web-1"), reply("r2", [complete])], { "web-1": started("web-1") }, true, false)).toBe(
+    "thinking",
+  );
+});
+
+test("a null optional result preview does not finish a running tool", () => {
+  const pending = {
+    type: "tool-call" as const,
+    tool_call_id: "c3",
+    tool_name: "file_read",
+    args: {},
+    chat_stream_result_preview: null,
+  } as unknown as ChatRow["parts"][number];
+  expect(threadActivityOf([input("web-1"), reply("r3", [pending])], { "web-1": started("web-1") }, true, false)).toBe(
+    "reading",
+  );
+});
+
 test("a note row is not the reply: a running turn reads as thinking", () => {
   const note: ChatRow = {
     id: "n1",
