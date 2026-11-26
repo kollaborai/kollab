@@ -400,6 +400,7 @@ describe("fixture replay", () => {
     const ok = fixtures.filter((fixture) => fixture.expect.length === 0);
     expect(ok.map((fixture) => fixture.name).sort()).toEqual([
       "compaction.json",
+      "preview-markers.json",
       "reload-mid-turn.json",
       "steered-input.json",
     ]);

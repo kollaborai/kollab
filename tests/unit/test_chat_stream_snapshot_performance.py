@@ -284,6 +284,31 @@ def test_snapshot_drops_unreferenced_turn_metadata():
     assert snapshot["inputs"] == [stream._inputs[uid]["active-input"]]
 
 
+def test_snapshot_keeps_a_running_goal_turn_without_rows_or_inputs():
+    state = _State([])
+    stream = ChatStreamService(state)
+    uid = state.get_conversation_uid()
+    goal_turn = {
+        "turn_id": "rowless-goal-turn",
+        "state": "running",
+        "input_ids": [],
+        "origin": {
+            "kind": "goal",
+            "goal_id": "goal-1",
+            "attempt_id": "attempt-1",
+        },
+    }
+    stream._turns[uid] = {goal_turn["turn_id"]: goal_turn}
+
+    rows, turns, inputs, _state = stream._snapshot_components(
+        uid, transcript_rows=[], row_byte_budget=0
+    )
+
+    assert rows == []
+    assert inputs == []
+    assert turns == [goal_turn]
+
+
 def test_snapshot_pages_the_window_when_its_row_budget_trims_every_row(monkeypatch):
     state = _State([])
     stream = ChatStreamService(state)

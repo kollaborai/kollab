@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
+
+import pytest
 
 from kollabor.state.chat_stream import ChatStreamService
 from kollabor.state.chat_stream_rows import (
@@ -165,3 +168,97 @@ def test_transcript_fallback_runs_outside_the_log_lock_for_all_retrievals():
 
         assert "error" not in response
         assert calls == [False], f"{method} rebuilt transcript under the log lock"
+
+
+@pytest.mark.parametrize("method", ("get_content", "get_parts", "get_tool_output"))
+def test_transcript_fallback_rechecks_live_row_before_caching(method):
+    stream = ChatStreamService(_State())
+    uid = stream._conversation_uid()
+    stale_row = _row()
+    updated_row = copy.deepcopy(stale_row)
+    if method == "get_tool_output":
+        updated_row["parts"][1]["result"] = "new live result"
+    else:
+        updated_row["parts"][0]["text"] = "new live text"
+
+    lock = stream._log(uid)._lock
+    transcript_lock_states = []
+    cache_lock_states = []
+
+    def transcript_rows(requested_uid):
+        transcript_lock_states.append(lock._is_owned())
+        assert requested_uid == uid
+        stream._upsert(uid, updated_row)
+        return [stale_row]
+
+    stream._transcript_rows = transcript_rows
+    if method == "get_tool_output":
+        original_cache = stream._cached_tool_output
+
+        def observe_cache(*args, **kwargs):
+            cache_lock_states.append(lock._is_owned())
+            return original_cache(*args, **kwargs)
+
+        stream._cached_tool_output = observe_cache
+        params = {
+            "row_id": stale_row["id"],
+            "tool_call_id": "call-live",
+            "output_revision": chat_stream_tool_output_revision("live result", "text"),
+            "offset": 0,
+            "limit": 32,
+        }
+        updated_revision = chat_stream_tool_output_revision("new live result", "text")
+    elif method == "get_content":
+        original_cache = stream._cached_stream_content
+
+        def observe_cache(*args, **kwargs):
+            cache_lock_states.append(lock._is_owned())
+            return original_cache(*args, **kwargs)
+
+        stream._cached_stream_content = observe_cache
+        params = {
+            "row_id": stale_row["id"],
+            "part_index": 0,
+            "field": "text",
+            "output_revision": chat_stream_tool_output_revision("live text", "text"),
+            "offset": 0,
+            "limit": 32,
+        }
+        updated_revision = chat_stream_tool_output_revision("new live text", "text")
+    else:
+        original_cache = stream._cached_stream_content
+
+        def observe_cache(*args, **kwargs):
+            cache_lock_states.append(lock._is_owned())
+            return original_cache(*args, **kwargs)
+
+        stream._cached_stream_content = observe_cache
+        _content, _output_type, old_revision = chat_stream_parts_revision(
+            stale_row["parts"]
+        )
+        _content, _output_type, updated_revision = chat_stream_parts_revision(
+            updated_row["parts"]
+        )
+        params = {
+            "row_id": stale_row["id"],
+            "output_revision": old_revision,
+            "offset": 0,
+            "limit": 8,
+        }
+
+    stale_response = getattr(stream, method)(params)
+
+    assert transcript_lock_states == [False]
+    assert stale_response == {"error": "output_changed"}
+    assert (
+        cache_lock_states[-1] is True
+    ), "fallback cache fill must follow log-before-cache lock order"
+
+    params["output_revision"] = updated_revision
+    current_response = getattr(stream, method)(params)
+    if method == "get_tool_output":
+        assert current_response["content"] == "new live result"
+    elif method == "get_content":
+        assert current_response["content"] == "new live text"
+    else:
+        assert current_response["parts"][0]["text"] == "new live text"
