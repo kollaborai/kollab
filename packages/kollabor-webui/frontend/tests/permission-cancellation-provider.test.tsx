@@ -89,6 +89,7 @@ describe("permission cancellation provider", () => {
       cancelOwned: vi.fn(async () => ({ cancelled: true })),
     } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
     const { root, container } = mount(api);
+    expect(container.querySelector("button")).not.toBeNull();
 
     await act(async () => {
       container.querySelector("button")?.click();
@@ -115,11 +116,10 @@ describe("permission cancellation provider", () => {
         : vi.fn(async () => ({ cancelled: true })),
     } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
     const { container } = mount(api);
+    expect(container.querySelector("button")).not.toBeNull();
 
-    await act(async () => {
-      container.querySelector("button")?.click();
-      await vi.waitFor(() => expect(container.querySelector('[role="alert"]')).not.toBeNull());
-    });
+    await act(async () => { container.querySelector("button")?.click(); });
+    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')).not.toBeNull());
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
       "Could not stop the pending permission. Try again.",
     );
