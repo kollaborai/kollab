@@ -14,6 +14,8 @@ Merge semantics are curated-safe:
   * existing entries are UPDATED only on fields the sources provide;
     curated-only fields (notes, effort_levels, thinking_default, default_output,
     supports_streaming, retired, aliases) are never touched;
+  * invalid retained price fields are normalized to null, even when a source
+    omits those prices;
   * new models are ADDED, flagged with an "Auto-generated" note for review;
   * nothing is ever deleted — retire models by hand;
   * _meta.updated bumps only when something actually changed.
@@ -31,6 +33,7 @@ model-directory-refresh workflow open a PR with the diff.
 
 import argparse
 import json
+import math
 import sys
 import urllib.request
 from datetime import date, datetime, timezone
@@ -52,6 +55,9 @@ MODELS_DEV_PROVIDERS = {
 
 # Fields a source may refresh on an existing entry. Everything else on the
 # entry is curated-only and survives every run.
+PRICE_FIELDS = ("pricing_in", "pricing_out", "pricing_cached_in")
+OUTPUT_LIMIT_FIELDS = ("max_output",)
+
 SOURCED_FIELDS = (
     "context_window",
     "max_output",
@@ -66,6 +72,35 @@ SOURCED_FIELDS = (
 )
 
 
+class _InvalidRetainedContextWindow(ValueError):
+    """A required registry field cannot safely survive a refresh."""
+
+
+# OpenRouter's top-provider cap can be larger than the model-level completion
+# limit. Keep these sourced values aligned with the public model FAQs so a
+# catalog refresh does not overwrite them with a provider-specific cap.
+OPENROUTER_MAX_OUTPUT_OVERRIDES = {
+    "deepseek/deepseek-v4-flash-vision-exp": 262144,  # openrouter.ai/deepseek/deepseek-v4-flash-vision-exp
+    "gryphe/mythomax-l2-13b": 4096,  # openrouter.ai/gryphe/mythomax-l2-13b/providers
+    "meta-llama/llama-3.1-8b-instruct": 16384,  # openrouter.ai/meta-llama/llama-3.1-8b-instruct/providers
+    "z-ai/glm-5.3-flash": 131072,  # openrouter.ai/z-ai/glm-5.3-flash
+}
+
+
+def _parse_json_int(text: str) -> int | float:
+    """Read a JSON integer literal without raising past Python's digit limit.
+
+    int() refuses a literal longer than sys.get_int_max_str_digits() with a
+    plain ValueError, which json.loads does not wrap. Such a price is
+    unrepresentable, so it reads as the float it overflows to (inf or -inf),
+    which _catalog_price maps to unknown.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        return float(text)
+
+
 def fetch_json(url: str) -> dict:
     request = urllib.request.Request(
         url,
@@ -75,7 +110,7 @@ def fetch_json(url: str) -> dict:
         },
     )
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+        return json.loads(response.read().decode("utf-8"), parse_int=_parse_json_int)
 
 
 def unix_to_date(unix: int) -> str:
@@ -88,8 +123,36 @@ def openrouter_catalog_id(model_id: str) -> str:
     return model_id.rsplit(":", 1)[0] if ":" in model_id else model_id
 
 
-def _as_number(value) -> float:
-    return float(value) if not isinstance(value, bool) else 0.0
+def _catalog_price(
+    value, *, multiplier: float = 1.0, precision: int = 6
+) -> float | None:
+    """Return a finite, non-negative catalog price, or None when unknown."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        price = float(value)
+    except TypeError, ValueError, OverflowError:
+        return None
+    if not math.isfinite(price) or price < 0:
+        return None
+    scaled = price * multiplier
+    if not math.isfinite(scaled):
+        return None
+    return round(scaled, precision)
+
+
+def _is_valid_existing_price(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        price = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(price) and price >= 0
+
+
+def _is_valid_existing_output_limit(value) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value > 0
 
 
 def map_models_dev_model(name: str, entry: dict, provider_slug: str) -> dict:
@@ -119,12 +182,13 @@ def map_models_dev_model(name: str, entry: dict, provider_slug: str) -> dict:
     pricing = entry.get("pricing")
     if not isinstance(pricing, dict):
         pricing = {}
-    if isinstance(pricing.get("input"), (int, float)):
-        mapped["pricing_in"] = round(_as_number(pricing["input"]), 6)
-    if isinstance(pricing.get("output"), (int, float)):
-        mapped["pricing_out"] = round(_as_number(pricing["output"]), 6)
-    if isinstance(pricing.get("cache_read"), (int, float)):
-        mapped["pricing_cached_in"] = round(_as_number(pricing["cache_read"]), 6)
+    for source_field, target_field in (
+        ("input", "pricing_in"),
+        ("output", "pricing_out"),
+        ("cache_read", "pricing_cached_in"),
+    ):
+        if source_field in pricing:
+            mapped[target_field] = _catalog_price(pricing[source_field])
     return mapped
 
 
@@ -139,6 +203,13 @@ def map_openrouter_model(entry: dict) -> dict:
     max_completion = top_provider.get("max_completion_tokens")
     if isinstance(max_completion, int) and max_completion > 0:
         mapped["max_output"] = max_completion
+    model_id = entry.get("id")
+    if isinstance(model_id, str):
+        output_override = OPENROUTER_MAX_OUTPUT_OVERRIDES.get(
+            openrouter_catalog_id(model_id)
+        )
+        if output_override is not None:
+            mapped["max_output"] = output_override
     architecture = entry.get("architecture")
     if not isinstance(architecture, dict):
         architecture = {}
@@ -155,13 +226,15 @@ def map_openrouter_model(entry: dict) -> dict:
     if not isinstance(pricing, dict):
         pricing = {}
     # OpenRouter prices are per-token strings; the directory is per-million.
-    if pricing.get("prompt") not in (None, ""):
-        mapped["pricing_in"] = round(_as_number(pricing["prompt"]) * 1_000_000, 4)
-    if pricing.get("completion") not in (None, ""):
-        mapped["pricing_out"] = round(_as_number(pricing["completion"]) * 1_000_000, 4)
-    cache_read = pricing.get("input_cache_read")
-    if cache_read not in (None, ""):
-        mapped["pricing_cached_in"] = round(_as_number(cache_read) * 1_000_000, 4)
+    for source_field, target_field in (
+        ("prompt", "pricing_in"),
+        ("completion", "pricing_out"),
+        ("input_cache_read", "pricing_cached_in"),
+    ):
+        if source_field in pricing:
+            mapped[target_field] = _catalog_price(
+                pricing[source_field], multiplier=1_000_000, precision=4
+            )
     if isinstance(entry.get("created"), int) and not isinstance(entry["created"], bool):
         mapped["released"] = unix_to_date(entry["created"])
     return mapped
@@ -240,6 +313,35 @@ def apply_merge(data: dict, models_dev: dict, openrouter: dict, today: str):
     for key, field, old, new_value in planned["changed"]:
         models[key][field] = new_value
         report.append(f"{key}.{field}: {old!r} -> {new_value!r}")
+    for key, entry in models.items():
+        if not isinstance(entry, dict):
+            continue
+        for field in PRICE_FIELDS:
+            value = entry.get(field)
+            if value is not None and not _is_valid_existing_price(value):
+                entry[field] = None
+                report.append(f"{key}.{field}: invalid existing price -> null")
+        for field in OUTPUT_LIMIT_FIELDS:
+            value = entry.get(field)
+            if value is not None and not _is_valid_existing_output_limit(value):
+                entry[field] = None
+                report.append(f"{key}.{field}: invalid existing output limit -> null")
+    invalid_context_windows = [
+        key
+        for key, entry in models.items()
+        if isinstance(entry, dict)
+        and (
+            isinstance(entry.get("context_window"), bool)
+            or not isinstance(entry.get("context_window"), int)
+            or entry["context_window"] <= 0
+        )
+    ]
+    if invalid_context_windows:
+        invalid = ", ".join(sorted(invalid_context_windows)[:10])
+        raise _InvalidRetainedContextWindow(
+            "invalid required context_window remains in model registry; "
+            f"refresh not written for: {invalid}"
+        )
     if not report:
         return False, ["no changes; model directory already matches the sources"]
     data.setdefault("_meta", {})["updated"] = today
@@ -247,11 +349,11 @@ def apply_merge(data: dict, models_dev: dict, openrouter: dict, today: str):
 
 
 def load_registry(path: Path) -> dict:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(), parse_int=_parse_json_int)
 
 
 def write_registry(path: Path, data: dict) -> None:
-    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
     path.write_text(text)
 
 
@@ -285,10 +387,14 @@ def main(argv=None) -> int:
 
     try:
         models_dev = (
-            json.loads(args.source_models_dev.read_text()) if args.source_models_dev else fetch_json(MODELS_DEV_URL)
+            json.loads(args.source_models_dev.read_text(), parse_int=_parse_json_int)
+            if args.source_models_dev
+            else fetch_json(MODELS_DEV_URL)
         )
         openrouter = (
-            json.loads(args.source_openrouter.read_text()) if args.source_openrouter else fetch_json(OPENROUTER_URL)
+            json.loads(args.source_openrouter.read_text(), parse_int=_parse_json_int)
+            if args.source_openrouter
+            else fetch_json(OPENROUTER_URL)
         )
     except (OSError, json.JSONDecodeError) as exc:
         print(f"FAIL: cannot load sources: {exc}")
@@ -296,7 +402,11 @@ def main(argv=None) -> int:
 
     data = load_registry(args.registry)
     today = date.today().isoformat()
-    changed, report = apply_merge(data, models_dev, openrouter, today)
+    try:
+        changed, report = apply_merge(data, models_dev, openrouter, today)
+    except _InvalidRetainedContextWindow as exc:
+        print(f"FAIL: {exc}")
+        return 2
 
     for line in report:
         print(line)
@@ -311,7 +421,11 @@ def main(argv=None) -> int:
     if args.dry_run:
         print("dry run: nothing written")
         return 0
-    write_registry(args.registry, data)
+    try:
+        write_registry(args.registry, data)
+    except ValueError as exc:
+        print(f"FAIL: registry cannot be written as strict JSON: {exc}")
+        return 2
     print(f"wrote {args.registry} ({data['_meta']['updated']})")
     return 0
 
