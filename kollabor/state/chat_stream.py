@@ -382,7 +382,7 @@ class ChatStreamService:
             return {"found": False}
         current = self._inputs.get(uid, {}).get(input_id, {})
         owner = self._input_scopes.get((uid, input_id))
-        if owner is not None and owner != scope:
+        if owner != scope:
             return {"found": False}
         if (
             (not isinstance(result, dict) or result.get("found") is not True)
