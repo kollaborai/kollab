@@ -690,6 +690,89 @@ async def test_plugin_send_now_rpc_prioritizes_exact_native_tagged_input(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_plugin_send_now_isolates_selected_input_from_queue_siblings(tmp_path):
+    state = _State()
+    _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    coordinator.create_background_task = lambda *_args, **_kwargs: None
+    first_id = await _add_triggered_plugin_input(coordinator, "older plugin input")
+    selected_id = await _add_triggered_plugin_input(coordinator, "send only this now")
+    last_id = await _add_triggered_plugin_input(coordinator, "keep this behind")
+
+    result = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": selected_id})
+    batches = []
+
+    async def process_batch(messages):
+        batches.append([item.request_ids[0] for item in messages])
+        processor.turn_completed = True
+
+    assert result == {"found": True, "accepted": True, "state": "queued"}
+    await processor.process_queue(None, process_batch, AsyncMock())
+
+    assert batches == [[selected_id], [first_id, last_id]]
+
+
+@pytest.mark.asyncio
+async def test_plugin_queued_stream_control_is_not_published_before_queue_admission(
+    tmp_path,
+):
+    state = _State()
+    logger, coordinator, processor, stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=2
+    )
+    logger_entered = asyncio.Event()
+    release_logger = asyncio.Event()
+    original_log = logger.log_user_message
+
+    async def gated_log(*args, **kwargs):
+        logger_entered.set()
+        await release_logger.wait()
+        return await original_log(*args, **kwargs)
+
+    logger.log_user_message = gated_log
+    handler_task = asyncio.create_task(
+        MessageHandler(coordinator).handle_add_message(
+            {
+                "messages": [{"role": "user", "content": "admit before controls"}],
+                "options": {
+                    "show_loading": False,
+                    "display_messages": True,
+                    "trigger_llm": True,
+                },
+            },
+            None,
+        )
+    )
+    try:
+        await asyncio.wait_for(logger_entered.wait(), timeout=1)
+        input_id = coordinator.conversation_history[0].metadata["input_id"]
+        snapshot_event = next(
+            event
+            for event in stream.subscribe({})["events"]
+            if event["type"] == "snapshot"
+        )
+        assert snapshot_event["data"]["inputs"] == []
+        assert all(
+            row["id"] != input_id
+            for row in snapshot_event["data"]["rows"]
+            if row["kind"] == "input"
+        )
+    finally:
+        release_logger.set()
+        result = await handler_task
+
+    assert result["success"] is True
+    input_id = coordinator.conversation_history[0].metadata["input_id"]
+    assert [item.request_ids for item in processor.processing_queue._queue] == [
+        (input_id,)
+    ]
+    admitted = await _rpc_call(rpc, "state.chat_stream.cancel_queued_input", {"id": input_id})
+    assert admitted == {"found": True, "cancelled": True}
+    assert processor.processing_queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_plugin_logging_without_history_initializes_message_metadata(tmp_path):
     state = _State()
     logger, coordinator, _processor, _stream, _rpc = _prepare_triggered_plugin_stream(
