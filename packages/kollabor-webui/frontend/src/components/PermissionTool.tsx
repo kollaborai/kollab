@@ -203,7 +203,7 @@ function PermissionPromptCard({ partId, args, result, resultPreview, resolved = 
         {resultPreview ? <ToolFallbackResult resultPreview={resultPreview} /> : null}
         {stale ? <p role="status" className="text-destructive text-xs">This permission request is no longer pending.</p> : null}
         {submissionError ? <p role="status" className="text-destructive text-xs">Couldn't send the decision. Refresh to check whether it was applied.</p> : null}
-        {submitting && !decided ? <p role="status" className="text-muted-foreground text-xs">Sending decision…</p> : null}
+        {submitting && !isResolved ? <p role="status" className="text-muted-foreground text-xs">Sending decision…</p> : null}
       </CardContent>
       {isResolved ? null : <CardFooter className="flex flex-wrap gap-2">
         {options.length > 0 ? options.map((option) => (
