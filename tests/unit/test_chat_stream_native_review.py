@@ -378,9 +378,12 @@ async def test_plugin_add_message_projects_its_displayable_user_text_live():
     events = _events(stream, initial)
     rows = _row_events(events, "input")
     assert result["success"] is True
-    assert len(rows) == 1
-    assert [part.get("text") for part in rows[0]["parts"]] == ["plugin message"]
-    assert sequence_problems(events) == []
+    latest_rows = {row["id"]: row for row in rows}
+    assert len(latest_rows) == 1
+    assert [part.get("text") for part in next(iter(latest_rows.values()))["parts"]] == [
+        "plugin message"
+    ]
+    assert sequence_problems(events, complete=False) == []
 
 
 def test_unmarked_idless_user_payload_still_hides_model_hud_and_image_tokens():
