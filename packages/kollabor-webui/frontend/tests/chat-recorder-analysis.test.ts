@@ -141,10 +141,19 @@ describe("chat recorder analysis", () => {
     const origin = { kind: "goal", goal_id: "goal-full", attempt_id: "attempt-full" };
     const turn = { turn_id: "turn-full", state: "running", input_ids: [], origin };
     const stream = { conversation_uid: "conv-full", turns: [turn], inputs: [] };
-    const persisted = { conversation_uid: "conv-full", goal: { goal_id: "goal-full", status: "active", attempt: { attempt_id: "attempt-full", state: "dispatched", turn_id: "turn-full" } } };
-    let after: any = persisted;
+    const makePersisted = (text: string) => ({
+      conversation_uid: "conv-full",
+      goal: {
+        goal_id: "goal-full", objective: text.slice("/goal ".length), status: "active",
+        attempt: { attempt_id: "attempt-full", state: "dispatched", turn_id: "turn-full" },
+      },
+    });
+    let after: any = null;
+    const command = async (text: string) => {
+      after = text === "/goal clear" ? null : makePersisted(text);
+    };
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
-      activeRuntime: "native", command: async () => {}, mark: async () => {}, hasMatchingGoalTurn,
+      activeRuntime: "native", command, mark: async () => {}, hasMatchingGoalTurn,
       readPersistedGoal: async () => after, currentStreamState: async () => stream,
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
@@ -153,10 +162,13 @@ describe("chat recorder analysis", () => {
       }, U: () => "u", R: () => "r",
     });
     await expect(flow()).rejects.toThrow(/goal reload proof inconclusive/i);
-    let successReads = 0;
+    let successAfter: any = null;
+    const successCommand = async (text: string) => {
+      successAfter = text === "/goal clear" ? null : makePersisted(text);
+    };
     const success = runInNewContext(`({${body}})["goal-reload"]`, {
-      activeRuntime: "native", command: async () => {}, mark: async () => {}, hasMatchingGoalTurn,
-      readPersistedGoal: async () => ++successReads <= 2 ? persisted : null,
+      activeRuntime: "native", command: successCommand, mark: async () => {}, hasMatchingGoalTurn,
+      readPersistedGoal: async () => successAfter,
       currentStreamState: async () => stream,
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
@@ -230,21 +242,24 @@ describe("chat recorder analysis", () => {
     const origin = { kind: "goal", goal_id: "goal-full", attempt_id: "attempt-full" };
     const turn = { turn_id: "turn-full", state: "running", input_ids: [], origin };
     const stream = { conversation_uid: "conv-full", turns: [turn], inputs: [] };
-    const persisted = {
-      conversation_uid: "conv-full",
-      goal: {
-        goal_id: "goal-full",
-        status: "active",
-        attempt: { attempt_id: "attempt-full", state: "dispatched", turn_id: "turn-full" },
-      },
-    };
+    let persisted: any = null;
     const commands: string[] = [];
     let cleared = false;
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
       activeRuntime: "native",
       command: async (text: string) => {
         commands.push(text);
-        if (text === "/goal clear") cleared = true;
+        if (text === "/goal clear") {
+          cleared = true;
+          return;
+        }
+        persisted = {
+          conversation_uid: "conv-full",
+          goal: {
+            goal_id: "goal-full", objective: text.slice("/goal ".length), status: "active",
+            attempt: { attempt_id: "attempt-full", state: "dispatched", turn_id: "turn-full" },
+          },
+        };
       },
       mark: async () => {},
       hasMatchingGoalTurn: () => false,
@@ -270,20 +285,24 @@ describe("chat recorder analysis", () => {
     const origin = { kind: "goal", goal_id: "goal-full", attempt_id: "attempt-full" };
     const turn = { turn_id: "turn-full", state: "running", input_ids: [], origin };
     const stream = { conversation_uid: "conv-full", turns: [turn], inputs: [] };
-    const persisted = {
-      conversation_uid: "conv-full",
-      goal: {
-        goal_id: "goal-full",
-        status: "active",
-        attempt: { attempt_id: "attempt-full", state: "dispatched", turn_id: "turn-full" },
-      },
-    };
+    let persisted: any = null;
     let clock = 0;
     const commands: string[] = [];
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
       Date: { now: () => clock },
       activeRuntime: "native",
-      command: async (text: string) => { commands.push(text); },
+      command: async (text: string) => {
+        commands.push(text);
+        if (text !== "/goal clear") {
+          persisted = {
+            conversation_uid: "conv-full",
+            goal: {
+              goal_id: "goal-full", objective: text.slice("/goal ".length), status: "active",
+              attempt: { attempt_id: "attempt-full", state: "dispatched", turn_id: "turn-full" },
+            },
+          };
+        }
+      },
       mark: async () => {},
       hasMatchingGoalTurn: () => false,
       readPersistedGoal: async () => persisted,
