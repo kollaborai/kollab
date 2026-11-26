@@ -94,6 +94,9 @@ def _set_acp_state(coord, *, runner=None, selects_acp=False):
     coord.event_bus.get_service = MagicMock(
         side_effect=lambda name: runner if name == "acp_orchestrator" else base_get_service(name)
     )
+    coord.profile_manager.get_active_profile = MagicMock(
+        return_value=SimpleNamespace(get_provider=lambda: "acp" if selects_acp else "openai")
+    )
 
 
 def _hub_stream(coord):
@@ -119,9 +122,6 @@ def _hub_stream(coord):
     stream = ChatStreamService(state)
     stream.subscribe({"after": None, "conversation_uid": None})
     return tap, stream
-    coord.profile_manager.get_active_profile = MagicMock(
-        return_value=SimpleNamespace(get_provider=lambda: "acp" if selects_acp else "openai")
-    )
 
 
 class TestMessageHandler(unittest.TestCase):
