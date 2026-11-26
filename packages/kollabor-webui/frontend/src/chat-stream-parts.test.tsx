@@ -6,12 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getChatStreamContent: vi.fn(),
   getChatStreamParts: vi.fn(),
+  getChatStreamToolOutput: vi.fn(),
 }));
 
 vi.mock("@/api", () => ({
   EngineApi: class {
     getChatStreamContent = mocks.getChatStreamContent;
     getChatStreamParts = mocks.getChatStreamParts;
+    getChatStreamToolOutput = mocks.getChatStreamToolOutput;
   },
   CHAT_STREAM_PART_PAGE_SIZE: 32,
   CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE: 32768,
@@ -159,6 +161,7 @@ describe("chat stream part recovery", () => {
   beforeEach(() => {
     mocks.getChatStreamContent.mockReset();
     mocks.getChatStreamParts.mockReset();
+    mocks.getChatStreamToolOutput.mockReset();
   });
 
   afterEach(() => {
@@ -587,6 +590,99 @@ describe("chat stream part recovery", () => {
 
       await clickButton(ui, "Stop");
       expect(permissionApi.cancelOwned).toHaveBeenCalledWith("session-1", owner.request_id);
+    } finally {
+      await ui.unmount();
+    }
+  });
+
+  it.each([
+    ["a present null result", { result: null }],
+    ["an externalized result preview", { resultPreview: true }],
+  ] as const)("does not offer permission actions for a completed paged call with %s", async (_label, resultState) => {
+    const marker = { ...partsMarker(`row-completed-permission-${_label.replaceAll(" ", "-")}`), part_count: 1 };
+    const owner = {
+      tool_id: "completed-tool",
+      permission_id: "completed-permission",
+      request_id: "completed-request",
+      source: "acp",
+      parked: false,
+      tool_name: "terminal",
+      command: "pytest -q completed",
+    };
+    const output = "permission tool finished";
+    const outputPreview = {
+      kind: "chat-stream-tool-output-preview" as const,
+      session_id: marker.session_id,
+      row_id: marker.row_id,
+      tool_call_id: "completed-call",
+      output_bytes: new TextEncoder().encode(output).length,
+      output_chars: Array.from(output).length,
+      output_type: "text" as const,
+      output_revision: "9".repeat(64),
+      preview: output,
+    };
+    const toolPart = {
+      type: "tool-call",
+      tool_call_id: "completed-call",
+      tool_name: "request_permission",
+      args: owner,
+      ...(Object.hasOwn(resultState, "result") ? { result: resultState.result } : {}),
+      ...(resultState.resultPreview ? { chat_stream_result_preview: outputPreview } : {}),
+    };
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: 1,
+      output_revision: marker.output_revision,
+      parts: [toolPart],
+      done: true,
+    });
+    mocks.getChatStreamToolOutput.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      tool_call_id: "completed-call",
+      output_revision: outputPreview.output_revision,
+      offset: 0,
+      next_offset: outputPreview.output_chars,
+      total_chars: outputPreview.output_chars,
+      output_type: "text",
+      content: output,
+      done: true,
+    });
+    const row: ChatRow = {
+      id: marker.row_id,
+      seq: 9,
+      kind: "tool",
+      role: "assistant",
+      turn_id: "turn-completed-permission",
+      status: "complete",
+      parts: [{ type: "text", text: "[Large chat row]" }],
+      chat_stream_parts_preview: marker,
+      created_at: "2026-11-25T00:00:00Z",
+    };
+    const permissionApi = {
+      getPermissions: vi.fn(async () => ({ pending_prompts: [owner] })),
+      cancelOwned: vi.fn(async () => ({ cancelled: true })),
+    } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const ui = mount();
+    try {
+      await ui.render(
+        <PermissionRecovery row={row} sessionId={marker.session_id} api={permissionApi} respond={respond}>
+          <ChatStreamPartsPreview marker={marker} />
+        </PermissionRecovery>,
+      );
+      await clickButton(ui, "Load full row");
+      await vi.waitFor(() => expect(ui.host.textContent).toContain("Recovered tool request_permission"));
+
+      expect(ui.host.textContent).not.toContain("Permission required:");
+      expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent?.trim() === "Allow once")).toBe(false);
+      expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent?.trim() === "Stop")).toBe(false);
+      expect(respond).not.toHaveBeenCalled();
+      expect(permissionApi.cancelOwned).not.toHaveBeenCalled();
+      if (resultState.resultPreview) {
+        await vi.waitFor(() => expect(ui.host.textContent).toContain("permission tool finished"));
+      }
     } finally {
       await ui.unmount();
     }
