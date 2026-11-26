@@ -232,6 +232,214 @@ async def test_native_queue_drain_starts_the_admitted_turn_before_reply_events()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_hud", [False, True])
+@pytest.mark.parametrize("with_batch", [False, True])
+async def test_native_batch_history_keeps_live_input_ids_and_original_text(
+    with_hud, with_batch
+):
+    """Drive native queue admission, history writing and chat projection together."""
+    from types import MethodType
+
+    from kollabor.llm.agent_hud import AgentHudEntry, merge_agent_hud_with_user_message
+    from kollabor.llm.llm_coordinator import LLMService
+    from kollabor_ai.message_content import combine_message_contents
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    inputs = [("web-native-a", "first message")]
+    if with_batch:
+        inputs.append(("web-native-b", "second message"))
+    for input_id, text in inputs:
+        await _add(stream, input_id, text)
+
+    llm = state._llm_service
+    llm._is_hidden_voice_message = lambda _message: False
+    llm.add = MethodType(LLMService._add_conversation_message, llm)
+    records = tuple(
+        {
+            "source": "webui",
+            "timestamp": f"2026-11-25T12:00:0{index}Z",
+            "text": text,
+            "request_id": input_id,
+        }
+        for index, (input_id, text) in enumerate(inputs)
+    )
+    messages = [
+        TaggedInput(text, (input_id,), operator_inputs=(records[index],))
+        for index, (input_id, text) in enumerate(inputs)
+    ]
+    if with_hud:
+        prompt = merge_agent_hud_with_user_message(
+            [AgentHudEntry(section="hub", label="peer->me", content="peer online")],
+            combine_message_contents([message.content for message in messages]),
+        )
+        messages = [
+            TaggedInput(
+                prompt,
+                tuple(item[0] for item in inputs),
+                operator_inputs=records,
+            )
+        ]
+
+    processor = QueueProcessor.__new__(QueueProcessor)
+    tap = state._event_bus.tap
+    processor.renderer = tap
+    processor.processing_queue = asyncio.Queue()
+    for message in messages:
+        processor.processing_queue.put_nowait(message)
+    processor.is_processing = False
+    processor.current_processing_tokens = 0
+    processor.processing_start_time = 0
+    processor.cancel_processing = False
+    processor.turn_completed = False
+    processor._last_tool_error_sig = None
+    processor._open_voice_turn = None
+    processor.active_origin_context = None
+    processor.active_request_ids = ()
+    processor._after_turn = []
+    processor._turn_token = None
+    processor._queue_handoffs = {}
+    processor._drained_batch_messages = ()
+    processor._drained_handoff_items = ()
+    processor._drained_handoff_started = False
+    processor._active_turn_handoff_attempts = ()
+    processor._add_message_fn = llm.add
+    processor.tool_executor = SimpleNamespace(yes_approvals=None)
+
+    async def execute_turn(
+        user_message_provided,
+        current_parent_uuid,
+        execution_context=None,
+        request_ids=(),
+    ):
+        assert user_message_provided is True
+        assert request_ids == tuple(item[0] for item in inputs)
+        publish_semantic(tap, "token", text="reply")
+        llm.add(
+            ConversationMessage(role="assistant", content="reply", metadata={}),
+            parent_uuid=current_parent_uuid,
+        )
+        publish_semantic(tap, "turn_complete", stop_reason="end_turn")
+        processor.turn_completed = True
+        return current_parent_uuid
+
+    processor._execute_llm_turn = execute_turn
+
+    async def process_batch(batch):
+        await processor.process_message_batch(
+            batch,
+            current_parent_uuid="parent-1",
+            request_ids=batch_request_ids(batch),
+        )
+
+    await processor._drain_queue(None, process_batch, AsyncMock())
+
+    history_user = next(
+        message for message in llm.conversation_history if message.role == "user"
+    )
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    input_rows = [row for row in snapshot["data"]["rows"] if row["kind"] == "input"]
+    assert [row["id"] for row in input_rows] == [item[0] for item in inputs]
+    assert [
+        next(part["text"] for part in row["parts"] if part["type"] == "text")
+        for row in input_rows
+    ] == [item[1] for item in inputs]
+    assert all(
+        "<agent_hud>" not in part.get("text", "")
+        for row in input_rows
+        for part in row["parts"]
+    )
+    assert all(row["status"] == "completed" for row in input_rows)
+    assert [item["id"] for item in snapshot["data"]["inputs"]] == [
+        item[0] for item in inputs
+    ]
+    assert history_user.metadata["request_id"] == inputs[0][0]
+    assert history_user.metadata["request_ids"] == [item[0] for item in inputs]
+    assert history_user.metadata["turn_id"]
+
+
+def test_resumed_native_transcript_ends_a_completed_input_without_live_state():
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content="saved question",
+            metadata={
+                "request_id": "web-resumed-native-1",
+                "request_ids": ["web-resumed-native-1"],
+                "turn_id": "native-resumed-1",
+            },
+        )
+    ]
+
+    snapshot = ChatStreamService(state).subscribe(
+        {"after": None, "conversation_uid": None}
+    )["events"][0]["data"]
+
+    assert snapshot["inputs"] == [
+        {
+            "id": "web-resumed-native-1",
+            "state": "ended",
+            "turn_id": "native-resumed-1",
+            "outcome": "completed",
+        }
+    ]
+    input_row = next(row for row in snapshot["rows"] if row["kind"] == "input")
+    assert input_row["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stop_reason, expected_outcome",
+    [
+        ("stop", "cancelled"),
+        ("end_turn", "completed"),
+        ("max_tokens", "failed"),
+        ("max_turn_requests", "failed"),
+        ("refusal", "failed"),
+        ("cancelled", "cancelled"),
+    ],
+)
+async def test_terminal_stop_reason_projects_the_persisted_outcome(
+    stop_reason, expected_outcome
+):
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    await _add(stream, "web-terminal-1", "question")
+
+    _publish(
+        state,
+        "turn_start",
+        request_id="web-terminal-1",
+        request_ids=["web-terminal-1"],
+        turn_id="native-terminal-1",
+        input_source="native",
+    )
+    _publish(
+        state,
+        "turn_complete",
+        request_id="web-terminal-1",
+        request_ids=["web-terminal-1"],
+        turn_id="native-terminal-1",
+        stop_reason=stop_reason,
+    )
+
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0][
+        "data"
+    ]
+    assert snapshot["inputs"] == [
+        {
+            "id": "web-terminal-1",
+            "state": "ended",
+            "turn_id": "native-terminal-1",
+            "outcome": expected_outcome,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_acp_steered_input_joins_the_current_turn_and_both_inputs_end_once():
     state = _State()
     stream = ChatStreamService(state)

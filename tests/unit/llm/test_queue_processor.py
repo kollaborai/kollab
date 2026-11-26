@@ -308,6 +308,54 @@ class TestQueueProcessor(unittest.TestCase):
         self.processor.active_origin_context = None
         self.assertEqual(self.processor._voice_turn_metadata(), {})
 
+    def test_native_assistant_history_keeps_the_active_turn_id(self):
+        from kollabor_tui.turn_context import current_turn
+
+        self._reply_with("The build is green.")
+        token = current_turn.set(
+            {"turn_id": "native-turn-9", "input_source": "native"}
+        )
+        try:
+            self.loop.run_until_complete(
+                self.processor._execute_llm_turn_inner(
+                    user_message_provided=True, current_parent_uuid="t",
+                )
+            )
+        finally:
+            current_turn.reset(token)
+
+        [reply] = self._assistant_messages()
+        self.assertEqual(reply.metadata["turn_id"], "native-turn-9")
+
+    def test_native_provider_stop_reason_is_normalized_to_completed(self):
+        from kollabor_tui.display_tap import DisplayTap
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self._reply_with("The build is green.")
+        self.api_service.last_stop_reason = "stop"
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        [complete] = [e for e in tap.get_snapshot() if e["type"] == "turn_complete"]
+        self.assertEqual(complete.get("stop_reason"), "end_turn")
+
+    def test_native_stop_publishes_cancelled_despite_stale_provider_reason(self):
+        self.api_service.last_stop_reason = "stop"
+        self.processor.cancel_processing = True
+        self._stop_after_streaming("visible partial")
+
+        events = [
+            call.args[0]
+            for call in self.renderer.get_service.return_value.publish.call_args_list
+        ]
+        [complete] = [e for e in events if e["type"] == "turn_complete"]
+        self.assertEqual(complete.get("stop_reason"), "cancelled")
+
     def test_every_event_of_a_voice_turn_carries_its_id(self):
         """The Engine streams a voice turn's reply by its id: a talked-over turn's
         late events, its turn_complete above all, end no other turn's stream."""
