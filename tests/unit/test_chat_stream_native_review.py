@@ -288,6 +288,59 @@ async def test_image_only_admission_keeps_model_hud_out_of_input_row():
     assert sequence_problems(events) == []
 
 
+def test_native_user_message_fills_turn_start_placeholders_by_authenticated_input():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({})["events"][0]
+    tap = state._event_bus.tap
+
+    publish_semantic(
+        tap,
+        "turn_start",
+        request_ids=["native-a", "native-b"],
+        turn_id="native-placeholder-turn",
+    )
+    publish_semantic(
+        tap,
+        "user_message",
+        request_id="native-a",
+        request_ids=["native-a", "native-b"],
+        text="<agent_hud>secret context</agent_hud>\n[image1]",
+        operator_inputs=[
+            {
+                "source": "tui",
+                "timestamp": "2026-11-26T00:00:00Z",
+                "request_id": "native-a",
+                "text": "first authored message",
+            },
+            {
+                "source": "tui",
+                "timestamp": "2026-11-26T00:00:01Z",
+                "request_id": "native-b",
+                "text": "second authored message",
+            },
+        ],
+    )
+
+    events = _events(stream, initial)
+    latest_rows = {}
+    for row in _row_events(events, "input"):
+        latest_rows[row["id"]] = row
+    assert {
+        input_id: [part.get("text") for part in latest_rows[input_id]["parts"]] for input_id in ("native-a", "native-b")
+    } == {
+        "native-a": ["first authored message"],
+        "native-b": ["second authored message"],
+    }
+    assert all(
+        "<agent_hud>" not in part.get("text", "") and "[image1]" not in part.get("text", "")
+        for row in latest_rows.values()
+        for part in row["parts"]
+    )
+    assert sequence_problems(events, complete=False) == []
+
+
 @pytest.mark.asyncio
 async def test_dropped_unbound_input_does_not_end_running_native_turn():
     state = _State()
@@ -323,10 +376,6 @@ async def test_dropped_unbound_input_does_not_end_running_native_turn():
     assert inputs["web-active"]["state"] == "started"
     assert inputs["voice-dropped"]["state"] == "ended"
     assert inputs["voice-dropped"].get("turn_id") is None
-    assert all(
-        row.get("turn_id") is None
-        for row in snapshot["rows"]
-        if row["kind"] == "marker"
-    )
+    assert all(row.get("turn_id") is None for row in snapshot["rows"] if row["kind"] == "marker")
     events = _events(stream, initial)
     assert sequence_problems(events, complete=False) == []
