@@ -50,7 +50,10 @@ async def test_queue_handoff_metadata_survives_jsonl_and_history_reload(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_reloaded_jsonl_queue_handoff_restores_chat_image_row(tmp_path):
+@pytest.mark.parametrize("legacy_without_force_send", [False, True])
+async def test_reloaded_jsonl_queue_handoff_restores_chat_image_row(
+    tmp_path, legacy_without_force_send
+):
     logger = KollaborConversationLogger(tmp_path)
     logger.reset_session("conversation-a")
     image = save(tmp_path, "conversation-a", PNG)
@@ -63,6 +66,8 @@ async def test_reloaded_jsonl_queue_handoff_restores_chat_image_row(tmp_path):
         "source_attachment_refs": ["stage-a"],
         "media_refs": [{"source_ref": "stage-a", "ref": image.ref}],
     }
+    if legacy_without_force_send:
+        handoff.pop("force_send")
     await logger.log_user_message(
         "inspect this image [image1]",
         message_metadata={"queue_handoff": handoff},
