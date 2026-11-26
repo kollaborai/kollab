@@ -247,7 +247,7 @@ describe("composer send, queue, Stop and Send Now on the chat store", () => {
 
     const reply = container.querySelector<HTMLElement>('[data-slot="kollab_goal-reply"]');
     expect(reply?.getAttribute("role")).toBe("status");
-    expect(reply?.textContent).toContain("Goal admission could not be confirmed.");
+    expect(reply?.textContent).toContain("Goal reply is unavailable or its admission could not be confirmed.");
     await click(byLabel(container, "Check status"));
 
     expect(store.checkGoalReply).toHaveBeenCalledWith(id);
