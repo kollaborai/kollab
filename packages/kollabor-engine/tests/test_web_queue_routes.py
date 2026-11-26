@@ -269,9 +269,9 @@ async def test_route_falls_back_to_bound_history_media_after_queue_release(monke
         return b"durable image", "image/png"
 
     monkeypatch.setattr(
-        web_queue.media_store,
-        "open_queue_handoff_media",
-        open_bound_media,
+        web_queue,
+        "media_store",
+        SimpleNamespace(open_queue_handoff_media=open_bound_media),
         raising=False,
     )
     monkeypatch.setattr(
