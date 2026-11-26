@@ -3138,6 +3138,12 @@ class LLMService:
                 "reason": self.image_input_rejection_reason(),
             }
 
+        # Every accepted native input needs an identity before it is logged or
+        # queued so its transcript row, turn_start and terminal event agree.
+        # Keep a sender-chosen id when the caller supplied one.
+        if not isinstance(request_id, str) or not request_id:
+            request_id = uuid.uuid4().hex
+
         input_source = getattr(operator_source, "value", operator_source)
         operator_inputs: tuple[dict[str, str], ...] = ()
         if (
