@@ -1,7 +1,8 @@
 import { EngineApi } from "../src/api";
 import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ChatRow, ChatStreamCursor, InputInfo, InputRequest, TurnInfo } from "../src/chat-stream";
+import type { ChatRow, ChatStreamContentPreviewMarker, ChatStreamCursor, InputInfo, InputRequest, TurnInfo } from "../src/chat-stream";
+import { chatStreamStreamingText, fetchChatStreamContent } from "../src/chat-stream-content";
 import {
   applyChatStreamEvent,
   initialStreamState,
@@ -276,6 +277,121 @@ describe("applyChatStreamEvent", () => {
     expect(newWindow.state).toMatchObject({ conversationUid: CONV, generation: "daemon-new", lastSeq: 4 });
     expect(newWindow.state.rows.map((item) => item.id)).toEqual(["new"]);
     expect(next).toMatchObject({ outcome: { kind: "applied" }, state: { generation: "daemon-new", lastSeq: 5 } });
+  });
+});
+
+describe("streaming content previews", () => {
+  it("hydrates a snapshot, appends later deltas, and switches to the final revision", async () => {
+    const conversationUid = "conversation-live-preview";
+    const generation = "daemon-live-preview";
+    const snapshotText = `snapshot baseline 🌵 ${"older text ".repeat(100)}`;
+    const appended = "newly streamed tail";
+    const finalText = snapshotText + appended;
+    const makeMarker = (content: string, revision: string): ChatStreamContentPreviewMarker => ({
+      kind: "chat-stream-content-preview",
+      session_id: "session-live-preview",
+      row_id: "row-live-preview",
+      part_index: 0,
+      field: "text",
+      output_bytes: new TextEncoder().encode(content).length,
+      output_chars: Array.from(content).length,
+      output_type: "text",
+      output_revision: revision,
+      preview: content.slice(0, 1024),
+    });
+    const snapshotMarker = makeMarker(snapshotText, "a".repeat(64));
+    const finalMarker = makeMarker(finalText, "b".repeat(64));
+    const streamRow = (
+      content: string,
+      status: string,
+      preview: ChatStreamContentPreviewMarker,
+    ): ChatRow => ({
+      id: preview.row_id,
+      seq: 1,
+      kind: "reply",
+      role: "assistant",
+      turn_id: "turn-live-preview",
+      status,
+      parts: [{ type: "text", text: content.slice(0, 1024), chat_stream_content_preview: preview }],
+      created_at: WHEN,
+    });
+    const contentApi = {
+      getChatStreamContent: vi.fn(async (
+        _sessionId: string,
+        rowId: string,
+        partIndex: number,
+        field: "text" | "reasoning" | "args" | "part",
+        revision: string,
+        { offset }: { offset: number; limit: number },
+      ) => {
+        const content = new Map([
+          [snapshotMarker.output_revision, snapshotText],
+          [finalMarker.output_revision, finalText],
+        ]).get(revision)!;
+        const nextOffset = Array.from(content).length;
+        return {
+          row_id: rowId,
+          part_index: partIndex,
+          field,
+          offset,
+          next_offset: nextOffset,
+          total_chars: nextOffset,
+          output_type: "text" as const,
+          output_revision: revision,
+          content,
+          done: true,
+        };
+      }),
+    };
+
+    const initial = applyChatStreamEvent(initialStreamState, {
+      seq: 0,
+      conversation_uid: conversationUid,
+      generation,
+      type: "snapshot",
+      data: {
+        rows: [streamRow(snapshotText, "streaming", snapshotMarker)],
+        next_seq: 1,
+        older: null,
+        turns: [],
+        inputs: [],
+      },
+    });
+    const hydrated = await fetchChatStreamContent(snapshotMarker, contentApi);
+    expect(chatStreamStreamingText(
+      snapshotMarker,
+      initial.state.rows[0].parts[0].text,
+      hydrated,
+    )).toBe(snapshotText);
+
+    const appendedState = applyChatStreamEvent(initial.state, {
+      seq: 1,
+      conversation_uid: conversationUid,
+      generation,
+      type: "row.append",
+      data: { id: snapshotMarker.row_id, part: 0, text: appended },
+    });
+    expect(chatStreamStreamingText(
+      snapshotMarker,
+      appendedState.state.rows[0].parts[0].text,
+      hydrated,
+    )).toBe(finalText);
+
+    const completed = applyChatStreamEvent(appendedState.state, {
+      seq: 2,
+      conversation_uid: conversationUid,
+      generation,
+      type: "row.upsert",
+      data: streamRow(finalText, "completed", finalMarker),
+    });
+    const finalHydration = await fetchChatStreamContent(finalMarker, contentApi);
+    expect(completed.state.rows[0].status).toBe("completed");
+    expect(finalHydration).toBe(finalText);
+    expect(chatStreamStreamingText(
+      finalMarker,
+      completed.state.rows[0].parts[0].text,
+      finalHydration,
+    )).toBe(finalText);
   });
 });
 
