@@ -356,6 +356,28 @@ async def test_timer_retries_failed_delivery_with_exponential_backoff(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_timer_restores_pending_retry_after_restart(tmp_path):
+    clock = FakeClock(1000.0)
+
+    async def fail(row, agent, due, now):
+        return False, "offline"
+
+    first = _timer(tmp_path, clock, fail, rows=[_row()])
+    assert await first.pass_due() == pytest.approx(30.0)
+
+    clock.advance(30.0)
+    attempts = []
+
+    async def recover(row, agent, due, now):
+        attempts.append((due, now))
+        return True, ""
+
+    restarted = _timer(tmp_path, clock, recover)
+    assert await restarted.pass_due() == pytest.approx(570.0)
+    assert attempts == [(1000.0, 1030.0)]
+
+
+@pytest.mark.asyncio
 async def test_timer_run_wakes_early_on_wake_call(tmp_path):
     # Real production sleep with a 0.05 s grid: wake() must interrupt it.
     clock = FakeClock()
