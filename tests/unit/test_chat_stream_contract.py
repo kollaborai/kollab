@@ -158,6 +158,57 @@ def test_an_input_that_changes_after_it_ended_is_reported():
     assert any("changed after it ended" in problem for problem in problems)
 
 
+@pytest.mark.parametrize(
+    ("outcome", "should_report"),
+    [("completed", True), ("cancelled", False), ("failed", False)],
+)
+def test_a_queued_input_cannot_complete_without_a_turn(outcome, should_report):
+    events = [
+        {
+            "seq": 0,
+            "conversation_uid": "c",
+            "generation": "daemon-1",
+            "type": "snapshot",
+            "data": {
+                "rows": [
+                    {
+                        "id": "i",
+                        "seq": 0,
+                        "kind": "input",
+                        "role": "user",
+                        "turn_id": None,
+                        "status": "queued",
+                        "parts": [],
+                        "created_at": "now",
+                    }
+                ],
+                "next_seq": 1,
+                "older": None,
+                "turns": [],
+                "inputs": [{"id": "i", "state": "queued", "turn_id": None}],
+            },
+        },
+        {
+            "seq": 1,
+            "conversation_uid": "c",
+            "generation": "daemon-1",
+            "type": "input.state",
+            "data": {
+                "id": "i",
+                "state": "ended",
+                "turn_id": None,
+                "outcome": outcome,
+            },
+        },
+    ]
+
+    problems = sequence_problems(events)
+    invalid_completion = any(
+        "queued" in problem and "ended" in problem for problem in problems
+    )
+    assert invalid_completion is should_report, problems
+
+
 def test_a_completed_input_must_wait_for_its_turn():
     events = json.loads((FIXTURES / "steered-input.json").read_text())["events"]
     turn_end = next(
@@ -168,6 +219,27 @@ def test_a_completed_input_must_wait_for_its_turn():
     early = [*events[:turn_end], *events[turn_end + 1 :]]
     problems = sequence_problems(early)
     assert any("completed before its turn t1 ended" in problem for problem in problems)
+
+
+def test_an_input_cannot_start_after_its_turn_ended():
+    events = [
+        _event("snapshot", {**SNAPSHOT, "next_seq": 1}, seq=0),
+        _event(
+            "turn.state",
+            {"turn_id": "t1", "state": "ended", "input_ids": []},
+            seq=1,
+        ),
+        _event("row.upsert", {**ROW, "id": "i", "seq": 2, "turn_id": "t1"}, seq=2),
+        _event("input.state", {"id": "i", "state": "started", "turn_id": "t1"}, seq=3),
+        _event(
+            "input.state",
+            {"id": "i", "state": "ended", "turn_id": "t1", "outcome": "completed"},
+            seq=4,
+        ),
+    ]
+
+    problems = sequence_problems(events)
+    assert any("started after turn t1 ended" in problem for problem in problems)
 
 
 def test_an_unfinished_stream_may_leave_inputs_open():
@@ -457,6 +529,14 @@ def test_snapshot_problems_check_cursors_and_entries(data, needle):
     assert any(needle in problem for problem in problems), problems
 
 
+def test_snapshot_next_seq_cannot_precede_snapshot_seq():
+    snapshot = _event("snapshot", {**SNAPSHOT, "next_seq": 5}, seq=10)
+    problems = sequence_problems([snapshot])
+    assert any(
+        "next_seq" in problem and "seq" in problem for problem in problems
+    ), problems
+
+
 def _lifecycle(*states):
     """A stream with one input row and the given input.state events, in order."""
     events = [
@@ -697,3 +777,139 @@ def test_goal_origin_requires_complete_identity():
         {"kind": "user", "goal_id": "g", "attempt_id": "a"},
     ):
         assert event_problems(_event("turn.state", {**turn, "origin": origin}))
+
+
+def test_input_cannot_rebind_turn_when_its_state_repeats():
+    events = _lifecycle(
+        {"id": "web-a1", "state": "started", "turn_id": "t1"},
+        {"id": "web-a1", "state": "started", "turn_id": "t2"},
+    )
+    problems = sequence_problems(events, complete=False)
+    assert any("changed turn" in problem for problem in problems), problems
+
+
+def test_input_cannot_drop_turn_binding_when_ending():
+    events = _lifecycle(
+        {"id": "web-a1", "state": "started", "turn_id": "t1"},
+        {"turn_id": "t1", "state": "ended", "input_ids": ["web-a1"]},
+        {"id": "web-a1", "state": "ended", "turn_id": None, "outcome": "completed"},
+    )
+    problems = sequence_problems(events)
+    assert any("turn" in problem and "t1" in problem for problem in problems), problems
+
+
+def _turn_event(kind, turn, seq):
+    """The turn as its own turn.state event, or in a snapshot that holds only it."""
+    if kind == "snapshot":
+        return _event(
+            "snapshot", {**SNAPSHOT, "next_seq": seq + 1, "turns": [turn]}, seq=seq
+        )
+    return _event("turn.state", turn, seq=seq)
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("turn.state", "turn.state"),
+        ("turn.state", "snapshot"),
+        ("snapshot", "turn.state"),
+        ("snapshot", "snapshot"),
+    ],
+)
+def test_a_turn_cannot_resume_after_it_ended(first, second):
+    ended = {"turn_id": "t1", "state": "ended", "input_ids": []}
+    running = {"turn_id": "t1", "state": "running", "input_ids": []}
+    events = [
+        _event("snapshot", {**SNAPSHOT, "next_seq": 2}, seq=1),
+        _turn_event(first, ended, seq=2),
+        _turn_event(second, running, seq=3),
+    ]
+    problems = sequence_problems(events)
+    assert any(
+        "turn t1" in problem and "running" in problem for problem in problems
+    ), problems
+
+
+def test_a_turn_may_restate_its_state_without_going_back():
+    running = {"turn_id": "t1", "state": "running", "input_ids": []}
+    ended = {"turn_id": "t1", "state": "ended", "input_ids": []}
+    events = [
+        _event("snapshot", {**SNAPSHOT, "next_seq": 2}, seq=1),
+        _turn_event("turn.state", running, seq=2),
+        _turn_event("snapshot", running, seq=3),
+        _turn_event("turn.state", ended, seq=4),
+        _turn_event("snapshot", ended, seq=5),
+        _turn_event("turn.state", ended, seq=6),
+    ]
+    assert sequence_problems(events) == []
+
+
+@pytest.mark.parametrize("state, turn_id", [("queued", None), ("started", "t1")])
+def test_a_snapshot_cannot_reopen_an_ended_input(state, turn_id):
+    ended = {"id": "web-a1", "state": "ended", "turn_id": None, "outcome": "cancelled"}
+    reopened = {"id": "web-a1", "state": state, "turn_id": turn_id}
+    events = [
+        _event("snapshot", {**SNAPSHOT, "next_seq": 2}, seq=1),
+        _event("row.upsert", {**ROW, "id": "web-a1", "seq": 2}, seq=2),
+        _event("input.state", ended, seq=3),
+        _event("snapshot", {**SNAPSHOT, "next_seq": 5, "inputs": [reopened]}, seq=4),
+    ]
+    problems = sequence_problems(events, complete=False)
+    assert any("changed after it ended" in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("turn_state", "turn_id", "outcome", "needle"),
+    [
+        ("running", "t1", "completed", "completed before its turn t1 ended"),
+    ],
+)
+def test_snapshot_rejects_terminal_input_states_that_cannot_have_occurred(
+    turn_state, turn_id, outcome, needle
+):
+    turns = (
+        [{"turn_id": turn_id, "state": turn_state, "input_ids": ["i"]}]
+        if turn_state
+        else []
+    )
+    row = {**ROW, "id": "i", "seq": 0, "turn_id": turn_id, "status": "ended"}
+    info = {"id": "i", "state": "ended", "turn_id": turn_id, "outcome": outcome}
+    snapshot = _event(
+        "snapshot",
+        {**SNAPSHOT, "next_seq": 1, "rows": [row], "turns": turns, "inputs": [info]},
+        seq=0,
+    )
+
+    problems = sequence_problems([snapshot])
+    assert any(needle in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+def test_an_input_that_was_never_queued_may_end_without_a_turn(outcome):
+    info = {"id": "i", "state": "ended", "turn_id": None, "outcome": outcome}
+    row = {**ROW, "id": "i", "seq": 1, "turn_id": None, "status": outcome}
+    events = [
+        _event("snapshot", SNAPSHOT, seq=0),
+        _event("row.upsert", row, seq=1),
+        _event("input.state", info, seq=2),
+    ]
+
+    assert sequence_problems(events) == []
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_snapshot_can_repeat_an_unchanged_ended_input(outcome):
+    info = {"id": "i", "state": "ended", "turn_id": "t", "outcome": outcome}
+    row = {**ROW, "id": "i", "seq": 1, "turn_id": "t", "status": "ended"}
+    turns = [{"turn_id": "t", "state": "ended", "input_ids": ["i"]}]
+    snapshot = {**SNAPSHOT, "rows": [row], "turns": turns, "inputs": [info]}
+    events = [
+        _event("snapshot", SNAPSHOT, seq=0),
+        _event("row.upsert", row, seq=1),
+        _event("input.state", {"id": "i", "state": "started", "turn_id": "t"}, seq=2),
+        _event("turn.state", turns[0], seq=3),
+        _event("input.state", info, seq=4),
+        _event("snapshot", {**snapshot, "next_seq": 6}, seq=5),
+    ]
+
+    assert sequence_problems(events) == []

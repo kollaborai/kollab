@@ -24,6 +24,8 @@ def outcome_for_stop_reason(stop_reason: Any) -> str:
     if reason == "end_turn":
         return "completed"
     return "failed"
+
+
 TURN_STATES = frozenset({"running", "ended"})
 EVENT_TYPES = frozenset(
     {
@@ -116,10 +118,14 @@ def _preview_marker_problems(
     if not _is_id(row_id) or marker.get("row_id") != row_id:
         problems.append(f"{where}: preview marker row_id does not match its row")
     if "session_id" in marker and not _is_id(marker["session_id"]):
-        problems.append(f"{where}: preview marker session_id must be a non-empty string")
+        problems.append(
+            f"{where}: preview marker session_id must be a non-empty string"
+        )
     for key in count_fields:
         if not _is_count(marker.get(key)):
-            problems.append(f"{where}: preview marker {key} must be a non-negative integer")
+            problems.append(
+                f"{where}: preview marker {key} must be a non-negative integer"
+            )
     if marker.get("output_type") != output_type:
         problems.append(f"{where}: preview marker has an invalid output_type")
     if not _is_revision(marker.get("output_revision")):
@@ -268,9 +274,7 @@ def _part_problems(part: Any, where: str, *, row_id: Any) -> list[str]:
     args_preview = part.get("chat_stream_args_preview")
     if args_preview is not None:
         if kind != "tool-call":
-            problems.append(
-                f"{where}: args preview is only valid on a tool-call part"
-            )
+            problems.append(f"{where}: args preview is only valid on a tool-call part")
         problems += _content_preview_problems(
             args_preview, f"{where} args", row_id=row_id, field="args"
         )
@@ -342,8 +346,12 @@ def _turn_problems(turn: Any, where: str) -> list[str]:
         problems.append(f"{where}: turn needs input_ids, a list of ids")
     if "origin" in turn:
         origin = turn["origin"]
-        if (not isinstance(origin, dict) or origin.get("kind") != "goal"
-                or not _is_id(origin.get("goal_id")) or not _is_id(origin.get("attempt_id"))):
+        if (
+            not isinstance(origin, dict)
+            or origin.get("kind") != "goal"
+            or not _is_id(origin.get("goal_id"))
+            or not _is_id(origin.get("attempt_id"))
+        ):
             problems.append(f"{where}: invalid turn origin")
     return problems
 
@@ -442,9 +450,11 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
     every input row has a lifecycle under the same id (a row under a
     second id is how a sent message shows twice), an input's state only moves
     forward (queued, then started or joined, then ended), an input ends once
-    and never changes after, and an input bound to a turn ends only after that
-    turn ends, whatever its outcome. With ``complete`` set, every input must
-    also have ended by the last event.
+    and never changes after, an input bound to a turn ends only after that
+    turn ends, whatever its outcome, an input that was queued does not complete
+    without a turn, and a turn that has ended never goes back
+    to running, in a turn.state event or a snapshot alike. With ``complete`` set,
+    every input must also have ended by the last event.
     """
     events = list(events)
     problems: list[str] = []
@@ -458,25 +468,85 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
     rows: set[str] = set()
     states: dict[str, list[str]] = {}
     turn_of: dict[str, str] = {}
+    terminal_info: dict[str, tuple[str | None, str]] = {}
     ended_turns: set[str] = set()
     last_seq = -1
     expected: int | None = None
 
-    def note_state(seq: Any, info: dict[str, Any]) -> None:
+    def note_state(seq: Any, info: dict[str, Any], *, snapshot: bool = False) -> None:
         seen = states.setdefault(info["id"], [])
+        turn_id = info.get("turn_id")
+        terminal = (turn_id, info.get("outcome"))
+        repeated_terminal_snapshot = (
+            snapshot
+            and info["state"] == "ended"
+            and bool(seen)
+            and seen[-1] == "ended"
+            and terminal_info.get(info["id"]) == terminal
+        )
+        if "ended" in seen and not repeated_terminal_snapshot:
+            problems.append(f"seq {seq}: input {info['id']} changed after it ended")
+        previous_state = seen[-1] if seen else None
         if seen and "ended" not in seen:
             last, state = seen[-1], info["state"]
-            if state != last and _STAGE[state] <= _STAGE[last]:
+            if (
+                last == "queued"
+                and state == "ended"
+                and info.get("outcome") == "completed"
+            ):
+                problems.append(
+                    f"seq {seq}: input {info['id']} went from queued to ended without starting or joining"
+                )
+            elif state != last and _STAGE[state] <= _STAGE[last]:
                 problems.append(
                     f"seq {seq}: input {info['id']} went from {last} to {state}"
                 )
-        seen.append(info["state"])
-        if info.get("turn_id"):
-            previous = turn_of.setdefault(info["id"], info["turn_id"])
-            if previous != info["turn_id"]:
-                problems.append(
-                    f"seq {seq}: input {info['id']} changed turn from {previous} to {info['turn_id']}"
+        if not repeated_terminal_snapshot:
+            seen.append(info["state"])
+        if info["state"] in ("started", "joined") and turn_id in ended_turns:
+            problems.append(
+                f"seq {seq}: input {info['id']} {info['state']} after turn {turn_id} ended"
+            )
+        if info["id"] in turn_of:
+            previous = turn_of[info["id"]]
+            if (
+                previous != turn_id
+                and previous_state != "ended"
+                and (
+                    _STAGE[info["state"]] > _STAGE[previous_state]
+                    or (
+                        info["state"] != "ended"
+                        and _STAGE[info["state"]] == _STAGE[previous_state]
+                    )
                 )
+            ):
+                problems.append(
+                    f"seq {seq}: input {info['id']} changed turn from {previous} to {turn_id}"
+                )
+        elif turn_id:
+            turn_of[info["id"]] = turn_id
+        if info["state"] == "ended":
+            terminal_info.setdefault(info["id"], terminal)
+            bound_turn = turn_of.get(info["id"])
+            # No turn: the daemon refused or cancelled the input, or recorded a
+            # message that asks for no reply and so was never queued.
+            if (
+                bound_turn is None
+                and info["outcome"] == "completed"
+                and previous_state not in (None, "ended")
+            ):
+                problems.append(f"seq {seq}: input {info['id']} ended without a turn")
+            elif bound_turn is not None and bound_turn not in ended_turns:
+                verb = "completed" if info["outcome"] == "completed" else "ended"
+                problems.append(
+                    f"seq {seq}: input {info['id']} {verb} before its turn {bound_turn} ended"
+                )
+
+    def note_turn(seq: Any, turn_id: Any, state: str) -> None:
+        if state == "running" and turn_id in ended_turns:
+            problems.append(f"seq {seq}: turn {turn_id} went from ended to running")
+        if state == "ended":
+            ended_turns.add(turn_id)
 
     def note_rows(new_rows: list[dict[str, Any]]) -> None:
         rows.clear()
@@ -511,12 +581,15 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
         last_seq = max(last_seq, seq)
         expected = data["next_seq"] if kind == "snapshot" else last_seq + 1
         if kind == "snapshot":
+            if data["next_seq"] <= seq:
+                problems.append(
+                    f"seq {seq}: snapshot next_seq must follow its event seq"
+                )
             note_rows(data["rows"])
             for turn in data["turns"]:
-                if turn.get("state") == "ended":
-                    ended_turns.add(turn.get("turn_id"))
+                note_turn(seq, turn["turn_id"], turn["state"])
             for info in data["inputs"]:
-                note_state(seq, info)
+                note_state(seq, info, snapshot=True)
         elif kind == "replace":
             note_rows(data["rows"])
         elif kind == "row.upsert":
@@ -529,17 +602,9 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
             elif kind == "row.delete":
                 rows.discard(data["id"])
         elif kind == "input.state":
-            if "ended" in states.get(data["id"], []):
-                problems.append(f"seq {seq}: input {data['id']} changed after it ended")
             note_state(seq, data)
-            turn = turn_of.get(data["id"])
-            if data["state"] == "ended" and turn and turn not in ended_turns:
-                verb = "completed" if data["outcome"] == "completed" else "ended"
-                problems.append(
-                    f"seq {seq}: input {data['id']} {verb} before its turn {turn} ended"
-                )
-        elif kind == "turn.state" and data["state"] == "ended":
-            ended_turns.add(data["turn_id"])
+        elif kind == "turn.state":
+            note_turn(seq, data["turn_id"], data["state"])
 
     for row_id in sorted(input_rows - set(states)):
         problems.append(
