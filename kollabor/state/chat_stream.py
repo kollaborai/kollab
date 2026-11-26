@@ -1870,12 +1870,23 @@ class ChatStreamService:
             if row.get("kind") == "marker"
             and row.get("parts") == compaction_marker_parts
         ]
+        cached_compaction_markers = [
+            row
+            for row in self._rows.get(uid, {}).values()
+            if row.get("kind") == "marker"
+            and row.get("parts") == compaction_marker_parts
+        ]
         if compaction_markers:
             marker = copy.deepcopy(compaction_markers[-1])
             compaction_marker_ids = {row["id"] for row in compaction_markers}
             rows = [row for row in rows if row.get("id") not in compaction_marker_ids]
             marker["seq"] = self._log(uid).next_seq
+        elif cached_compaction_markers:
+            marker = copy.deepcopy(cached_compaction_markers[-1])
+            compaction_marker_ids = {row["id"] for row in cached_compaction_markers}
+            marker["seq"] = self._log(uid).next_seq
         else:
+            compaction_marker_ids = set()
             marker = {
                 "id": f"marker-{uuid.uuid4().hex}",
                 "seq": self._log(uid).next_seq,
@@ -1898,6 +1909,7 @@ class ChatStreamService:
             ):
                 live_rows.append(row)
         rows = merge_chat_stream_rows(rows, live_rows)
+        rows = [row for row in rows if row.get("id") not in compaction_marker_ids]
         if marker["turn_id"] is None:
             marker["turn_id"] = active_turn
         replacement_rows = [marker, *rows][-REPLAY_WINDOW:]
@@ -2136,16 +2148,55 @@ class ChatStreamService:
                 return message.get(name, default)
             return getattr(message, name, default)
 
-        tool_results: dict[str, dict[str, Any]] = {}
-        for message in messages:
-            if field(message, "role") != "tool":
-                continue
+        def normalize_tool_id(value: Any) -> str | None:
+            if isinstance(value, int) and not isinstance(value, bool):
+                return str(value)
+            return value if isinstance(value, str) and value else None
+
+        def call_id_for(call: Any) -> str | None:
+            if not isinstance(call, dict):
+                return None
+            return normalize_tool_id(call.get("id") or call.get("tool_call_id"))
+
+        pending_tool_calls: dict[str, list[tuple[int, int, str | None]]] = {}
+        tool_results: dict[tuple[int, int], dict[str, Any]] = {}
+        for message_index, message in enumerate(messages):
+            role = field(message, "role")
             metadata = field(message, "metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
-            call_id = metadata.get("tool_call_id")
-            if not isinstance(call_id, str) or not call_id:
+            if role == "assistant":
+                calls = metadata.get("tool_calls")
+                if not isinstance(calls, list):
+                    continue
+                turn_id = self._event_turn_id(metadata)
+                for call_index, call in enumerate(calls):
+                    call_id = call_id_for(call)
+                    if call_id is None:
+                        continue
+                    pending_tool_calls.setdefault(call_id, []).append(
+                        (message_index, call_index, turn_id)
+                    )
                 continue
-            tool_results[call_id] = {
+            if role != "tool":
+                continue
+            call_id = normalize_tool_id(metadata.get("tool_call_id"))
+            owners = pending_tool_calls.get(call_id) if call_id is not None else None
+            if not owners:
+                continue
+            result_turn_id = self._event_turn_id(metadata)
+            owner_index = next(
+                (
+                    owner_index
+                    for owner_index in range(len(owners) - 1, -1, -1)
+                    if result_turn_id is None
+                    or owners[owner_index][2] == result_turn_id
+                ),
+                None,
+            )
+            if owner_index is None:
+                continue
+            assistant_index, call_index, _turn_id = owners.pop(owner_index)
+            tool_results[(assistant_index, call_index)] = {
                 "result": copy.deepcopy(field(message, "content", "")),
                 "is_error": metadata.get("is_error") is True
                 or metadata.get("status") == "failed",
@@ -2319,6 +2370,7 @@ class ChatStreamService:
             input_id = metadata.get("input_id")
             hub_message_id = metadata.get("hub_message_id")
             tool_id = metadata.get("tool_id")
+            calls = metadata.get("tool_calls")
             explicit_input_row_ids = False
             if kind == "input":
                 if isinstance(hub_message_id, str) and hub_message_id:
@@ -2334,7 +2386,13 @@ class ChatStreamService:
             elif kind == "reply":
                 explicit_reply_id = metadata.get("reply_id")
                 segment_index = None
-                if isinstance(turn_id, str) and turn_id:
+                skip_empty_tool_reply = (
+                    source_role == "assistant"
+                    and not parts
+                    and isinstance(calls, list)
+                    and bool(calls)
+                )
+                if isinstance(turn_id, str) and turn_id and not skip_empty_tool_reply:
                     segment_key = (turn_id, history_key)
                     segment_index = reply_segments.get(segment_key, 0)
                     reply_segments[segment_key] = segment_index + 1
@@ -2349,7 +2407,7 @@ class ChatStreamService:
                                 uid, turn_id, segment_index, history_key
                             )
                         )
-                        if turn_id is not None
+                        if turn_id is not None and not skip_empty_tool_reply
                         else None
                     )
                 )
@@ -2474,28 +2532,32 @@ class ChatStreamService:
                         }
                     )
             else:
-                rows.append(
-                    {
-                        "id": row_id,
-                        "seq": len(rows),
-                        "kind": kind,
-                        "role": role,
-                        "turn_id": turn_id,
-                        "status": str(row_status or "done"),
-                        "parts": parts,
-                        "created_at": timestamp,
-                    }
-                )
-            calls = metadata.get("tool_calls")
+                if not (
+                    kind == "reply"
+                    and source_role == "assistant"
+                    and not parts
+                    and isinstance(calls, list)
+                    and bool(calls)
+                ):
+                    rows.append(
+                        {
+                            "id": row_id,
+                            "seq": len(rows),
+                            "kind": kind,
+                            "role": role,
+                            "turn_id": turn_id,
+                            "status": str(row_status or "done"),
+                            "parts": parts,
+                            "created_at": timestamp,
+                        }
+                    )
             if source_role != "assistant" or not isinstance(calls, list):
                 continue
-            for call in calls:
+            for call_index, call in enumerate(calls):
                 if not isinstance(call, dict):
                     continue
-                call_id = call.get("id") or call.get("tool_call_id")
-                if isinstance(call_id, int) and not isinstance(call_id, bool):
-                    call_id = str(call_id)
-                if not isinstance(call_id, str) or not call_id:
+                call_id = call_id_for(call)
+                if call_id is None:
                     continue
                 name = call.get("name") or call.get("tool_name")
                 function = call.get("function")
@@ -2524,7 +2586,7 @@ class ChatStreamService:
                     "args": copy.deepcopy(args),
                 }
                 result = call.get("result")
-                native_result = tool_results.get(call_id)
+                native_result = tool_results.get((index, call_index))
                 if result is None and native_result is not None:
                     result = native_result["result"]
                 if result is not None:
