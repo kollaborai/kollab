@@ -1794,6 +1794,20 @@ class ChatStreamService:
         self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in replacement_rows}
         return event
 
+    def publish_conversation_reset(self) -> Event:
+        """Publish a replacement on the new UID so connected clients resnapshot."""
+        uid = self._conversation_uid()
+        rows = self._snapshot_rows(uid)
+
+        def store_rows(_event: Event) -> None:
+            self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in rows}
+
+        # The engine detects the new conversation UID on this live event and
+        # asks the daemon for a full snapshot, which also carries turns/inputs.
+        return self._log(uid).publish(
+            "replace", {"rows": rows}, on_commit=store_rows
+        )
+
     def _log(self, uid: str | None = None) -> ChatStreamLog:
         uid = uid or self._conversation_uid()
         if uid not in self._logs:

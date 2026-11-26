@@ -3226,7 +3226,17 @@ class LocalStateService(StateService):
         # Return a fresh conversation snapshot.
         if uses_acp:
             await self._restore_conversation_acp(acp)
-        return await self.get_conversation()
+        snapshot = await self.get_conversation()
+        chat_stream = getattr(self, "chat_stream", None)
+        publish_reset = getattr(chat_stream, "publish_conversation_reset", None)
+        conversation_uid = self.get_conversation_uid()
+        if (
+            callable(publish_reset)
+            and isinstance(conversation_uid, str)
+            and conversation_uid
+        ):
+            publish_reset()
+        return snapshot
 
     # === MCP writes (phase 4.5 step 7) ===
 
