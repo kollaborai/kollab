@@ -146,6 +146,7 @@ def test_hard_cap_retry_records_only_positions_retained_after_task_drop() -> Non
         pre_message_count=len(source_history),
         compaction_snapshot_count=len(source_history),
         compaction_retained_positions=original_retained_positions,
+        compaction_source_history=source_history,
     )
 
     summary = next(

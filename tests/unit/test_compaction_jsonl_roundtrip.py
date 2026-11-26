@@ -64,6 +64,17 @@ class TestCompactionSummaryPersists(unittest.TestCase):
                     summary_text=GO_BLOCK,
                     compaction_snapshot_count=52,
                     compaction_retained_positions=[0, 48, 49, 50, 51],
+                    compaction_id="compact-52",
+                    compaction_source_id="compact-51",
+                    compaction_snapshot_row_revision=9,
+                    compaction_retained_position_map={
+                        "0": 0,
+                        "48": 8,
+                        "49": 9,
+                        "50": 10,
+                        "51": 11,
+                    },
+                    compaction_output_count=12,
                 )
             )
             self.assertTrue(sf.exists())
@@ -78,6 +89,14 @@ class TestCompactionSummaryPersists(unittest.TestCase):
             self.assertEqual(
                 rec["compaction_retained_positions"], [0, 48, 49, 50, 51]
             )
+            self.assertEqual(rec["compaction_id"], "compact-52")
+            self.assertEqual(rec["compaction_source_id"], "compact-51")
+            self.assertEqual(rec["compaction_snapshot_row_revision"], 9)
+            self.assertEqual(
+                rec["compaction_retained_position_map"],
+                {"0": 0, "48": 8, "49": 9, "50": 10, "51": 11},
+            )
+            self.assertEqual(rec["compaction_output_count"], 12)
 
     def test_no_summary_text_no_content_key(self):
         # legacy/empty summary -> record shape unchanged

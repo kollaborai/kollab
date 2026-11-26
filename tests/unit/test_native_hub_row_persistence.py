@@ -187,9 +187,12 @@ def test_interrupted_native_hub_input_ends_failed_after_restart(tmp_path):
 
     resumed_manager = ConversationManager(config)
     assert resumed_manager.load_session(logger.session_id)
-    assert resumed_manager.chat_stream_rows == [
-        {**row, "status": "failed"}
-    ]
+    assert len(resumed_manager.chat_stream_rows) == 1
+    restored = resumed_manager.chat_stream_rows[0]
+    assert {
+        key: value for key, value in restored.items() if not key.startswith("_history_")
+    } == {**row, "status": "failed"}
+    assert restored["_history_row_revision"] == 1
 
     llm = SimpleNamespace(
         conversation_manager=resumed_manager,
@@ -280,6 +283,71 @@ def test_branch_excludes_hub_row_recorded_after_selected_message(tmp_path):
 
     assert result["success"] is True
     assert manager.chat_stream_rows == []
+
+
+def test_native_hub_rows_recorded_after_compaction_use_live_history_coordinates(
+    tmp_path,
+):
+    conversations = tmp_path / "conversations"
+    config = SimpleNamespace(
+        _conversations_dir=conversations,
+        get=lambda _key, default=None: default,
+    )
+    manager = ConversationManager(config)
+    # The manager's model transcript can lag the coordinator's list while a
+    # compaction has just swapped in the shorter history.
+    manager.messages = [
+        {"role": "user", "content": f"old message {index}", "metadata": {}}
+        for index in range(8)
+    ]
+    live_history = [
+        {
+            "uuid": "compact-summary-uuid",
+            "role": "user",
+            "content": "compacted summary",
+            "metadata": {
+                "context_compaction": True,
+                "compaction_id": "compact-live-current",
+            },
+        },
+        {
+            "uuid": "current-tail-uuid",
+            "role": "assistant",
+            "content": "current tail",
+            "metadata": {},
+        },
+    ]
+
+    row = manager.record_hub_chat_stream_row(
+        _hub_row(
+            "after-live-compaction",
+            kind="note",
+            created_at="2026-11-25T12:00:00Z",
+        ),
+        history=live_history,
+    )
+
+    assert row["_history_index"] == 2
+    assert row["_history_compaction_id"] == "compact-live-current"
+
+    manager.messages = live_history
+    logger = KollaborConversationLogger(conversations)
+    manager.conversation_logger = logger
+    assert manager.save_session(logger.session_id)
+
+    resumed = ConversationManager(config)
+    assert resumed.load_session(logger.session_id)
+    assert resumed.chat_stream_history_compaction_id == "compact-live-current"
+    assert resumed.chat_stream_history_length == 2
+    next_row = resumed.record_hub_chat_stream_row(
+        _hub_row(
+            "after-restart-compaction",
+            kind="note",
+            created_at="2026-11-25T12:00:01Z",
+        )
+    )
+    assert next_row["_history_index"] == 2
+    assert next_row["_history_compaction_id"] == "compact-live-current"
 
 
 def test_compaction_replacement_drops_old_persisted_hub_rows():
@@ -483,6 +551,12 @@ def test_repeated_live_compaction_remaps_hub_row_into_current_history_coordinate
     )
     row["_history_row_revision"] = 1
     manager = SimpleNamespace(messages=[], chat_stream_rows=[row])
+
+    def set_history_coordinate(compaction_id, history_length):
+        manager.chat_stream_history_compaction_id = compaction_id
+        manager.chat_stream_history_length = history_length
+
+    manager.set_chat_stream_history_coordinate = set_history_coordinate
     first_summary = SimpleNamespace(
         role="user",
         content="first summary",
@@ -518,6 +592,8 @@ def test_repeated_live_compaction_remaps_hub_row_into_current_history_coordinate
 
     assert manager.chat_stream_rows[0]["_history_index"] == 2
     assert manager.chat_stream_rows[0]["_history_compaction_id"] == "compact-one"
+    assert manager.chat_stream_history_compaction_id == "compact-one"
+    assert manager.chat_stream_history_length == 3
 
     second_summary = SimpleNamespace(
         role="user",
@@ -547,6 +623,8 @@ def test_repeated_live_compaction_remaps_hub_row_into_current_history_coordinate
         row["id"] for row in replacement["data"]["rows"]
     }
     assert manager.chat_stream_rows == []
+    assert manager.chat_stream_history_compaction_id == "compact-two"
+    assert manager.chat_stream_history_length == 2
 
 
 def test_repeated_compaction_rows_are_filtered_sequentially_after_restart(tmp_path):
@@ -598,6 +676,14 @@ def test_repeated_compaction_rows_are_filtered_sequentially_after_restart(tmp_pa
     assert resumed_manager.load_session(logger.session_id)
 
     assert resumed_manager.chat_stream_rows == []
+    summary = next(
+        message
+        for message in resumed_manager.messages
+        if message.get("metadata", {}).get("context_compaction")
+    )
+    assert summary["metadata"]["compaction_id"] == "compact-two"
+    assert summary["metadata"]["compaction_source_id"] == "compact-one"
+    assert summary["metadata"]["compaction_retained_position_map"] == {"0": 0}
 
 
 def test_compacted_hub_rows_filter_from_saved_base_without_stream_tail(tmp_path):
