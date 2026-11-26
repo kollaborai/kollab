@@ -309,6 +309,26 @@ def test_snapshot_keeps_a_running_goal_turn_without_rows_or_inputs():
     assert turns == [goal_turn]
 
 
+def test_snapshot_keeps_a_rowless_running_non_goal_turn():
+    state = _State([])
+    stream = ChatStreamService(state)
+    uid = state.get_conversation_uid()
+    running_turn = {
+        "turn_id": "rowless-native-turn",
+        "state": "running",
+        "input_ids": [],
+    }
+    stream._turns[uid] = {running_turn["turn_id"]: running_turn}
+
+    rows, turns, inputs, _state = stream._snapshot_components(
+        uid, transcript_rows=[], row_byte_budget=0
+    )
+
+    assert rows == []
+    assert inputs == []
+    assert turns == [running_turn]
+
+
 def test_snapshot_pages_the_window_when_its_row_budget_trims_every_row(monkeypatch):
     state = _State([])
     stream = ChatStreamService(state)
