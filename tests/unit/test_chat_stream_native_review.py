@@ -365,7 +365,22 @@ async def test_plugin_add_message_projects_its_displayable_user_text_live():
 
     result = await MessageHandler(coordinator).handle_add_message(
         {
-            "messages": [{"role": "user", "content": "plugin message"}],
+            "messages": [
+                {"role": "user", "content": "plugin message"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "plugin caption"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "kind": "url",
+                                "url": "https://example.invalid/photo.png",
+                            },
+                        },
+                    ],
+                },
+            ],
             "options": {
                 "show_loading": False,
                 "log_messages": False,
@@ -379,10 +394,20 @@ async def test_plugin_add_message_projects_its_displayable_user_text_live():
     rows = _row_events(events, "input")
     assert result["success"] is True
     latest_rows = {row["id"]: row for row in rows}
-    assert len(latest_rows) == 1
-    assert [part.get("text") for part in next(iter(latest_rows.values()))["parts"]] == [
-        "plugin message"
+    assert len(latest_rows) == 2
+    text_by_id = {
+        row_id: [part.get("text") for part in row["parts"] if part["type"] == "text"]
+        for row_id, row in latest_rows.items()
+    }
+    assert sorted(tuple(texts) for texts in text_by_id.values()) == [
+        ("plugin caption",),
+        ("plugin message",),
     ]
+    assert all(
+        "[image" not in part.get("text", "")
+        for row in latest_rows.values()
+        for part in row["parts"]
+    )
     assert sequence_problems(events, complete=False) == []
 
 
