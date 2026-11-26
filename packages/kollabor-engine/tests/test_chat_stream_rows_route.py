@@ -129,6 +129,37 @@ def test_rows_route_materializes_queue_image_refs_for_authenticated_fetch(monkey
     )
 
 
+def test_rows_route_materializes_tool_output_preview_session_identity(monkeypatch):
+    row = _row("tool-row-1", 1)
+    row.update({"kind": "tool", "role": "assistant"})
+    row["parts"] = [
+        {
+            "type": "tool-call",
+            "tool_call_id": "call-1",
+            "result": {
+                "kind": "chat-stream-tool-output-preview",
+                "row_id": "tool-row-1",
+                "tool_call_id": "call-1",
+                "output_bytes": 100,
+                "output_chars": 100,
+                "output_type": "text",
+                "preview": "preview",
+            },
+        }
+    ]
+    client, _session = _install_client(
+        monkeypatch,
+        bypass_auth=True,
+        responses={None: {"rows": [row], "older": None}},
+    )
+
+    response = client.get("/sessions/s1/rows")
+
+    assert response.status_code == 200
+    result = response.json()["rows"][0]["parts"][0]["result"]
+    assert result["session_id"] == "s1"
+
+
 def test_rows_route_returns_409_for_a_stale_cursor_after_compaction(monkeypatch):
     client, _session = _install_client(
         monkeypatch,
