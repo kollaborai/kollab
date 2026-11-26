@@ -89,6 +89,127 @@ def test_large_text_reasoning_and_tool_args_use_fetchable_previews():
     assert "args" in tool_part
 
 
+def test_compact_row_marks_every_truncated_text_part_for_retrieval():
+    parts = [
+        {"type": "text", "text": f"part {index}:" + (chr(65 + index % 26) * 10_000)}
+        for index in range(30)
+    ]
+    row = _row(parts)
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),
+        get_conversation_uid=lambda: "content-preview-test",
+    )
+    service = ChatStreamService(state)
+    service._upsert("content-preview-test", row)
+    projected = service._log("content-preview-test")._events[-1]["data"]
+
+    assert len(projected["parts"]) == len(parts)
+    for part_index, (part, original) in enumerate(
+        zip(projected["parts"], parts, strict=True)
+    ):
+        marker = part.get("chat_stream_content_preview")
+        assert isinstance(marker, dict)
+        assert marker["kind"] == "chat-stream-content-preview"
+        assert marker["row_id"] == row["id"]
+        assert marker["part_index"] == part_index
+        assert marker["field"] == "text"
+        chunks = []
+        offset = 0
+        while True:
+            chunk = service.get_content(
+                {
+                    "row_id": row["id"],
+                    "part_index": part_index,
+                    "field": "text",
+                    "output_revision": marker["output_revision"],
+                    "offset": offset,
+                    "limit": 32_768,
+                }
+            )
+            chunks.append(chunk["content"])
+            if chunk["done"]:
+                break
+            offset = chunk["next_offset"]
+        assert "".join(chunks) == original["text"]
+
+
+def test_append_to_preview_row_invalidates_cache_and_publishes_new_marker():
+    original_text = "initial " * 40_000
+    row = _row(
+        [
+            {"type": "text", "text": original_text},
+            {"type": "image", "url": "data:image/png;base64," + "A" * 300_000},
+        ]
+    )
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),
+        get_conversation_uid=lambda: "content-preview-test",
+    )
+    service = ChatStreamService(state)
+    service._upsert("content-preview-test", row)
+    log = service._log("content-preview-test")
+    initial_event = log._events[-1]
+    initial_marker = initial_event["data"]["chat_stream_parts_preview"]
+
+    # Prime the parts fingerprint cache using the exact list that row.append
+    # will mutate in place.
+    initial_page = service.get_parts(
+        {
+            "row_id": row["id"],
+            "output_revision": initial_marker["output_revision"],
+            "offset": 0,
+            "limit": 1,
+        }
+    )
+    assert initial_page["next_offset"] == 1
+
+    service.record_event(
+        "row.append", {"id": row["id"], "part": 0, "text": "appended tail"}
+    )
+    appended_event = log._events[-1]
+
+    assert appended_event["type"] == "row.upsert"
+    updated_marker = appended_event["data"]["chat_stream_parts_preview"]
+    assert updated_marker["output_revision"] != initial_marker["output_revision"]
+    assert service.get_parts(
+        {
+            "row_id": row["id"],
+            "output_revision": initial_marker["output_revision"],
+            "offset": 0,
+            "limit": 1,
+        }
+    ) == {"error": "output_changed"}
+
+    updated_page = service.get_parts(
+        {
+            "row_id": row["id"],
+            "output_revision": updated_marker["output_revision"],
+            "offset": 0,
+            "limit": 1,
+        }
+    )
+    part_marker = updated_page["parts"][0]["chat_stream_part_preview"]
+    chunks = []
+    offset = 0
+    while True:
+        chunk = service.get_content(
+            {
+                "row_id": row["id"],
+                "part_index": 0,
+                "field": "part",
+                "output_revision": part_marker["output_revision"],
+                "offset": offset,
+                "limit": 32_768,
+            }
+        )
+        chunks.append(chunk["content"])
+        if chunk["done"]:
+            break
+        offset = chunk["next_offset"]
+    recovered = json.loads("".join(chunks))
+    assert recovered["text"].endswith("appended tail")
+
+
 def test_chat_content_chunks_round_trip_and_reject_stale_revision():
     text = "reply 🌵\n" * 8_000
     reasoning = "private reasoning " * 8_000
