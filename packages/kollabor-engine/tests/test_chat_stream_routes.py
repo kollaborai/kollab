@@ -986,8 +986,34 @@ def test_stream_recovers_dropped_tail_even_without_a_later_chat_event(monkeypatc
     session = _Session()
     session.queue = DaemonEventQueue()
     session.rpc.subscribe_results = [
-        {"events": [{"seq": 7, "conversation_uid": "conv-1", "generation": "daemon-1", "type": "snapshot", "data": {"rows": [], "next_seq": 8, "older": None, "turns": [], "inputs": []}}]},
-        {"events": [{"seq": 8, "conversation_uid": "conv-1", "generation": "daemon-1", "type": "row.delete", "data": {"id": "lost"}}]},
+        {
+            "events": [
+                {
+                    "seq": 7,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 8,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        },
+        {
+            "events": [
+                {
+                    "seq": 8,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "row.delete",
+                    "data": {"id": "lost"},
+                }
+            ]
+        },
     ]
     monkeypatch.setattr(stream, "_get_rpc", lambda _session_id: (session, session.rpc))
 

@@ -247,6 +247,14 @@ async def test_send_now_selects_one_input_from_a_shared_batch():
     assert [handoff.request_id for _, handoff, _ in state.dispatches] == [
         "web-selected"
     ]
+    assert sent["result"]["accepted"] is True
+    async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
+        snapshot = await queue.snapshot()
+    assert [item.request_id for batch in snapshot.batches for item in batch.items] == [
+        "web-seed",
+        "web-first",
+        "web-last",
+    ]
 
 
 @pytest.mark.asyncio
@@ -278,14 +286,6 @@ async def test_send_now_reports_dispatch_unavailable_without_ending_queued_input
     async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
         snapshot = await queue.snapshot()
     assert snapshot.batches[0].request_ids == ("web-still-queued",)
-    assert sent["result"]["accepted"] is True
-    async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
-        snapshot = await queue.snapshot()
-    assert [item.request_id for batch in snapshot.batches for item in batch.items] == [
-        "web-seed",
-        "web-first",
-        "web-last",
-    ]
 
 
 @pytest.mark.asyncio
