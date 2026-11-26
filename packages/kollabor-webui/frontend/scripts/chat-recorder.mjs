@@ -159,8 +159,8 @@ function installRecorder(cfg) {
     const calls = rec.goalTurn ? rec.pendingToolCalls.filter((call) => call.turn_id === rec.goalTurn) : [];
     const counts = new Map();
     for (const card of cards) {
-      const { chatTurnId, chatRowId, chatToolCallId } = card.dataset;
-      if (chatTurnId !== rec.goalTurn || !calls.some((call) => call.id === chatToolCallId && call.rows?.includes(chatRowId))) continue;
+      const { chatToolCallId } = card.dataset;
+      if (!calls.some((call) => call.id === chatToolCallId)) continue;
       counts.set(chatToolCallId, (counts.get(chatToolCallId) ?? 0) + 1);
     }
     const toolsDrawn = [...counts.values()].reduce((sum, count) => sum + count, 0);
@@ -428,7 +428,7 @@ function installRecorder(cfg) {
       }
       if (!viewport || !viewport.isConnected) viewport = findViewport(all[all.length - 1]);
       const errors = [...document.querySelectorAll(".aui-message-error-root")];
-      const goalTools = rec.goalMode ? rec.goalToolSample(document.querySelectorAll('[data-chat-tool-call-id][data-chat-row-id][data-chat-turn-id]')) : null;
+      const goalTools = rec.goalMode ? rec.goalToolSample(document.querySelectorAll('[data-chat-tool-call-id]')) : null;
       const frame = {
         n: all.length, rows, texts, fading, users, replies, toolsDrawn, toolsStarted: rec.toolsStarted,
         ...(goalTools ?? {}),
@@ -872,36 +872,61 @@ async function record(flow, session, browser, target) {
       if (activeRuntime !== "native") throw new Error("goal-reload is unsupported for ACP: persisted goals are unavailable");
       await command(`/goal ${U(1)}: Use your terminal tool to run ` + "`sleep 10`" + `, then complete this goal with a concise report containing exactly ${R(1)}.`, "PAGE START GOAL");
       let expectedGoal;
-      await reloadDuringRun(R(1), {
-        allowEmptyInputs: true,
-        before: async (turn, stream) => {
-          expectedGoal = await readPersistedGoal();
-          if (!hasMatchingGoalTurn(stream, expectedGoal, turn) ||
-              !hasMatchingGoalTurn(await currentStreamState(), expectedGoal, turn)) {
-            throw new Error("goal reload proof inconclusive: persisted goal and running stream turn do not match before reload");
+      let proofFailure = null;
+      try {
+        await reloadDuringRun(R(1), {
+          allowEmptyInputs: true,
+          before: async (turn, stream) => {
+            expectedGoal = await readPersistedGoal();
+            if (!hasMatchingGoalTurn(stream, expectedGoal, turn) ||
+                !hasMatchingGoalTurn(await currentStreamState(), expectedGoal, turn)) {
+              throw new Error("goal reload proof inconclusive: persisted goal and running stream turn do not match before reload");
+            }
+            await mark(`GOAL VERIFIED ${turn.turn_id}`);
+            await mark(`GOAL BEFORE ${JSON.stringify({ persisted: expectedGoal, turn, conversation_uid: stream.conversation_uid })}`);
+          },
+          after: async (turn, snapshot, stream) => {
+            const restored = await readPersistedGoal();
+            if (!hasMatchingGoalTurn(snapshot, restored, turn) ||
+                !hasMatchingGoalTurn(stream, restored, turn) ||
+                !hasMatchingGoalTurn(await currentStreamState(), restored, turn) ||
+                restored.conversation_uid !== expectedGoal.conversation_uid ||
+                restored.goal.goal_id !== expectedGoal.goal.goal_id ||
+                restored.goal.attempt.attempt_id !== expectedGoal.goal.attempt.attempt_id ||
+                restored.goal.attempt.turn_id !== expectedGoal.goal.attempt.turn_id) {
+              throw new Error("goal reload proof inconclusive: persisted goal or running turn changed during reload");
+            }
+            const reloadedTurn = snapshot.turns.find((item) => item.turn_id === turn.turn_id);
+            await mark(`GOAL AFTER ${JSON.stringify({ persisted: restored, turn: reloadedTurn, conversation_uid: snapshot.conversation_uid })}`);
+          },
+        });
+        const observed = typeof page !== "undefined" && await page.evaluate(() =>
+          window.__rec.goalCardsObserved && !window.__rec.sampleError &&
+          window.__rec.pendingToolCalls.some((call) => call.turn_id === window.__rec.goalTurn));
+        if (!observed) throw new Error("goal reload proof inconclusive: rendered tool cards cannot be associated with the verified goal turn");
+      } catch (error) {
+        proofFailure = error;
+        throw error;
+      } finally {
+        try {
+          let persisted = await readPersistedGoal();
+          if (persisted?.goal) {
+            await command("/goal clear", "PAGE CLEANUP /goal clear");
+            const cleanupDeadline = Date.now() + 60000;
+            while (persisted?.goal && Date.now() < cleanupDeadline) {
+              await sleep(500);
+              persisted = await readPersistedGoal();
+            }
+            if (persisted?.goal) {
+              throw new Error("timed out waiting for /goal clear to remove the persisted goal");
+            }
           }
-          await mark(`GOAL VERIFIED ${turn.turn_id}`);
-          await mark(`GOAL BEFORE ${JSON.stringify({ persisted: expectedGoal, turn, conversation_uid: stream.conversation_uid })}`);
-        },
-        after: async (turn, snapshot, stream) => {
-          const restored = await readPersistedGoal();
-          if (!hasMatchingGoalTurn(snapshot, restored, turn) ||
-              !hasMatchingGoalTurn(stream, restored, turn) ||
-              !hasMatchingGoalTurn(await currentStreamState(), restored, turn) ||
-              restored.conversation_uid !== expectedGoal.conversation_uid ||
-              restored.goal.goal_id !== expectedGoal.goal.goal_id ||
-              restored.goal.attempt.attempt_id !== expectedGoal.goal.attempt.attempt_id ||
-              restored.goal.attempt.turn_id !== expectedGoal.goal.attempt.turn_id) {
-            throw new Error("goal reload proof inconclusive: persisted goal or running turn changed during reload");
-          }
-          const reloadedTurn = snapshot.turns.find((item) => item.turn_id === turn.turn_id);
-          await mark(`GOAL AFTER ${JSON.stringify({ persisted: restored, turn: reloadedTurn, conversation_uid: snapshot.conversation_uid })}`);
-        },
-      });
-      const observed = typeof page !== "undefined" && await page.evaluate(() =>
-        window.__rec.goalCardsObserved && !window.__rec.sampleError &&
-        window.__rec.pendingToolCalls.some((call) => call.turn_id === window.__rec.goalTurn));
-      if (!observed) throw new Error("goal reload proof inconclusive: rendered tool cards cannot be associated with the verified goal turn");
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          const original = proofFailure instanceof Error ? `; original proof failure: ${proofFailure.message}` : "";
+          throw new Error(`goal reload cleanup failed: ${detail}${original}`);
+        }
+      }
     },
     // Inject a real hub message while the page's turn is still running.
     async "hub-note"() {
