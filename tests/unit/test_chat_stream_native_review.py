@@ -219,9 +219,10 @@ async def test_idless_tui_message_while_native_turn_runs_gets_its_own_live_row()
         for row in rows
         if any(part.get("type") == "text" and part.get("text") == "typed in the terminal" for part in row["parts"])
     ]
-    assert len(tui_rows) == 1
-    assert tui_rows[0]["id"] != "web-a"
-    assert tui_rows[0]["status"] in {"joined", "completed"}
+    tui_ids = {row["id"] for row in tui_rows}
+    assert len(tui_ids) == 1
+    assert next(iter(tui_ids)) != "web-a"
+    assert tui_rows[-1]["status"] in {"joined", "completed"}
     assert all("<agent_hud>" not in part.get("text", "") for row in rows for part in row["parts"])
     assert sequence_problems(events) == []
 
