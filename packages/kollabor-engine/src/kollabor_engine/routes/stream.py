@@ -241,6 +241,7 @@ async def chat_stream(
     async def event_generator():
         last_seq = -1
         last_uid = conversation_uid
+        received_initial_cursor = False
         try:
             for event in initial:
                 seq = event.get("seq")
@@ -254,7 +255,15 @@ async def chat_stream(
                 if seq <= last_seq:
                     continue
                 last_seq, last_uid = _cursor_after(event), uid
+                received_initial_cursor = True
                 yield _sse_event(event)
+            if (
+                not received_initial_cursor
+                and isinstance(after, int)
+                and not isinstance(after, bool)
+                and after >= 0
+            ):
+                last_seq = after
 
             while not await request.is_disconnected():
                 try:

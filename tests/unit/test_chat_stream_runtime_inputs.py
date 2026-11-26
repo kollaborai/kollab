@@ -122,6 +122,37 @@ async def test_input_admission_and_cancel_keep_the_clients_id_in_the_queue():
 
 
 @pytest.mark.asyncio
+async def test_send_now_after_cancel_reports_the_owned_ended_input():
+    server, state, _runtime = _server_and_runtime()
+    added = await _call(
+        server,
+        "state.chat_stream.add_input",
+        {"id": "web-cancelled", "text": "hello", "attachments": []},
+    )
+    cancelled = await _call(
+        server,
+        "state.chat_stream.cancel_queued_input",
+        {"id": "web-cancelled"},
+    )
+
+    sent = await _call(
+        server,
+        "state.chat_stream.send_now",
+        {"id": "web-cancelled"},
+    )
+
+    assert added["result"] == {"id": "web-cancelled", "state": "queued"}
+    assert cancelled["result"] == {"found": True, "cancelled": True}
+    assert sent["error"] is None
+    assert sent["result"] == {
+        "found": True,
+        "accepted": False,
+        "state": "ended",
+    }
+    assert state.dispatches == []
+
+
+@pytest.mark.asyncio
 async def test_send_now_dispatches_only_the_input_named_by_the_client():
     server, state, _runtime = _server_and_runtime()
     body = {"id": "web-a1", "text": "send now", "attachments": []}

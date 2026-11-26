@@ -568,18 +568,25 @@ class ChatStreamService:
         uid = self._conversation_uid()
         runtime = self._queue_runtime()
         scope = await runtime.input_scope(uid)
-        current = self._inputs.get(uid, {}).get(input_id, {})
-        if current.get("state") in {"started", "joined", "ended"} and current.get(
-            "turn_id"
-        ):
+
+        def moved_input_result() -> dict[str, Any] | None:
+            current = self._inputs.get(uid, {}).get(input_id, {})
+            state = current.get("state")
+            turn_id = current.get("turn_id")
+            if state not in {"started", "joined", "ended"} or (
+                state != "ended" and not turn_id
+            ):
+                return None
             if self._input_scopes.get((uid, input_id)) != scope:
                 return {"found": False}
-            return {
-                "found": True,
-                "accepted": False,
-                "state": current["state"],
-                "turn_id": current["turn_id"],
-            }
+            result = {"found": True, "accepted": False, "state": state}
+            if isinstance(turn_id, str) and turn_id:
+                result["turn_id"] = turn_id
+            return result
+
+        current_result = moved_input_result()
+        if current_result is not None:
+            return current_result
         result = await runtime.send_now({"id": input_id})
         if await runtime.input_scope(uid) != scope:
             return {"found": False}
@@ -587,17 +594,10 @@ class ChatStreamService:
         owner = self._input_scopes.get((uid, input_id))
         if owner != scope:
             return {"found": False}
-        if (
-            (not isinstance(result, dict) or result.get("found") is not True)
-            and current.get("state") in {"started", "joined", "ended"}
-            and current.get("turn_id")
-        ):
-            return {
-                "found": True,
-                "accepted": False,
-                "state": current["state"],
-                "turn_id": current["turn_id"],
-            }
+        if not isinstance(result, dict) or result.get("found") is not True:
+            current_result = moved_input_result()
+            if current_result is not None:
+                return current_result
         if not isinstance(result, dict) or result.get("found") is not True:
             return {"found": False}
         state = result.get("state")
