@@ -88,6 +88,37 @@ describe("chat stream contract", () => {
     }))).toBe(true);
   });
 
+  it("keeps tool args opaque and validates the dedicated args preview marker", () => {
+    const markerShapedUserArgs = {
+      kind: "chat-stream-content-preview",
+      field: "args",
+      application_value: "user supplied data",
+    };
+    expect(isChatStreamEvent(upsert({
+      ...ROW,
+      parts: [{
+        type: "tool-call", tool_call_id: "call-user", tool_name: "inspect",
+        args: markerShapedUserArgs,
+      }],
+    }))).toBe(true);
+
+    const marker = contentPreview("args");
+    expect(isChatStreamEvent(upsert({
+      ...ROW,
+      parts: [{
+        type: "tool-call", tool_call_id: "call-large", tool_name: "inspect",
+        args: {}, chat_stream_args_preview: marker,
+      }],
+    }))).toBe(true);
+    expect(isChatStreamEvent(upsert({
+      ...ROW,
+      parts: [{
+        type: "tool-call", tool_call_id: "call-large", tool_name: "inspect",
+        args: {}, chat_stream_args_preview: contentPreview("text"),
+      }],
+    }))).toBe(false);
+  });
+
   it("rejects preview markers whose row identity disagrees with their row", () => {
     expect(isChatStreamEvent(upsert({
       ...ROW,

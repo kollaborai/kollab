@@ -126,6 +126,53 @@ describe("toThreadMessageLike", () => {
     });
   });
 
+  it("passes the dedicated args marker through provider metadata without inspecting args", () => {
+    const marker = {
+      kind: "chat-stream-content-preview" as const,
+      session_id: "session-args",
+      row_id: "row-args",
+      part_index: 0,
+      field: "args" as const,
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "json" as const,
+      output_revision: "b".repeat(64),
+      preview: '{"bounded":true}',
+    };
+    const markerShapedUserArgs = {
+      kind: "chat-stream-content-preview",
+      field: "args",
+      application_value: "user supplied data",
+    };
+    const message = toThreadMessageLike(row("row-args", [{
+      type: "tool-call",
+      tool_call_id: "call-large",
+      tool_name: "inspect",
+      args: {},
+      chat_stream_args_preview: marker,
+    }]));
+    const toolPart = message.content[0];
+    expect(toolPart).toMatchObject({
+      type: "tool-call",
+      args: {},
+      providerMetadata: { kollab: { chat_stream_args_preview: marker } },
+    });
+
+    const opaqueMessage = toThreadMessageLike(row("row-opaque", [{
+      type: "tool-call",
+      tool_call_id: "call-opaque",
+      tool_name: "inspect",
+      args: markerShapedUserArgs,
+    }]));
+    expect(opaqueMessage.content[0]).toMatchObject({
+      type: "tool-call",
+      providerMetadata: undefined,
+    });
+    expect(opaqueMessage.content[0]).toMatchObject({
+      argsText: JSON.stringify(markerShapedUserArgs),
+    });
+  });
+
   it("carries a row-parts page marker in message metadata and part recovery in provider metadata", () => {
     const partsPreview = {
       kind: "chat-stream-parts-preview",
