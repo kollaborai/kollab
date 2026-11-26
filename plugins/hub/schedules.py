@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 MIN_INTERVAL_SECONDS = 1.0
 WHEN_BUSY_CHOICES = ("queue", "new_instance")
+RETRY_INITIAL_SECONDS = 30.0
 
 # fire(row, agent, due, now) -> (ok, error). `due` is the grid point the fire
 # stands for; `now` is when it actually went out.
@@ -154,6 +155,7 @@ class RunLog:
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
         self._last: Optional[Dict[str, dict]] = None
+        self._last_by_agent: Optional[Dict[Tuple[str, str], dict]] = None
 
     def append(self, record: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,25 +163,45 @@ class RunLog:
             handle.write(json.dumps(record, separators=(",", ":")) + "\n")
         if self._last is not None:
             self._last[str(record.get("id"))] = record
+        if self._last_by_agent is not None:
+            self._last_by_agent[(str(record.get("id")), str(record.get("agent")))] = record
+
+    def _load_index(self) -> None:
+        if self._last is not None:
+            return
+        last: Dict[str, dict] = {}
+        by_agent: Dict[Tuple[str, str], dict] = {}
+        try:
+            lines = self._path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            schedule_id = str(record.get("id"))
+            agent = str(record.get("agent"))
+            last[schedule_id] = record
+            by_agent[(schedule_id, agent)] = record
+        self._last = last
+        self._last_by_agent = by_agent
 
     def last_run(self, schedule_id: str) -> Optional[dict]:
-        if self._last is None:
-            index: Dict[str, dict] = {}
-            try:
-                for line in self._path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(record, dict):
-                        index[str(record.get("id"))] = record
-            except OSError:
-                pass
-            self._last = index
+        self._load_index()
+        assert self._last is not None
         return self._last.get(schedule_id)
+
+    def last_run_for(self, schedule_id: str, agent: str) -> Optional[dict]:
+        """The last attempt for one agent, including its pending retry data."""
+        self._load_index()
+        assert self._last_by_agent is not None
+        return self._last_by_agent.get((schedule_id, agent))
 
 
 class ScheduleTimer:
@@ -208,6 +230,8 @@ class ScheduleTimer:
         self._device_name = device_name
         self._clock = clock or time.time
         self._wake = asyncio.Event()
+        # (schedule id, agent) -> (retry time, original grid point, prior delay)
+        self._retries: Dict[Tuple[str, str], Tuple[float, float, float]] = {}
 
     # -- ownership -----------------------------------------------------
 
@@ -256,19 +280,47 @@ class ScheduleTimer:
                 logger.warning("schedules: %s skipped: bad interval", row.id)
                 continue
             if due <= now:
+                # The next grid point supersedes any pending retry from the
+                # previous interval; this fire is the new scheduled attempt.
+                for agent in owned:
+                    self._retries.pop((row.id, agent), None)
                 due_rows.append((row, owned, due))
-            elif upcoming is None or due < upcoming:
-                upcoming = due
+            else:
+                if upcoming is None or due < upcoming:
+                    upcoming = due
+                # Retry a failed agent before the next grid point. Other
+                # agents in the same row keep their own delivery state.
+                for agent in owned:
+                    retry = self._retries.get((row.id, agent))
+                    if retry is None:
+                        last = self._runs.last_run_for(row.id, agent)
+                        if (
+                            last
+                            and last.get("result") == "error"
+                            and isinstance(last.get("retry_at"), (int, float))
+                            and isinstance(last.get("retry_due"), (int, float))
+                            and isinstance(last.get("retry_delay"), (int, float))
+                        ):
+                            retry = (
+                                float(last["retry_at"]),
+                                float(last["retry_due"]),
+                                float(last["retry_delay"]),
+                            )
+                            self._retries[(row.id, agent)] = retry
+                    if retry is None:
+                        continue
+                    retry_at, retry_due, _delay = retry
+                    if retry_at >= due:
+                        self._retries.pop((row.id, agent), None)
+                    elif retry_at <= now:
+                        due_rows.append((row, [agent], retry_due))
+                    elif upcoming is None or retry_at < upcoming:
+                        upcoming = retry_at
 
         for row, owned, due in due_rows:
             logger.info(
                 "schedules: %s due at %.0f, firing for %s", row.id, due, owned
             )
-            # A fired row owes its next grid point too, so the timer knows
-            # when to wake up again.
-            nxt = due + row.interval_seconds
-            if upcoming is None or nxt < upcoming:
-                upcoming = nxt
             for agent in owned:
                 fired_at = self._clock()
                 try:
@@ -276,16 +328,46 @@ class ScheduleTimer:
                 except Exception as exc:  # a failing fire must not kill the timer
                     ok, error = False, f"fire failed ({type(exc).__name__})"
                     logger.warning("schedules: %s fire error: %s", row.id, exc)
-                self._runs.append(
-                    {
-                        "id": row.id,
-                        "agent": agent,
-                        "due": due,
-                        "fired_at": fired_at,
-                        "result": "ok" if ok else "error",
-                        "error": error or "",
-                    }
-                )
+                key = (row.id, agent)
+                record = {
+                    "id": row.id,
+                    "agent": agent,
+                    "due": due,
+                    "fired_at": fired_at,
+                    "result": "ok" if ok else "error",
+                    "error": error or "",
+                }
+                if ok:
+                    self._retries.pop(key, None)
+                else:
+                    previous = self._retries.get(key)
+                    delay = (
+                        RETRY_INITIAL_SECONDS
+                        if previous is None
+                        else previous[2] * 2
+                    )
+                    retry_at = fired_at + delay
+                    next_grid = next_due_time(
+                        row.anchor, row.interval_seconds, fired_at
+                    )
+                    if retry_at < next_grid:
+                        self._retries[key] = (retry_at, due, delay)
+                        record.update(
+                            retry_at=retry_at,
+                            retry_due=due,
+                            retry_delay=delay,
+                        )
+                        if upcoming is None or retry_at < upcoming:
+                            upcoming = retry_at
+                    else:
+                        self._retries.pop(key, None)
+                self._runs.append(record)
+
+                # A catch-up fire resumes on the first grid point after now,
+                # while an on-time fire resumes at the following grid point.
+                nxt = next_due_time(row.anchor, row.interval_seconds, fired_at)
+                if upcoming is None or nxt < upcoming:
+                    upcoming = nxt
 
         if upcoming is None:
             return None
