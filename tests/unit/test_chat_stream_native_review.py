@@ -16,6 +16,7 @@ from kollabor_ai.message_content import combine_message_contents
 from kollabor_events.chat_stream import sequence_problems
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import DisplayTap, publish_semantic
+from kollabor_tui.turn_context import current_turn
 
 
 class _QueueRuntime:
@@ -305,10 +306,14 @@ async def test_dropped_unbound_input_does_not_end_running_native_turn():
     )
     publish_semantic(tap, "token", text="still working", turn_id="native-active")
     processor = _processor(state)
-    processor._end_dropped(
-        TaggedInput("later input", ("voice-dropped",)),
-        "Queue full",
-    )
+    token = current_turn.set({})
+    try:
+        processor._end_dropped(
+            TaggedInput("later input", ("voice-dropped",)),
+            "Queue full",
+        )
+    finally:
+        current_turn.reset(token)
 
     snapshot = stream.subscribe({})["events"][0]["data"]
     turns = {turn["turn_id"]: turn for turn in snapshot["turns"]}
