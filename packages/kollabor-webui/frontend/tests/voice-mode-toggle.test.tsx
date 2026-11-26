@@ -28,7 +28,8 @@ type FakeApi = ReturnType<typeof fakeApi>;
 let latest!: VoiceMode;
 function Probe() {
   latest = useVoiceMode();
-  return null;
+  const error = latest.error;
+  return error ? <div role="alert">{error}</div> : null;
 }
 
 let container: HTMLDivElement;
@@ -98,6 +99,19 @@ describe("voice mode toggle through props", () => {
 
     await toggle();
     expect(sendCommand.mock.calls).toEqual([["/voice on"]]);
+  });
+
+  it("clears pending and reports an error when the voice command is rejected", async () => {
+    const api = fakeApi({ voice_requested: false });
+    const sendCommand = vi.fn().mockRejectedValue(new Error("offline"));
+    await render(api, false, sendCommand);
+
+    await toggle();
+
+    expect(latest.pending).toBe(false);
+    expect(latest.error).toBe("Could not change voice mode. Try again.");
+    expect(container.querySelector('[role="alert"]')?.textContent)
+      .toBe("Could not change voice mode. Try again.");
   });
 
   it("after the run ends, on is set from voice_requested and getHistory is never called", async () => {

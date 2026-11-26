@@ -47,6 +47,11 @@ describe("toThreadMessageLike", () => {
     expect(message.createdAt).toEqual(new Date(WHEN));
   });
 
+  it("carries the authoritative stream turn id in custom metadata", () => {
+    const message = toThreadMessageLike({ ...row("reply-1", [], "assistant"), turn_id: "turn-1" });
+    expect(message.metadata?.custom).toEqual({ chatRowKind: "reply", chatTurnId: "turn-1" });
+  });
+
   it("maps text and reasoning parts to parts of the same type", () => {
     const message = toThreadMessageLike(
       row("row-2", [
@@ -91,6 +96,14 @@ describe("toThreadMessageLike", () => {
       row("nullable", [{ type: "tool-call", tool_call_id: "c", tool_name: "test", args: {}, is_error: null }]),
     );
     expect((message.content as { isError?: boolean }[])[0].isError).toBeUndefined();
+  });
+
+  it("preserves a failed local input status for the thread", () => {
+    const message = toThreadMessageLike({
+      ...row("send-failed", [{ type: "text", text: "keep this draft" }], "user"),
+      status: "failed",
+    });
+    expect(message.status).toEqual({ type: "incomplete", reason: "error" });
   });
 
   it("gives empty args when the tool-call args are not a plain object", () => {

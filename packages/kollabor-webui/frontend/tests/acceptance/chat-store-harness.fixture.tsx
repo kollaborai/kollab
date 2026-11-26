@@ -18,6 +18,7 @@ declare global {
       streamConnects: number;
       threadMounts: number;
       permissionResponses: PermissionResponseRecord[];
+      acceptedInputIds: string[];
       publish: (type: string, data: unknown) => void;
     };
   }
@@ -32,6 +33,7 @@ class ChatStoreTransport implements ChatTransport {
   private sequence = 0;
   private rows: ChatRow[] = [];
   private readonly inputs = new Map<string, InputInfo>();
+  private readonly acceptedInputIds = new Set<string>();
   private readonly turns = new Map<string, TurnInfo>();
   private readonly listeners = new Set<(event: unknown) => void>();
 
@@ -39,6 +41,36 @@ class ChatStoreTransport implements ChatTransport {
     const method = (init.method ?? "GET").toUpperCase();
     const body = typeof init.body === "string" ? JSON.parse(init.body) as unknown : null;
     this.requests.push({ path, method, body });
+    if (method === "POST" && path.endsWith("/inputs")) {
+      const input = body as { id: string; text: string };
+      const attemptsForText = this.requests.filter((request) =>
+        request.path.endsWith("/inputs") &&
+        (request.body as { text?: string } | null)?.text === input.text,
+      ).length;
+      if (input.text === "uncertain draft" && attemptsForText === 1) {
+        this.acceptedInputIds.add(input.id);
+        window.chatHarness.acceptedInputIds = [...this.acceptedInputIds];
+        // The daemon accepted this input but the HTTP response was lost.
+        // The row is held back until the retry to exercise idempotent resend.
+        throw new TypeError("Failed to fetch");
+      }
+      if (input.text === "explicit rejection") {
+        return new Response(JSON.stringify({ detail: "rejected" }), { status: 400 });
+      }
+      this.acceptedInputIds.add(input.id);
+      window.chatHarness.acceptedInputIds = [...this.acceptedInputIds];
+      this.publish("row.upsert", {
+        id: input.id,
+        seq: 0,
+        kind: "input",
+        role: "user",
+        turn_id: null,
+        status: "complete",
+        parts: [{ type: "text", text: input.text }],
+        created_at: CREATED_AT,
+      });
+      return new Response(JSON.stringify({ id: input.id, state: "queued" }), { status: 202 });
+    }
     if (path.includes("/rows?")) {
       return new Response(JSON.stringify({ rows: [], older: null }), { status: 200 });
     }
@@ -127,6 +159,7 @@ window.chatHarness = {
   streamConnects: 0,
   threadMounts: 0,
   permissionResponses,
+  acceptedInputIds: [],
   publish: (type, data) => transport.publish(type, data),
 };
 

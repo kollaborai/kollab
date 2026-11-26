@@ -24,6 +24,7 @@
     "test:e2e:profile-rows": "node tests/acceptance/profile-rows.browser.mjs",
     "test:e2e:llm-provider-remove": "node tests/llm-provider-removal.browser.mjs",
     "test:e2e:1367-handover": "node tests/acceptance/1367-handover.browser.mjs",
+    "test:e2e:chat-send-retry": "node tests/acceptance/chat-send-retry.browser.mjs",
     "test:e2e:chat-stream-failure": "node tests/acceptance/chat-stream-failure.browser.mjs",
     "test:e2e:live-pending-input": "node tests/acceptance/live-pending-input.browser.mjs",
     "test:e2e:turn-settle": "node tests/acceptance/turn-settle.browser.mjs",
