@@ -1972,8 +1972,13 @@ class ChatStreamService:
         return event
 
     def publish_conversation_reset(self) -> Event:
-        """Publish a replacement on the new UID so connected clients resnapshot."""
+        """Publish restored state on a fresh generation for this conversation."""
         uid = self._conversation_uid()
+        self._reset_conversation_cache(uid)
+        # A restored session can reuse a UID whose old in-memory stream belongs
+        # to a later visit. Start a new sequence space so subscribers discard
+        # their stale cursors and request the canonical restored snapshot.
+        self._logs.pop(uid, None)
         rows = self._snapshot_rows(uid)
 
         def store_rows(_event: Event) -> None:
@@ -1984,6 +1989,40 @@ class ChatStreamService:
         return self._log(uid).publish(
             "replace", {"rows": rows}, on_commit=store_rows
         )
+
+    def _reset_conversation_cache(self, uid: str) -> None:
+        """Drop live state for a UID before rebuilding it from restored history."""
+        self._rows.pop(uid, None)
+        self._inputs.pop(uid, None)
+        self._turns.pop(uid, None)
+        self._active_turns.pop(uid, None)
+
+        uid_scoped_maps = (
+            self._input_scopes,
+            self._input_text,
+            self._input_attachments,
+            self._input_goal_reply_ids,
+            self._turn_inputs,
+            self._input_turns,
+            self._reply_rows,
+            self._reply_text,
+            self._reply_segment_offsets,
+            self._reply_row_ids,
+            self._turn_history_keys,
+            self._turn_errors,
+        )
+        for cache in uid_scoped_maps:
+            for key in tuple(cache):
+                if isinstance(key, tuple) and key and key[0] == uid:
+                    cache.pop(key, None)
+        self._reply_after_tool = {
+            key for key in self._reply_after_tool if key[0] != uid
+        }
+        self._goal_reply_owners = {
+            reply_id: owner
+            for reply_id, owner in self._goal_reply_owners.items()
+            if owner[0] != uid
+        }
 
     def _log(self, uid: str | None = None) -> ChatStreamLog:
         uid = uid or self._conversation_uid()
