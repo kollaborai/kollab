@@ -28,7 +28,7 @@ import { resolveAgentSender, type HubNote } from "@/hub-notes";
 import { useChatStore } from "@/chat-store";
 import type { ChatPart, ChatRow } from "@/chat-stream";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
-import { PermissionToolUI } from "@/components/PermissionTool";
+import { PermissionPromptDataUI, PermissionToolUI } from "@/components/PermissionTool";
 import { agentName } from "@/utils/session-display";
 import { cn } from "@/lib/utils";
 import { composerDraftStorageKey } from "../composer-draft";
@@ -409,6 +409,7 @@ export const Thread: FC<{
           <HubSendToolUI key={index} />
         ))}
         <PermissionToolUI />
+        <PermissionPromptDataUI />
         <ComposerLockContext.Provider value={locked}>
           <AssistantThread
             components={{

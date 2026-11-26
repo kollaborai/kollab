@@ -432,8 +432,9 @@ const ThreadMessage: FC = () => {
     UserMessage: UserMessageComponent = UserMessage,
   } = useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
+  const chatRowRole = useAuiState((s) => s.message.metadata.custom.chatRowRole);
   if (role === "user") return <UserMessageComponent />;
-  if (role === "system") return <SystemMessageComponent />;
+  if (role === "system" || chatRowRole === "system") return <SystemMessageComponent />;
   return <AssistantMessageComponent />;
 };
 

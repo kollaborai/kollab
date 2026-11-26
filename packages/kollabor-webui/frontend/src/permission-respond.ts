@@ -5,7 +5,6 @@ import { cancelPendingPermission as cancelIfStillPending, permissionOwner } from
 
 export type PermissionAnswer = { decision: "approve" | "deny"; scope?: string; option_id?: string };
 
-type ToolCallPart = Extract<ChatPart, { type: "tool-call" }>;
 type PermissionResponseOwner = PendingPermission & { permissionId: string };
 
 /** Answers in flight, keyed by session and permission: one POST per permission at a time. */
@@ -15,9 +14,9 @@ const responsesInFlight = new Set<string>();
 const permissionResponseOwner = (payload: unknown): PermissionResponseOwner | null => {
   const owner = permissionOwner(payload);
   if (!owner || !payload || typeof payload !== "object") return null;
-  const value = payload as { request_id?: unknown; permission_id?: unknown; details?: unknown };
+  const value = payload as { type?: unknown; request_id?: unknown; permission_id?: unknown; details?: unknown };
   const details = value.details && typeof value.details === "object"
-    ? value.details as { permission_id?: unknown }
+    ? value.details as { permission_id?: unknown; request_id?: unknown }
     : undefined;
   const permissionId = typeof value.permission_id === "string" && value.permission_id
     ? value.permission_id
@@ -25,7 +24,11 @@ const permissionResponseOwner = (payload: unknown): PermissionResponseOwner | nu
       ? details.permission_id
       : "";
   if (!permissionId) return null;
-  const requestId = value.request_id;
+  // The GET endpoint returns the normalized permission event: request_id may
+  // live in its details because the daemon's original event carries it there.
+  // Row prompt data is already that raw details object, and tool-call args use
+  // the top-level owner id, so don't infer parentage from arbitrary nested args.
+  const requestId = value.request_id ?? (value.type === "permission_request" ? details?.request_id : undefined);
   return {
     ...owner,
     ...(typeof requestId === "string" && requestId ? { requestId } : {}),
@@ -40,10 +43,17 @@ const samePermissionResponseOwner = (
   candidate.requestId === expected.requestId && candidate.source === expected.source &&
   candidate.permissionId === expected.permissionId);
 
-/** The unanswered request_permission call with this tool call ID, if the row has one. */
-function openPrompt(row: ChatRow, toolCallId: string): ToolCallPart | undefined {
-  return row.parts.find((part): part is ToolCallPart => part.type === "tool-call" &&
+/** The open permission call or daemon prompt part with this identifier, if present. */
+function openPermissionPart(row: ChatRow, toolCallId: string): { payload: unknown } | undefined {
+  const toolCall = row.parts.find((part) => part.type === "tool-call" &&
     part.tool_call_id === toolCallId && part.tool_name === "request_permission" && part.result === undefined);
+  if (toolCall?.type === "tool-call") return { payload: toolCall.args };
+  const prompt = row.parts.find((part) => part.type === "prompt" && part.prompt_id === toolCallId);
+  if (prompt?.type !== "prompt" || row.kind !== "prompt" || row.role !== "system" || row.status !== "open") return undefined;
+  if (!prompt.data || typeof prompt.data !== "object" || Array.isArray(prompt.data) || "resolution" in prompt.data) return undefined;
+  const data = prompt.data as { permission_id?: unknown };
+  if (data.permission_id !== toolCallId) return undefined;
+  return { payload: prompt.data };
 }
 
 /**
@@ -69,14 +79,14 @@ export async function respondToPermission({
 }): Promise<"answered" | "stale"> {
   const findPrompt = () => {
     for (const row of rows()) {
-      const part = openPrompt(row, toolCallId);
+      const part = openPermissionPart(row, toolCallId);
       if (part) return { row, part };
     }
     return undefined;
   };
   const initial = findPrompt();
   if (!initial) return "stale";
-  const expected = permissionResponseOwner(initial.part.args);
+  const expected = permissionResponseOwner(initial.part.payload);
   const displayed = permissionResponseOwner(args);
   if (!expected || !displayed || !samePermissionResponseOwner(expected, [displayed])) return "stale";
   const key = `${sessionId}:${expected.permissionId}`;
@@ -84,7 +94,7 @@ export async function respondToPermission({
   const isCurrent = () => {
     const current = findPrompt();
     if (!current || current.row.id !== initial.row.id) return false;
-    const owner = permissionResponseOwner(current.part.args);
+    const owner = permissionResponseOwner(current.part.payload);
     return !!owner && samePermissionResponseOwner(expected, [owner]);
   };
   if (!isCurrent()) return "stale";
@@ -133,8 +143,13 @@ export function cancelPendingPermission({
     expected,
     current,
     readPending: async () => (await api.getPermissions(sessionId)).pending_prompts.flatMap((prompt) => {
-      const owner = permissionOwner(prompt);
-      return owner ? [owner] : [];
+      const owner = permissionResponseOwner(prompt);
+      return owner ? [{
+        toolId: owner.toolId,
+        requestId: owner.requestId,
+        source: owner.source,
+        parked: owner.parked,
+      }] : [];
     }),
     cancel: (requestId) => api.cancelOwned(sessionId, requestId),
   });
