@@ -534,13 +534,15 @@ class ChatStreamService:
         for item in inputs:
             if not isinstance(item, dict):
                 raise ValueError("queued input must be an object")
-            input_id, text, attachments = self._validate_input(
+            input_id, text, attachments, goal_reply_id = self._validate_input(
                 {
                     "id": item.get("id"),
                     "text": item.get("text"),
                     "attachments": item.get("attachments", []),
                 }
             )
+            if goal_reply_id is not None:
+                raise ValueError("queued input cannot carry a private goal capability")
             normalized.append((input_id, text, attachments))
         if not isinstance(scope, tuple) or len(scope) != 3:
             raise ValueError("queued input scope is invalid")
