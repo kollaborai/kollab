@@ -1,6 +1,5 @@
-from fastapi import HTTPException
 import pytest
-
+from fastapi import HTTPException
 from kollabor_engine.routes import hub
 
 
