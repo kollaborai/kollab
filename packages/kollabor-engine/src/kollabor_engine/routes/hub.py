@@ -18,6 +18,7 @@ from ..hub_bridge import HubBridge
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/hub", tags=["hub"])
+_schedule_mutation_lock = asyncio.Lock()
 
 # Shared bridge instance (stateless, safe to reuse)
 _bridge = HubBridge()
@@ -357,58 +358,61 @@ async def list_schedules():
 
 @router.post("/schedules")
 async def create_schedule(body: ScheduleFields):
-    import time
-    import uuid
+    async with _schedule_mutation_lock:
+        import time
+        import uuid
 
-    now = time.time()
-    fields = body.model_dump(exclude_none=True)
-    interval = float(fields.get("interval_seconds") or 0)
-    row = _checked(
-        {
-            "id": uuid.uuid4().hex[:8],
-            "agents": fields.get("agents") or [],
-            "prompt": fields.get("prompt") or "",
-            "interval_seconds": interval,
-            "anchor": now + interval,  # first fire one interval from now
-            "active": fields.get("active", True),
-            "when_busy": fields.get("when_busy", "queue"),
-            "skill": fields.get("skill", ""),
-            "created_by": "web",
-            "created_at": now,
-            "updated_at": now,
-            "revision": 1,
-        }
-    )
-    via = await _save_schedule_rows(_load_schedule_rows() + [row])
-    return {"schedule": row, "via": via}
+        now = time.time()
+        fields = body.model_dump(exclude_none=True)
+        interval = float(fields.get("interval_seconds") or 0)
+        row = _checked(
+            {
+                "id": uuid.uuid4().hex[:8],
+                "agents": fields.get("agents") or [],
+                "prompt": fields.get("prompt") or "",
+                "interval_seconds": interval,
+                "anchor": now + interval,  # first fire one interval from now
+                "active": fields.get("active", True),
+                "when_busy": fields.get("when_busy", "queue"),
+                "skill": fields.get("skill", ""),
+                "created_by": "web",
+                "created_at": now,
+                "updated_at": now,
+                "revision": 1,
+            }
+        )
+        via = await _save_schedule_rows(_load_schedule_rows() + [row])
+        return {"schedule": row, "via": via}
 
 
 @router.put("/schedules/{schedule_id}")
 async def update_schedule(schedule_id: str, body: ScheduleFields):
-    import time
+    async with _schedule_mutation_lock:
+        import time
 
-    rows = _load_schedule_rows()
-    for i, old in enumerate(rows):
-        if old["id"] == schedule_id:
-            row = _checked(
-                {
-                    **old,
-                    **body.model_dump(exclude_none=True),
-                    "updated_at": time.time(),
-                    "revision": int(old.get("revision") or 1) + 1,
-                }
-            )
-            rows[i] = row
-            via = await _save_schedule_rows(rows)
-            return {"schedule": row, "via": via}
-    raise HTTPException(status_code=404, detail=f"No schedule '{schedule_id}'")
+        rows = _load_schedule_rows()
+        for i, old in enumerate(rows):
+            if old["id"] == schedule_id:
+                row = _checked(
+                    {
+                        **old,
+                        **body.model_dump(exclude_none=True),
+                        "updated_at": time.time(),
+                        "revision": int(old.get("revision") or 1) + 1,
+                    }
+                )
+                rows[i] = row
+                via = await _save_schedule_rows(rows)
+                return {"schedule": row, "via": via}
+        raise HTTPException(status_code=404, detail=f"No schedule '{schedule_id}'")
 
 
 @router.delete("/schedules/{schedule_id}")
 async def delete_schedule(schedule_id: str):
-    rows = _load_schedule_rows()
-    kept = [row for row in rows if row["id"] != schedule_id]
-    if len(kept) == len(rows):
-        raise HTTPException(status_code=404, detail=f"No schedule '{schedule_id}'")
-    via = await _save_schedule_rows(kept)
-    return {"ok": True, "via": via}
+    async with _schedule_mutation_lock:
+        rows = _load_schedule_rows()
+        kept = [row for row in rows if row["id"] != schedule_id]
+        if len(kept) == len(rows):
+            raise HTTPException(status_code=404, detail=f"No schedule '{schedule_id}'")
+        via = await _save_schedule_rows(kept)
+        return {"ok": True, "via": via}
