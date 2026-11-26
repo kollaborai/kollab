@@ -18,7 +18,7 @@ vi.mock("@/api", () => ({
 }));
 
 vi.mock("@/components/media/media-view", () => ({
-  useAuthenticatedImage: () => null,
+  useAuthenticatedImage: (path?: string | null) => path ? `/authenticated${path}` : null,
 }));
 
 import {
@@ -119,6 +119,35 @@ describe("chat stream part recovery", () => {
     }
   });
 
+  it("maps a verified recovered queue image to the authenticated attachment route", async () => {
+    const part = {
+      type: "image",
+      url: "kollab-queue-image:?conversation_uid=conversation%2F1&request_id=request%2F2&ref=attachment%2F3",
+    };
+    const serialized = JSON.stringify(part);
+    const marker = {
+      ...partMarker("row-queue-image", 1),
+      output_bytes: new TextEncoder().encode(serialized).length,
+      output_chars: Array.from(serialized).length,
+    };
+    mocks.getChatStreamContent.mockResolvedValueOnce(
+      contentChunk(marker.row_id, marker.part_index, marker.output_revision, serialized),
+    );
+
+    const ui = mount();
+    try {
+      await ui.render(<ChatStreamPartPreview marker={marker} />);
+      await act(async () => {
+        ui.host.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(ui.host.querySelector("img")?.getAttribute("src")).toBe(
+        "/authenticated/sessions/session-1/web-message-queue/items/request%2F2/attachments/attachment%2F3?conversation_uid=conversation%2F1",
+      );
+    } finally {
+      await ui.unmount();
+    }
+  });
+
   it("rejects a page from a different row revision before rendering it", async () => {
     const marker = partsMarker();
     mocks.getChatStreamParts.mockResolvedValueOnce({
@@ -153,7 +182,32 @@ describe("chat stream part recovery", () => {
     await expect(fetchChatStreamPartsPage(marker, 0)).rejects.toThrow("does not match");
   });
 
-  it("rejects tool result previews whose nested identity does not match the paged tool call", async () => {
+  it("accepts a recoverable oversized permission prompt part in a paged row", async () => {
+    const marker = partsMarker("row-prompt-preview");
+    const promptPreview = {
+      ...partMarker(marker.row_id, 0),
+      session_id: marker.session_id,
+    };
+    const prompt = {
+      type: "prompt",
+      prompt_id: "permission-1",
+      data: { tool_id: "tool-1", request_id: "request-1" },
+      chat_stream_part_preview: promptPreview,
+    };
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: marker.part_count,
+      output_revision: marker.output_revision,
+      parts: [prompt],
+      done: false,
+    });
+
+    await expect(fetchChatStreamPartsPage(marker, 0)).resolves.toMatchObject({ parts: [prompt] });
+  });
+
+  it("rejects tool result previews whose top-level identity does not match the paged tool call", async () => {
     const marker = partsMarker("row-tool-result");
     mocks.getChatStreamParts.mockResolvedValueOnce({
       row_id: marker.row_id,
@@ -166,7 +220,7 @@ describe("chat stream part recovery", () => {
         tool_call_id: "call-expected",
         tool_name: "lookup",
         args: {},
-        result: {
+        chat_stream_result_preview: {
           kind: "chat-stream-tool-output-preview",
           session_id: marker.session_id,
           row_id: marker.row_id,
@@ -182,6 +236,37 @@ describe("chat stream part recovery", () => {
     });
 
     await expect(fetchChatStreamPartsPage(marker, 0)).rejects.toThrow("does not match");
+  });
+
+  it("accepts a top-level tool result preview while leaving the result absent", async () => {
+    const marker = partsMarker("row-top-level-result");
+    const outputPreview = {
+      kind: "chat-stream-tool-output-preview",
+      session_id: marker.session_id,
+      row_id: marker.row_id,
+      tool_call_id: "call-result",
+      output_bytes: 80_000,
+      output_chars: 80_000,
+      output_type: "text",
+      output_revision: "e".repeat(64),
+      preview: "bounded result",
+    };
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: marker.part_count,
+      output_revision: marker.output_revision,
+      parts: [{
+        type: "tool-call", tool_call_id: "call-result", tool_name: "inspect", args: {},
+        chat_stream_result_preview: outputPreview,
+      }],
+      done: false,
+    });
+
+    await expect(fetchChatStreamPartsPage(marker, 0)).resolves.toMatchObject({
+      parts: [{ result: undefined, chat_stream_result_preview: outputPreview }],
+    });
   });
 
   it("keeps marker-shaped tool args opaque and validates the dedicated args preview", async () => {

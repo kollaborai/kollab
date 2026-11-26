@@ -2,6 +2,15 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const streamMocks = vi.hoisted(() => ({ getChatStreamContent: vi.fn() }));
+vi.mock("@/api", () => ({
+  CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE: 32768,
+  EngineApi: class {
+    getChatStreamContent = streamMocks.getChatStreamContent;
+  },
+}));
+
 import {
   PermissionPromptData,
   PermissionPromptDataUI,
@@ -217,6 +226,65 @@ describe("permission prompt data from the daemon chat-stream row", () => {
 
     expect(container.textContent).toContain("Allowed (session)");
     expect(buttons(container)).toHaveLength(0);
+  });
+
+  it("requires the complete recovered permission part to be visible before answering", async () => {
+    streamMocks.getChatStreamContent.mockReset();
+    let finish!: (chunk: unknown) => void;
+    streamMocks.getChatStreamContent.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const completeData = {
+      ...DAEMON_PROMPT_DATA,
+      command: `pytest -q ${"tests/authorization-path/".repeat(300)}`,
+    };
+    const completePart = JSON.stringify({ type: "prompt", prompt_id: "daemon-perm-9", data: completeData });
+    const marker = {
+      kind: "chat-stream-part-preview",
+      session_id: "session-preview",
+      row_id: "row-preview",
+      part_index: 2,
+      output_bytes: new TextEncoder().encode(completePart).length,
+      output_chars: Array.from(completePart).length,
+      output_type: "json",
+      output_revision: "f".repeat(64),
+      preview: completePart.slice(0, 1024),
+    };
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const container = renderDataPrompt("daemon-perm-9", {
+      kind: "kollab-chat-stream-permission-prompt-preview",
+      marker,
+    }, respond);
+
+    expect(buttons(container).map((button) => button.textContent?.trim())).not.toContain("Allow once");
+    expect(buttons(container).map((button) => button.textContent?.trim())).not.toContain("Deny");
+    expect(streamMocks.getChatStreamContent).toHaveBeenCalledWith(
+      "session-preview", "row-preview", 2, "part", marker.output_revision,
+      { offset: 0, limit: 32768 },
+    );
+
+    await act(async () => {
+      finish({
+        row_id: marker.row_id,
+        part_index: marker.part_index,
+        field: "part",
+        output_revision: marker.output_revision,
+        offset: 0,
+        next_offset: marker.output_chars,
+        total_chars: marker.output_chars,
+        output_type: "json",
+        content: completePart,
+        done: true,
+      });
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(container.textContent).toContain("authorization-path/"));
+    const fullPrompt = container.querySelector("details[open]");
+    expect(fullPrompt?.textContent).toContain(completeData.command);
+    await click(container, "Allow once");
+    expect(respond).toHaveBeenCalledWith(
+      "daemon-perm-9",
+      expect.objectContaining({ command: completeData.command, request_id: completeData.request_id }),
+      expect.objectContaining({ tool_id: completeData.tool_id, permission_id: completeData.permission_id, decision: "approve" }),
+    );
   });
 });
 

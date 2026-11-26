@@ -174,6 +174,34 @@ describe("toThreadMessageLike", () => {
     expect(messageHasRecoverableChatStreamPreview(undefined, [opaqueMessage.content[0]])).toBe(false);
   });
 
+  it("passes the dedicated tool result marker through provider metadata", () => {
+    const marker = {
+      kind: "chat-stream-tool-output-preview" as const,
+      session_id: "session-result",
+      row_id: "row-result",
+      tool_call_id: "call-result",
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "text" as const,
+      output_revision: "f".repeat(64),
+      preview: "bounded result",
+    };
+    const message = toThreadMessageLike(row("row-result", [{
+      type: "tool-call",
+      tool_call_id: "call-result",
+      tool_name: "inspect",
+      args: {},
+      chat_stream_result_preview: marker,
+    } as unknown as ChatRow["parts"][number]]));
+
+    expect(message.content[0]).toMatchObject({
+      type: "tool-call",
+      result: undefined,
+      providerMetadata: { kollab: { chat_stream_result_preview: marker } },
+    });
+    expect(messageHasRecoverableChatStreamPreview(undefined, [message.content[0]])).toBe(true);
+  });
+
   it("carries a row-parts page marker in message metadata and part recovery in provider metadata", () => {
     const partsPreview = {
       kind: "chat-stream-parts-preview",
@@ -324,6 +352,32 @@ describe("toThreadMessageLike", () => {
     const data = { question: "Proceed?", options: ["yes", "no"] };
     const message = toThreadMessageLike(row("row-6", [{ type: "prompt", prompt_id: "p-1", data }]));
     expect(message.content).toEqual([{ type: "data-prompt", id: "p-1", data }]);
+  });
+
+  it("wraps clipped permission prompt data with its dedicated recovery marker", () => {
+    const marker = {
+      kind: "chat-stream-part-preview" as const,
+      session_id: "session-prompt",
+      row_id: "row-prompt",
+      part_index: 0,
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "json" as const,
+      output_revision: "e".repeat(64),
+      preview: "bounded permission details",
+    };
+    const message = toThreadMessageLike(row("row-prompt", [{
+      type: "prompt",
+      prompt_id: "p-1",
+      data: { tool_id: "tool-1", command: "clipped" },
+      chat_stream_part_preview: marker,
+    } as unknown as ChatRow["parts"][number]]));
+
+    expect(message.content[0]).toEqual({
+      type: "data-prompt",
+      id: "p-1",
+      data: { kind: "kollab-chat-stream-permission-prompt-preview", marker },
+    });
   });
 });
 
