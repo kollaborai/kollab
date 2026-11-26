@@ -96,6 +96,18 @@ def test_marker_shaped_large_result_is_opaque_bounded_and_fetchable():
     assert chunk["output_revision"] == marker["output_revision"]
     assert chunk["content"] == expected[:128]
 
+    service._clear_tool_output_cache("result-preview-test")
+    uncached_chunk = service.get_tool_output(
+        {
+            "row_id": row["id"],
+            "tool_call_id": "call-result-preview",
+            "output_revision": marker["output_revision"],
+            "offset": 0,
+            "limit": 128,
+        }
+    )
+    assert uncached_chunk["content"] == expected[:128]
+
 
 def test_event_contract_rejects_invalid_top_level_tool_result_preview():
     row = _row("result")
