@@ -943,6 +943,23 @@ def test_snapshot_persists_managed_upload_without_handoff_as_authenticated_media
     assert "data:image" not in json.dumps(snapshot)
     ref = rows[0]["parts"][1]["url"].removeprefix("/media/")
     assert open_media(tmp_path, ref, session_id="s1") == (b"\x01\x02\x03", "image/png")
+    index = json.loads((tmp_path / "media" / "s1" / "index.json").read_text())
+    assert len(index) == 1
+
+    restarted_state = _State()
+    restarted_state._llm_service.conversation_logger = state._llm_service.conversation_logger
+    restarted_state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content="look [image1]",
+            metadata={
+                "request_id": "native-managed-image",
+                "chat_stream_parts": rows[0]["parts"],
+            },
+        )
+    ]
+    _reloaded_snapshot, reloaded_rows = _snapshot_rows(ChatStreamService(restarted_state))
+    assert reloaded_rows[0]["parts"] == rows[0]["parts"]
 
 
 def test_snapshot_resolves_uploaded_transcript_images_without_inline_data():
