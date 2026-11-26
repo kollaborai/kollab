@@ -411,3 +411,80 @@ async def test_colliding_queue_ids_never_dispatch_for_two_principals():
     assert (await send(owner))["result"]["turn_id"] == "turn-1"
     assert (await send(other))["result"] == {"found": False}
     assert len(state.dispatches) == 1
+
+
+@pytest.mark.asyncio
+async def test_queue_rejects_cross_principal_batch_collision_before_draining():
+    server, state, runtime = _server_and_runtime()
+
+    async def call(principal, method, params):
+        return await server.handle_wire(
+            {
+                "action": "rpc_request",
+                "request_id": method,
+                "method": method,
+                "params": params,
+            },
+            caller_context=RpcCallerContext.from_unix_peer(principal),
+        )
+
+    binding = {
+        "expected_conversation_uid": "conversation-a",
+        "expected_conversation_revision": 7,
+    }
+    assert (
+        await call(
+            501,
+            "state.chat_stream.add_input",
+            {"id": "web-same", "text": "first", "attachments": []},
+        )
+    )["error"] is None
+    ids = (
+        await call(
+            502,
+            "state.web_queue.allocate_ids",
+            {**binding, "item_count": 2, "operation_count": 2},
+        )
+    )["result"]
+
+    def batch(operation, batch_id, names):
+        return {
+            **binding,
+            "operation_id": operation,
+            "batch_id": batch_id,
+            "items": [
+                {
+                    "request_id": name,
+                    "payload_b64": base64.b64encode(b'{"text":"queued"}').decode(),
+                }
+                for name in names
+            ],
+        }
+
+    rejected = await call(
+        502,
+        "state.web_queue.enqueue_batch",
+        batch(ids["operation_ids"][0], ids["batch_id"], ["web-same", "web-unique-1"]),
+    )
+    assert rejected["error"] is not None
+    scopes = await runtime.registry.known_scopes()
+    second = next(
+        scope
+        for scope in scopes
+        if scope.principal_id == RpcCallerContext.from_unix_peer(502).principal_id
+    )
+    async with runtime.registry.acquire_existing_scope(second) as queue:
+        assert (await queue.snapshot()).batches == ()
+    later = await call(
+        502,
+        "state.web_queue.enqueue_batch",
+        batch(ids["operation_ids"][1], ids["batch_id"], ["web-unique-1"]),
+    )
+    assert later["error"] is None
+    state.is_processing = False
+    await runtime._dispatch_known_scopes()
+    assert [handoff.request_id for _, handoff, _ in state.dispatches] == [
+        "web-same",
+        "web-unique-1",
+    ]
+    await runtime.close()
