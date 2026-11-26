@@ -46,7 +46,7 @@ const partPreview = (rowId = "r1") => ({
   output_chars: 40_000,
   output_type: "json",
   output_revision: "b".repeat(64),
-  preview: "[Large chat part. Expand to load full content.]",
+  preview: "[Large part. Expand to load full content.]",
 });
 const partsPreview = (rowId = "r1") => ({
   kind: "chat-stream-parts-preview",
@@ -74,7 +74,7 @@ describe("chat stream contract", () => {
   it("accepts row paging and per-part retrieval markers on bounded placeholders", () => {
     const row = {
       ...ROW,
-      parts: [{ type: "text", text: "[Large chat row. Expand to load full content.]", chat_stream_part_preview: partPreview() }],
+      parts: [{ type: "text", text: "[Large chat row. Expand to load all content.]", chat_stream_part_preview: partPreview() }],
       chat_stream_parts_preview: partsPreview(),
     };
     expect(isChatStreamEvent(upsert(row))).toBe(true);

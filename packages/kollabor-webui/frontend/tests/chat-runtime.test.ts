@@ -146,7 +146,7 @@ describe("toThreadMessageLike", () => {
       output_chars: 30_000,
       output_type: "json" as const,
       output_revision: "e".repeat(64),
-      preview: "[Large chat part. Expand to load full content.]",
+      preview: "[Large part. Expand to load full content.]",
     };
     const largeRow = {
       ...row("row-large", [{
