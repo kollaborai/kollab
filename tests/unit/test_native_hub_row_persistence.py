@@ -141,3 +141,62 @@ def test_native_hub_rows_round_trip_and_page_without_becoming_model_messages(
     assert page["older"] is not None
     older_page = stream.row_pager().read(before=page["older"], limit=1)
     assert [row["id"] for row in older_page["rows"]] == ["note-before-window"]
+
+
+def test_interrupted_native_hub_input_ends_failed_after_restart(tmp_path):
+    conversations = tmp_path / "conversations"
+    config = SimpleNamespace(
+        _conversations_dir=conversations,
+        get=lambda _key, default=None: default,
+    )
+    logger = KollaborConversationLogger(conversations)
+    manager = ConversationManager(config, logger)
+    manager.conversation_metadata["conversation_uid"] = "native-hub-conversation"
+    assert manager.save_session(logger.session_id)
+
+    row = _hub_row(
+        "interrupted-input",
+        kind="input",
+        turn_id="native-turn-interrupted",
+        status="started",
+        created_at="2026-11-25T12:00:00Z",
+    )
+
+    import asyncio
+
+    asyncio.run(
+        logger.log_system_message(
+            "hub row display record",
+            parent_uuid=None,
+            subtype="hub_incoming",
+            chat_stream_row=row,
+        )
+    )
+
+    resumed_manager = ConversationManager(config)
+    assert resumed_manager.load_session(logger.session_id)
+    assert resumed_manager.chat_stream_rows == [
+        {**row, "status": "failed"}
+    ]
+
+    llm = SimpleNamespace(
+        conversation_manager=resumed_manager,
+        conversation_history=[],
+    )
+    state = SimpleNamespace(
+        _llm_service=llm,
+        get_conversation_uid=lambda: resumed_manager.conversation_metadata[
+            "conversation_uid"
+        ],
+    )
+    snapshot = ChatStreamService(state).subscribe(
+        {"after": None, "conversation_uid": None}
+    )["events"][0]
+    assert snapshot["data"]["inputs"] == [
+        {
+            "id": "interrupted-input",
+            "state": "ended",
+            "turn_id": "native-turn-interrupted",
+            "outcome": "failed",
+        }
+    ]
