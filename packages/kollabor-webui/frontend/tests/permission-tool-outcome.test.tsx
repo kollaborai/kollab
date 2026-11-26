@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   PermissionPromptData,
+  PermissionPromptDataUI,
   PermissionPrompt,
   PermissionResponseContext,
   type PermissionArgs,
@@ -180,12 +181,13 @@ describe("permission prompt data from the daemon chat-stream row", () => {
     expect(container.textContent).toContain("Permission required: terminal");
     expect(container.textContent).toContain("high risk");
     expect(container.textContent).toContain("pytest -q");
+    expect(PermissionPromptDataUI.unstable_data.name).toBe("prompt");
     await click(container, "Allow once");
 
     expect(respond).toHaveBeenCalledTimes(1);
     expect(respond).toHaveBeenCalledWith(
       "daemon-perm-9",
-      DAEMON_PROMPT_DATA,
+      expect.objectContaining(DAEMON_PROMPT_DATA),
       expect.objectContaining({
         tool_id: "daemon-tool-7",
         permission_id: "daemon-perm-9",
@@ -203,6 +205,17 @@ describe("permission prompt data from the daemon chat-stream row", () => {
     }, respond);
 
     expect(container.textContent).toContain("Cancelled");
+    expect(buttons(container)).toHaveLength(0);
+  });
+
+  it("renders a daemon grant as resolved and hides decision buttons", () => {
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const container = renderDataPrompt("daemon-perm-9", {
+      ...DAEMON_PROMPT_DATA,
+      resolution: { type: "permission_granted", scope: "session" },
+    }, respond);
+
+    expect(container.textContent).toContain("Allowed (session)");
     expect(buttons(container)).toHaveLength(0);
   });
 });
