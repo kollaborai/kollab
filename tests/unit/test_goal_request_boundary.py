@@ -956,6 +956,13 @@ async def test_ordered_input_dispatches_private_goal_once_and_is_owner_scoped(bo
         assert (await call(
             'state.poll_goal_reply', {'reply_id': second_capability}, uid=502
         ))['result']['status'] == 'missing'
+        foreign_cancel = await call(
+            'state.cancel_goal_reply', {'reply_id': second_capability}, uid=502
+        )
+        assert foreign_cancel['result']['cancelled'] is False
+        assert (await call(
+            'state.poll_goal_reply', {'reply_id': second_capability}
+        ))['result']['status'] == 'pending'
         cancelled = await call(
             'state.cancel_goal_reply', {'reply_id': second_capability}
         )
