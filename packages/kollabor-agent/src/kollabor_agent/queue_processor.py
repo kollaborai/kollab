@@ -144,6 +144,9 @@ class TaggedInput:
     # Authored display text when the model payload also contains hidden
     # context/media that must not become part of the transcript input row.
     stream_display_content: str | None = field(default=None, kw_only=True)
+    # The stream can route queue controls only for explicitly marked plugin
+    # admissions; ordinary native and daemon handoff inputs keep their own API.
+    stream_origin: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -1522,6 +1525,53 @@ class QueueProcessor:
             ),
             "chat_stream_input_count": 1,
         }
+
+    def _queued_plugin_input(self, request_id: str) -> TaggedInput | None:
+        """Find one exact plugin input still held by the native queue."""
+        queue = getattr(self, "processing_queue", None)
+        entries = getattr(queue, "_queue", None)
+        if entries is None:
+            return None
+        return next(
+            (
+                item
+                for item in entries
+                if isinstance(item, TaggedInput)
+                and not isinstance(item, QueueHandoffInput)
+                and item.stream_origin == "plugin"
+                and item.request_ids == (request_id,)
+            ),
+            None,
+        )
+
+    async def cancel_queued_plugin_input(self, request_id: str) -> bool:
+        """Cancel one exact, queued plugin input and persist its outcome."""
+        if not isinstance(request_id, str) or not request_id:
+            return False
+        item = self._queued_plugin_input(request_id)
+        if item is None:
+            return False
+        queue = self.processing_queue
+        queue._queue.remove(item)
+        queue.task_done()
+        queue._wakeup_next(queue._putters)
+        await self._persist_native_input_outcomes((request_id,), "cancelled")
+        return True
+
+    def prioritize_queued_plugin_input(self, request_id: str) -> bool:
+        """Move one exact queued plugin input ahead of other native work."""
+        if not isinstance(request_id, str) or not request_id:
+            return False
+        item = self._queued_plugin_input(request_id)
+        if item is None:
+            return False
+        queue = self.processing_queue
+        entries = queue._queue
+        if entries[0] is item:
+            return True
+        entries.remove(item)
+        entries.appendleft(item)
+        return True
 
     async def _end_dropped_persisted(
         self,

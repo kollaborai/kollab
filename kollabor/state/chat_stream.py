@@ -258,6 +258,7 @@ class ChatStreamService:
         self._input_text: dict[tuple[str, str], str] = {}
         self._input_attachments: dict[tuple[str, str], list[dict[str, str]]] = {}
         self._input_goal_reply_ids: dict[tuple[str, str], str | None] = {}
+        self._native_plugin_inputs: set[tuple[str, str]] = set()
         self._goal_reply_owners: dict[
             str, tuple[str, str, tuple[str, str, str], float]
         ] = {}
@@ -562,6 +563,27 @@ class ChatStreamService:
         existing = self._inputs.setdefault(uid, {}).get(input_id)
         if existing is not None and existing.get("state") != "queued":
             return {"found": True, "cancelled": False}
+        if (uid, input_id) in self._native_plugin_inputs:
+            processor = getattr(self._llm_service(), "_queue_processor", None)
+            cancel_native = getattr(
+                processor, "cancel_queued_plugin_input", None
+            )
+            if not callable(cancel_native):
+                return {"found": False, "cancelled": False}
+            cancelled = await cancel_native(input_id)
+            if not cancelled:
+                return {"found": True, "cancelled": False}
+            self._set_input_state(
+                uid,
+                input_id,
+                "ended",
+                turn_id=None,
+                outcome="cancelled",
+            )
+            row = self._rows.setdefault(uid, {}).get(input_id)
+            if row is not None:
+                self._upsert(uid, {**row, "status": "cancelled"})
+            return {"found": True, "cancelled": True}
         runtime_params = {"id": input_id}
         if expected_conversation_uid is not None:
             runtime_params["expected_conversation_uid"] = expected_conversation_uid
@@ -710,6 +732,32 @@ class ChatStreamService:
         if not isinstance(input_id, str) or not input_id:
             return {"found": False}
         uid = self._conversation_uid()
+        if (uid, input_id) in self._native_plugin_inputs:
+            current = self._inputs.get(uid, {}).get(input_id, {})
+            state = current.get("state")
+            if state != "queued":
+                result = {
+                    "found": True,
+                    "accepted": False,
+                    "state": state or "queued",
+                }
+                turn_id = current.get("turn_id")
+                if isinstance(turn_id, str) and turn_id:
+                    result["turn_id"] = turn_id
+                return result
+            if (uid, input_id) in self._input_scopes:
+                return {"found": False}
+            send_native = getattr(
+                self._llm_service(), "send_now_native_plugin_input", None
+            )
+            if not callable(send_native):
+                return {"found": False}
+            result = await send_native(input_id)
+            return (
+                result
+                if isinstance(result, dict) and result.get("found") is True
+                else {"found": False}
+            )
         runtime = self._queue_runtime()
         scope = await runtime.input_scope(uid)
 
@@ -908,6 +956,22 @@ class ChatStreamService:
         text = event.get("text")
         if not isinstance(text, str):
             return
+        # Plugin ADD_MESSAGE events carry an explicitly authored display
+        # string alongside the model payload and generated input identity.
+        # Handle that trusted projection before generic request IDs, whose
+        # path intentionally refuses to infer authored text from `text`.
+        display_text = event.get("display_text")
+        input_id = event.get("input_id")
+        if not isinstance(input_id, str) or not input_id:
+            input_id = event.get("request_id")
+        if (
+            isinstance(display_text, str)
+            and display_text.strip()
+            and isinstance(input_id, str)
+            and input_id
+        ):
+            self._on_plugin_user_message(uid, event, input_id, display_text)
+            return
         input_ids = self._event_input_ids(event)
         if input_ids:
             records = event.get("operator_inputs")
@@ -974,9 +1038,7 @@ class ChatStreamService:
         # Plugin ADD_MESSAGE events can carry an explicit authored string
         # from the producer. This is separate from `text`, which may be a
         # model payload containing HUD context or image placeholders.
-        display_text = event.get("display_text")
         if isinstance(display_text, str) and display_text.strip():
-            input_id = event.get("input_id")
             if not isinstance(input_id, str) or not input_id:
                 input_id = self._transcript_input_id(uid, display_text)
             if not isinstance(input_id, str) or not input_id:
@@ -1003,6 +1065,8 @@ class ChatStreamService:
         queued = event.get("chat_stream_trigger_llm") is True
         state = "queued" if queued else "ended"
         outcome = None if queued else "completed"
+        if queued:
+            self._native_plugin_inputs.add((uid, input_id))
         row = self._rows.setdefault(uid, {}).get(input_id)
         if row is not None:
             parts = self._input_parts(display_text)
@@ -3132,6 +3196,8 @@ class ChatStreamService:
         if outcome is not None:
             data["outcome"] = outcome
         self._inputs.setdefault(uid, {})[input_id] = data
+        if state == "ended":
+            self._native_plugin_inputs.discard((uid, input_id))
         self._log(uid).publish("input.state", data)
 
     def _set_turn_state(
@@ -3218,6 +3284,11 @@ class ChatStreamService:
         if runtime is None:
             raise RuntimeError("daemon input queue is unavailable")
         return runtime
+
+    def _llm_service(self) -> Any:
+        get_service = getattr(self._event_bus, "get_service", None)
+        registered = get_service("llm_service") if callable(get_service) else None
+        return registered or getattr(self._state_service, "_llm_service", None)
 
     def _conversation_uid(self) -> str:
         getter = getattr(self._state_service, "get_conversation_uid", None)

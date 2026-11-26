@@ -779,6 +779,7 @@ class MessageHandler:
                             (last_user_input_id,),
                             history_row_uuid=last_user_history_row_uuid,
                             stream_display_content=last_user_display_text,
+                            stream_origin="plugin",
                         )
                         if isinstance(last_user_input_id, str) and last_user_input_id
                         else last_user_message

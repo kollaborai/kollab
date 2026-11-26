@@ -2706,6 +2706,78 @@ class LLMService:
         """
         return await self._queue_processor.enqueue(message)
 
+    async def send_now_native_plugin_input(self, request_id: str) -> Dict[str, Any]:
+        """Force one already-queued plugin input to the front of native work."""
+        if not isinstance(request_id, str) or not request_id:
+            return {"found": False}
+        processor = getattr(self, "_queue_processor", None)
+        begin = getattr(processor, "begin_forced_send", None)
+        end = getattr(processor, "end_forced_send", None)
+        find_queued = getattr(processor, "_queued_plugin_input", None)
+        prioritize = getattr(processor, "prioritize_queued_plugin_input", None)
+        clear = getattr(processor, "clear_force_cancellation", None)
+        if not all(
+            callable(method)
+            for method in (begin, end, find_queued, prioritize, clear)
+        ):
+            return {"found": False}
+
+        token = await begin()
+        generation: int | None = None
+        accepted = False
+        try:
+            item = find_queued(request_id)
+            if item is None:
+                active_ids = getattr(processor, "active_request_ids", ())
+                if request_id in active_ids:
+                    return {
+                        "found": True,
+                        "accepted": False,
+                        "state": "started",
+                    }
+                return {"found": False}
+
+            if getattr(processor, "cancel_processing", False):
+                if getattr(processor, "cancel_origin", None) != "human":
+                    return {"found": True, "accepted": False, "state": "queued"}
+                generation = getattr(processor, "cancel_generation", None)
+
+            if self.is_processing:
+                generation = self.cancel_current_request(
+                    origin="human", preserve_queued=True
+                )
+                if generation is None or not await self._await_forced_native_stop(
+                    generation
+                ):
+                    return {"found": True, "accepted": False, "state": "queued"}
+                if (
+                    getattr(processor, "cancel_generation", None) != generation
+                    or getattr(processor, "cancel_origin", None) != "human"
+                    or not getattr(processor, "cancel_processing", False)
+                ):
+                    return {"found": True, "accepted": False, "state": "queued"}
+
+            if not prioritize(request_id):
+                return {"found": False}
+            if generation is not None and not clear(generation):
+                return {"found": True, "accepted": False, "state": "queued"}
+            accepted = True
+            return {"found": True, "accepted": True, "state": "queued"}
+        finally:
+            end(token)
+            if accepted:
+                self.create_background_task(
+                    lambda: self._process_queue(),
+                    name="force_send_plugin_input",
+                )
+            elif generation is not None:
+                resume = getattr(self, "_resume_queue_after_forced_stop", None)
+                if callable(resume):
+                    self.create_background_task(
+                        lambda: resume(generation),
+                        name=f"resume_queue_after_force_{generation}",
+                    )
+
     async def _process_queue(self):
         """Process queued messages. Delegates to QueueProcessor."""
         wait_force = getattr(self._queue_processor, "wait_for_forced_send", None)
