@@ -62,6 +62,30 @@ def test_daemon_pages_row_log_and_transcript_back_to_the_start():
     assert second["older"] is None
 
 
+def test_daemon_pages_live_only_note_at_its_transcript_position():
+    source = _Sources()
+    before = _row("before-note", 1)
+    before["created_at"] = "2026-11-25T12:00:00Z"
+    boundary = _row("snapshot-boundary", 2)
+    boundary["created_at"] = "2026-11-25T12:00:02Z"
+    note = _row("live-note", 3)
+    note.update(
+        {
+            "kind": "note",
+            "role": "system",
+            "created_at": "2026-11-25T12:00:01Z",
+            "parts": [{"type": "text", "text": "between transcript rows"}],
+        }
+    )
+    source.transcript = [before, boundary]
+    source.snapshot_rows = [boundary]
+    source.row_log = [note]
+
+    page = source.pager().read(before=None, limit=10)
+
+    assert [row["id"] for row in page["rows"]] == ["before-note", "live-note"]
+
+
 def test_daemon_returns_an_empty_page_at_the_start_of_the_transcript():
     source = _Sources()
     source.snapshot_rows = source.transcript
