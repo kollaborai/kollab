@@ -1,7 +1,15 @@
 import type { EngineApi } from "./api.ts";
-import type { ChatPart, ChatRow } from "./chat-stream.ts";
+import {
+  isChatStreamPartsPreviewMarker,
+  type ChatPart,
+  type ChatRow,
+} from "./chat-stream.ts";
 import type { PendingPermission } from "./utils/permission-cancel.ts";
 import { cancelPendingPermission as cancelIfStillPending, permissionOwner } from "./utils/permission-cancel.ts";
+import {
+  permissionPromptPreviewKey,
+  type RecoveredPermissionPrompt,
+} from "./permission-preview-state.ts";
 
 export type PermissionAnswer = { decision: "approve" | "deny"; scope?: string; option_id?: string };
 
@@ -44,7 +52,10 @@ const samePermissionResponseOwner = (
   candidate.permissionId === expected.permissionId);
 
 /** The open permission call or daemon prompt part with this identifier, if present. */
-function openPermissionPart(row: ChatRow, toolCallId: string): { payload: unknown } | undefined {
+function openPermissionPart(
+  row: ChatRow,
+  toolCallId: string,
+): { payload: unknown; previewKey?: string } | undefined {
   const toolCall = row.parts.find((part) => part.type === "tool-call" &&
     part.tool_call_id === toolCallId && part.tool_name === "request_permission" && part.result === undefined);
   if (toolCall?.type === "tool-call") return { payload: toolCall.args };
@@ -69,6 +80,7 @@ export async function respondToPermission({
   args,
   answer,
   rows,
+  recoveredPrompts,
 }: {
   api: Pick<EngineApi, "getPermissions" | "request">;
   sessionId: string;
@@ -76,11 +88,31 @@ export async function respondToPermission({
   args: unknown;
   answer: PermissionAnswer;
   rows: () => readonly ChatRow[];
+  recoveredPrompts?: () => readonly RecoveredPermissionPrompt[];
 }): Promise<"answered" | "stale"> {
   const findPrompt = () => {
-    for (const row of rows()) {
+    const currentRows = rows();
+    for (const row of currentRows) {
       const part = openPermissionPart(row, toolCallId);
       if (part) return { row, part };
+    }
+    for (const prompt of recoveredPrompts?.() ?? []) {
+      if (prompt.sessionId !== sessionId || prompt.promptId !== toolCallId) continue;
+      const row = currentRows.find((candidate) => candidate.id === prompt.rowId);
+      const marker = row?.chat_stream_parts_preview;
+      const data = prompt.data;
+      if (
+        row?.kind !== "prompt" || row.role !== "system" || row.status !== "open" ||
+        !isChatStreamPartsPreviewMarker(marker) || marker.session_id !== sessionId ||
+        marker.row_id !== prompt.rowId || marker.output_revision !== prompt.revision ||
+        prompt.partIndex >= marker.part_count || typeof data !== "object" || data === null ||
+        Array.isArray(data) || !("permission_id" in data) || data.permission_id !== toolCallId ||
+        "resolution" in data
+      ) continue;
+      return {
+        row,
+        part: { payload: data, previewKey: permissionPromptPreviewKey(prompt) },
+      };
     }
     return undefined;
   };
@@ -94,6 +126,7 @@ export async function respondToPermission({
   const isCurrent = () => {
     const current = findPrompt();
     if (!current || current.row.id !== initial.row.id) return false;
+    if (current.part.previewKey !== initial.part.previewKey) return false;
     const owner = permissionResponseOwner(current.part.payload);
     return !!owner && samePermissionResponseOwner(expected, [owner]);
   };

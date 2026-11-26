@@ -1,6 +1,12 @@
 import type { ChatRow } from "../chat-stream.ts";
-import { isChatStreamPartPreviewMarker } from "../chat-stream.ts";
-import { permissionPromptPreviewKey } from "../permission-preview-state.ts";
+import {
+  isChatStreamPartPreviewMarker,
+  isChatStreamPartsPreviewMarker,
+} from "../chat-stream.ts";
+import {
+  permissionPromptPreviewKey,
+  type RecoveredPermissionPrompt,
+} from "../permission-preview-state.ts";
 
 export type PendingPermission = {
   toolId: string;
@@ -35,8 +41,11 @@ export function permissionOwner(payload: unknown): PendingPermission | null {
  * A permission part is pending while its request_permission tool call has no
  * result. Only a pending part with a parent owner exposes Stop.
  */
-export function pendingPermissions(rows: readonly ChatRow[]): PendingPermission[] {
-  return rows.flatMap((row) => row.parts.flatMap((part) => {
+export function pendingPermissions(
+  rows: readonly ChatRow[],
+  recoveredPrompts: readonly RecoveredPermissionPrompt[] = [],
+): PendingPermission[] {
+  const fromRows = rows.flatMap((row) => row.parts.flatMap((part) => {
     let payload: unknown;
     if (part.type === "tool-call") {
       if (part.tool_name !== "request_permission" || part.result !== undefined) return [];
@@ -62,6 +71,27 @@ export function pendingPermissions(rows: readonly ChatRow[]): PendingPermission[
     }
     return [owner];
   }));
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
+  const fromRecovered = recoveredPrompts.flatMap((prompt) => {
+    const row = rowsById.get(prompt.rowId);
+    const marker = row?.chat_stream_parts_preview;
+    const data = prompt.data;
+    if (
+      row?.kind !== "prompt" || row.role !== "system" || row.status !== "open" ||
+      !isChatStreamPartsPreviewMarker(marker) || marker.session_id !== prompt.sessionId ||
+      marker.row_id !== prompt.rowId || marker.output_revision !== prompt.revision ||
+      prompt.partIndex >= marker.part_count || typeof data !== "object" || data === null ||
+      Array.isArray(data) || !("permission_id" in data) || data.permission_id !== prompt.promptId ||
+      "resolution" in data
+    ) return [];
+    const owner = permissionOwner(data);
+    if (!owner?.requestId) return [];
+    return [{
+      ...owner,
+      previewKey: permissionPromptPreviewKey(prompt),
+    }];
+  });
+  return [...fromRows, ...fromRecovered];
 }
 
 /**
@@ -86,9 +116,14 @@ export async function cancelPendingPermission({
   if (!samePermissionOwner(selected, beforeRead)) return false;
   const daemon = await readPending();
   const afterRead = current();
-  const daemonOwner = daemon.find((candidate) => samePermissionOwner(selected, [candidate]));
+  const daemonOwner = daemon.find((candidate) => sameDaemonPermissionOwner(selected, candidate));
   if (!selected.requestId || !samePermissionOwner(selected, afterRead) || daemonOwner?.parked !== false) return false;
   return (await cancel(selected.requestId)).cancelled === true;
+}
+
+function sameDaemonPermissionOwner(expected: PendingPermission, candidate: PendingPermission): boolean {
+  return candidate.toolId === expected.toolId && candidate.requestId === expected.requestId &&
+    candidate.source === expected.source && candidate.parked === expected.parked;
 }
 
 function samePermissionOwner(expected: PendingPermission, candidates: readonly PendingPermission[]): boolean {

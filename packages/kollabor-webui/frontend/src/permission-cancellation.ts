@@ -21,18 +21,23 @@ import { pendingPermissions, type PendingPermission } from "./utils/permission-c
 import {
   isPermissionPromptPreviewVisible,
   subscribePermissionPromptPreview,
+  visibleRecoveredPermissionPrompts,
 } from "./permission-preview-state";
 
 export type PermissionCancellation = {
   cancel: (expected: readonly PendingPermission[]) => Promise<void>;
   cancelling: boolean;
   error: string | null;
+  sessionId: string;
 };
 
 export const PermissionCancellationContext = createContext<PermissionCancellation | null>(null);
 
-function visiblePendingPermissions(rows: readonly import("./chat-stream").ChatRow[]): PendingPermission[] {
-  return pendingPermissions(rows).filter((permission) =>
+function visiblePendingPermissions(
+  rows: readonly import("./chat-stream").ChatRow[],
+  sessionId: string,
+): PendingPermission[] {
+  return pendingPermissions(rows, visibleRecoveredPermissionPrompts(rows, sessionId)).filter((permission) =>
     !permission.previewKey || isPermissionPromptPreviewVisible(permission.previewKey),
   );
 }
@@ -67,7 +72,7 @@ export function PermissionCancellationProvider({
         api,
         sessionId,
         expected,
-        current: () => mounted.current ? visiblePendingPermissions(store.rows) : [],
+        current: () => mounted.current ? visiblePendingPermissions(store.rows, sessionId) : [],
       });
     } catch {
       if (mounted.current) setError("Could not stop the pending permission. Try again.");
@@ -76,7 +81,7 @@ export function PermissionCancellationProvider({
     }
   }, [api, sessionId, store]);
 
-  const control = useMemo(() => ({ cancel, cancelling, error }), [cancel, cancelling, error]);
+  const control = useMemo(() => ({ cancel, cancelling, error, sessionId }), [cancel, cancelling, error, sessionId]);
   return createElement(PermissionCancellationContext.Provider, { value: control }, children);
 }
 
@@ -91,8 +96,10 @@ export function usePendingPermissionCancellation(): {
 } | null {
   const control = useContext(PermissionCancellationContext);
   const { rows } = useChatStore();
-  const candidates = pendingPermissions(rows);
-  const expected = visiblePendingPermissions(rows);
+  const sessionId = control?.sessionId ?? "";
+  const recovered = visibleRecoveredPermissionPrompts(rows, sessionId);
+  const candidates = pendingPermissions(rows, recovered);
+  const expected = visiblePendingPermissions(rows, sessionId);
   const previewReady = useSyncExternalStore(
     subscribePermissionPromptPreview,
     () => candidates.length === 1 && (

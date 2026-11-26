@@ -30,7 +30,15 @@ const RecoveredPermissionPromptPart = RecoveredPermissionPrompt as FC<{
   id: string;
   data: unknown;
   serializedPart: string;
+  rowContext?: RecoveredChatRowContext;
 }>;
+
+type RecoveredChatRowContext = {
+  sessionId: string;
+  rowId: string;
+  rowRevision: string;
+  partIndex: number;
+};
 
 export function chatStreamPartsIdentity(marker: ChatStreamPartsPreviewMarker): string {
   return [marker.session_id, marker.row_id, marker.output_revision].join("\u0000");
@@ -173,7 +181,15 @@ function RecoveredImage({ url, sessionId }: { url: string; sessionId?: string })
 }
 
 /** Read-only rendering for an exact structured part recovered from the stream row. */
-export function RecoveredChatPart({ part, sessionId }: { part: unknown; sessionId?: string }) {
+export function RecoveredChatPart({
+  part,
+  sessionId,
+  rowContext,
+}: {
+  part: unknown;
+  sessionId?: string;
+  rowContext?: RecoveredChatRowContext;
+}) {
   if (!isRecord(part)) return <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{partJson(part)}</pre>;
   const textPreview = part.chat_stream_content_preview;
   if (
@@ -251,7 +267,12 @@ export function RecoveredChatPart({ part, sessionId }: { part: unknown; sessionI
     case "prompt":
       return (
         typeof part.prompt_id === "string"
-          ? <RecoveredPermissionPromptPart id={part.prompt_id} data={part.data} serializedPart={partJson(part)} />
+          ? <RecoveredPermissionPromptPart
+              id={part.prompt_id}
+              data={part.data}
+              serializedPart={partJson(part)}
+              rowContext={rowContext}
+            />
           : <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{partJson(part)}</pre>
       );
     default:
@@ -260,7 +281,13 @@ export function RecoveredChatPart({ part, sessionId }: { part: unknown; sessionI
 }
 
 /** A valid text placeholder that recovers its original structured part on demand. */
-export function ChatStreamPartPreview({ marker }: { marker: ChatStreamPartPreviewMarker }) {
+export function ChatStreamPartPreview({
+  marker,
+  rowContext,
+}: {
+  marker: ChatStreamPartPreviewMarker;
+  rowContext?: RecoveredChatRowContext;
+}) {
   const contentMarker: ChatStreamContentPreviewMarker = {
     kind: "chat-stream-content-preview",
     session_id: marker.session_id,
@@ -282,7 +309,11 @@ export function ChatStreamPartPreview({ marker }: { marker: ChatStreamPartPrevie
     >
       {(serialized) => {
         try {
-          return <RecoveredChatPart part={JSON.parse(serialized) as ChatPart} sessionId={marker.session_id} />;
+          return <RecoveredChatPart
+            part={JSON.parse(serialized) as ChatPart}
+            sessionId={marker.session_id}
+            rowContext={rowContext}
+          />;
         } catch {
           return <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{serialized}</pre>;
         }
@@ -303,6 +334,11 @@ export function ChatStreamPartsPreview({ marker }: { marker: ChatStreamPartsPrev
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pending = useRef<string | null>(null);
+  const rowContext = {
+    sessionId: marker.session_id,
+    rowId: marker.row_id,
+    rowRevision: marker.output_revision,
+  };
 
   useEffect(() => {
     setParts([]);
@@ -344,8 +380,15 @@ export function ChatStreamPartsPreview({ marker }: { marker: ChatStreamPartsPrev
       {parts.map((part, index) => (
         <div key={`${identity}:${index}`} data-chat-recovered-part={index}>
           {isRecord(part) && isChatStreamPartPreviewMarker(part.chat_stream_part_preview)
-            ? <ChatStreamPartPreview marker={part.chat_stream_part_preview} />
-            : <RecoveredChatPart part={part} sessionId={marker.session_id} />}
+            ? <ChatStreamPartPreview
+                marker={part.chat_stream_part_preview}
+                rowContext={{ ...rowContext, partIndex: index }}
+              />
+            : <RecoveredChatPart
+                part={part}
+                sessionId={marker.session_id}
+                rowContext={{ ...rowContext, partIndex: index }}
+              />}
         </div>
       ))}
       {loading ? <p role="status">Loading chat parts…</p> : null}

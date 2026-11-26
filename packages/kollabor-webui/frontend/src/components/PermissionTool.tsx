@@ -21,7 +21,10 @@ import {
   isChatStreamPartPreviewMarker,
   type ChatStreamPartPreviewMarker,
 } from "@/chat-stream";
-import { markPermissionPromptPreviewVisible } from "@/permission-preview-state";
+import {
+  markPermissionPromptPreviewVisible,
+  registerRecoveredPermissionPrompt,
+} from "@/permission-preview-state";
 
 export type PermissionArgs = {
   request_id?: string;
@@ -406,18 +409,45 @@ export function RecoveredPermissionPrompt({
   id,
   data,
   serializedPart,
+  rowContext,
 }: {
   id: string;
   data: unknown;
   serializedPart: string;
+  rowContext?: {
+    sessionId: string;
+    rowId: string;
+    rowRevision: string;
+    partIndex: number;
+  };
 }) {
   const [detailsOpen, setDetailsOpen] = useState(true);
   const payload = permissionArgsFromData(data);
   const result = permissionResultFromData(data);
   const resolved = isRecord(data) && Object.hasOwn(data, "resolution");
+  const register = (isVisible: boolean) => {
+    if (!rowContext) return;
+    if (isVisible && (!isRecord(data) || data.permission_id !== id || resolved)) return;
+    registerRecoveredPermissionPrompt({
+      sessionId: rowContext.sessionId,
+      rowId: rowContext.rowId,
+      revision: rowContext.rowRevision,
+      partIndex: rowContext.partIndex,
+      promptId: id,
+      data,
+    }, isVisible);
+  };
+  useEffect(() => {
+    register(detailsOpen);
+    return () => register(false);
+  }, [detailsOpen, id, rowContext?.partIndex, rowContext?.rowId, rowContext?.rowRevision, rowContext?.sessionId, data]);
   return (
     <div className="space-y-2">
-      <details open={detailsOpen} onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+      <details open={detailsOpen} onToggle={(event) => {
+        const open = event.currentTarget.open;
+        setDetailsOpen(open);
+        register(open);
+      }}>
         <summary className="cursor-pointer text-xs font-medium">Full permission request details</summary>
         <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 text-xs">{serializedPart}</pre>
       </details>

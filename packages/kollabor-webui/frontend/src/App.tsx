@@ -7,6 +7,7 @@ import { ChatStoreProvider, LiveChatStore, useChatStore } from "./chat-store";
 import { useChatRuntime } from "./chat-runtime";
 import { PermissionCancellationProvider } from "./permission-cancellation";
 import { respondToPermission } from "./permission-respond";
+import { visibleRecoveredPermissionPrompts } from "./permission-preview-state";
 import { PermissionResponseContext, type PermissionArgs, type PermissionResult } from "./components/PermissionTool";
 import { VoiceModeProvider } from "./voice-mode";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
@@ -199,7 +200,15 @@ function ChatRuntime({ api: engine, sessionId, store, children }: {
   const chat = useChatStore();
   const respond = useCallback(
     (toolCallId: string, args: PermissionArgs, result: PermissionResult) =>
-      respondToPermission({ api: engine, sessionId, toolCallId, args, answer: result, rows: () => store.rows }),
+      respondToPermission({
+        api: engine,
+        sessionId,
+        toolCallId,
+        args,
+        answer: result,
+        rows: () => store.rows,
+        recoveredPrompts: () => visibleRecoveredPermissionPrompts(store.rows, sessionId),
+      }),
     [engine, sessionId, store],
   );
   const sendCommand = useCallback((text: string, inputId: string) => chat.send({ id: inputId, text }), [chat.send]);
