@@ -1082,6 +1082,7 @@ class ChatStreamService:
             row = self._rows.get(uid, {}).get(row_id)
             if row is not None:
                 self._upsert(uid, {**row, "status": outcome})
+        self._reconcile_silent_reply(uid, turn_id)
         self._reply_after_tool.discard(key)
         self._set_turn_state(uid, turn_id, "ended")
         for input_id in input_ids:
@@ -1101,6 +1102,34 @@ class ChatStreamService:
                 self._upsert(uid, {**row, "turn_id": turn_id, "status": outcome})
         if self._active_turns.get(uid) == turn_id:
             self._active_turns.pop(uid, None)
+
+    def _reconcile_silent_reply(self, uid: str, turn_id: str) -> None:
+        """Publish a live row update when persisted projection silences its period."""
+        transcript_rows = {
+            row["id"]: row
+            for row in self._transcript_rows(uid)
+            if row.get("kind") == "reply"
+        }
+        key = (uid, turn_id)
+        latest_row_id = self._reply_rows.get(key)
+        for row_id in self._reply_row_ids.get(key, []):
+            cached = self._rows.get(uid, {}).get(row_id)
+            projected = transcript_rows.get(row_id)
+            if cached is None or projected is None or projected.get("parts"):
+                continue
+            parts = cached.get("parts")
+            if (
+                not isinstance(parts, list)
+                or len(parts) != 1
+                or not isinstance(parts[0], dict)
+                or parts[0].get("type") != "text"
+                or not isinstance(parts[0].get("text"), str)
+                or parts[0]["text"].strip() != "."
+            ):
+                continue
+            if row_id == latest_row_id:
+                self._reply_text[key] = ""
+            self._upsert(uid, {**cached, "parts": []})
 
     def _on_turn_error(self, uid: str, event: dict[str, Any]) -> None:
         message = event.get("message")
