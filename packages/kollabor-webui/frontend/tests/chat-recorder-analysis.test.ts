@@ -436,6 +436,45 @@ describe("chat recorder analysis", () => {
     });
   });
 
+  it("does not claim a matching private receipt in a different conversation", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    const foreignGoal = {
+      conversation_uid: "conv-other",
+      goal: { goal_id: "goal-full", objective: "", status: "active", attempt: { attempt_id: "foreign-attempt", turn_id: "foreign-turn" } },
+    };
+    let persisted: any = null;
+    let objective = "";
+    const commands: string[] = [];
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native", session: "test-session",
+      command: async (text: string) => {
+        commands.push(text);
+        if (text === "/goal clear") persisted = null;
+        else {
+          objective = text.slice("/goal ".length);
+          foreignGoal.goal.objective = objective;
+          persisted = foreignGoal;
+        }
+      },
+      mark: async () => {},
+      page: privateGoalPage("goal-ful", "conv-other"),
+      apiJson: privateGoalPoll("goal-ful", () => objective),
+      readPersistedGoal: async () => persisted,
+      currentStreamState: async () => ({ conversation_uid: "conv-owned", turns: [], inputs: [] }),
+      sleep: async () => {},
+      U: () => "recorder-objective", R: () => "recorder-reply",
+    });
+
+    const failure = await flow().then(() => null, (error: unknown) => error);
+    expect({ commands, persisted, failure }).toMatchObject({
+      commands: [expect.stringMatching(/^\/goal /)],
+      persisted: foreignGoal,
+      failure: expect.objectContaining({ message: expect.stringMatching(/conversation|claim|identity/i) }),
+    });
+  });
+
   it("reports ACP goal reload as unsupported without sending a chat prompt", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const start = source.indexOf('    async "goal-reload"() {');
