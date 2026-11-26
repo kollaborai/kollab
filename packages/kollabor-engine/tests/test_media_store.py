@@ -18,6 +18,7 @@ from kollabor_engine.media_store import (
     list_for,
     open_media,
     save,
+    save_managed_upload_media,
     save_queue_handoff_media,
 )
 from kollabor_engine.routes.messages import _save_sent_media
@@ -34,6 +35,20 @@ def test_save_stores_and_returns_ref(tmp_path: Path) -> None:
     stored = list((tmp_path / "media" / "s1").glob("*.png"))
     assert len(stored) == 1
     assert stored[0].read_bytes() == bytes([1, 2, 3])
+
+
+def test_managed_upload_save_reuses_stable_ref_and_rejects_rebinding(tmp_path: Path) -> None:
+    media_id = "img_" + "a" * 32
+    first = save_managed_upload_media(tmp_path, "s1", media_id, PNG)
+    retried = save_managed_upload_media(tmp_path, "s1", media_id, PNG)
+
+    assert retried == first
+    index = json.loads((tmp_path / "media" / "s1" / "index.json").read_text())
+    assert len(index) == 1
+    assert index[0]["managed_upload_id"] == media_id
+    assert open_media(tmp_path, first.ref, session_id="s1") == (b"\x01\x02\x03", "image/png")
+    with pytest.raises(MediaError, match="managed upload id is already bound"):
+        save_managed_upload_media(tmp_path, "s1", media_id, JPEG)
 
 
 @pytest.mark.parametrize(
