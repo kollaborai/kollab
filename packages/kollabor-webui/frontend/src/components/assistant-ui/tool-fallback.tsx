@@ -1130,8 +1130,11 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   const needsApproval =
     status?.type === "requires-action" &&
     (approval != null || interrupt != null);
-  const failed = (isError === true || cardStatus === "failed") && result !== undefined;
-  const errorLine = failed ? toolErrorLine(result) : undefined;
+  const hasResult = result !== undefined || resultPreview !== undefined;
+  const failed = (isError === true || cardStatus === "failed") && hasResult;
+  const errorLine = failed
+    ? toolErrorLine(result !== undefined ? result : resultPreview)
+    : undefined;
   const asked = askedForOk(errorLine);
 
   const [open, setOpen] = useState(needsApproval);
