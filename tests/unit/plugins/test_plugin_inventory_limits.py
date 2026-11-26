@@ -333,6 +333,18 @@ def test_plugin_inventory_redacts_credential_shaped_renderer_namespaced_ids():
     assert entry["omitted"]["contributions"] == 1
 
 
+def test_plugin_inventory_redacts_long_sk_credential_shaped_renderer_ids():
+    token = "sk-" + "A" * 40
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [{"tool": f"{token}:fetch"}]
+
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
 def test_plugin_inventory_redacts_colon_delimited_sensitive_assignments():
     entry = _normalize_plugin_entry(
         {
@@ -354,6 +366,21 @@ def test_plugin_inventory_preserves_the_documented_sk_fetch_renderer_tag():
 
     assert entry is not None
     assert entry["contributes"]["renderers"] == [{"tag": "sk-fetch"}]
+    assert entry["omitted"]["contributions"] == 0
+
+
+def test_plugin_inventory_preserves_short_sk_declaration_identifiers():
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["slash"] = ["sk-admin"]
+    contributes["views"] = [{"id": "sk-admin", "label": "Admin"}]
+    contributes["renderers"] = [{"tag": "sk-card"}, {"tool": "sk-admin"}]
+
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"]["slash"] == ["sk-admin"]
+    assert entry["contributes"]["views"] == [{"id": "sk-admin", "label": "Admin"}]
+    assert entry["contributes"]["renderers"] == [{"tag": "sk-card"}, {"tool": "sk-admin"}]
     assert entry["omitted"]["contributions"] == 0
 
 

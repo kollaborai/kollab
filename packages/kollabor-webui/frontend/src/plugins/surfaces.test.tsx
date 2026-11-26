@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from "react";
+import { act, useState, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -458,6 +458,49 @@ describe("modals", () => {
 });
 
 describe("plugin view icons", () => {
+  it("keeps a stateful icon mounted as views are recomputed and drops it on unload", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const StatefulIcon = () => {
+      const [clicks, setClicks] = useState(0);
+      return (
+        <button type="button" onClick={() => setClicks((count) => count + 1)}>
+          {clicks}
+        </button>
+      );
+    };
+    const addStatefulView = () => put("stateful-icon", "Stateful", {
+      contributions: contributions({
+        views: [{ id: "kept", label: "Kept", icon: StatefulIcon, render: Body }],
+      }),
+    });
+    addStatefulView();
+    const [, , FirstIcon] = pluginViews(pluginRegistry.getSnapshot(), true)[0];
+    expect(pluginViews(pluginRegistry.getSnapshot(), true)[0][2]).toBe(FirstIcon);
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<FirstIcon className="size-4" />));
+      await act(async () => host.querySelector("button")?.click());
+      expect(host.textContent).toBe("1");
+
+      const [, , NextIcon] = pluginViews(pluginRegistry.getSnapshot(), true)[0];
+      expect(NextIcon).toBe(FirstIcon);
+      await act(async () => root.render(<NextIcon className="size-4" />));
+      expect(host.textContent).toBe("1");
+
+      pluginRegistry.remove("stateful-icon");
+      expect(pluginViews(pluginRegistry.getSnapshot(), true)).toEqual([]);
+      addStatefulView();
+      const [, , ReloadedIcon] = pluginViews(pluginRegistry.getSnapshot(), true)[0];
+      expect(ReloadedIcon).not.toBe(FirstIcon);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it.each(["throws", "suspends"] as const)(
     "F2 contains a plugin view icon that %s and uses the host fallback icon",
     async (failure) => {

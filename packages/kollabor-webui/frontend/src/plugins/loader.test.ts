@@ -237,7 +237,15 @@ describe("plugin inventory text redaction", () => {
     expect(error).not.toContain("canary");
   });
 
-  it.each(["client_secret", "clientSecret", "oauth_client_secret"])(
+  it.each([
+    "client_secret",
+    "clientSecret",
+    "oauth_client_secret",
+    "passphrase",
+    "passwd",
+    "pwd",
+    "secret_key",
+  ])(
     "redacts JSON-quoted compound secret key %s",
     (key) => {
       const secret = "CSECRETVALUE123";
@@ -245,6 +253,19 @@ describe("plugin inventory text redaction", () => {
 
       expect(error).toContain("[redacted]");
       expect(error).not.toContain(secret);
+    },
+  );
+
+  it.each(["passphrase", "passwd", "pwd", "secret_key"])(
+    "redacts %s assignments from browser plugin errors",
+    (key) => {
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      logPluginFailure("hello", "event listener failed", new Error(`${key}=abc123`));
+
+      const output = logged.mock.calls.flat().join(" ");
+      expect(output).toContain(`${key}=[redacted]`);
+      expect(output).not.toContain("abc123");
     },
   );
 

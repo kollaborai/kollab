@@ -82,6 +82,26 @@ describe("plugin tagged text", () => {
     expect(parts.at(-1)).toEqual({ type: "tag", name: "todo_write", content: "demo" });
     expect(elapsed).toBeLessThan(1000);
   });
+  it("measures streaming a 100 KB fenced literal-tag block across 500 chunks", () => {
+    const text = `\`\`\`text\n${"<card>literal</card>".repeat(5000)}\n\`\`\``;
+    const chunkCount = 500;
+    let accumulated = "";
+    let taggedUpdates = 0;
+    const started = performance.now();
+
+    for (let index = 0; index < chunkCount; index += 1) {
+      const start = Math.floor((text.length * index) / chunkCount);
+      const end = Math.floor((text.length * (index + 1)) / chunkCount);
+      accumulated += text.slice(start, end);
+      const parts = splitPluginTags(accumulated, ["card"]);
+      if (parts.some((part) => part.type === "tag")) taggedUpdates += 1;
+    }
+
+    const elapsed = performance.now() - started;
+    console.info(`[plugin-tag-stream] bytes=${text.length} chunks=${chunkCount} elapsed_ms=${elapsed.toFixed(1)}`);
+    expect(accumulated).toBe(text);
+    expect(taggedUpdates).toBe(0);
+  });
   it("closes a code fence only on a bare marker line", () => {
     const text = "~~~\n~~~text\n<todo_write>demo</todo_write>\n~~~";
     expect(splitPluginTags(text, ["todo_write"])).toEqual([{ type: "text", text }]);
