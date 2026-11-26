@@ -147,6 +147,92 @@ test("chat stream content reads bounded chunks for a row part and field", async 
   ]);
 });
 
+test("chat stream content can recover a complete serialized part including structured fields", async () => {
+  const requests: string[] = [];
+  const revision = "f".repeat(64);
+  const serializedPart = JSON.stringify({
+    type: "image",
+    url: "data:image/png;base64,large-payload",
+  });
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "/api/config") return new Response(JSON.stringify({ engine_url: "http://engine" }), { status: 200 });
+    requests.push(url);
+    return new Response(JSON.stringify({
+      row_id: "row-structured",
+      part_index: 4,
+      field: "part",
+      output_revision: revision,
+      offset: 0,
+      next_offset: Array.from(serializedPart).length,
+      total_chars: Array.from(serializedPart).length,
+      output_type: "json",
+      content: serializedPart,
+      done: true,
+    }), { status: 200 });
+  });
+
+  const api = new EngineApi("http://engine");
+  const chunk = await (api as unknown as {
+    getChatStreamContent: (
+      sessionId: string,
+      rowId: string,
+      partIndex: number,
+      field: "part",
+      outputRevision: string,
+      options: { offset: number; limit: number },
+    ) => Promise<unknown>;
+  }).getChatStreamContent("session-1", "row-structured", 4, "part", revision, { offset: 0, limit: 32768 });
+
+  expect(chunk).toMatchObject({
+    row_id: "row-structured",
+    part_index: 4,
+    field: "part",
+    output_type: "json",
+    content: serializedPart,
+    done: true,
+  });
+  expect(requests).toEqual([
+    `http://engine/sessions/session-1/chat-stream/rows/row-structured/content?part_index=4&field=part&output_revision=${revision}&offset=0&limit=32768`,
+  ]);
+});
+
+test("chat stream part pages are revision-bound and count-bounded", async () => {
+  const requests: Array<{ url: string; authorization: string | null }> = [];
+  const revision = "9".repeat(64);
+  vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/config") return new Response(JSON.stringify({ engine_url: "http://engine" }), { status: 200 });
+    requests.push({ url, authorization: new Headers(init?.headers).get("Authorization") });
+    return new Response(JSON.stringify({
+      row_id: "row-many-parts",
+      offset: 20,
+      next_offset: 22,
+      total_parts: 75,
+      output_revision: revision,
+      parts: [{ type: "image", url: "data:image/png;base64,AAAA" }, { type: "hub-note", from: "peer", to: "", text: "note", observed: true }],
+      done: false,
+    }), { status: 200 });
+  });
+
+  const api = new EngineApi("http://engine");
+  api.setToken("session-token");
+  const page = await (api as unknown as {
+    getChatStreamParts: (
+      sessionId: string,
+      rowId: string,
+      outputRevision: string,
+      options: { offset: number; limit: number },
+    ) => Promise<unknown>;
+  }).getChatStreamParts("session-1", "row-many-parts", revision, { offset: 20, limit: 2 });
+
+  expect(page).toMatchObject({ row_id: "row-many-parts", offset: 20, next_offset: 22, total_parts: 75, output_revision: revision, done: false });
+  expect(requests).toEqual([{
+    url: `http://engine/sessions/session-1/chat-stream/rows/row-many-parts/parts?output_revision=${revision}&offset=20&limit=2`,
+    authorization: "Bearer session-token",
+  }]);
+});
+
 test("snapshot cursor uses next_seq minus one and keeps the generation", () => {
   expect(chatStreamCursorAfter({
     seq: 0,

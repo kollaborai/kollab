@@ -126,6 +126,43 @@ describe("toThreadMessageLike", () => {
     });
   });
 
+  it("carries a row-parts page marker in message metadata and part recovery in provider metadata", () => {
+    const partsPreview = {
+      kind: "chat-stream-parts-preview",
+      session_id: "session-1",
+      row_id: "row-large",
+      part_count: 120,
+      output_revision: "d".repeat(64),
+    };
+    const partPreview = {
+      kind: "chat-stream-part-preview",
+      session_id: "session-1",
+      row_id: "row-large",
+      part_index: 0,
+      output_bytes: 50_000,
+      output_chars: 30_000,
+      output_revision: "e".repeat(64),
+      preview: "[Large chat part. Expand to load full content.]",
+    };
+    const largeRow = {
+      ...row("row-large", [{
+        type: "text" as const,
+        text: partPreview.preview,
+        chat_stream_part_preview: partPreview,
+      }]),
+      chat_stream_parts_preview: partsPreview,
+    } as unknown as ChatRow;
+
+    const message = toThreadMessageLike(largeRow);
+
+    expect(message.metadata?.custom).toMatchObject({ chatStreamPartsPreview: partsPreview });
+    expect(message.content[0]).toMatchObject({
+      type: "text",
+      text: partPreview.preview,
+      providerMetadata: { kollab: { chat_stream_part_preview: partPreview } },
+    });
+  });
+
   it("preserves an argument preview marker on the tool call", () => {
     const marker = {
       kind: "chat-stream-content-preview",
