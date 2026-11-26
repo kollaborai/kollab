@@ -9,7 +9,8 @@ afterEach(() => {
 test("chat stream reconnect carries sequence, conversation and daemon generation", async () => {
   const requests: string[] = [];
   vi.stubGlobal("fetch", async (input: string | URL | Request) => {
-    requests.push(String(input));
+    const url = String(input);
+    if (url.startsWith("http://engine/")) requests.push(url);
     return new Response(new ReadableStream({ start(controller) { controller.close(); } }), { status: 200 });
   });
 
@@ -27,7 +28,8 @@ test("chat stream reconnect carries sequence, conversation and daemon generation
 test("initial chat stream request omits a replay cursor and receives a snapshot", async () => {
   const requests: string[] = [];
   vi.stubGlobal("fetch", async (input: string | URL | Request) => {
-    requests.push(String(input));
+    const url = String(input);
+    if (url.startsWith("http://engine/")) requests.push(url);
     return new Response(new ReadableStream({ start(controller) { controller.close(); } }), { status: 200 });
   });
 

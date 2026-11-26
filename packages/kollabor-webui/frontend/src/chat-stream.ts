@@ -52,7 +52,9 @@ export type ChatRow = {
 export type InputInfo = { id: string; state: InputState; turn_id: string | null; outcome?: Outcome | null };
 export type TurnInfo = { turn_id: string; state: TurnState; input_ids: string[]; origin?: { kind: "goal"; goal_id: string; attempt_id: string } };
 
-type StreamEvent<T extends string, D> = { seq: number; conversation_uid: string; type: T; data: D };
+export type ChatStreamCursor = { after: number; conversation_uid: string; generation: string };
+
+type StreamEvent<T extends string, D> = { seq: number; conversation_uid: string; generation: string; type: T; data: D };
 
 export type ChatStreamEvent =
   // `older` is the cursor for the page before `rows`, or null when there is none.
@@ -63,6 +65,15 @@ export type ChatStreamEvent =
   | StreamEvent<"replace", { rows: ChatRow[] }>
   | StreamEvent<"input.state", InputInfo>
   | StreamEvent<"turn.state", TurnInfo>;
+
+/** Cursor to use after applying an event; snapshots resume at next_seq - 1. */
+export function chatStreamCursorAfter(event: ChatStreamEvent): ChatStreamCursor {
+  return {
+    after: event.type === "snapshot" ? Math.max(0, event.data.next_seq - 1) : event.seq,
+    conversation_uid: event.conversation_uid,
+    generation: event.generation,
+  };
+}
 
 /** The body of `POST /sessions/{id}/inputs`. */
 export type InputRequest = {
@@ -145,7 +156,7 @@ const isInputInfo = (value: unknown): boolean => {
 /** Shape check for one event, the same rules as `event_problems` on the Python side. */
 export function isChatStreamEvent(value: unknown): value is ChatStreamEvent {
   if (!isRecord(value) || !isCount(value.seq)) return false;
-  if (!isId(value.conversation_uid) || !EVENT_TYPES.has(value.type as string) || !isRecord(value.data)) return false;
+  if (!isId(value.conversation_uid) || !isId(value.generation) || !EVENT_TYPES.has(value.type as string) || !isRecord(value.data)) return false;
   const data = value.data;
   switch (value.type) {
     case "snapshot":

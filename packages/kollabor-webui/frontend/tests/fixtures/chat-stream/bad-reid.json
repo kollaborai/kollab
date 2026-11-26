@@ -9,6 +9,7 @@
   {
    "seq": 1,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "snapshot",
    "data": {
     "rows": [],
@@ -21,6 +22,7 @@
   {
    "seq": 2,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "input.state",
    "data": {
     "id": "web-a1",
@@ -31,6 +33,7 @@
   {
    "seq": 3,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "row.upsert",
    "data": {
     "id": "web-a1",
@@ -51,6 +54,7 @@
   {
    "seq": 4,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "turn.state",
    "data": {
     "turn_id": "t1",
@@ -63,6 +67,7 @@
   {
    "seq": 5,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "input.state",
    "data": {
     "id": "web-a1",
@@ -73,6 +78,7 @@
   {
    "seq": 6,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "row.upsert",
    "data": {
     "id": "r1",
@@ -93,6 +99,7 @@
   {
    "seq": 7,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "row.append",
    "data": {
     "id": "r1",
@@ -103,6 +110,7 @@
   {
    "seq": 8,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "input.state",
    "data": {
     "id": "web-b2",
@@ -113,6 +121,7 @@
   {
    "seq": 9,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "row.upsert",
    "data": {
     "id": "steering-d11780fd",
@@ -133,6 +142,7 @@
   {
    "seq": 10,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "input.state",
    "data": {
     "id": "web-b2",
@@ -143,6 +153,7 @@
   {
    "seq": 11,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "turn.state",
    "data": {
     "turn_id": "t1",
@@ -156,6 +167,7 @@
   {
    "seq": 12,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "row.append",
    "data": {
     "id": "r1",
@@ -166,6 +178,7 @@
   {
    "seq": 13,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "row.upsert",
    "data": {
     "id": "r1",
@@ -186,6 +199,7 @@
   {
    "seq": 14,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "turn.state",
    "data": {
     "turn_id": "t1",
@@ -199,6 +213,7 @@
   {
    "seq": 15,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "input.state",
    "data": {
     "id": "web-a1",
@@ -210,6 +225,7 @@
   {
    "seq": 16,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "input.state",
    "data": {
     "id": "web-b2",

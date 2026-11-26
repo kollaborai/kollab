@@ -1,3 +1,5 @@
+import type { ChatStreamCursor, ChatStreamEvent } from "./chat-stream";
+
 export type PhoneLinkState = {
   state: "ready" | "connect_needed" | "service_update" | "offline";
   message: string;
@@ -1621,6 +1623,30 @@ export class EngineApi {
     onOpen?: () => void,
   ): Promise<void> {
     return this.streamSse<SessionEvent>(`/sessions/${encodeURIComponent(sessionId)}/events`, signal, onEvent, onOpen);
+  }
+
+  /** Follow the daemon-owned ordered transcript, resuming only with a full cursor. */
+  streamChatEvents(
+    sessionId: string,
+    cursor: ChatStreamCursor | null,
+    signal?: AbortSignal,
+    onEvent?: (event: ChatStreamEvent) => void,
+    onOpen?: () => void,
+  ): Promise<void> {
+    const query = new URLSearchParams();
+    if (cursor !== null) {
+      query.set("after", String(cursor.after));
+      query.set("conversation_uid", cursor.conversation_uid);
+      query.set("generation", cursor.generation);
+    }
+    const encoded = query.toString();
+    const suffix = encoded ? `?${encoded}` : "";
+    return this.streamSse<ChatStreamEvent>(
+      `/sessions/${encodeURIComponent(sessionId)}/stream${suffix}`,
+      signal,
+      onEvent,
+      onOpen,
+    );
   }
 
   /**

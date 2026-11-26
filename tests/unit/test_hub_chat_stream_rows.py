@@ -66,7 +66,11 @@ def _script_stream(hub_events):
             },
         )
 
-    replay = log.read(after=0, conversation_uid="conversation-a")
+    replay = log.read(
+        after=0,
+        conversation_uid="conversation-a",
+        generation=log.generation,
+    )
     return [snapshot, *replay]
 
 

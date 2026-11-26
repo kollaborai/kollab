@@ -6,6 +6,7 @@
   {
    "seq": 1,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "snapshot",
    "data": {
     "rows": [
@@ -63,6 +64,7 @@
   {
    "seq": 41,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "row.append",
    "data": {
     "id": "r1",
@@ -73,6 +75,7 @@
   {
    "seq": 42,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "turn.state",
    "data": {
     "turn_id": "t1",
@@ -85,6 +88,7 @@
   {
    "seq": 43,
    "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
    "type": "input.state",
    "data": {
     "id": "web-a1",

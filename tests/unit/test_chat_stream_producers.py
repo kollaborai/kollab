@@ -62,9 +62,13 @@ class _State:
 
 def _events(stream, first):
     cursor = first["data"]["next_seq"] - 1
-    replay = stream.subscribe({"after": cursor, "conversation_uid": "conversation-a"})[
-        "events"
-    ]
+    replay = stream.subscribe(
+        {
+            "after": cursor,
+            "conversation_uid": "conversation-a",
+            "generation": first["generation"],
+        }
+    )["events"]
     return [first, *replay]
 
 
@@ -363,9 +367,13 @@ async def test_reload_mid_turn_replays_terminal_events_from_the_snapshot_cursor(
         turn_id="native-2",
         stop_reason="end_turn",
     )
-    missed = stream.subscribe({"after": cursor, "conversation_uid": "conversation-a"})[
-        "events"
-    ]
+    missed = stream.subscribe(
+        {
+            "after": cursor,
+            "conversation_uid": "conversation-a",
+            "generation": snapshot["generation"],
+        }
+    )["events"]
 
     assert sequence_problems([snapshot, *missed]) == []
 
@@ -1242,11 +1250,11 @@ def test_snapshot_cursor_is_atomic_with_goal_turn_transition(transition):
     release = threading.Event()
     snapshot_done = threading.Event()
     snapshots = []
-    def paused_publish(kind, data):
+    def paused_publish(kind, data, *, on_commit=None):
         if kind == "turn.state":
             entered.set()
             assert release.wait(2)
-        return publish(kind, data)
+        return publish(kind, data, on_commit=on_commit)
     log.publish = paused_publish
     def produce():
         if transition == "start":

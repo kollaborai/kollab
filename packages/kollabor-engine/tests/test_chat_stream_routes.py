@@ -29,12 +29,16 @@ class _Rpc:
         self.calls.append((method, params))
         if method == "state.chat_stream.subscribe":
             if self.subscribe_results:
-                return self.subscribe_results.pop(0)
+                result = self.subscribe_results.pop(0)
+                for event in result.get("events", []):
+                    event.setdefault("generation", "daemon-1")
+                return result
             return {
                 "events": [
                     {
                         "seq": 7,
                         "conversation_uid": "conv-1",
+                        "generation": "daemon-1",
                         "type": "snapshot",
                         "data": {
                             "rows": [],
@@ -91,7 +95,9 @@ def test_stream_route_requires_the_engine_bearer_token(monkeypatch):
 def test_stream_route_forwards_cursor_and_sends_whole_events_as_sse(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
 
-    response = client.get("/sessions/s1/stream?after=6&conversation_uid=conv-1")
+    response = client.get(
+        "/sessions/s1/stream?after=6&conversation_uid=conv-1&generation=daemon-1"
+    )
 
     assert response.status_code == 200
     data_lines = [
@@ -100,6 +106,7 @@ def test_stream_route_forwards_cursor_and_sends_whole_events_as_sse(monkeypatch)
     assert json.loads(data_lines[0]) == {
         "seq": 7,
         "conversation_uid": "conv-1",
+        "generation": "daemon-1",
         "type": "snapshot",
         "data": {
             "rows": [],
@@ -112,7 +119,7 @@ def test_stream_route_forwards_cursor_and_sends_whole_events_as_sse(monkeypatch)
     assert session.rpc.calls == [
         (
             "state.chat_stream.subscribe",
-            {"after": 6, "conversation_uid": "conv-1"},
+            {"after": 6, "conversation_uid": "conv-1", "generation": "daemon-1"},
         )
     ]
 
@@ -366,6 +373,7 @@ def test_stream_refreshes_the_snapshot_when_live_events_switch_conversations(
             "event": {
                 "seq": 1,
                 "conversation_uid": "conv-2",
+                "generation": "daemon-1",
                 "type": "row.upsert",
                 "data": {"id": "input-2"},
             },
@@ -373,7 +381,9 @@ def test_stream_refreshes_the_snapshot_when_live_events_switch_conversations(
     )
     session.queue.put_nowait(None)
 
-    response = client.get("/sessions/s1/stream?after=6&conversation_uid=conv-1")
+    response = client.get(
+        "/sessions/s1/stream?after=6&conversation_uid=conv-1&generation=daemon-1"
+    )
 
     assert response.status_code == 200
     data_lines = [
@@ -385,11 +395,11 @@ def test_stream_refreshes_the_snapshot_when_live_events_switch_conversations(
     assert session.rpc.calls == [
         (
             "state.chat_stream.subscribe",
-            {"after": 6, "conversation_uid": "conv-1"},
+            {"after": 6, "conversation_uid": "conv-1", "generation": "daemon-1"},
         ),
         (
             "state.chat_stream.subscribe",
-            {"after": None, "conversation_uid": "conv-2"},
+            {"after": None, "conversation_uid": "conv-2", "generation": "daemon-1"},
         ),
     ]
 
@@ -439,6 +449,7 @@ def test_stream_discards_stale_event_when_daemon_snapshot_is_newer_conversation(
             "event": {
                 "seq": 9,
                 "conversation_uid": "conv-2",
+                "generation": "daemon-1",
                 "type": "row.upsert",
                 "data": {"id": "stale-input"},
             },
@@ -446,7 +457,9 @@ def test_stream_discards_stale_event_when_daemon_snapshot_is_newer_conversation(
     )
     session.queue.put_nowait(None)
 
-    response = client.get("/sessions/s1/stream?after=6&conversation_uid=conv-1")
+    response = client.get(
+        "/sessions/s1/stream?after=6&conversation_uid=conv-1&generation=daemon-1"
+    )
 
     assert response.status_code == 200
     data_lines = [
@@ -458,11 +471,11 @@ def test_stream_discards_stale_event_when_daemon_snapshot_is_newer_conversation(
     assert session.rpc.calls == [
         (
             "state.chat_stream.subscribe",
-            {"after": 6, "conversation_uid": "conv-1"},
+            {"after": 6, "conversation_uid": "conv-1", "generation": "daemon-1"},
         ),
         (
             "state.chat_stream.subscribe",
-            {"after": None, "conversation_uid": "conv-2"},
+            {"after": None, "conversation_uid": "conv-2", "generation": "daemon-1"},
         ),
     ]
 
@@ -489,6 +502,7 @@ def test_stream_replays_from_requested_cursor_after_empty_initial_replay(monkeyp
             "event": {
                 "seq": 8,
                 "conversation_uid": "conv-1",
+                "generation": "daemon-1",
                 "type": "row.upsert",
                 "data": {"id": "live-input"},
             },
@@ -496,7 +510,9 @@ def test_stream_replays_from_requested_cursor_after_empty_initial_replay(monkeyp
     )
     session.queue.put_nowait(None)
 
-    response = client.get("/sessions/s1/stream?after=6&conversation_uid=conv-1")
+    response = client.get(
+        "/sessions/s1/stream?after=6&conversation_uid=conv-1&generation=daemon-1"
+    )
 
     assert response.status_code == 200
     data_lines = [
@@ -507,11 +523,11 @@ def test_stream_replays_from_requested_cursor_after_empty_initial_replay(monkeyp
     assert session.rpc.calls == [
         (
             "state.chat_stream.subscribe",
-            {"after": 6, "conversation_uid": "conv-1"},
+            {"after": 6, "conversation_uid": "conv-1", "generation": "daemon-1"},
         ),
         (
             "state.chat_stream.subscribe",
-            {"after": 6, "conversation_uid": "conv-1"},
+            {"after": 6, "conversation_uid": "conv-1", "generation": "daemon-1"},
         ),
     ]
 

@@ -21,8 +21,9 @@ const PARTS = [
   { type: "hub-note", from: "lapis", to: "me", text: "done", observed: false, kind: "reply", thread_id: "th-1", reply_to: "m-1", is_direct: true, presence: "online" },
 ];
 const without = (data: Record<string, unknown>, key: string) => Object.fromEntries(Object.entries(data).filter(([k]) => k !== key));
-const upsert = (data: unknown) => ({ seq: 1, conversation_uid: "c", type: "row.upsert", data });
-const snapshot = (data: unknown) => ({ seq: 1, conversation_uid: "c", type: "snapshot", data });
+const upsert = (data: unknown) => ({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "row.upsert", data });
+const snapshot = (data: unknown) => ({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "snapshot", data });
+const withGeneration = (value: Record<string, unknown>) => ({ ...value, generation: "daemon-1" });
 
 describe("chat stream contract", () => {
   it("reads all eight fixtures", () => {
@@ -67,18 +68,18 @@ describe("chat stream contract", () => {
     ["a queued input with an outcome", { id: "a", state: "queued", turn_id: null, outcome: "completed" }],
     ["a started input with an unknown outcome", { id: "a", state: "started", turn_id: "t1", outcome: "nope" }],
   ])("rejects %s, as an event and inside a snapshot", (_label, info) => {
-    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "input.state", data: info })).toBe(false);
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "input.state", data: info })).toBe(false);
     expect(isChatStreamEvent(snapshot({ ...SNAPSHOT, inputs: [info] }))).toBe(false);
   });
 
   it.each([[-1], [true], [1.5]])("rejects a row.append whose part index is %s", (part) => {
-    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "row.append", data: { id: "r1", part, text: "x" } })).toBe(false);
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "row.append", data: { id: "r1", part, text: "x" } })).toBe(false);
   });
 
   it("validates the optional goal origin on turns and snapshots", () => {
     const turn = { turn_id: "t", state: "running", input_ids: [] };
     const valid = { kind: "goal", goal_id: "full-goal", attempt_id: "full-attempt" };
-    const event = (origin: unknown) => ({ seq: 1, conversation_uid: "c", type: "turn.state", data: { ...turn, origin } });
+    const event = (origin: unknown) => ({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "turn.state", data: { ...turn, origin } });
     expect(isChatStreamEvent(event(valid))).toBe(true);
     expect(isChatStreamEvent(snapshot({ ...SNAPSHOT, turns: [{ ...turn, origin: valid }] }))).toBe(true);
     for (const origin of [null, {}, { ...valid, attempt_id: "" }, { ...valid, kind: "user" }]) {
@@ -131,7 +132,7 @@ describe("chat stream contract", () => {
     ["a snapshot with a turn in an unknown state", snapshot({ ...SNAPSHOT, turns: [{ turn_id: "t1", state: "paused", input_ids: [] }] })],
     ["a snapshot with a turn without input_ids", snapshot({ ...SNAPSHOT, turns: [{ turn_id: "t1", state: "running" }] })],
   ])("rejects %s", (_label, event) => {
-    expect(isChatStreamEvent(event)).toBe(false);
+    expect(isChatStreamEvent(withGeneration(event as Record<string, unknown>))).toBe(false);
   });
 
   it("makes prefixed ids from getRandomValues, so plain-http pages without randomUUID still work", () => {
