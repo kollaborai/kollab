@@ -15,8 +15,8 @@ from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
 from kollabor_agent.queue_processor import (
-    QueueProcessor,
     QueuedInput,
+    QueueProcessor,
     TaggedInput,
     batch_request_ids,
 )

@@ -1054,12 +1054,15 @@ class KollaborConversationLogger:
         *,
         expected_metadata: Dict[str, Any],
         updates: Dict[str, Any],
+        remove_metadata_keys: List[str] | tuple[str, ...] = (),
     ) -> bool:
-        """Atomically add metadata to one exact user row in the current log.
+        """Atomically update metadata on one exact user row in the current log.
 
         ACP assigns dispatch order when a prompt actually begins, after its
         admission row was written. The row UUID and expected identity prevent a
         delayed callback from modifying a reused request ID or another turn.
+        ``remove_metadata_keys`` supports lifecycle transitions that retire
+        private admission markers from the durable row.
         """
         if (
             not isinstance(message_uuid, str)
@@ -1068,6 +1071,12 @@ class KollaborConversationLogger:
             or not expected_metadata
             or not isinstance(updates, dict)
             or not updates
+            or not isinstance(remove_metadata_keys, (list, tuple))
+            or any(
+                not isinstance(key, str) or not key
+                for key in remove_metadata_keys
+            )
+            or set(remove_metadata_keys) & set(updates)
         ):
             return False
         try:
@@ -1083,6 +1092,7 @@ class KollaborConversationLogger:
                 message_uuid,
                 expected_metadata,
                 updates,
+                tuple(remove_metadata_keys),
             )
 
     async def reorder_native_queue_history(
@@ -1207,6 +1217,7 @@ class KollaborConversationLogger:
         message_uuid: str,
         expected_metadata: Dict[str, Any],
         updates: Dict[str, Any],
+        remove_metadata_keys: tuple[str, ...],
     ) -> bool:
         """Rewrite one exact JSONL row under the shared rewrite/write locks."""
         temp_path: Path | None = None
@@ -1254,8 +1265,10 @@ class KollaborConversationLogger:
                             changed = any(
                                 metadata.get(key) != value
                                 for key, value in updates.items()
-                            )
+                            ) or any(key in metadata for key in remove_metadata_keys)
                             metadata.update(deepcopy(updates))
+                            for key in remove_metadata_keys:
+                                metadata.pop(key, None)
                             output.append((json.dumps(record) + "\n").encode())
                     if not found:
                         return False

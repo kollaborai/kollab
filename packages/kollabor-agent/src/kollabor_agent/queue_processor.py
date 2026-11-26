@@ -1595,6 +1595,7 @@ class QueueProcessor:
                         "chat_stream_pending_input_id": request_id
                     },
                     updates=updates,
+                    remove_metadata_keys=("chat_stream_pending_input_id",),
                 )
             except Exception:
                 logger.exception(
@@ -1632,7 +1633,10 @@ class QueueProcessor:
                 else item.content
             ),
             "chat_stream_input_count": 1,
-            "plugin_pending_admission": item.stream_origin == "plugin",
+            "plugin_pending_admission": (
+                isinstance(item, TaggedInput)
+                and item.stream_origin == "plugin"
+            ),
         }
 
     def _queued_plugin_input(self, request_id: str) -> TaggedInput | None:
@@ -2593,12 +2597,27 @@ class QueueProcessor:
                             "chat_stream_trigger_llm": True,
                         }
                     )
+                expected_options = [expected_metadata]
+                if plugin_pending:
+                    # Admission may already have atomically retired the
+                    # private pending marker before this terminal update
+                    # acquired the JSONL lock. Accept either exact phase.
+                    expected_options.append({"request_id": input_id})
                 try:
-                    persisted = await update_metadata(
-                        row_uuid,
-                        expected_metadata=expected_metadata,
-                        updates=updates,
-                    )
+                    persisted = False
+                    for expected in expected_options:
+                        persisted = await update_metadata(
+                            row_uuid,
+                            expected_metadata=expected,
+                            updates=updates,
+                            remove_metadata_keys=(
+                                ("chat_stream_pending_input_id",)
+                                if plugin_pending
+                                else ()
+                            ),
+                        )
+                        if persisted:
+                            break
                 except Exception:
                     logger.exception(
                         "Could not persist native input outcome for %s", input_id
