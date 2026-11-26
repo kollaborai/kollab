@@ -117,6 +117,210 @@ def test_stream_route_forwards_cursor_and_sends_whole_events_as_sse(monkeypatch)
     ]
 
 
+def test_stream_route_forwards_generation_and_daemon_restart_returns_snapshot(
+    monkeypatch,
+):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.subscribe_results = [
+        {
+            "events": [
+                {
+                    "seq": 0,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-after-restart",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 1,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        }
+    ]
+
+    response = client.get(
+        "/sessions/s1/stream?after=6&conversation_uid=conv-1&generation=daemon-before-restart"
+    )
+
+    events = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert response.status_code == 200
+    assert events[0]["type"] == "snapshot"
+    assert events[0]["generation"] == "daemon-after-restart"
+    assert session.rpc.calls == [
+        (
+            "state.chat_stream.subscribe",
+            {
+                "after": 6,
+                "conversation_uid": "conv-1",
+                "generation": "daemon-before-restart",
+            },
+        )
+    ]
+
+
+def test_legacy_after_without_identity_forces_a_snapshot_request(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.subscribe_results = [
+        {
+            "events": [
+                {
+                    "seq": 0,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 1,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        }
+    ]
+
+    response = client.get("/sessions/s1/stream?after=6")
+
+    assert response.status_code == 200
+    assert session.rpc.calls == [
+        (
+            "state.chat_stream.subscribe",
+            {"after": None, "conversation_uid": None, "generation": None},
+        )
+    ]
+
+
+def test_engine_reconnect_replays_same_generation_after_requested_cursor(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.subscribe_results = [
+        {
+            "events": [
+                {
+                    "seq": 7,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "row.upsert",
+                    "data": {"id": "replayed"},
+                }
+            ]
+        }
+    ]
+    session.queue = asyncio.Queue()
+    session.queue.put_nowait(
+        {
+            "type": "chat_stream",
+            "event": {
+                "seq": 8,
+                "conversation_uid": "conv-1",
+                "generation": "daemon-1",
+                "type": "row.upsert",
+                "data": {"id": "live"},
+            },
+        }
+    )
+    session.queue.put_nowait(None)
+
+    response = client.get(
+        "/sessions/s1/stream?after=6&conversation_uid=conv-1&generation=daemon-1"
+    )
+    events = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+    assert [event["seq"] for event in events] == [7, 8]
+    assert [event["data"]["id"] for event in events] == ["replayed", "live"]
+    assert session.rpc.calls == [
+        (
+            "state.chat_stream.subscribe",
+            {
+                "after": 6,
+                "conversation_uid": "conv-1",
+                "generation": "daemon-1",
+            },
+        )
+    ]
+
+
+def test_live_daemon_generation_change_refreshes_snapshot_before_replay(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.subscribe_results = [
+        {
+            "events": [
+                {
+                    "seq": 0,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 1,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        },
+        {
+            "events": [
+                {
+                    "seq": 0,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-2",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 2,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        },
+    ]
+    session.queue = asyncio.Queue()
+    session.queue.put_nowait(
+        {
+            "type": "chat_stream",
+            "event": {
+                "seq": 1,
+                "conversation_uid": "conv-1",
+                "generation": "daemon-2",
+                "type": "row.upsert",
+                "data": {"id": "included-in-snapshot"},
+            },
+        }
+    )
+    session.queue.put_nowait(None)
+
+    response = client.get(
+        "/sessions/s1/stream?after=0&conversation_uid=conv-1&generation=daemon-1"
+    )
+    events = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+    assert [event["generation"] for event in events] == ["daemon-1", "daemon-2"]
+    assert events[-1]["type"] == "snapshot"
+    assert session.rpc.calls[-1] == (
+        "state.chat_stream.subscribe",
+        {"after": None, "conversation_uid": "conv-1", "generation": "daemon-2"},
+    )
+
+
 def test_stream_refreshes_the_snapshot_when_live_events_switch_conversations(
     monkeypatch,
 ):

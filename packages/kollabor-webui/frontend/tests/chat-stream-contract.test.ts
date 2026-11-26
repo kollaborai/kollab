@@ -88,9 +88,15 @@ describe("chat stream contract", () => {
   });
 
   it("accepts a full row and a snapshot whose older is a cursor or null", () => {
-    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "row.upsert", data: ROW })).toBe(true);
-    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "snapshot", data: SNAPSHOT })).toBe(true);
-    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "snapshot", data: { ...SNAPSHOT, older: "cursor-1" } })).toBe(true);
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "row.upsert", data: ROW })).toBe(true);
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "snapshot", data: SNAPSHOT })).toBe(true);
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "snapshot", data: { ...SNAPSHOT, older: "cursor-1" } })).toBe(true);
+  });
+
+  it("requires a non-empty daemon generation on every stream event", () => {
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", type: "row.delete", data: { id: "r1" } })).toBe(false);
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", generation: "", type: "row.delete", data: { id: "r1" } })).toBe(false);
+    expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "row.delete", data: { id: "r1" } })).toBe(true);
   });
 
   it("accepts every fixture event, since the bad fixtures break the sequence rules, not the shapes", () => {

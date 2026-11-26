@@ -88,6 +88,39 @@ def _snapshot_rows(stream):
     return snapshot, snapshot["data"]["rows"]
 
 
+def test_row_is_visible_in_a_snapshot_taken_during_live_publish():
+    state = _State()
+    stream = ChatStreamService(state)
+    during_publish = {}
+
+    def snapshot_during_publish(event):
+        during_publish["event"] = event
+        during_publish["snapshot"] = stream.subscribe(
+            {"after": None, "conversation_uid": None}
+        )["events"][0]
+
+    stream._publish_live = snapshot_during_publish
+    stream._upsert(
+        "conversation-a",
+        {
+            "id": "input-racing-snapshot",
+            "seq": 0,
+            "kind": "input",
+            "role": "user",
+            "turn_id": None,
+            "status": "queued",
+            "parts": [{"type": "text", "text": "hello"}],
+            "created_at": "2026-11-25T12:00:00Z",
+        },
+    )
+
+    snapshot = during_publish["snapshot"]
+    assert snapshot["data"]["next_seq"] == during_publish["event"]["seq"] + 1
+    assert [row["id"] for row in snapshot["data"]["rows"]] == [
+        "input-racing-snapshot"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_native_queued_input_streams_one_reply_and_ends_after_its_turn():
     state = _State()

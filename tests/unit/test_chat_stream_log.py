@@ -124,6 +124,44 @@ def test_join_keeps_the_running_turn_replayable_past_the_window():
     assert [event["seq"] for event in replay] == [3, 4, 5, 6]
 
 
+def test_daemon_restart_changes_generation_and_old_cursor_gets_snapshot():
+    previous_daemon = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+    previous_event = previous_daemon.publish("row.delete", {"id": "old-row"})
+
+    restarted_daemon = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+    restarted_daemon.publish("row.delete", {"id": "new-row"})
+
+    assert restarted_daemon.generation != previous_event["generation"]
+    replay = restarted_daemon.read(
+        after=previous_event["seq"],
+        conversation_uid="conv-1",
+        generation=previous_event["generation"],
+    )
+
+    assert len(replay) == 1
+    assert replay[0]["type"] == "snapshot"
+    assert replay[0]["generation"] == restarted_daemon.generation
+    assert replay[0]["data"]["next_seq"] == 2
+
+
+def test_cursor_without_generation_gets_snapshot_even_with_matching_uid():
+    log = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+    log.publish("row.delete", {"id": "existing"})
+
+    result = log.read(after=1, conversation_uid="conv-1")
+
+    assert result[0]["type"] == "snapshot"
+
+
+def test_cursor_without_conversation_uid_gets_snapshot():
+    log = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+    log.publish("row.delete", {"id": "existing"})
+
+    result = log.read(after=1)
+
+    assert result[0]["type"] == "snapshot"
+
+
 def test_live_publish_callbacks_preserve_the_log_sequence_across_threads():
     callback_started = threading.Event()
     release_first = threading.Event()

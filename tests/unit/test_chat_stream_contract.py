@@ -122,6 +122,16 @@ def test_event_problems_names_the_broken_field(event, needle):
     assert any(needle in problem for problem in event_problems(event))
 
 
+def test_event_requires_generation_to_make_sequence_numbers_restart_safe():
+    event = {
+        "seq": 1,
+        "conversation_uid": "c",
+        "type": "row.delete",
+        "data": {"id": "a"},
+    }
+    assert any("generation" in problem for problem in event_problems(event))
+
+
 def test_an_input_that_changes_after_it_ended_is_reported():
     base = json.loads((FIXTURES / "steered-input.json").read_text())["events"]
     late = {
