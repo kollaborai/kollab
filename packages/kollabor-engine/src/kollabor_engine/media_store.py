@@ -642,6 +642,45 @@ def open_media(
     return data, mime
 
 
+def open_queue_handoff_media(
+    conversations_dir: Path,
+    session_id: str,
+    *,
+    request_id: str,
+    source_ref: str,
+) -> Tuple[bytes, str]:
+    """Resolve one queue attachment only after it is bound to saved history."""
+    if (
+        not isinstance(request_id, str)
+        or not request_id
+        or len(request_id) > 256
+        or not isinstance(source_ref, str)
+        or not source_ref
+        or len(source_ref) > 128
+    ):
+        raise FileNotFoundError(source_ref)
+    entries = [
+        entry
+        for entry in _read_index(Path(conversations_dir), session_id)
+        if entry.get("queue_request_id") == request_id
+        and entry.get("queue_source_ref") == source_ref
+        and isinstance(entry.get("history_row_uuid"), str)
+        and entry.get("history_row_uuid")
+        and type(entry.get("queue_attachment_index")) is int
+        and isinstance(entry.get("ref"), str)
+        and REF_RE.fullmatch(entry["ref"])
+    ]
+    if len(entries) != 1:
+        raise FileNotFoundError(source_ref)
+    entry = entries[0]
+    data, mime = open_media(
+        Path(conversations_dir), entry["ref"], session_id=session_id
+    )
+    if entry.get("mime") != mime:
+        raise MediaError("queue handoff media MIME does not match stored file")
+    return data, mime
+
+
 def list_for(conversations_dir: Path, session_id: str) -> List[Dict[str, object]]:
     """The session's images oldest first: the viewer's and gallery's source."""
     return [e for e in _read_index(conversations_dir, session_id) if e.get("ref")]
