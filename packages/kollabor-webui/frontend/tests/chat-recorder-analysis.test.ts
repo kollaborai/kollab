@@ -446,6 +446,41 @@ describe("chat recorder analysis", () => {
     await expect(flow()).rejects.toThrow(/rendered.*turn|turn.*rendered/i);
   });
 
+  it("measures goal cards by verified turn and call identity across recovery", () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    const installPage = (saved: string | null) => {
+      const window = { fetch: async () => new Response() };
+      const install = runInNewContext(`(${body})`, {
+        window, Request, Response, ReadableStream, TextDecoder, URL, performance,
+        location: { href: "http://localhost/" },
+        sessionStorage: { getItem: () => saved, removeItem: () => {} }, requestAnimationFrame: () => {},
+      });
+      install({ wall0: Date.now(), sessionStreamSuffix: "/sessions/target/stream", user: ["joined"], reply: [] });
+      return (window as any).__rec;
+    };
+    const rec = installPage(null);
+    rec.mark("PAGE START GOAL");
+    rec.noteToolRow({ id: "r1", turn_id: "goal", parts: [{ type: "tool-call", tool_call_id: "c1" }] });
+    rec.noteToolRow({ id: "old", turn_id: "other", parts: [{ type: "tool-call", tool_call_id: "old" }] });
+    rec.verifyGoalTurn("goal");
+    expect(rec.toolsStarted).toBe(1);
+    const card = (turn: string, row: string, call: string) => ({ dataset: { chatTurnId: turn, chatRowId: row, chatToolCallId: call } });
+    let sample = rec.goalToolSample([card("goal", "r1", "c1"), card("other", "old", "old")]);
+    expect(sample).toMatchObject({ toolsStarted: 1, toolsDrawn: 1, duplicateTools: 0 });
+    sample = rec.goalToolSample([card("goal", "r1", "c1"), card("goal", "r1", "c1")]);
+    expect(sample.duplicateTools).toBe(1);
+    expect(analyzeChatFrames([frame({ ...sample })], ready).defects.dupTools).toBe(1);
+    const restored = installPage(JSON.stringify(rec));
+    restored.noteToolRow({ id: "r1", turn_id: "goal", parts: [{ type: "tool-call", tool_call_id: "c1" }] });
+    restored.noteToolRow({ id: "joined", kind: "input", turn_id: "goal", parts: [{ type: "text", text: "joined" }] });
+    restored.noteToolRow({ id: "r2", turn_id: "goal", parts: [{ type: "tool-call", tool_call_id: "c2" }] });
+    sample = restored.goalToolSample([card("goal", "r1", "c1"), card("goal", "r1", "c1")]);
+    expect(sample).toMatchObject({ toolsStarted: 2, toolsDrawn: 2, duplicateTools: 1 });
+    expect(analyzeChatFrames([frame({ ...sample })], ready).defects.dupTools).toBe(1);
+    expect(restored.goalToolSample([])).toMatchObject({ toolsStarted: 2, toolsDrawn: 0, duplicateTools: 0 });
+  });
+
   it("counts a tool call once across row IDs and reload", () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
