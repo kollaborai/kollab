@@ -77,8 +77,11 @@ keep working when a device drops off and comes back.
 
 ### Who fires
 
-- Each schedule fires only on the device its agent runs on (the `@device`
-  part, or this device for a bare name). Other devices only show it.
+- Each persisted agent target is qualified as `name@device`; the editor binds
+  a bare name to the saving coordinator's device before it is stored or synced.
+  A bare or invalid target already on disk has no provable owner and stays
+  Waiting on every device. Other devices only show qualified targets they do
+  not own.
 - On that device one process owns the timer: the hub coordinator (the
   `flock` holder on `hub.lock`). Agents do not run timers of their own, so
   two agents in one folder never fire the same schedule twice.

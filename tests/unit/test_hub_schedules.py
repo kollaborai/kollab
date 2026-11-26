@@ -43,7 +43,7 @@ class FakeClock:
 def _row(**overrides) -> ScheduleRow:
     base = dict(
         id="s1",
-        agents=["lapis"],
+        agents=["lapis@mac"],
         prompt="check the queue",
         interval_seconds=600.0,
         anchor=1000.0,
@@ -212,14 +212,14 @@ async def test_timer_fires_on_the_grid_without_drift(tmp_path):
 
     # t=1000: the anchor is due right now.
     delay = await timer.pass_due()
-    assert fires.fires == [("s1", "lapis", 1000.0)]
+    assert fires.fires == [("s1", "lapis@mac", 1000.0)]
     assert delay == pytest.approx(600.0)
 
     # The fire landed a little late; the next due time is still on the grid,
     # so the remaining wait shrinks by exactly the lateness.
     clock.advance(605.0)
     delay = await timer.pass_due()
-    assert fires.fires[-1] == ("s1", "lapis", 1600.0)
+    assert fires.fires[-1] == ("s1", "lapis@mac", 1600.0)
     assert delay == pytest.approx(595.0)
 
     clock.advance(600.0)
@@ -423,4 +423,4 @@ async def test_timer_run_wakes_early_on_wake_call(tmp_path):
         await task
     except asyncio.CancelledError:
         pass
-    assert fires.fires == [("s1", "lapis", pytest.approx(clock.now))]
+    assert fires.fires == [("s1", "lapis@mac", pytest.approx(clock.now))]

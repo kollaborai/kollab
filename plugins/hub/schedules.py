@@ -238,15 +238,22 @@ class ScheduleTimer:
     def _owned_agents(self, row: ScheduleRow) -> List[str]:
         """The row's agents that run on this device (requirement 7's Waiting).
 
-        A bare name is this device's agent; ``name@device`` belongs to that
-        device only. With no rows owned here the schedule is Waiting and is
-        never fired or deleted.
+        Only ``name@device`` identifies an owner. Bare or invalid names do not
+        identify a device, so they stay Waiting instead of firing everywhere.
+        With no rows owned here the schedule is never fired or deleted.
         """
         mine = _device_name(self._device_name)
         owned = []
         for agent in row.agents:
             handle = parse_handle(agent)
-            if handle is None or handle[1] == mine:
+            if handle is None:
+                logger.warning(
+                    "schedules: %s has unqualified agent %r; leaving it Waiting",
+                    row.id,
+                    agent,
+                )
+                continue
+            if handle[1] == mine:
                 owned.append(agent)
         return owned
 
