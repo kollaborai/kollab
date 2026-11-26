@@ -268,7 +268,12 @@ async def test_route_falls_back_to_bound_history_media_after_queue_release(monke
         opened.append((conversations_dir, session_id, request_id, source_ref))
         return b"durable image", "image/png"
 
-    monkeypatch.setattr(web_queue.media_store, "open_queue_handoff_media", open_bound_media)
+    monkeypatch.setattr(
+        web_queue.media_store,
+        "open_queue_handoff_media",
+        open_bound_media,
+        raising=False,
+    )
     monkeypatch.setattr(
         "kollabor_config.config_utils.get_project_data_dir",
         lambda: Path("/data-root"),

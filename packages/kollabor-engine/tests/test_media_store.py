@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from kollabor_engine import media_store
 from kollabor_engine.media_store import (
     MAX_DECODED_BYTES,
     REF_RE,
@@ -16,7 +17,6 @@ from kollabor_engine.media_store import (
     count_image_tokens,
     list_for,
     open_media,
-    open_queue_handoff_media,
     save,
     save_queue_handoff_media,
 )
@@ -196,7 +196,7 @@ def test_queue_attachment_is_resolvable_only_after_its_history_row_is_bound(
     source_ref, media_ref = media_refs[0]
 
     with pytest.raises(FileNotFoundError):
-        open_queue_handoff_media(
+        media_store.open_queue_handoff_media(
             tmp_path,
             "s1",
             request_id="queue-request-a",
@@ -211,14 +211,14 @@ def test_queue_attachment_is_resolvable_only_after_its_history_row_is_bound(
         source_media_refs=media_refs,
     )
 
-    assert open_queue_handoff_media(
+    assert media_store.open_queue_handoff_media(
         tmp_path,
         "s1",
         request_id="queue-request-a",
         source_ref=source_ref,
     ) == (image, "image/png")
     with pytest.raises(FileNotFoundError):
-        open_queue_handoff_media(
+        media_store.open_queue_handoff_media(
             tmp_path,
             "s1",
             request_id="queue-request-b",
