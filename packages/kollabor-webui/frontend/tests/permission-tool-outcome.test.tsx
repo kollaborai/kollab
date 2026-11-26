@@ -286,6 +286,43 @@ describe("permission prompt data from the daemon chat-stream row", () => {
       expect.objectContaining({ tool_id: completeData.tool_id, permission_id: completeData.permission_id, decision: "approve" }),
     );
   });
+
+  it("does not show decision actions when recovered prompt identity differs", async () => {
+    streamMocks.getChatStreamContent.mockReset();
+    const wrongPart = JSON.stringify({ type: "prompt", prompt_id: "different-prompt", data: DAEMON_PROMPT_DATA });
+    const marker = {
+      kind: "chat-stream-part-preview",
+      session_id: "session-preview",
+      row_id: "row-preview",
+      part_index: 2,
+      output_bytes: new TextEncoder().encode(wrongPart).length,
+      output_chars: Array.from(wrongPart).length,
+      output_type: "json",
+      output_revision: "e".repeat(64),
+      preview: wrongPart.slice(0, 64),
+    };
+    streamMocks.getChatStreamContent.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      part_index: marker.part_index,
+      field: "part",
+      output_revision: marker.output_revision,
+      offset: 0,
+      next_offset: marker.output_chars,
+      total_chars: marker.output_chars,
+      output_type: "json",
+      content: wrongPart,
+      done: true,
+    });
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const container = renderDataPrompt("daemon-perm-9", {
+      kind: "kollab-chat-stream-permission-prompt-preview",
+      marker,
+    }, respond);
+
+    await vi.waitFor(() => expect(container.textContent).toContain("could not be verified"));
+    expect(buttons(container).some((button) => /Allow|Deny/.test(button.textContent ?? ""))).toBe(false);
+    expect(respond).not.toHaveBeenCalled();
+  });
 });
 
 function renderDataPrompt(

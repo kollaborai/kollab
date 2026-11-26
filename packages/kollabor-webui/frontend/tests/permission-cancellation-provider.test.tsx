@@ -109,6 +109,8 @@ describe("permission cancellation provider", () => {
     const readyKey = { sessionId: marker.session_id, promptId: "permission-1", revision };
 
     expect(container.querySelector("button")).toBeNull();
+    act(() => markPermissionPromptPreviewVisible({ ...readyKey, revision: "b".repeat(64) }, true));
+    expect(container.querySelector("button")).toBeNull();
     act(() => markPermissionPromptPreviewVisible(readyKey, true));
     expect(container.querySelector("button")?.textContent).toBe("Stop");
   });
