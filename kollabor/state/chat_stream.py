@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import threading
 import time
@@ -1575,6 +1576,20 @@ class ChatStreamService:
         return f"reply-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex}"
 
     @staticmethod
+    def _reply_segment_row_id(
+        uid: str,
+        turn_id: str,
+        segment: int,
+        history_key: str | None = None,
+    ) -> str:
+        identity = (
+            f"{uid}:acp:{history_key}"
+            if isinstance(history_key, str) and history_key
+            else f"{uid}:turn:{turn_id}"
+        )
+        return f"reply-{uuid.uuid5(uuid.NAMESPACE_URL, f'{identity}:segment:{segment}').hex}"
+
+    @staticmethod
     def _tool_row_id(
         uid: str,
         turn_id: str | None,
@@ -1846,6 +1861,31 @@ class ChatStreamService:
         for row_id in dropped_row_ids:
             row_cache.pop(row_id, None)
         rows = merge_chat_stream_rows(self._transcript_rows(uid), state_rows)
+        compaction_marker_parts = [
+            {"type": "text", "text": "Earlier messages compacted"}
+        ]
+        compaction_markers = [
+            row
+            for row in rows
+            if row.get("kind") == "marker"
+            and row.get("parts") == compaction_marker_parts
+        ]
+        if compaction_markers:
+            marker = copy.deepcopy(compaction_markers[-1])
+            compaction_marker_ids = {row["id"] for row in compaction_markers}
+            rows = [row for row in rows if row.get("id") not in compaction_marker_ids]
+            marker["seq"] = self._log(uid).next_seq
+        else:
+            marker = {
+                "id": f"marker-{uuid.uuid4().hex}",
+                "seq": self._log(uid).next_seq,
+                "kind": "marker",
+                "role": "system",
+                "turn_id": None,
+                "status": "done",
+                "parts": compaction_marker_parts,
+                "created_at": self._timestamp(),
+            }
         active_turn = self._active_turns.get(uid)
         live_rows = []
         for row in self._rows.get(uid, {}).values():
@@ -1858,16 +1898,8 @@ class ChatStreamService:
             ):
                 live_rows.append(row)
         rows = merge_chat_stream_rows(rows, live_rows)
-        marker = {
-            "id": f"marker-{uuid.uuid4().hex}",
-            "seq": self._log(uid).next_seq,
-            "kind": "marker",
-            "role": "system",
-            "turn_id": active_turn,
-            "status": "done",
-            "parts": [{"type": "text", "text": "Earlier messages compacted"}],
-            "created_at": self._timestamp(),
-        }
+        if marker["turn_id"] is None:
+            marker["turn_id"] = active_turn
         replacement_rows = [marker, *rows][-REPLAY_WINDOW:]
         event = self._log(uid).publish("replace", {"rows": replacement_rows})
         self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in replacement_rows}
@@ -2104,7 +2136,23 @@ class ChatStreamService:
                 return message.get(name, default)
             return getattr(message, name, default)
 
+        tool_results: dict[str, dict[str, Any]] = {}
+        for message in messages:
+            if field(message, "role") != "tool":
+                continue
+            metadata = field(message, "metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            call_id = metadata.get("tool_call_id")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            tool_results[call_id] = {
+                "result": copy.deepcopy(field(message, "content", "")),
+                "is_error": metadata.get("is_error") is True
+                or metadata.get("status") == "failed",
+            }
+
         rows = []
+        reply_segments: dict[tuple[str, str | None], int] = {}
         for index, message in enumerate(messages):
             role = field(message, "role")
             if not isinstance(role, str):
@@ -2113,11 +2161,72 @@ class ChatStreamService:
             metadata = metadata if isinstance(metadata, dict) else {}
             if (
                 metadata.get("hidden") is True
-                or metadata.get("stream_context_only") is True
                 or metadata.get("system_initialization") is True
+                or metadata.get("tool_output_batch") is True
             ):
                 continue
             source_role = role
+            is_agent_hud = metadata.get("agent_hud") is True
+            if is_agent_hud:
+                if metadata.get("stream_context_only") is True:
+                    continue
+                raw_hub_notes = metadata.get("hub_notes")
+                if isinstance(raw_hub_notes, list):
+                    hub_notes = raw_hub_notes
+                else:
+                    hub_notes = []
+                    hub_note = self._hub_note_part(metadata.get("hub_note"))
+                    hub_message_id = metadata.get("hub_message_id")
+                    if hub_note is not None and isinstance(hub_message_id, str):
+                        hub_notes.append(
+                            {
+                                "id": hub_message_id,
+                                "part": hub_note,
+                                "admission": metadata.get("hub_admission"),
+                            }
+                        )
+                timestamp = field(message, "timestamp")
+                if hasattr(timestamp, "isoformat"):
+                    timestamp = timestamp.isoformat()
+                if not isinstance(timestamp, str):
+                    timestamp = self._timestamp()
+                turn_id = self._event_turn_id(metadata)
+                for entry in hub_notes:
+                    if not isinstance(entry, dict):
+                        continue
+                    hub_message_id = entry.get("id")
+                    hub_note = self._hub_note_part(entry.get("part"))
+                    if (
+                        not isinstance(hub_message_id, str)
+                        or not hub_message_id
+                        or hub_note is None
+                    ):
+                        continue
+                    is_input = entry.get("admission") == "input"
+                    rows.append(
+                        {
+                            "id": hub_message_id,
+                            "seq": len(rows),
+                            "kind": "input" if is_input else "note",
+                            "role": "user" if is_input else "system",
+                            "turn_id": turn_id,
+                            "status": (
+                                metadata.get("status")
+                                if isinstance(metadata.get("status"), str)
+                                else "completed" if is_input else "done"
+                            ),
+                            "parts": [hub_note],
+                            "created_at": timestamp,
+                        }
+                    )
+                continue
+            tool_call_id = metadata.get("tool_call_id")
+            if metadata.get("stream_context_only") is True or (
+                source_role == "tool"
+                and isinstance(tool_call_id, str)
+                and bool(tool_call_id)
+            ):
+                continue
             role = (
                 source_role
                 if source_role in {"user", "assistant", "system"}
@@ -2132,7 +2241,11 @@ class ChatStreamService:
                 or metadata.get("hub_message")
                 or metadata.get("hub_message_id")
             )
-            if metadata.get("context_compaction") or metadata.get("compaction_summary"):
+            is_compaction = bool(
+                metadata.get("context_compaction")
+                or metadata.get("compaction_summary")
+            )
+            if is_compaction:
                 kind, role = "marker", "system"
             elif has_hub_identity:
                 if metadata.get("hub_admission") == "input":
@@ -2156,9 +2269,13 @@ class ChatStreamService:
             resolve_image = getattr(image_store, "resolve", None)
             hub_note = self._hub_note_part(metadata.get("hub_note"))
             parts = (
-                [hub_note]
-                if hub_note is not None
-                else self._transcript_parts(content, resolve_image)
+                [{"type": "text", "text": "Earlier messages compacted"}]
+                if is_compaction
+                else (
+                    [hub_note]
+                    if hub_note is not None
+                    else self._transcript_parts(content, resolve_image)
+                )
             )
             turn_id = self._event_turn_id(metadata)
             timestamp = field(message, "timestamp")
@@ -2216,14 +2333,32 @@ class ChatStreamService:
                 row_id = input_row_ids[0] if input_row_ids else None
             elif kind == "reply":
                 explicit_reply_id = metadata.get("reply_id")
+                segment_index = None
+                if isinstance(turn_id, str) and turn_id:
+                    segment_key = (turn_id, history_key)
+                    segment_index = reply_segments.get(segment_key, 0)
+                    reply_segments[segment_key] = segment_index + 1
                 row_id = (
                     explicit_reply_id
                     if isinstance(explicit_reply_id, str) and explicit_reply_id
                     else (
-                        self._reply_row_id(uid, turn_id, history_key)
+                        (
+                            self._reply_row_id(uid, turn_id, history_key)
+                            if segment_index in (None, 0)
+                            else self._reply_segment_row_id(
+                                uid, turn_id, segment_index, history_key
+                            )
+                        )
                         if turn_id is not None
                         else None
                     )
+                )
+            elif kind == "marker" and is_compaction:
+                compaction_id = metadata.get("compaction_id")
+                row_id = (
+                    f"marker-{uuid.uuid5(uuid.NAMESPACE_URL, f'{uid}:compaction:{compaction_id}').hex}"
+                    if isinstance(compaction_id, str) and compaction_id
+                    else None
                 )
             elif kind == "tool" and isinstance(tool_id, str) and tool_id:
                 row_id = tool_id
@@ -2363,11 +2498,25 @@ class ChatStreamService:
                 if not isinstance(call_id, str) or not call_id:
                     continue
                 name = call.get("name") or call.get("tool_name")
+                function = call.get("function")
+                if isinstance(function, dict):
+                    name = name or function.get("name")
                 if not isinstance(name, str) or not name:
                     name = "Tool"
                 args = call.get("input")
                 if args is None:
-                    args = call.get("args", {})
+                    args = call.get("args")
+                if args is None and isinstance(function, dict):
+                    raw_args = function.get("arguments")
+                    if isinstance(raw_args, str):
+                        try:
+                            args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            args = raw_args
+                    elif raw_args is not None:
+                        args = copy.deepcopy(raw_args)
+                if args is None:
+                    args = {}
                 part: dict[str, Any] = {
                     "type": "tool-call",
                     "tool_call_id": call_id,
@@ -2375,14 +2524,21 @@ class ChatStreamService:
                     "args": copy.deepcopy(args),
                 }
                 result = call.get("result")
+                native_result = tool_results.get(call_id)
+                if result is None and native_result is not None:
+                    result = native_result["result"]
                 if result is not None:
                     part["result"] = copy.deepcopy(result)
                 is_error = call.get("is_error")
-                if not isinstance(is_error, bool):
+                if native_result is not None:
+                    is_error = native_result["is_error"]
+                elif not isinstance(is_error, bool):
                     is_error = call.get("status") == "failed"
                 part["is_error"] = is_error
                 call_status = call.get("status")
-                if call_status in {"running", "in_progress"}:
+                if native_result is not None:
+                    tool_status = "failed" if native_result["is_error"] else "completed"
+                elif call_status in {"running", "in_progress"}:
                     tool_status = "running"
                 elif call_status in {"failed", "completed", "cancelled"}:
                     tool_status = call_status
