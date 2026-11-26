@@ -1624,11 +1624,16 @@ class ChatStreamService:
         dropped_row_ids: set[str] = set()
         if isinstance(history, list):
             compaction_stamps = []
+            saw_compaction = False
             has_unparseable_compaction = False
             compaction_snapshot_count = None
             compaction_retained_positions: set[int] = set()
             has_compaction_position_metadata = False
-            compaction_round = None
+            compaction_position_map: dict[int, int] = {}
+            compaction_output_count = None
+            compaction_snapshot_row_revision = None
+            compaction_id = None
+            compaction_source_id = None
             for message in history:
                 if isinstance(message, dict):
                     metadata = message.get("metadata")
@@ -1641,6 +1646,7 @@ class ChatStreamService:
                     or metadata.get("compaction_summary")
                 ):
                     continue
+                saw_compaction = True
                 snapshot_count = metadata.get("compaction_snapshot_count")
                 retained_positions = metadata.get("compaction_retained_positions")
                 if (
@@ -1658,13 +1664,41 @@ class ChatStreamService:
                     compaction_snapshot_count = snapshot_count
                     compaction_retained_positions = set(retained_positions)
                     has_compaction_position_metadata = True
-                round_number = metadata.get("compaction_round")
-                if (
-                    isinstance(round_number, int)
-                    and not isinstance(round_number, bool)
-                    and round_number >= 0
-                ):
-                    compaction_round = round_number
+                    raw_position_map = metadata.get(
+                        "compaction_retained_position_map"
+                    )
+                    if isinstance(raw_position_map, dict):
+                        compaction_position_map = {
+                            int(source): target
+                            for source, target in raw_position_map.items()
+                            if isinstance(source, str)
+                            and source.isdigit()
+                            and isinstance(target, int)
+                            and not isinstance(target, bool)
+                            and target >= 0
+                        }
+                    output_count = metadata.get("compaction_output_count")
+                    if (
+                        isinstance(output_count, int)
+                        and not isinstance(output_count, bool)
+                        and output_count >= 0
+                    ):
+                        compaction_output_count = output_count
+                    snapshot_revision = metadata.get(
+                        "compaction_snapshot_row_revision"
+                    )
+                    if (
+                        isinstance(snapshot_revision, int)
+                        and not isinstance(snapshot_revision, bool)
+                        and snapshot_revision >= 0
+                    ):
+                        compaction_snapshot_row_revision = snapshot_revision
+                value = metadata.get("compaction_id")
+                compaction_id = value if isinstance(value, str) and value else None
+                value = metadata.get("compaction_source_id")
+                compaction_source_id = (
+                    value if isinstance(value, str) and value else None
+                )
                 stamp = _parse_chat_timestamp(timestamp)
                 if stamp is None:
                     has_unparseable_compaction = True
@@ -1687,24 +1721,76 @@ class ChatStreamService:
                         row_stamp = _parse_chat_timestamp(row.get("created_at"))
                         row_position = row.get("_history_index")
                         if has_compaction_position_metadata:
-                            if (
-                                row.get("_history_compaction_round") == compaction_round
-                                and compaction_round is not None
+                            row_coordinate = row.get("_history_compaction_id")
+                            if compaction_id and row_coordinate == compaction_id:
+                                keep_row = True
+                            elif (
+                                row_coordinate is not None
+                                and row_coordinate != compaction_source_id
                             ):
+                                # Rows already tagged for another history
+                                # generation cannot be compared to this map.
                                 keep_row = True
                             elif (
                                 isinstance(row_position, int)
                                 and not isinstance(row_position, bool)
                                 and row_position >= 0
                             ):
-                                adjacent_to_retained = (
-                                    row_position - 1 in compaction_retained_positions
-                                    or row_position in compaction_retained_positions
+                                revision = row.get("_history_row_revision")
+                                is_concurrent = (
+                                    isinstance(revision, int)
+                                    and not isinstance(revision, bool)
+                                    and compaction_snapshot_row_revision is not None
+                                    and revision > compaction_snapshot_row_revision
                                 )
-                                keep_row = (
-                                    row_position >= compaction_snapshot_count
-                                    or adjacent_to_retained
-                                )
+                                # Legacy rows have no revision watermark. Keep
+                                # their old tail behavior until a new durable
+                                # coordinate is written for them.
+                                if (
+                                    not isinstance(revision, int)
+                                    and row_position >= compaction_snapshot_count
+                                ):
+                                    is_concurrent = True
+                                if is_concurrent:
+                                    keep_row = True
+                                    if (
+                                        compaction_id
+                                        and compaction_output_count is not None
+                                    ):
+                                        row["_history_index"] = (
+                                            compaction_output_count
+                                            + row_position
+                                            - compaction_snapshot_count
+                                        )
+                                        row["_history_compaction_id"] = compaction_id
+                                elif compaction_position_map:
+                                    left_position = compaction_position_map.get(
+                                        row_position - 1
+                                    )
+                                    right_position = compaction_position_map.get(
+                                        row_position
+                                    )
+                                    if left_position is not None:
+                                        keep_row = True
+                                        row["_history_index"] = left_position + 1
+                                    elif right_position is not None:
+                                        keep_row = True
+                                        row["_history_index"] = right_position
+                                    else:
+                                        keep_row = False
+                                    if keep_row and compaction_id:
+                                        row["_history_compaction_id"] = compaction_id
+                                else:
+                                    adjacent_to_retained = (
+                                        row_position - 1 in compaction_retained_positions
+                                        or row_position in compaction_retained_positions
+                                    )
+                                    keep_row = (
+                                        row_position >= compaction_snapshot_count
+                                        or adjacent_to_retained
+                                    )
+                                    if keep_row and compaction_id:
+                                        row["_history_compaction_id"] = compaction_id
                             else:
                                 # Legacy rows have no source position. Preserve
                                 # the historical timestamp fallback for them.
@@ -1724,15 +1810,7 @@ class ChatStreamService:
                             if isinstance(row_id, str):
                                 dropped_row_ids.add(row_id)
                             continue
-                        row_compaction_round = row.get("_history_compaction_round")
-                        is_current_compaction_row = (
-                            row_compaction_round == compaction_round
-                            and compaction_round is not None
-                        )
-                        if row_stamp is not None and (
-                            not has_compaction_position_metadata
-                            or is_current_compaction_row
-                        ):
+                        if row_stamp is not None and not has_compaction_position_metadata:
                             preceding = []
                             for index, message in enumerate(history):
                                 if isinstance(message, dict):
@@ -1743,13 +1821,14 @@ class ChatStreamService:
                                 if message_stamp is not None and message_stamp <= row_stamp:
                                     preceding.append(index)
                             row["_history_index"] = len(preceding)
-                        if (
-                            isinstance(row_compaction_round, int)
-                            and row_compaction_round != compaction_round
-                        ):
-                            row.pop("_history_compaction_round", None)
                         retained_rows.append(row)
                     manager_rows[:] = retained_rows
+            if saw_compaction:
+                set_coordinate = getattr(
+                    manager, "set_chat_stream_history_coordinate", None
+                )
+                if callable(set_coordinate):
+                    set_coordinate(compaction_id, len(history))
         custom = getattr(self._state_service, "chat_stream_snapshot", None)
         state = custom() if callable(custom) else {}
         state_rows = state.get("rows") if isinstance(state, dict) else None

@@ -283,7 +283,9 @@ class MessageHandler:
         record_row = getattr(manager, "record_hub_chat_stream_row", None)
         if callable(record_row):
             try:
-                recorded_row = record_row(row)
+                recorded_row = record_row(
+                    row, history=getattr(coord, "conversation_history", None)
+                )
                 if isinstance(recorded_row, dict):
                     row = recorded_row
             except Exception:
