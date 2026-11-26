@@ -252,6 +252,36 @@ def test_branch_session_filters_native_hub_rows_after_the_branch_point(tmp_path)
     ]
 
 
+def test_branch_excludes_hub_row_recorded_after_selected_message(tmp_path):
+    """The default row position is the boundary after the current message."""
+    conversations = tmp_path / "conversations"
+    config = SimpleNamespace(
+        _conversations_dir=conversations,
+        get=lambda _key, default=None: default,
+    )
+    logger = KollaborConversationLogger(conversations)
+    manager = ConversationManager(config, logger)
+    manager.save_conversations = False
+    manager.conversation_metadata["conversation_uid"] = "branch-boundary-source"
+    manager.add_message("user", "selected message")
+    # A native row recorded now is after message 0. Its boundary is 1, so it
+    # must not be part of a branch whose inclusive endpoint is message 0.
+    manager.record_hub_chat_stream_row(
+        _hub_row(
+            "hub-after-selected-message",
+            kind="note",
+            created_at="2026-11-25T12:00:00Z",
+        )
+    )
+    manager.add_message("assistant", "later message")
+    assert manager.save_session(logger.session_id)
+
+    result = manager.branch_session(logger.session_id, 0)
+
+    assert result["success"] is True
+    assert manager.chat_stream_rows == []
+
+
 def test_compaction_replacement_drops_old_persisted_hub_rows():
     before = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc)
     compaction_time = before + timedelta(seconds=2)
