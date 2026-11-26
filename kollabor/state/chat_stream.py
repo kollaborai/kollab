@@ -17,6 +17,7 @@ from kollabor_events.chat_stream import (
     REPLAY_WINDOW,
     Event,
     event_problems,
+    outcome_for_stop_reason,
 )
 from kollabor_events.chat_stream_emit import emit_chat_event
 
@@ -857,6 +858,63 @@ class ChatStreamService:
         text = event.get("text")
         if not isinstance(text, str):
             return
+        raw_ids = event.get("request_ids")
+        if isinstance(raw_ids, list) and raw_ids:
+            input_ids = list(
+                dict.fromkeys(
+                    input_id
+                    for input_id in raw_ids
+                    if isinstance(input_id, str) and input_id
+                )
+            )
+            request_id = event.get("request_id")
+            if isinstance(request_id, str) and request_id and request_id not in input_ids:
+                input_ids.append(request_id)
+            records = event.get("operator_inputs")
+            text_by_id = {
+                record["request_id"]: record["text"]
+                for record in records or []
+                if isinstance(record, dict)
+                and isinstance(record.get("request_id"), str)
+                and record["request_id"] in input_ids
+                and isinstance(record.get("text"), str)
+            }
+            for input_id in input_ids:
+                input_text = text_by_id.get(input_id)
+                if input_text is None:
+                    existing = self._rows.setdefault(uid, {}).get(input_id)
+                    existing_text = next(
+                        (
+                            part.get("text")
+                            for part in (existing or {}).get("parts", [])
+                            if isinstance(part, dict)
+                            and part.get("type") == "text"
+                            and isinstance(part.get("text"), str)
+                        ),
+                        None,
+                    )
+                    input_text = (
+                        existing_text
+                        if existing_text is not None
+                        else text if len(input_ids) == 1 else ""
+                    )
+                self._on_user_message_input(
+                    uid,
+                    {
+                        **event,
+                        "request_id": input_id,
+                        "request_ids": [],
+                        "operator_inputs": [],
+                        "text": input_text,
+                    },
+                )
+            return
+        self._on_user_message_input(uid, event)
+
+    def _on_user_message_input(self, uid: str, event: dict[str, Any]) -> None:
+        text = event.get("text")
+        if not isinstance(text, str):
+            return
         input_id = event.get("request_id")
         if not isinstance(input_id, str) or not input_id:
             input_id = self._transcript_input_id(uid, text)
@@ -881,13 +939,22 @@ class ChatStreamService:
         self._input_turns[(uid, input_id)] = turn_id
         self._add_turn_input(uid, turn_id, input_id)
         row = self._rows.setdefault(uid, {}).get(input_id)
-        parts = self._input_parts(text)
-        if row is not None:
-            parts.extend(
+        parts = copy.deepcopy(row.get("parts", [])) if row is not None else []
+        has_text = any(
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+            and part["text"]
+            for part in parts
+        )
+        if not has_text and text:
+            images = [
                 copy.deepcopy(part)
-                for part in row.get("parts", [])
+                for part in parts
                 if isinstance(part, dict) and part.get("type") == "image"
-            )
+            ]
+            parts = self._input_parts(text)
+            parts.extend(images)
         if row is not None and (
             row.get("status") != state or row.get("parts") != parts
         ):
@@ -973,15 +1040,9 @@ class ChatStreamService:
         input_ids = list(dict.fromkeys((*self._turn_inputs.get(key, []), *input_ids)))
         if not input_ids and turn_id not in self._turns.get(uid, {}):
             return
-        stop_reason = str(event.get("stop_reason") or "")
-        if stop_reason in {"cancelled", "canceled", "interrupted", "stop"}:
-            outcome = "cancelled"
-        elif (
-            stop_reason in {"error", "failed", "exception"} or key in self._turn_errors
-        ):
+        outcome = outcome_for_stop_reason(event.get("stop_reason"))
+        if key in self._turn_errors and outcome == "completed":
             outcome = "failed"
-        else:
-            outcome = "completed"
         self._upsert_reply(
             uid,
             turn_id,
@@ -1657,6 +1718,13 @@ class ChatStreamService:
                     "turn_id": turn_id,
                     "outcome": persisted_outcome,
                 }
+            elif persisted_outcome == "done":
+                info = {
+                    "id": input_id,
+                    "state": "ended",
+                    "turn_id": turn_id,
+                    "outcome": "completed",
+                }
             elif reply is not None:
                 status = reply.get("status")
                 outcome = (
@@ -1853,6 +1921,16 @@ class ChatStreamService:
             if not isinstance(history_key, str) or not history_key:
                 history_key = None
             request_id = metadata.get("request_id")
+            request_ids = metadata.get("request_ids")
+            input_row_ids = list(
+                dict.fromkeys(
+                    value
+                    for value in request_ids
+                    if isinstance(value, str) and value
+                )
+            ) if isinstance(request_ids, (list, tuple)) else []
+            if isinstance(request_id, str) and request_id and request_id not in input_row_ids:
+                input_row_ids.insert(0, request_id)
             if history_key is None and kind in {"reply", "tool"}:
                 search_ids = [request_id] if isinstance(request_id, str) else None
                 history_key = self._turn_history_key(
@@ -1862,14 +1940,15 @@ class ChatStreamService:
             hub_message_id = metadata.get("hub_message_id")
             tool_id = metadata.get("tool_id")
             if kind == "input":
-                row_id = next(
-                    (
+                if isinstance(hub_message_id, str) and hub_message_id:
+                    input_row_ids = [hub_message_id]
+                elif not input_row_ids:
+                    input_row_ids = [
                         candidate
-                        for candidate in (hub_message_id, request_id, input_id)
+                        for candidate in (input_id,)
                         if isinstance(candidate, str) and candidate
-                    ),
-                    None,
-                )
+                    ]
+                row_id = input_row_ids[0] if input_row_ids else None
             elif kind == "reply":
                 explicit_reply_id = metadata.get("reply_id")
                 row_id = (
@@ -1896,32 +1975,61 @@ class ChatStreamService:
             row_status = metadata.get("status")
             stop_reason = metadata.get("stop_reason")
             chat_stream_outcome = metadata.get("chat_stream_outcome")
-            if kind == "input" and chat_stream_outcome in {
-                "completed",
-                "failed",
-                "cancelled",
-            }:
-                row_status = chat_stream_outcome
+            if kind == "input":
+                if chat_stream_outcome in {"completed", "failed", "cancelled"}:
+                    row_status = chat_stream_outcome
+                elif row_status in (None, "done"):
+                    row_status = "completed"
             if kind == "reply" and stop_reason is not None and not row_status:
-                row_status = (
-                    "done"
-                    if stop_reason == "end_turn"
-                    else "cancelled"
-                    if str(stop_reason).lower() in {"cancelled", "canceled"}
-                    else "failed"
-                )
-            rows.append(
-                {
-                    "id": row_id,
-                    "seq": len(rows),
-                    "kind": kind,
-                    "role": role,
-                    "turn_id": turn_id,
-                    "status": str(row_status or "done"),
-                    "parts": parts,
-                    "created_at": timestamp,
+                row_status = outcome_for_stop_reason(stop_reason)
+            if kind == "input":
+                operator_inputs = metadata.get("operator_inputs")
+                text_by_id = {
+                    record["request_id"]: record["text"]
+                    for record in operator_inputs or []
+                    if isinstance(record, dict)
+                    and isinstance(record.get("request_id"), str)
+                    and isinstance(record.get("text"), str)
                 }
-            )
+                input_row_ids = input_row_ids or [row_id]
+                for input_row_id in input_row_ids:
+                    original_text = text_by_id.get(input_row_id)
+                    if original_text is not None:
+                        input_parts = self._transcript_parts(original_text, resolve_image)
+                        input_parts.extend(
+                            copy.deepcopy(part)
+                            for part in parts
+                            if isinstance(part, dict) and part.get("type") == "image"
+                        )
+                    elif len(input_row_ids) == 1:
+                        input_parts = parts
+                    else:
+                        input_parts = []
+                    rows.append(
+                        {
+                            "id": input_row_id,
+                            "seq": len(rows),
+                            "kind": kind,
+                            "role": role,
+                            "turn_id": turn_id,
+                            "status": str(row_status or "done"),
+                            "parts": input_parts,
+                            "created_at": timestamp,
+                        }
+                    )
+            else:
+                rows.append(
+                    {
+                        "id": row_id,
+                        "seq": len(rows),
+                        "kind": kind,
+                        "role": role,
+                        "turn_id": turn_id,
+                        "status": str(row_status or "done"),
+                        "parts": parts,
+                        "created_at": timestamp,
+                    }
+                )
             calls = metadata.get("tool_calls")
             if source_role != "assistant" or not isinstance(calls, list):
                 continue

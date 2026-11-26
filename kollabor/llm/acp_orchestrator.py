@@ -23,6 +23,7 @@ from typing import Any
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_ai.profile_manager import EFFORT_LEVELS, LLMProfile
 from kollabor_events import EventType
+from kollabor_events.chat_stream import outcome_for_stop_reason
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.terminal_state import TerminalMode
@@ -1728,11 +1729,7 @@ class ACPOrchestrator:
             await self._await_user_history(turn_key)
             await self._persist_chat_stream_outcome(
                 admission,
-                "completed" if result.stop_reason == "end_turn" else (
-                    "cancelled"
-                    if str(result.stop_reason).lower() in {"cancelled", "canceled", "interrupted", "stop"}
-                    else "failed"
-                ),
+                outcome_for_stop_reason(result.stop_reason),
             )
             self._save_binding()
             await self._record_result(result, turn_key)

@@ -310,23 +310,19 @@ class LLMService:
         if role == "user" and not hidden and publish_user_event:
             # What mirrors this conversation (the engine) follows it by these,
             # so a window opened mid-turn shows the message being answered.
+            metadata = getattr(message, "metadata", None)
+            event_fields = {}
+            if isinstance(metadata, dict):
+                for field in ("request_id", "request_ids", "turn_id", "operator_inputs"):
+                    value = metadata.get(field)
+                    if value is not None:
+                        event_fields[field] = value
             publish_semantic(
                 getattr(self, "event_bus", None),
                 "user_message",
                 role="user",
                 text=content_to_text(content),
-                **(
-                    {"request_id": message.metadata["request_id"]}
-                    if isinstance(message.metadata, dict)
-                    and isinstance(message.metadata.get("request_id"), str)
-                    else {}
-                ),
-                **(
-                    {"turn_id": message.metadata["turn_id"]}
-                    if isinstance(message.metadata, dict)
-                    and isinstance(message.metadata.get("turn_id"), str)
-                    else {}
-                ),
+                **event_fields,
             )
 
         return cast(str, message_uuid)
