@@ -28,8 +28,16 @@ import {
   fetchChatStreamPartsPage,
 } from "./chat-stream-parts";
 import { canExportChatStreamMarkdown } from "./chat-stream-content";
+import type { EngineApi } from "./api";
+import { ChatStoreProvider, type ChatSnapshot, type LiveStore } from "./chat-store";
 import type { ChatRow, ChatStreamPartPreviewMarker, ChatStreamPartsPreviewMarker } from "./chat-stream";
+import {
+  PermissionCancellationProvider,
+  usePendingPermissionCancellation,
+} from "./permission-cancellation";
 import { visibleRecoveredPermissionPrompts } from "./permission-preview-state";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const revision = "a".repeat(64);
 function partsMarker(rowId = "row-paged", outputRevision = revision): ChatStreamPartsPreviewMarker {
@@ -80,6 +88,27 @@ function contentChunk(rowId: string, partIndex: number, revisionValue: string, c
     content,
     done: true,
   };
+}
+
+function PermissionStopControl() {
+  const permission = usePendingPermissionCancellation();
+  return permission ? <button type="button" onClick={() => { void permission.cancel(); }}>Stop</button> : null;
+}
+
+function permissionStore(rows: ChatRow[]): LiveStore {
+  const snapshot: ChatSnapshot = {
+    rows, inputs: {}, goalReplies: {}, running: false, connection: "live", hasEarlier: false, olderStatus: "idle",
+  };
+  return {
+    rows: snapshot.rows,
+    inputs: snapshot.inputs,
+    running: snapshot.running,
+    olderStatus: snapshot.olderStatus,
+    connection: snapshot.connection,
+    hasEarlier: snapshot.hasEarlier,
+    subscribe: () => () => {},
+    getSnapshot: () => snapshot,
+  } as unknown as LiveStore;
 }
 
 describe("chat stream part recovery", () => {
@@ -274,6 +303,78 @@ describe("chat stream part recovery", () => {
       await ui.unmount();
     }
     expect(visibleRecoveredPermissionPrompts([row], marker.session_id)).toEqual([]);
+  });
+
+  it("updates Stop when a permission is loaded, opened, closed, and reopened after mount", async () => {
+    const marker = { ...partsMarker("row-paged-permission-stop"), part_count: 1 };
+    const data = {
+      permission_id: "paged-permission-stop",
+      tool_id: "tool-stop",
+      request_id: "request-stop",
+      source: "acp",
+      parked: false,
+      tool_name: "terminal",
+    };
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: marker.part_count,
+      output_revision: marker.output_revision,
+      parts: [{ type: "prompt", prompt_id: data.permission_id, data }],
+      done: true,
+    });
+    const row: ChatRow = {
+      id: marker.row_id,
+      seq: 2,
+      kind: "prompt",
+      role: "system",
+      turn_id: null,
+      status: "open",
+      parts: [{ type: "text", text: "[Large chat row]" }],
+      chat_stream_parts_preview: marker,
+      created_at: "2026-11-25T00:00:00Z",
+    };
+    const store = permissionStore([row]);
+    const permissionApi = {
+      getPermissions: vi.fn(async () => ({ pending_prompts: [data] })),
+      cancelOwned: vi.fn(async () => ({ cancelled: true })),
+    } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
+    const ui = mount();
+
+    try {
+      await ui.render(
+        <ChatStoreProvider store={store}>
+          <PermissionCancellationProvider api={permissionApi} sessionId={marker.session_id} store={store}>
+            <ChatStreamPartsPreview marker={marker} />
+            <PermissionStopControl />
+          </PermissionCancellationProvider>
+        </ChatStoreProvider>,
+      );
+      expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent === "Stop")).toBe(false);
+
+      await act(async () => {
+        Array.from(ui.host.querySelectorAll("button")).find((button) => button.textContent === "Load full row")?.click();
+        await Promise.resolve();
+      });
+      expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent === "Stop")).toBe(true);
+
+      const details = ui.host.querySelector("details");
+      expect(details).not.toBeNull();
+      await act(async () => {
+        details!.open = false;
+        details!.dispatchEvent(new Event("toggle"));
+      });
+      expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent === "Stop")).toBe(false);
+
+      await act(async () => {
+        details!.open = true;
+        details!.dispatchEvent(new Event("toggle"));
+      });
+      expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent === "Stop")).toBe(true);
+    } finally {
+      await ui.unmount();
+    }
   });
 
   it("rejects tool result previews whose top-level identity does not match the paged tool call", async () => {

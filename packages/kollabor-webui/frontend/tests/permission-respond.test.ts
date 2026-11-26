@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EngineApi } from "../src/api.ts";
 import type { ChatRow } from "../src/chat-stream.ts";
 import { cancelPendingPermission, respondToPermission } from "../src/permission-respond.ts";
+import { markPermissionPromptPreviewVisible } from "../src/permission-preview-state.ts";
 import { pendingPermissions } from "../src/utils/permission-cancel.ts";
 
 const BASE = "http://127.0.0.1:9000";
@@ -70,6 +71,40 @@ const recoveredPagedPrompt = {
   partIndex: 0,
   data: daemonPromptData,
 };
+const inlinePromptData = {
+  tool_id: "inline-tool-1",
+  request_id: "inline-parent-1",
+  permission_id: "inline-perm-1",
+  source: "acp",
+  parked: false,
+  tool_name: "terminal",
+};
+const inlinePromptMarker = (revision: string) => ({
+  kind: "chat-stream-part-preview" as const,
+  session_id: "session/one",
+  row_id: "inline-prompt-row",
+  part_index: 0,
+  output_bytes: 300_000,
+  output_chars: 280_000,
+  output_type: "json" as const,
+  output_revision: revision,
+  preview: "clipped prompt",
+});
+const inlinePromptRow = (revision: string): ChatRow => ({
+  id: "inline-prompt-row",
+  seq: 6,
+  kind: "prompt",
+  role: "system",
+  turn_id: null,
+  status: "open",
+  parts: [{
+    type: "prompt",
+    prompt_id: inlinePromptData.permission_id,
+    data: inlinePromptData,
+    chat_stream_part_preview: inlinePromptMarker(revision),
+  }],
+  created_at: "2026-11-25T00:00:00Z",
+});
 
 type Sent = { method: string; url: string; body: unknown };
 
@@ -246,6 +281,49 @@ describe("respondToPermission", () => {
     expect(api.getPermissions).toHaveBeenCalledOnce();
     expect(posts(sent)).toEqual([]);
   });
+
+  it.each(["closed", "revision changed"] as const)(
+    "does not answer a clipped inline prompt when its details are %s during lookup",
+    async (change) => {
+      const initialRevision = "c".repeat(64);
+      const key = { sessionId: "session/one", promptId: inlinePromptData.permission_id, revision: initialRevision };
+      const { api, sent } = engine([{
+        type: "permission_request",
+        tool_id: inlinePromptData.tool_id,
+        permission_id: inlinePromptData.permission_id,
+        details: inlinePromptData,
+      }]);
+      let rows: ChatRow[] = [inlinePromptRow(initialRevision)];
+      markPermissionPromptPreviewVisible(key, true);
+      const getPermissions = api.getPermissions.bind(api);
+      vi.spyOn(api, "getPermissions").mockImplementation(async (sessionId) => {
+        const result = await getPermissions(sessionId);
+        if (change === "closed") {
+          markPermissionPromptPreviewVisible(key, false);
+        } else {
+          rows = [inlinePromptRow("d".repeat(64))];
+          markPermissionPromptPreviewVisible(key, false);
+        }
+        return result;
+      });
+
+      try {
+        const outcome = await respondToPermission({
+          api,
+          sessionId: key.sessionId,
+          toolCallId: key.promptId,
+          args: inlinePromptData,
+          answer: { decision: "approve" },
+          rows: () => rows,
+        });
+        expect(outcome).toBe("stale");
+        expect(api.getPermissions).toHaveBeenCalledOnce();
+        expect(posts(sent)).toEqual([]);
+      } finally {
+        markPermissionPromptPreviewVisible(key, false);
+      }
+    },
+  );
 
   it("posts the full body to /sessions/{id}/permission and returns 'answered' on success", async () => {
     const { api, sent } = engine([promptArgs]);

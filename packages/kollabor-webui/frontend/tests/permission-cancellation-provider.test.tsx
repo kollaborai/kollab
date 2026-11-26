@@ -153,10 +153,17 @@ describe("permission cancellation provider", () => {
       getPermissions: vi.fn(async () => ({ pending_prompts: [promptArgs] })),
       cancelOwned: vi.fn(async () => ({ cancelled: true })),
     } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
-    act(() => registerRecoveredPermissionPrompt(recovered, true));
     const { container } = mount(api, [row]);
 
     try {
+      expect(container.querySelector("button")).toBeNull();
+      act(() => registerRecoveredPermissionPrompt(recovered, true));
+      expect(container.querySelector("button")?.textContent).toBe("Stop");
+
+      act(() => registerRecoveredPermissionPrompt(recovered, false));
+      expect(container.querySelector("button")).toBeNull();
+
+      act(() => registerRecoveredPermissionPrompt(recovered, true));
       expect(container.querySelector("button")?.textContent).toBe("Stop");
       await act(async () => { container.querySelector("button")?.click(); });
       expect(api.cancelOwned).toHaveBeenCalledWith("session-1", "parent-1");
