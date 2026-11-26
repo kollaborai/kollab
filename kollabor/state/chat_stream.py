@@ -528,10 +528,25 @@ class ChatStreamService:
                     )
         return {"found": True, "cancelled": cancelled}
 
-    async def admit_queued_batch(self, input_ids, scope, enqueue):
-        """Serialize ownership and queue admission with direct input sends."""
+    async def admit_queued_batch(self, inputs, scope, enqueue):
+        """Publish queued rows and lifecycle after an atomic queue admission."""
+        normalized = []
+        for item in inputs:
+            if not isinstance(item, dict):
+                raise ValueError("queued input must be an object")
+            input_id, text, attachments = self._validate_input(
+                {
+                    "id": item.get("id"),
+                    "text": item.get("text"),
+                    "attachments": item.get("attachments", []),
+                }
+            )
+            normalized.append((input_id, text, attachments))
+        if not isinstance(scope, tuple) or len(scope) != 3:
+            raise ValueError("queued input scope is invalid")
+
         async with self._input_lock:
-            keys = [(scope[1], input_id) for input_id in input_ids]
+            keys = [(scope[1], input_id) for input_id, _, _ in normalized]
             if any(
                 self._input_scopes.get(key, scope) != scope
                 or (
@@ -542,9 +557,50 @@ class ChatStreamService:
             ):
                 raise ValueError("input ID is already owned")
             receipt = await enqueue()
-            for key in keys:
+            uid = scope[1]
+            self.attach_display_tap()
+            for (input_id, text, attachments), key in zip(normalized, keys):
                 self._input_scopes[key] = scope
+                prior = self._inputs.setdefault(uid, {}).get(input_id)
+                if prior is None:
+                    self._input_text[key] = text
+                    self._input_attachments[key] = copy.deepcopy(attachments)
+                    self._set_input_state(uid, input_id, "queued", turn_id=None)
+                    status = "queued"
+                else:
+                    status = prior.get("state") or "queued"
+                if input_id not in self._rows.setdefault(uid, {}):
+                    if status == "ended":
+                        status = prior.get("outcome") or "ended"
+                    self._upsert(
+                        uid,
+                        {
+                            "id": input_id,
+                            "seq": 0,
+                            "kind": "input",
+                            "role": "user",
+                            "turn_id": (prior or {}).get("turn_id"),
+                            "status": status,
+                            "parts": self._input_parts(text, attachments),
+                            "created_at": self._timestamp(),
+                        },
+                    )
             return receipt
+
+    def has_admitted_input(self, input_id: str, scope: tuple[str, str, str]) -> bool:
+        """Whether this exact queue scope already has a projected chat input."""
+        if (
+            not isinstance(input_id, str)
+            or not isinstance(scope, tuple)
+            or len(scope) != 3
+        ):
+            return False
+        uid = scope[1]
+        key = (uid, input_id)
+        return self._input_scopes.get(key) == scope and (
+            input_id in self._inputs.get(uid, {})
+            or input_id in self._rows.get(uid, {})
+        )
 
     async def bind_queued_input_scopes(
         self, input_ids: list[str], scope: tuple[str, str, str]

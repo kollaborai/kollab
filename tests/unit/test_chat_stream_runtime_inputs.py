@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 
 import pytest
 
@@ -518,4 +519,115 @@ async def test_queue_rejects_cross_principal_batch_collision_before_draining():
         "web-same",
         "web-unique-1",
     ]
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_web_queue_batch_publishes_inputs_and_cancel_lifecycle():
+    server, state, runtime = _server_and_runtime()
+    stream = state._event_bus.get_service("chat_stream")
+    initial = stream.subscribe({})["events"][0]
+    cursor = initial["data"]["next_seq"] - 1
+    binding = {"expected_conversation_uid": "conversation-a"}
+    allocated = await _call(
+        server,
+        "state.web_queue.allocate_ids",
+        {
+            **binding,
+            "item_count": 2,
+            "operation_count": 1,
+            "attachment_operation_count": 1,
+        },
+    )
+    assert allocated["error"] is None
+    ids = allocated["result"]
+    image = b"\x89PNG\r\n\x1a\nqueued image bytes"
+    staged = await _call(
+        server,
+        "state.web_queue.stage_attachment",
+        {
+            **binding,
+            "operation_id": ids["attachment_operation_ids"][0],
+            "mime": "image/png",
+            "filename": "queued.png",
+            "payload_b64": base64.b64encode(image).decode("ascii"),
+        },
+    )
+    assert staged["error"] is None
+    first_id, second_id = ids["request_ids"]
+    batch_params = {
+        **binding,
+        "operation_id": ids["operation_ids"][0],
+        "batch_id": ids["batch_id"],
+        "items": [
+            {
+                "request_id": first_id,
+                "payload_b64": base64.b64encode(
+                    json.dumps({"text": "first queued"}).encode()
+                ).decode("ascii"),
+            },
+            {
+                "request_id": second_id,
+                "payload_b64": base64.b64encode(
+                    json.dumps({"text": "second queued"}).encode()
+                ).decode("ascii"),
+                "attachment_refs": [staged["result"]["ref"]],
+            },
+        ],
+    }
+    queued = await _call(server, "state.web_queue.enqueue_batch", batch_params)
+    assert queued["error"] is None
+
+    admitted = stream.subscribe(
+        {"after": cursor, "conversation_uid": "conversation-a"}
+    )["events"]
+    states = [event["data"] for event in admitted if event["type"] == "input.state"]
+    rows = [event["data"] for event in admitted if event["type"] == "row.upsert"]
+    assert {state["id"] for state in states} == {first_id, second_id}
+    assert all(state["state"] == "queued" for state in states)
+    rows_by_id = {row["id"]: row for row in rows}
+    assert rows_by_id[first_id]["parts"] == [
+        {"type": "text", "text": "first queued"}
+    ]
+    assert rows_by_id[second_id]["parts"][0] == {
+        "type": "text",
+        "text": "second queued",
+    }
+    assert rows_by_id[second_id]["parts"][1]["type"] == "image"
+    assert rows_by_id[second_id]["parts"][1]["url"].startswith(
+        "data:image/png;base64,"
+    )
+
+    cancelled = await _call(
+        server,
+        "state.chat_stream.cancel_queued_input",
+        {"id": second_id},
+    )
+    assert cancelled["result"] == {"found": True, "cancelled": True}
+    final_cursor = admitted[-1]["seq"]
+    terminal = stream.subscribe(
+        {"after": final_cursor, "conversation_uid": "conversation-a"}
+    )["events"]
+    terminal_states = [
+        event["data"] for event in terminal if event["type"] == "input.state"
+    ]
+    terminal_rows = [
+        event["data"] for event in terminal if event["type"] == "row.upsert"
+    ]
+    assert terminal_states == [
+        {
+            "id": second_id,
+            "state": "ended",
+            "turn_id": None,
+            "outcome": "cancelled",
+        }
+    ]
+    assert terminal_rows[0]["id"] == second_id
+    assert terminal_rows[0]["status"] == "cancelled"
+
+    replay = await _call(server, "state.web_queue.enqueue_batch", batch_params)
+    assert replay["error"] is None
+    assert stream.subscribe(
+        {"after": terminal[-1]["seq"], "conversation_uid": "conversation-a"}
+    )["events"] == []
     await runtime.close()
