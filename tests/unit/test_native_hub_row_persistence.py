@@ -752,6 +752,17 @@ def test_hub_row_after_staged_compaction_replays_through_later_compaction_and_br
             "content": "second staged summary",
         },
         {
+            "type": "system",
+            "subtype": "hub_incoming",
+            "uuid": "hub-row-record-after-stage",
+            "timestamp": "2026-11-25T12:00:12.500Z",
+            "chat_stream_row": {
+                **late_row,
+                "_history_index": 2,
+                "_history_compaction_id": "compact-two-staged",
+            },
+        },
+        {
             "type": "assistant",
             "uuid": "post-compaction-assistant",
             "timestamp": "2026-11-25T12:00:13Z",
@@ -769,6 +780,9 @@ def test_hub_row_after_staged_compaction_replays_through_later_compaction_and_br
         for row in resumed.chat_stream_rows
         if row["id"] == "hub-row-during-staged-compaction"
     )
+    assert [row["id"] for row in resumed.chat_stream_rows] == [
+        "hub-row-during-staged-compaction"
+    ]
     assert row["_history_index"] == 2
     assert row["_history_compaction_id"] == "compact-two-staged"
 
@@ -780,6 +794,16 @@ def test_hub_row_after_staged_compaction_replays_through_later_compaction_and_br
     before_row = resumed.branch_session(logger.session_id, 1)
     assert before_row["success"] is True
     assert resumed.chat_stream_rows == []
+    assert resumed.chat_stream_history_length == 2
+    after_branch = resumed.record_hub_chat_stream_row(
+        _hub_row(
+            "hub-row-after-branch",
+            kind="note",
+            created_at="2026-11-25T12:00:14Z",
+        )
+    )
+    assert after_branch["_history_index"] == 2
+    assert after_branch["_history_compaction_id"] == "compact-two-staged"
 
 
 def test_compacted_hub_rows_filter_from_saved_base_without_stream_tail(tmp_path):
