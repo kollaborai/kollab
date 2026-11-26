@@ -148,7 +148,7 @@ async function selectRemoteSession(page) {
     sidebarTitleIncludes: "Open Remote Coder on remote-build",
     sessionHeading: "Remote Coder",
     sessionName: "Remote coder session",
-    historyPath: `/sessions/${remoteId}/history`,
+    historyPath: `/sessions/${remoteId}/stream`,
     composerPlaceholder: "Message Remote Coder…",
     clickTarget: page.locator(remoteButtonSelector),
     timeout,
