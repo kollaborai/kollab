@@ -105,6 +105,17 @@ def test_append_refreshes_a_preview_evicted_by_another_rows_lru_entry(monkeypatc
     )
 
     assert append["type"] == "row.upsert"
+    stale = service.get_content(
+        {
+            "row_id": first["id"],
+            "part_index": 0,
+            "field": "text",
+            "output_revision": first_marker["output_revision"],
+            "offset": 0,
+            "limit": 32,
+        }
+    )
+    assert stale == {"error": "output_changed"}
     refreshed = append["data"]["parts"][0]["chat_stream_content_preview"]
     assert refreshed["output_revision"] != first_marker["output_revision"]
     chunk = service.get_content(
