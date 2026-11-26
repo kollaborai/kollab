@@ -292,6 +292,54 @@ def test_parts_page_uses_one_snapshot_during_concurrent_append():
     )
 
 
+def test_streaming_append_refreshes_a_paged_row_instead_of_using_original_part_index():
+    row = _row(
+        [
+            {"type": "text", "text": f"part-{index}:" + ("x" * 1_000)}
+            for index in range(300)
+        ]
+    )
+    row["status"] = "streaming"
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),
+        get_conversation_uid=lambda: "content-preview-test",
+    )
+    service = ChatStreamService(state)
+    service._upsert("content-preview-test", row)
+
+    snapshot_row = next(
+        item for item in service._snapshot("content-preview-test")["rows"]
+        if item["id"] == row["id"]
+    )
+    old_marker = snapshot_row["chat_stream_parts_preview"]
+    assert len(snapshot_row["parts"]) == 1
+
+    append = service.record_event(
+        "row.append", {"id": row["id"], "part": 299, "text": " later delta"}
+    )
+
+    assert append["type"] == "row.upsert"
+    new_marker = append["data"]["chat_stream_parts_preview"]
+    assert new_marker["output_revision"] != old_marker["output_revision"]
+    refreshed_page = service.get_parts(
+        {
+            "row_id": row["id"],
+            "output_revision": new_marker["output_revision"],
+            "offset": 288,
+            "limit": 32,
+        }
+    )
+    assert refreshed_page["parts"][-1]["text"] == row["parts"][-1]["text"] + " later delta"
+    assert service.get_parts(
+        {
+            "row_id": row["id"],
+            "output_revision": old_marker["output_revision"],
+            "offset": 288,
+            "limit": 32,
+        }
+    ) == {"error": "output_changed"}
+
+
 def test_tool_args_with_preview_like_kind_remain_valid_and_retrievable():
     args = {
         "kind": "chat-stream-content-preview",
