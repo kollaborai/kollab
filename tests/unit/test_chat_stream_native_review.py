@@ -14,7 +14,12 @@ from kollabor.llm.agent_hud import AgentHudEntry, merge_agent_hud_with_user_mess
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
-from kollabor_agent.queue_processor import QueueProcessor, TaggedInput, batch_request_ids
+from kollabor_agent.queue_processor import (
+    QueueProcessor,
+    QueuedInput,
+    TaggedInput,
+    batch_request_ids,
+)
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_ai.message_content import combine_message_contents
@@ -222,6 +227,29 @@ async def _add_triggered_plugin_input(coordinator, text: str) -> str:
     ]
     queue_item = queue_items[-1]
     return queue_item.request_ids[0]
+
+
+@pytest.mark.asyncio
+async def test_durable_voice_request_input_can_be_admitted_to_native_queue(tmp_path):
+    state = _State()
+    logger, _coordinator, processor, _stream, _rpc = (
+        _prepare_triggered_plugin_stream(state, tmp_path, max_queue_size=2)
+    )
+    request_id = "voice-durable-input"
+    history_row_uuid = await logger.log_user_message(
+        "voice transcript", message_metadata={"request_id": request_id}
+    )
+    voice_input = QueuedInput(
+        "voice transcript",
+        {"name": "test voice"},
+        history_row_uuid=history_row_uuid,
+        request_ids=(request_id,),
+    )
+
+    accepted = await processor.enqueue(voice_input)
+
+    assert accepted is True
+    assert list(processor.processing_queue._queue) == [voice_input]
 
 
 def _events(stream: ChatStreamService, initial: dict):
@@ -661,6 +689,68 @@ async def test_plugin_cancel_rpc_controls_exact_native_tagged_input(tmp_path):
             "state": "ended",
             "turn_id": None,
             "outcome": "cancelled",
+        }
+    ]
+
+
+@pytest.mark.parametrize("outcome", ["completed", "cancelled"])
+@pytest.mark.asyncio
+async def test_plugin_input_admission_and_terminal_outcome_survive_jsonl_reload(
+    tmp_path, outcome
+):
+    state = _State()
+    logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=2
+    )
+    input_id = await _add_triggered_plugin_input(
+        coordinator, f"plugin {outcome} across reload"
+    )
+
+    if outcome == "cancelled":
+        result = await _rpc_call(
+            rpc, "state.chat_stream.cancel_queued_input", {"id": input_id}
+        )
+        assert result == {"found": True, "cancelled": True}
+    else:
+        await processor._persist_native_input_outcomes((input_id,), "end_turn")
+
+    user_record = next(
+        json.loads(line)
+        for line in logger.session_file.read_text().splitlines()
+        if json.loads(line).get("type") == "user"
+    )
+    persisted_metadata = user_record["message"]["metadata"]
+    assert "chat_stream_pending_input_id" not in persisted_metadata
+    assert persisted_metadata["input_id"] == input_id
+    assert persisted_metadata["chat_stream_outcome"] == outcome
+
+    resumed_manager = ConversationManager(
+        _manager_config(tmp_path / "conversations"), logger
+    )
+    assert resumed_manager.load_session(logger.session_id)
+    resumed_state = SimpleNamespace(
+        _event_bus=state._event_bus,
+        _llm_service=SimpleNamespace(
+            conversation_history=None,
+            conversation_manager=resumed_manager,
+            conversation_logger=logger,
+        ),
+        get_conversation_uid=lambda: "conversation-a",
+    )
+    resumed = ChatStreamService(resumed_state).subscribe({})["events"][0]["data"]
+
+    rows = [row for row in resumed["rows"] if row["kind"] == "input"]
+    assert len(rows) == 1
+    assert rows[0]["id"] == input_id
+    assert rows[0]["parts"] == [
+        {"type": "text", "text": f"plugin {outcome} across reload"}
+    ]
+    assert resumed["inputs"] == [
+        {
+            "id": input_id,
+            "state": "ended",
+            "turn_id": None,
+            "outcome": outcome,
         }
     ]
 
