@@ -229,10 +229,10 @@ def _part_problems(part: Any, where: str, *, row_id: Any) -> list[str]:
                 content_preview, where, row_id=row_id, field="reasoning"
             )
     elif kind == "tool-call":
-        args = part.get("args")
-        if isinstance(args, dict) and args.get("kind") == "chat-stream-content-preview":
+        args_preview = part.get("chat_stream_args_preview")
+        if args_preview is not None:
             problems += _content_preview_problems(
-                args, f"{where} args", row_id=row_id, field="args"
+                args_preview, f"{where} args", row_id=row_id, field="args"
             )
     return problems
 

@@ -264,12 +264,15 @@ def _materialize_row_images(rows: Any, session_id: str) -> None:
                     and result.get("kind") == "chat-stream-tool-output-preview"
                 ):
                     materialized["result"] = {**result, "session_id": session_id}
-                args = part.get("args")
+                args_preview = part.get("chat_stream_args_preview")
                 if (
-                    isinstance(args, dict)
-                    and args.get("kind") == "chat-stream-content-preview"
+                    isinstance(args_preview, dict)
+                    and args_preview.get("kind") == "chat-stream-content-preview"
                 ):
-                    materialized["args"] = {**args, "session_id": session_id}
+                    materialized["chat_stream_args_preview"] = {
+                        **args_preview,
+                        "session_id": session_id,
+                    }
                 content_preview = part.get("chat_stream_content_preview")
                 if (
                     isinstance(content_preview, dict)

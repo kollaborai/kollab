@@ -195,13 +195,15 @@ def bounded_chat_stream_row(
 
     def preview_args(part: dict[str, Any], part_index: int) -> None:
         args = part.get("args")
-        if args is None or (
-            isinstance(args, dict)
-            and args.get("kind") == "chat-stream-content-preview"
-        ):
+        marker = part.get("chat_stream_args_preview")
+        if isinstance(marker, dict) and marker.get("field") == "args":
+            part["args"] = {}
+            return
+        if args is None:
             return
         marker, _content = content_preview(part_index, "args", args)
-        part["args"] = marker
+        part["args"] = {}
+        part["chat_stream_args_preview"] = marker
 
     for part_index, part in enumerate(parts):
         if not isinstance(part, dict) or part.get("type") != "tool-call":
@@ -255,11 +257,25 @@ def bounded_chat_stream_row(
                     "tool_name": part.get("tool_name", "Tool"),
                 }
                 if "args" in part:
-                    compact["args"] = copy.deepcopy(part["args"])
-                    if chat_stream_wire_bytes(compact["args"]) > CHAT_STREAM_PART_INLINE_BYTES:
-                        compact["args"] = content_preview(
-                            part_index, "args", part["args"]
-                        )[0]
+                    existing_args_preview = part.get("chat_stream_args_preview")
+                    if (
+                        isinstance(existing_args_preview, dict)
+                        and existing_args_preview.get("field") == "args"
+                    ):
+                        compact["args"] = {}
+                        compact["chat_stream_args_preview"] = copy.deepcopy(
+                            existing_args_preview
+                        )
+                    else:
+                        compact["args"] = copy.deepcopy(part["args"])
+                        if (
+                            chat_stream_wire_bytes(compact["args"])
+                            > CHAT_STREAM_PART_INLINE_BYTES
+                        ):
+                            compact["args"] = {}
+                            compact["chat_stream_args_preview"] = content_preview(
+                                part_index, "args", part["args"]
+                            )[0]
                 result = part.get("result")
                 if result is not None:
                     if (
