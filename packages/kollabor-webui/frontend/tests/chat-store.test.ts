@@ -484,6 +484,60 @@ describe("LiveChatStore", () => {
     expect(request).toHaveBeenCalledWith("/sessions/s1/inputs", { method: "POST", body: JSON.stringify(input) });
   });
 
+  it("sends the private goal owner and keeps its completed reply local to the initiating UI", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-1",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"a".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    request.mockImplementation(async (path) => path.endsWith("/goal-replies/poll")
+      ? new Response(JSON.stringify({ status: "complete", success: true, message: "Build is healthy." }), { status: 200 })
+      : new Response(null, { status: 202 }));
+
+    await store.send(input);
+    await vi.waitFor(() => expect(store.getSnapshot()).toMatchObject({
+      goalReplies: { "web-goal-1": { state: "complete", success: true, message: "Build is healthy." } },
+    }));
+
+    expect(request).toHaveBeenCalledWith("/sessions/s1/inputs", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    expect(store.rows.map((candidate) => candidate.parts)).toEqual([[{ type: "text", text: input.text }]]);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
+  it("stops an active goal only through its private owner id", async () => {
+    const { store, request, streams } = make();
+    const input = {
+      id: "web-goal-active",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"b".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    request.mockImplementation(async (path) => path.endsWith("/goal-replies/poll")
+      ? new Response(JSON.stringify({ status: "pending" }), { status: 200 })
+      : path.endsWith("/cancel-owned")
+        ? new Response(JSON.stringify({ cancelled: true }), { status: 200 })
+        : new Response(null, { status: 202 }));
+    await store.send(input);
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row(input.id, input.text, "input", "user")], {
+      inputs: [{ id: input.id, state: "started", turn_id: "goal-turn" }],
+      turns: [{ turn_id: "goal-turn", state: "running", input_ids: [input.id] }],
+    }));
+
+    await store.stop();
+
+    expect(request).toHaveBeenCalledWith("/sessions/s1/cancel-owned", {
+      method: "POST",
+      body: JSON.stringify({ request_id: ownerId }),
+    });
+    expect(request).not.toHaveBeenCalledWith("/sessions/s1/cancel", { method: "POST" });
+  });
+
   it("send throws when the POST answers 500", async () => {
     const { store, request } = make();
     request.mockResolvedValueOnce(new Response(null, { status: 500 }));

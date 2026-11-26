@@ -175,6 +175,21 @@ describe("composer send, queue, Stop and Send Now on the chat store", () => {
     expect(runtimeSpies.onNew).not.toHaveBeenCalled();
   });
 
+  it("a /goal input gets a separate client-side cancellation capability", async () => {
+    const { store, live } = fakeStore([], {}, false);
+    const runtimeSpies = spies();
+    const container = mount(live, runtimeSpies);
+
+    await typeText("/goal inspect the build");
+    await click(byLabel(container, "Send message"));
+
+    const sent = store.send.mock.calls[0]?.[0] as { id: string; text: string; goal_reply_id?: string };
+    expect(sent.text).toBe("/goal inspect the build");
+    expect(sent.goal_reply_id).toMatch(/^goal-[0-9a-f]{32}$/);
+    expect(sent.id).toMatch(/^web-[0-9a-f]{24}$/);
+    expect(runtimeSpies.onNew).not.toHaveBeenCalled();
+  });
+
   it("Stop calls store.stop and not the runtime's cancel", async () => {
     const { store, live } = fakeStore([], {}, true);
     const runtimeSpies = spies();
