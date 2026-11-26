@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/api", () => ({
+  CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE: 32768,
   EngineApi: class {
     getHistoryOutput = mocks.getHistoryOutput;
     getChatStreamToolOutput = mocks.getChatStreamToolOutput;
@@ -180,7 +181,8 @@ describe("expanding a chat stream tool output preview", () => {
 
     expect(markup).toContain("Output preview:");
     expect(markup).toContain("first lines of output");
-    expect(markup).not.toContain("chat-stream-tool-output-preview");
+    expect(markup).not.toContain("&quot;kind&quot;: &quot;chat-stream-tool-output-preview&quot;");
+    expect(markup).not.toContain("output_bytes");
     expect(markup).not.toContain("tool_call_id");
     expect(mocks.getChatStreamToolOutput).not.toHaveBeenCalled();
   });
