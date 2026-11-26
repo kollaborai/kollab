@@ -6,6 +6,7 @@ import { JSDOM } from "jsdom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ToolFallbackContent,
+  ToolFallbackArgs,
   ToolFallbackResult,
   ToolFallbackRoot,
   fetchHistoryOutput,
@@ -239,6 +240,47 @@ describe("recovering bounded chat stream content", () => {
       });
       expect(rootElement.textContent).toContain("complete long text");
       expect(rootElement.textContent).not.toContain("short");
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+      dom.window.close();
+    }
+  });
+
+  it("renders and recovers oversized tool arguments when the call is expanded", async () => {
+    const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>");
+    const rootElement = dom.window.document.getElementById("root");
+    if (!rootElement) throw new Error("test root element is missing");
+    vi.stubGlobal("window", dom.window);
+    vi.stubGlobal("document", dom.window.document);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const root = createRoot(rootElement);
+    const argsRevision = "e".repeat(64);
+    const argsMarker: ChatStreamContentPreviewMarker = {
+      ...contentMarker,
+      part_index: 1,
+      field: "args",
+      output_type: "json",
+      output_revision: argsRevision,
+      output_chars: 28,
+      preview: '{"command":"echo clipped"}',
+    };
+    mocks.getChatStreamContent.mockResolvedValueOnce({
+      row_id: "row-1", part_index: 1, field: "args", output_revision: argsRevision,
+      offset: 0, next_offset: 28, total_chars: 28, output_type: "json",
+      content: '{"command":"echo recovered"}', done: true,
+    });
+
+    try {
+      await act(async () => {
+        root.render(<ToolFallbackArgs argsText="" preview={argsMarker} />);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(rootElement.textContent).toContain("echo recovered");
+      expect(rootElement.textContent).not.toContain("echo clipped");
+      expect(mocks.getChatStreamContent).toHaveBeenCalledWith(
+        "session-1", "row-1", 1, "args", argsRevision, { offset: 0, limit: 32768 },
+      );
     } finally {
       await act(async () => root.unmount());
       vi.unstubAllGlobals();

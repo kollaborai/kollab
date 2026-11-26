@@ -98,6 +98,34 @@ describe("toThreadMessageLike", () => {
     });
   });
 
+  it("preserves the full-text retrieval marker beside a bounded reasoning part", () => {
+    const marker = {
+      kind: "chat-stream-content-preview",
+      session_id: "session-1",
+      row_id: "row-reasoning",
+      part_index: 0,
+      field: "reasoning",
+      output_bytes: 40_000,
+      output_chars: 40_000,
+      output_type: "text",
+      output_revision: "c".repeat(64),
+      preview: "reasoning prefix",
+    };
+    const part = {
+      type: "reasoning" as const,
+      text: "reasoning prefix",
+      chat_stream_content_preview: marker,
+    } as unknown as ChatRow["parts"][number];
+
+    const message = toThreadMessageLike(row("row-reasoning", [part]));
+
+    expect(message.content[0]).toMatchObject({
+      type: "reasoning",
+      text: "reasoning prefix",
+      providerMetadata: { kollab: { chat_stream_content_preview: marker } },
+    });
+  });
+
   it("preserves an argument preview marker on the tool call", () => {
     const marker = {
       kind: "chat-stream-content-preview",
