@@ -2767,6 +2767,12 @@ class LLMService:
                     return {"found": True, "accepted": False, "state": "queued"}
 
             if not prioritize(request_id):
+                if find_queued(request_id) is not None:
+                    return {
+                        "found": True,
+                        "accepted": False,
+                        "state": "queued",
+                    }
                 return {"found": False}
             if generation is not None and not clear(generation):
                 clear_batch(request_id)

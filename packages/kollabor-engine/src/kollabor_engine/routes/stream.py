@@ -614,6 +614,11 @@ async def send_input_now(session_id: str, input_id: str):
         raise HTTPException(
             status_code=502, detail="The local daemon returned an invalid input state."
         )
+    if result.get("reason") == "dispatch_unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="Queue dispatch is unavailable; the message remains queued.",
+        )
     already_moved = state in {"started", "joined"} or (
         state == "ended" and turn_id is not None
     )

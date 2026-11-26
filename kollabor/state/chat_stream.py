@@ -810,6 +810,11 @@ class ChatStreamService:
             "found": True,
             "accepted": result.get("accepted") is True,
             "state": current.get("state", state or "queued"),
+            **(
+                {"reason": result["reason"]}
+                if isinstance(result.get("reason"), str) and result["reason"]
+                else {}
+            ),
             **({"turn_id": current["turn_id"]} if current.get("turn_id") else {}),
         }
 
