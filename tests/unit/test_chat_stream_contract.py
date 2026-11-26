@@ -349,7 +349,11 @@ def test_contract_rejects_invalid_part_preview_metadata(marker):
     row = {
         **ROW,
         "parts": [
-            {"type": "text", "text": "[Large part.]", "chat_stream_part_preview": marker}
+            {
+                "type": "text",
+                "text": "[Large part.]",
+                "chat_stream_part_preview": marker,
+            }
         ],
     }
     assert event_problems(_event("row.upsert", row))
