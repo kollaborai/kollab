@@ -57,6 +57,9 @@ class GoalReplyPollRequest(BaseModel):
     goal_reply_id: StrictStr = Field(pattern=r"^goal-[0-9a-f]{32}$")
 
 
+AGENT_NEEDS_RESTART = "This agent runs an older version of Kollab. Restart it to chat here."
+
+
 def _get_session(session_id: str) -> Any:
     session = get_session_registry().get(session_id)
     if session is None:
@@ -80,10 +83,8 @@ async def _call_daemon(session_id: str, method: str, params: dict[str, Any]) -> 
     try:
         return await rpc.call(method, params, timeout=15.0)
     except RpcMethodNotFound:
-        raise HTTPException(
-            status_code=503,
-            detail="This agent's local chat stream is unavailable.",
-        ) from None
+        # The daemon predates the chat stream: it keeps running its start-time code until restarted.
+        raise HTTPException(status_code=426, detail=AGENT_NEEDS_RESTART) from None
     except RpcHandlerError as exc:
         logger.debug("chat stream daemon action %s failed: %s", method, exc)
         raise HTTPException(
