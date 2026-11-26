@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ToolFallback,
   ToolFallbackContent,
   ToolFallbackArgs,
   ToolFallbackResult,
@@ -170,6 +171,31 @@ describe("collapsed failed tool previews", () => {
       "session-error-preview",
       "Error: permission denied while reading file\nremaining stack details",
     ))).toBe("permission denied while reading file");
+  });
+
+  it("keeps the failure indicator when projection externalizes the result", () => {
+    const resultPreview = chatStreamPreviewResult(
+      "session-failed-preview",
+      "Error: permission denied while reading file",
+    );
+    const markup = renderToStaticMarkup(
+      <ToolFallback
+        toolCallId="tool-call-1"
+        toolName="read_file"
+        args={{}}
+        argsText="{}"
+        providerMetadata={{ kollab: { chat_stream_result_preview: resultPreview } }}
+        result={undefined}
+        isError={true}
+        status={{ type: "complete" }}
+        addResult={() => undefined}
+        resume={() => undefined}
+        respondToApproval={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-slot="tool-fallback-trigger-error"');
+    expect(markup).toContain("permission denied while reading file");
   });
 });
 
