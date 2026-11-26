@@ -190,6 +190,79 @@ def test_stream_refreshes_the_snapshot_when_live_events_switch_conversations(
     ]
 
 
+def test_stream_discards_stale_event_when_daemon_snapshot_is_newer_conversation(
+    monkeypatch,
+):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.subscribe_results = [
+        {
+            "events": [
+                {
+                    "seq": 7,
+                    "conversation_uid": "conv-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 8,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        },
+        {
+            "events": [
+                {
+                    "seq": 0,
+                    "conversation_uid": "conv-3",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [],
+                        "next_seq": 4,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        },
+    ]
+    session.queue = asyncio.Queue()
+    session.queue.put_nowait(
+        {
+            "type": "chat_stream",
+            "event": {
+                "seq": 9,
+                "conversation_uid": "conv-2",
+                "type": "row.upsert",
+                "data": {"id": "stale-input"},
+            },
+        }
+    )
+    session.queue.put_nowait(None)
+
+    response = client.get("/sessions/s1/stream?after=6&conversation_uid=conv-1")
+
+    assert response.status_code == 200
+    data_lines = [
+        line[6:] for line in response.text.splitlines() if line.startswith("data: ")
+    ]
+    events = [json.loads(line) for line in data_lines]
+    assert [event["conversation_uid"] for event in events] == ["conv-1", "conv-3"]
+    assert events[1]["type"] == "snapshot"
+    assert session.rpc.calls == [
+        (
+            "state.chat_stream.subscribe",
+            {"after": 6, "conversation_uid": "conv-1"},
+        ),
+        (
+            "state.chat_stream.subscribe",
+            {"after": None, "conversation_uid": "conv-2"},
+        ),
+    ]
+
+
 def test_input_route_returns_202_with_the_sender_id_and_state(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
 
