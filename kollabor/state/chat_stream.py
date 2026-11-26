@@ -2242,6 +2242,8 @@ class ChatStreamService:
                         if isinstance(request_id, str)
                         else turn_history_by_turn.get(turn_id)
                     )
+                    if history_key is not None and turn_id is not None:
+                        self._turn_history_keys[(uid, turn_id)] = history_key
             input_id = metadata.get("input_id")
             hub_message_id = metadata.get("hub_message_id")
             tool_id = metadata.get("tool_id")
