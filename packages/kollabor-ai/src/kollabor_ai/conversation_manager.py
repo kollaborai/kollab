@@ -1591,11 +1591,11 @@ class ConversationManager:
                 chat_stream_rows_by_id.clear()
                 chat_stream_rows_by_id.update(updated)
                 native_hub_compactions.append(deepcopy(data))
+                has_applied_native_hub_compaction = True
             elif row_id in updated:
                 chat_stream_rows_by_id[row_id] = updated[row_id]
             else:
                 chat_stream_rows_by_id.pop(row_id, None)
-            has_applied_native_hub_compaction = True
             return True
 
         def compaction_summary_metadata(round_value: Any) -> Dict[str, Any]:

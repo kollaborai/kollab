@@ -452,6 +452,49 @@ def test_legacy_compaction_stays_pruned_after_restart(tmp_path):
     ]
 
 
+def test_late_hub_row_replay_preserves_legacy_compaction_timestamp_fallback(tmp_path):
+    conversations = tmp_path / "conversations"
+    config = SimpleNamespace(
+        _conversations_dir=conversations,
+        get=lambda _key, default=None: default,
+    )
+    logger = KollaborConversationLogger(conversations)
+    manager = ConversationManager(config, logger)
+    manager.conversation_metadata["conversation_uid"] = "mixed-compaction-hub-session"
+    assert manager.save_session(logger.session_id)
+
+    with logger.session_file.open("a") as session:
+        session.write(
+            '{"type":"context_compaction","uuid":"compact-modern",'
+            '"timestamp":"2026-11-25T12:00:02Z","content":"modern summary",'
+            '"compaction_round":1,"compaction_snapshot_count":0,'
+            '"compaction_retained_positions":[],"compaction_output_count":1,'
+            '"compaction_id":"modern-compaction"}\n'
+        )
+        session.write(
+            '{"type":"context_compaction","uuid":"compact-legacy",'
+            '"timestamp":"2026-11-25T12:00:04Z","content":"legacy summary",'
+            '"compaction_round":2}\n'
+        )
+        session.write(
+            '{"type":"system","subtype":"hub_incoming",'
+            '"uuid":"hub-row-record-after-legacy",'
+            '"timestamp":"2026-11-25T12:00:05Z","chat_stream_row":'
+            + json.dumps(
+                _hub_row(
+                    "stale-hub-note",
+                    kind="note",
+                    created_at="2026-11-25T12:00:03Z",
+                )
+            )
+            + "}\n"
+        )
+
+    resumed_manager = ConversationManager(config)
+    assert resumed_manager.load_session(logger.session_id)
+    assert resumed_manager.chat_stream_rows == []
+
+
 def test_compacted_hub_rows_stay_pruned_after_restart(tmp_path):
     conversations = tmp_path / "conversations"
     config = SimpleNamespace(
