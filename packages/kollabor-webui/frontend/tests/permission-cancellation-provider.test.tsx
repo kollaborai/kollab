@@ -9,6 +9,7 @@ import {
   PermissionCancellationProvider,
   usePendingPermissionCancellation,
 } from "../src/permission-cancellation.ts";
+import { markPermissionPromptPreviewVisible } from "../src/permission-preview-state.ts";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -24,9 +25,9 @@ const promptRow: ChatRow = {
   created_at: "2026-11-25T00:00:00Z",
 };
 
-function fakeStore(): LiveStore {
+function fakeStore(rows: ChatRow[] = [promptRow]): LiveStore {
   const snapshot: ChatSnapshot = {
-    rows: [promptRow], inputs: {}, goalReplies: {}, running: false, connection: "live", hasEarlier: false, olderStatus: "idle",
+    rows, inputs: {}, goalReplies: {}, running: false, connection: "live", hasEarlier: false, olderStatus: "idle",
   };
   return {
     rows: snapshot.rows,
@@ -60,8 +61,8 @@ function StopControl() {
 }
 
 const roots: Root[] = [];
-function mount(api: Pick<EngineApi, "getPermissions" | "cancelOwned">) {
-  const store = fakeStore();
+function mount(api: Pick<EngineApi, "getPermissions" | "cancelOwned">, rows?: ChatRow[]) {
+  const store = fakeStore(rows);
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -82,6 +83,38 @@ afterEach(() => {
 });
 
 describe("permission cancellation provider", () => {
+  it("withholds Stop for a clipped prompt until its exact details are visible", () => {
+    const revision = "a".repeat(64);
+    const marker = {
+      kind: "chat-stream-part-preview" as const,
+      session_id: "session-1",
+      row_id: "prompt-row",
+      part_index: 0,
+      output_bytes: 200_000,
+      output_chars: 200_000,
+      output_type: "json" as const,
+      output_revision: revision,
+      preview: "clipped request",
+    };
+    const row = {
+      id: "prompt-row", seq: 2, kind: "prompt", role: "system", turn_id: null, status: "open",
+      parts: [{ type: "prompt", prompt_id: "permission-1", data: promptArgs, chat_stream_part_preview: marker }],
+      created_at: "2026-11-25T00:00:00Z",
+    } as unknown as ChatRow;
+    const api = {
+      getPermissions: vi.fn(async () => ({ pending_prompts: [promptArgs] })),
+      cancelOwned: vi.fn(async () => ({ cancelled: true })),
+    } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
+    const { container } = mount(api, [row]);
+    const readyKey = { sessionId: marker.session_id, promptId: "permission-1", revision };
+
+    expect(container.querySelector("button")).toBeNull();
+    act(() => markPermissionPromptPreviewVisible({ ...readyKey, revision: "b".repeat(64) }, true));
+    expect(container.querySelector("button")).toBeNull();
+    act(() => markPermissionPromptPreviewVisible(readyKey, true));
+    expect(container.querySelector("button")?.textContent).toBe("Stop");
+  });
+
   it("does not cancel a pending permission after its session unmounts during lookup", async () => {
     let resolvePermissions!: (value: { pending_prompts: unknown[] }) => void;
     const api = {

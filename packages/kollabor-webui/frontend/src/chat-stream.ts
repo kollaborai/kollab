@@ -10,19 +10,78 @@ export type InputState = "queued" | "started" | "joined" | "ended";
 export type Outcome = "completed" | "failed" | "cancelled";
 export type TurnState = "running" | "ended";
 
+export type ChatStreamContentField = "text" | "reasoning" | "args" | "part";
+export type ChatStreamContentPreviewMarker = {
+  kind: "chat-stream-content-preview";
+  session_id: string;
+  row_id: string;
+  part_index: number;
+  field: ChatStreamContentField;
+  output_bytes: number;
+  output_chars: number;
+  output_type: "text" | "json";
+  output_revision: string;
+  preview: string;
+};
+export type ChatStreamPartPreviewMarker = {
+  kind: "chat-stream-part-preview";
+  session_id: string;
+  row_id: string;
+  part_index: number;
+  output_bytes: number;
+  output_chars: number;
+  output_type: "json";
+  output_revision: string;
+  preview: string;
+};
+export type ChatStreamPartsPreviewMarker = {
+  kind: "chat-stream-parts-preview";
+  session_id: string;
+  row_id: string;
+  part_count: number;
+  output_bytes: number;
+  output_chars: number;
+  output_type: "json";
+  output_revision: string;
+};
+export type ChatStreamToolOutputPreviewMarker = {
+  kind: "chat-stream-tool-output-preview";
+  session_id: string;
+  row_id: string;
+  tool_call_id: string;
+  output_bytes: number;
+  output_chars: number;
+  output_type: "text" | "json";
+  output_revision: string;
+  preview: string;
+};
+export const CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND =
+  "kollab-chat-stream-permission-prompt-preview" as const;
+export type ChatStreamPermissionPromptPreviewEnvelope = {
+  kind: typeof CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND;
+  marker: ChatStreamPartPreviewMarker;
+};
+
 export type ChatPart =
-  | { type: "text"; text: string }
-  | { type: "reasoning"; text: string }
+  | {
+      type: "text";
+      text: string;
+      chat_stream_content_preview?: ChatStreamContentPreviewMarker;
+      chat_stream_part_preview?: ChatStreamPartPreviewMarker;
+    }
+  | { type: "reasoning"; text: string; chat_stream_content_preview?: ChatStreamContentPreviewMarker }
   | {
       type: "tool-call";
       tool_call_id: string;
       tool_name: string;
       args: unknown;
+      chat_stream_args_preview?: ChatStreamContentPreviewMarker;
+      chat_stream_result_preview?: ChatStreamToolOutputPreviewMarker;
       result?: unknown;
       is_error?: boolean | null;
     }
   | { type: "image"; url: string }
-  | { type: "prompt"; prompt_id: string; data: unknown }
+  | { type: "prompt"; prompt_id: string; data: unknown; chat_stream_part_preview?: ChatStreamPartPreviewMarker }
   // A hub message, built from the daemon's structured hub fields (never parsed from text).
   // In a note row when it starts no turn; in an input row (id = hub message id) when it does.
   | {
@@ -47,6 +106,7 @@ export type ChatRow = {
   status: string;
   parts: ChatPart[];
   created_at: string;
+  chat_stream_parts_preview?: ChatStreamPartsPreviewMarker;
 };
 
 export type InputInfo = { id: string; state: InputState; turn_id: string | null; outcome?: Outcome | null };
@@ -111,6 +171,39 @@ const isId = (value: unknown): value is string => typeof value === "string" && v
 const isCount = (value: unknown): boolean => Number.isInteger(value) && (value as number) >= 0;
 const isStr = (value: unknown): value is string => typeof value === "string";
 const isBool = (value: unknown): value is boolean => typeof value === "boolean";
+const isContentField = (value: unknown): value is ChatStreamContentField =>
+  value === "text" || value === "reasoning" || value === "args" || value === "part";
+const isRevision = (value: unknown): value is string =>
+  typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+export const isChatStreamContentPreviewMarker = (
+  value: unknown,
+): value is ChatStreamContentPreviewMarker => {
+  if (!isRecord(value) || value.kind !== "chat-stream-content-preview") return false;
+  const expectedType = value.field === "args" || value.field === "part" ? "json" : "text";
+  return isId(value.session_id) && isId(value.row_id) && isCount(value.part_index) &&
+    isContentField(value.field) && isCount(value.output_bytes) && isCount(value.output_chars) &&
+    value.output_type === expectedType && isRevision(value.output_revision) && isStr(value.preview);
+};
+export const isChatStreamPartPreviewMarker = (
+  value: unknown,
+): value is ChatStreamPartPreviewMarker =>
+  isRecord(value) && value.kind === "chat-stream-part-preview" && isId(value.session_id) &&
+  isId(value.row_id) && isCount(value.part_index) && isCount(value.output_bytes) &&
+  isCount(value.output_chars) && value.output_type === "json" &&
+  isRevision(value.output_revision) && isStr(value.preview);
+export const isChatStreamPartsPreviewMarker = (
+  value: unknown,
+): value is ChatStreamPartsPreviewMarker =>
+  isRecord(value) && value.kind === "chat-stream-parts-preview" && isId(value.session_id) &&
+  isId(value.row_id) && isCount(value.part_count) && isCount(value.output_bytes) &&
+  isCount(value.output_chars) && value.output_type === "json" && isRevision(value.output_revision);
+export const isChatStreamToolOutputPreviewMarker = (
+  value: unknown,
+): value is ChatStreamToolOutputPreviewMarker =>
+  isRecord(value) && value.kind === "chat-stream-tool-output-preview" && isId(value.session_id) &&
+  isId(value.row_id) && isId(value.tool_call_id) && isCount(value.output_bytes) &&
+  isCount(value.output_chars) && (value.output_type === "text" || value.output_type === "json") &&
+  isRevision(value.output_revision) && isStr(value.preview);
 const has = (record: Record<string, unknown>, key: string): boolean => Object.prototype.hasOwnProperty.call(record, key);
 // An optional field: absent, null, or passing its check.
 const optional = (record: Record<string, unknown>, key: string, check: (value: unknown) => boolean): boolean =>
@@ -121,14 +214,25 @@ const isPart = (value: unknown): boolean => {
   if (!isRecord(value)) return false;
   switch (value.type) {
     case "text":
+      return isStr(value.text) &&
+        optional(value, "chat_stream_content_preview", (preview) =>
+          isChatStreamContentPreviewMarker(preview) && preview.field === "text") &&
+        optional(value, "chat_stream_part_preview", isChatStreamPartPreviewMarker);
     case "reasoning":
-      return isStr(value.text);
+      return isStr(value.text) && optional(value, "chat_stream_content_preview", (preview) =>
+        isChatStreamContentPreviewMarker(preview) && preview.field === "reasoning");
     case "tool-call":
-      return isId(value.tool_call_id) && isStr(value.tool_name) && has(value, "args") && optional(value, "is_error", isBool);
+      return isId(value.tool_call_id) && isStr(value.tool_name) && has(value, "args") &&
+        optional(value, "chat_stream_args_preview", (preview) =>
+          isChatStreamContentPreviewMarker(preview) && preview.field === "args") &&
+        optional(value, "chat_stream_result_preview", (preview) =>
+          isChatStreamToolOutputPreviewMarker(preview) && preview.tool_call_id === value.tool_call_id) &&
+        optional(value, "is_error", isBool);
     case "image":
       return isId(value.url);
     case "prompt":
-      return isId(value.prompt_id) && has(value, "data");
+      return isId(value.prompt_id) && has(value, "data") &&
+        optional(value, "chat_stream_part_preview", isChatStreamPartPreviewMarker);
     case "hub-note":
       return isId(value.from) && isStr(value.to) && isStr(value.text) && isBool(value.observed) &&
         optional(value, "kind", isStr) && optional(value, "thread_id", isStr) && optional(value, "reply_to", isStr) &&
@@ -143,7 +247,19 @@ const isRow = (value: unknown): boolean =>
   isRecord(value) && isId(value.id) && isCount(value.seq) && KINDS.has(value.kind as string) &&
   ROLES.has(value.role as string) && (value.turn_id === null || isId(value.turn_id)) &&
   typeof value.status === "string" && Array.isArray(value.parts) && value.parts.every(isPart) &&
-  typeof value.created_at === "string";
+  typeof value.created_at === "string" &&
+  optional(value, "chat_stream_parts_preview", (preview) =>
+    isChatStreamPartsPreviewMarker(preview) && preview.row_id === value.id) &&
+  value.parts.every((part) => isRecord(part) &&
+    optional(part, "chat_stream_part_preview", (preview) =>
+      isChatStreamPartPreviewMarker(preview) && preview.row_id === value.id) &&
+    optional(part, "chat_stream_content_preview", (preview) =>
+      isChatStreamContentPreviewMarker(preview) && preview.row_id === value.id) &&
+    optional(part, "chat_stream_args_preview", (preview) =>
+      isChatStreamContentPreviewMarker(preview) && preview.field === "args" && preview.row_id === value.id) &&
+    optional(part, "chat_stream_result_preview", (preview) =>
+      isChatStreamToolOutputPreviewMarker(preview) && preview.row_id === value.id &&
+      isRecord(part) && part.type === "tool-call" && preview.tool_call_id === part.tool_call_id));
 
 const isTurnInfo = (value: unknown): boolean =>
   isRecord(value) && isId(value.turn_id) && (value.state === "running" || value.state === "ended") &&

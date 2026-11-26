@@ -10,6 +10,17 @@ import {
   type ComposerPaletteItem,
 } from "@/components/assistant-ui/composer-palette";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import {
+  ChatStreamContentPreview,
+  ChatStreamStreamingContent,
+  chatStreamContentIdentity,
+  chatStreamContentPreviewFromMetadata,
+  chatStreamPartPreviewFromMetadata,
+  chatStreamPartsPreviewFromCustom,
+  canExportChatStreamMarkdown,
+  messageHasRecoverableChatStreamPreview,
+} from "@/chat-stream-content";
+import { ChatStreamPartPreview, ChatStreamPartsPreview } from "@/chat-stream-parts";
 import { MessageTimingBadge } from "@/components/assistant-ui/message-timing";
 import {
   Reasoning,
@@ -83,6 +94,7 @@ import {
   type ToolCallMessagePartComponent,
   useAui,
   useAuiState,
+  TextMessagePartProvider,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -458,7 +470,7 @@ export const SystemMessage: FC = () => (
     data-role="system"
     className="fade-in slide-in-from-bottom-1 animate-in text-muted-foreground px-2 text-center text-sm duration-150"
   >
-    <MessagePrimitive.Parts components={{ Image: AuthenticatedMessageImage }} />
+    <MessagePrimitive.Parts components={{ Text: UserText, Image: AuthenticatedMessageImage }} />
   </MessagePrimitive.Root>
 );
 
@@ -1370,6 +1382,10 @@ const AssistantMessage: FC = () => {
     const value = s.message.metadata.custom.chatTurnId;
     return typeof value === "string" ? value : undefined;
   });
+  const rowStatus = useAuiState((s) => s.message.metadata.custom.chatRowStatus);
+  const partsPreview = chatStreamPartsPreviewFromCustom(
+    useAuiState((s) => s.message.metadata.custom),
+  );
 
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
@@ -1429,10 +1445,63 @@ const AssistantMessage: FC = () => {
                   </ReasoningRoot>
                 );
               }
-              case "text":
-                return <MarkdownText />;
-              case "reasoning":
-                return <Reasoning {...part} />;
+              case "text": {
+                if (partsPreview) {
+                  return (
+                    <ChatStreamPartsPreview
+                      key={`${partsPreview.row_id}:${partsPreview.output_revision}`}
+                      marker={partsPreview}
+                    />
+                  );
+                }
+                const partPreview = chatStreamPartPreviewFromMetadata(part.providerMetadata);
+                if (partPreview) {
+                  return (
+                    <ChatStreamPartPreview
+                      key={`${partPreview.row_id}:${partPreview.part_index}:${partPreview.output_revision}`}
+                      marker={partPreview}
+                    />
+                  );
+                }
+                const preview = chatStreamContentPreviewFromMetadata(part.providerMetadata, "text");
+                const renderText = (text: string) => (
+                  <TextMessagePartProvider text={text}>
+                    <MarkdownText />
+                  </TextMessagePartProvider>
+                );
+                return preview && rowStatus === "streaming" ? (
+                  <ChatStreamStreamingContent
+                    marker={preview}
+                    text={part.text}
+                  >
+                    {renderText}
+                  </ChatStreamStreamingContent>
+                ) : preview ? (
+                  <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+                    {renderText}
+                  </ChatStreamContentPreview>
+                ) : <MarkdownText />;
+              }
+              case "reasoning": {
+                const preview = chatStreamContentPreviewFromMetadata(part.providerMetadata, "reasoning");
+                const renderReasoning = (text: string) => (
+                  <TextMessagePartProvider text={text}>
+                    <Reasoning {...part} text={text} />
+                  </TextMessagePartProvider>
+                );
+                return preview && rowStatus === "streaming" ? (
+                  <ChatStreamStreamingContent
+                    marker={preview}
+                    text={part.text}
+                  >
+                    {renderReasoning}
+                  </ChatStreamStreamingContent>
+                ) : preview ? (
+                  <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+                    {renderReasoning}
+                  </ChatStreamContentPreview>
+                ) : <Reasoning {...part} />;
+              }
               case "tool-call":
                 return (
                   <div
@@ -1478,22 +1547,28 @@ const AssistantMessage: FC = () => {
 };
 
 const AssistantActionBar: FC = () => {
+  const canUseCompleteTextActions = useAuiState((s) => canExportChatStreamMarkdown(
+    s.message.metadata.custom,
+    s.message.parts,
+  ));
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
       autohide="not-last"
       className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in col-start-3 row-start-2 -ms-1 flex gap-1 duration-200"
     >
-      <ActionBarPrimitive.Copy asChild>
-        <TooltipIconButton tooltip="Copy">
-          <AuiIf condition={(s) => s.message.isCopied}>
-            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
-          </AuiIf>
-          <AuiIf condition={(s) => !s.message.isCopied}>
-            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
-          </AuiIf>
-        </TooltipIconButton>
-      </ActionBarPrimitive.Copy>
+      {canUseCompleteTextActions ? (
+        <ActionBarPrimitive.Copy asChild>
+          <TooltipIconButton tooltip="Copy">
+            <AuiIf condition={(s) => s.message.isCopied}>
+              <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+            </AuiIf>
+            <AuiIf condition={(s) => !s.message.isCopied}>
+              <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+            </AuiIf>
+          </TooltipIconButton>
+        </ActionBarPrimitive.Copy>
+      ) : null}
       <MessageTimingBadge />
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
@@ -1510,12 +1585,14 @@ const AssistantActionBar: FC = () => {
           sideOffset={6}
           className="aui-action-bar-more-content bg-popover/95 text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-xl border p-1.5 shadow-lg backdrop-blur-sm"
         >
-          <ActionBarPrimitive.ExportMarkdown asChild>
-            <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
-              <DownloadIcon className="size-4" />
-              Export as Markdown
-            </ActionBarMorePrimitive.Item>
-          </ActionBarPrimitive.ExportMarkdown>
+          {canUseCompleteTextActions ? (
+            <ActionBarPrimitive.ExportMarkdown asChild>
+              <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
+                <DownloadIcon className="size-4" />
+                Export as Markdown
+              </ActionBarMorePrimitive.Item>
+            </ActionBarPrimitive.ExportMarkdown>
+          ) : null}
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
     </ActionBarPrimitive.Root>
@@ -1529,7 +1606,50 @@ const AssistantActionBar: FC = () => {
  * A live row carries its pictures as image parts, so there the tokens render
  * as nothing instead of duplicating the picture next to them.
  */
-export const UserText: FC<{ text?: string }> = ({ text }) => {
+export const UserText: FC<{ text?: string; providerMetadata?: unknown }> = ({ text, providerMetadata }) => {
+  const rowStatus = useAuiState((s) => s.message.metadata.custom.chatRowStatus);
+  const partsPreview = chatStreamPartsPreviewFromCustom(
+    useAuiState((s) => s.message.metadata.custom),
+  );
+  if (partsPreview) {
+    return (
+      <ChatStreamPartsPreview
+        key={`${partsPreview.row_id}:${partsPreview.output_revision}`}
+        marker={partsPreview}
+      />
+    );
+  }
+  const partPreview = chatStreamPartPreviewFromMetadata(providerMetadata);
+  if (partPreview) {
+    return (
+      <ChatStreamPartPreview
+        key={`${partPreview.row_id}:${partPreview.part_index}:${partPreview.output_revision}`}
+        marker={partPreview}
+      />
+    );
+  }
+  const preview = chatStreamContentPreviewFromMetadata(providerMetadata, "text");
+  if (preview && rowStatus === "streaming") {
+    return (
+      <ChatStreamStreamingContent
+        marker={preview}
+        text={text ?? ""}
+      >
+        {(fullText) => <UserTextBody text={fullText} />}
+      </ChatStreamStreamingContent>
+    );
+  }
+  if (preview) {
+    return (
+      <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+        {(fullText) => <UserTextBody text={fullText} />}
+      </ChatStreamContentPreview>
+    );
+  }
+  return <UserTextBody text={text} />;
+};
+
+const UserTextBody: FC<{ text?: string }> = ({ text }) => {
   const media = useAuiState(
     (s) => s.message.metadata?.custom?.media,
   ) as MediaEntry[] | undefined;
@@ -1550,11 +1670,23 @@ export const UserText: FC<{ text?: string }> = ({ text }) => {
         // row carries no media list, so resolving would misclassify.
         if (imageParts > 0 && segment.kind === "token") return null;
         const resolved = resolveMediaSegment(segment, media);
-        if (resolved.kind === "text") return <span key={index}>{resolved.text}</span>;
+        if (resolved.kind === "text") {
+          return (
+            <span key={index} className="whitespace-pre-wrap">
+              {resolved.text}
+            </span>
+          );
+        }
         // Literal [imageN] text: the escaped form, or a slot whose picture
         // is missing or failed - it never requests a ref and never opens
         // the viewer (#1124 P2a).
-        if (resolved.kind === "literal") return <span key={index}>{resolved.text}</span>;
+        if (resolved.kind === "literal") {
+          return (
+            <span key={index} className="whitespace-pre-wrap">
+              {resolved.text}
+            </span>
+          );
+        }
         const { entry } = resolved;
         // The session list may lag behind a new message. Include valid refs
         // from this row so selection and navigation resolve by identity.
@@ -1696,22 +1828,28 @@ export const UserMessage: FC = () => {
 };
 
 const UserActionBar: FC = () => {
+  const canCopy = useAuiState((s) => !messageHasRecoverableChatStreamPreview(
+    s.message.metadata.custom,
+    s.message.parts,
+  ));
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
       autohide="not-last"
       className="aui-user-action-bar-root text-muted-foreground flex items-center gap-1"
     >
-      <ActionBarPrimitive.Copy asChild>
-        <TooltipIconButton tooltip="Copy" className="aui-user-action-copy">
-          <AuiIf condition={(s) => s.message.isCopied}>
-            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
-          </AuiIf>
-          <AuiIf condition={(s) => !s.message.isCopied}>
-            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
-          </AuiIf>
-        </TooltipIconButton>
-      </ActionBarPrimitive.Copy>
+      {canCopy ? (
+        <ActionBarPrimitive.Copy asChild>
+          <TooltipIconButton tooltip="Copy" className="aui-user-action-copy">
+            <AuiIf condition={(s) => s.message.isCopied}>
+              <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+            </AuiIf>
+            <AuiIf condition={(s) => !s.message.isCopied}>
+              <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+            </AuiIf>
+          </TooltipIconButton>
+        </ActionBarPrimitive.Copy>
+      ) : null}
     </ActionBarPrimitive.Root>
   );
 };

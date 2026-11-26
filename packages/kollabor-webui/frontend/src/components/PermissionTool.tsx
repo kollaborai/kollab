@@ -1,4 +1,4 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { makeAssistantDataUI, makeAssistantToolUI } from "@assistant-ui/react";
 import type { DataMessagePartProps, ToolCallMessagePartProps } from "@assistant-ui/react";
 import { Badge } from "@/components/ui/badge";
@@ -11,6 +11,17 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  ChatStreamContentPreview,
+  chatStreamContentIdentity,
+  type ChatStreamContentPreviewMarker,
+} from "@/chat-stream-content";
+import {
+  CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND,
+  isChatStreamPartPreviewMarker,
+  type ChatStreamPartPreviewMarker,
+} from "@/chat-stream";
+import { markPermissionPromptPreviewVisible } from "@/permission-preview-state";
 
 export type PermissionArgs = {
   request_id?: string;
@@ -273,6 +284,10 @@ function permissionResultFromData(value: unknown): PermissionResult | undefined 
 /** Renders the `data-prompt` part written by the daemon's chat-stream producer. */
 export function PermissionPromptData({ id, data }: DataMessagePartProps<unknown>) {
   if (!id) return null;
+  if (isRecord(data) && data.kind === CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND &&
+      isChatStreamPartPreviewMarker(data.marker)) {
+    return <PermissionPromptPreview id={id} marker={data.marker} />;
+  }
   const payload = permissionArgsFromData(data);
   const hasResolution = isRecord(data) && Object.hasOwn(data, "resolution");
   return (
@@ -282,6 +297,132 @@ export function PermissionPromptData({ id, data }: DataMessagePartProps<unknown>
       result={permissionResultFromData(data)}
       resolved={hasResolution}
     />
+  );
+}
+
+function permissionPartContentMarker(marker: ChatStreamPartPreviewMarker): ChatStreamContentPreviewMarker {
+  return {
+    kind: "chat-stream-content-preview",
+    session_id: marker.session_id,
+    row_id: marker.row_id,
+    part_index: marker.part_index,
+    field: "part",
+    output_bytes: marker.output_bytes,
+    output_chars: marker.output_chars,
+    output_type: "json",
+    output_revision: marker.output_revision,
+    preview: marker.preview,
+  };
+}
+
+function parsePermissionPromptPart(content: string, promptId: string): {
+  data: unknown;
+  result?: PermissionResult;
+  resolved: boolean;
+} | null {
+  try {
+    const part: unknown = JSON.parse(content);
+    if (!isRecord(part) || part.type !== "prompt" || part.prompt_id !== promptId || !Object.hasOwn(part, "data")) {
+      return null;
+    }
+    const hasResolution = isRecord(part.data) && Object.hasOwn(part.data, "resolution");
+    return {
+      data: part.data,
+      result: permissionResultFromData(part.data),
+      resolved: hasResolution,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** A clipped permission prompt has no decision actions until its exact source is loaded. */
+export function PermissionPromptPreview({
+  id,
+  marker,
+}: {
+  id: string;
+  marker: ChatStreamPartPreviewMarker;
+}) {
+  const contentMarker = permissionPartContentMarker(marker);
+
+  return (
+    <ChatStreamContentPreview
+      key={chatStreamContentIdentity(contentMarker)}
+      marker={contentMarker}
+      autoLoad
+    >
+      {(content, loaded) => {
+        const parsed = loaded ? parsePermissionPromptPart(content, id) : null;
+        if (!loaded) {
+          return <p role="status" className="text-muted-foreground text-xs">Loading complete permission details before showing decision options…</p>;
+        }
+        if (!parsed) {
+          return <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
+        }
+        return <LoadedPermissionPrompt id={id} marker={marker} content={content} parsed={parsed} />;
+      }}
+    </ChatStreamContentPreview>
+  );
+}
+
+function LoadedPermissionPrompt({
+  id,
+  marker,
+  content,
+  parsed,
+}: {
+  id: string;
+  marker: ChatStreamPartPreviewMarker;
+  content: string;
+  parsed: { data: unknown; result?: PermissionResult; resolved: boolean };
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(true);
+  useEffect(() => {
+    const key = {
+      sessionId: marker.session_id,
+      promptId: id,
+      revision: marker.output_revision,
+    };
+    markPermissionPromptPreviewVisible(key, detailsOpen);
+    return () => markPermissionPromptPreviewVisible(key, false);
+  }, [detailsOpen, id, marker.output_revision, marker.session_id]);
+  const payload = permissionArgsFromData(parsed.data);
+  return (
+    <div className="space-y-2">
+      <details open={detailsOpen} onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+        <summary className="cursor-pointer text-xs font-medium">Full permission request details</summary>
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 text-xs">{content}</pre>
+      </details>
+      {detailsOpen ? (
+        <PermissionPromptCard partId={id} args={payload} result={parsed.result} resolved={parsed.resolved} />
+      ) : null}
+    </div>
+  );
+}
+
+/** The exact prompt part was already fetched by the part-recovery viewer. */
+export function RecoveredPermissionPrompt({
+  id,
+  data,
+  serializedPart,
+}: {
+  id: string;
+  data: unknown;
+  serializedPart: string;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(true);
+  const payload = permissionArgsFromData(data);
+  const result = permissionResultFromData(data);
+  const resolved = isRecord(data) && Object.hasOwn(data, "resolution");
+  return (
+    <div className="space-y-2">
+      <details open={detailsOpen} onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+        <summary className="cursor-pointer text-xs font-medium">Full permission request details</summary>
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 text-xs">{serializedPart}</pre>
+      </details>
+      {detailsOpen ? <PermissionPromptCard partId={id} args={payload} result={result} resolved={resolved} /> : null}
+    </div>
   );
 }
 

@@ -11,12 +11,17 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import type { EngineApi } from "./api";
 import { useChatStore, type LiveStore } from "./chat-store";
 import { cancelPendingPermission } from "./permission-respond";
 import { pendingPermissions, type PendingPermission } from "./utils/permission-cancel";
+import {
+  isPermissionPromptPreviewVisible,
+  subscribePermissionPromptPreview,
+} from "./permission-preview-state";
 
 export type PermissionCancellation = {
   cancel: (expected: readonly PendingPermission[]) => Promise<void>;
@@ -25,6 +30,12 @@ export type PermissionCancellation = {
 };
 
 export const PermissionCancellationContext = createContext<PermissionCancellation | null>(null);
+
+function visiblePendingPermissions(rows: readonly import("./chat-stream").ChatRow[]): PendingPermission[] {
+  return pendingPermissions(rows).filter((permission) =>
+    !permission.previewKey || isPermissionPromptPreviewVisible(permission.previewKey),
+  );
+}
 
 /** Provides owner-scoped cancellation while the session is mounted. */
 export function PermissionCancellationProvider({
@@ -56,7 +67,7 @@ export function PermissionCancellationProvider({
         api,
         sessionId,
         expected,
-        current: () => mounted.current ? pendingPermissions(store.rows) : [],
+        current: () => mounted.current ? visiblePendingPermissions(store.rows) : [],
       });
     } catch {
       if (mounted.current) setError("Could not stop the pending permission. Try again.");
@@ -80,8 +91,16 @@ export function usePendingPermissionCancellation(): {
 } | null {
   const control = useContext(PermissionCancellationContext);
   const { rows } = useChatStore();
-  const expected = pendingPermissions(rows);
-  return control && expected.length === 1 && expected[0].parked === false
+  const candidates = pendingPermissions(rows);
+  const expected = visiblePendingPermissions(rows);
+  const previewReady = useSyncExternalStore(
+    subscribePermissionPromptPreview,
+    () => candidates.length === 1 && (
+      !candidates[0].previewKey || isPermissionPromptPreviewVisible(candidates[0].previewKey)
+    ),
+    () => false,
+  );
+  return control && previewReady && expected.length === 1 && expected[0].parked === false
     ? { cancel: () => control.cancel(expected), cancelling: control.cancelling, error: control.error }
     : null;
 }

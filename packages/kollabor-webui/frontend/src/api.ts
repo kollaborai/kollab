@@ -1,4 +1,4 @@
-import type { ChatStreamCursor, ChatStreamEvent } from "./chat-stream";
+import type { ChatStreamContentField, ChatStreamCursor, ChatStreamEvent } from "./chat-stream";
 
 export type PhoneLinkState = {
   state: "ready" | "connect_needed" | "service_update" | "offline";
@@ -166,6 +166,49 @@ export type HistoryPageOptions = {
   /** Tool output over 4 KB pages as a preview ("preview", the default) or whole. */
   toolOutput?: "preview" | "full";
 };
+
+export type ChatStreamToolOutputType = "text" | "json";
+
+/** One bounded slice of a stored text, reasoning or tool-argument part. */
+export type ChatStreamContentChunk = {
+  row_id: string;
+  part_index: number;
+  field: ChatStreamContentField;
+  output_revision: string;
+  offset: number;
+  next_offset: number;
+  total_chars: number;
+  output_type: ChatStreamToolOutputType;
+  content: string;
+  done: boolean;
+};
+
+/** One bounded count/byte page from a row whose part list needs paging. */
+export type ChatStreamPartsPage = {
+  row_id: string;
+  offset: number;
+  next_offset: number;
+  total_parts: number;
+  output_revision: string;
+  parts: unknown[];
+  done: boolean;
+};
+
+/** One bounded slice of a stored chat-stream tool result. Offsets count Unicode code points. */
+export type ChatStreamToolOutputChunk = {
+  row_id: string;
+  tool_call_id: string;
+  output_revision: string;
+  offset: number;
+  next_offset: number;
+  total_chars: number;
+  output_type: ChatStreamToolOutputType;
+  content: string;
+  done: boolean;
+};
+
+export const CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE = 32_768;
+export const CHAT_STREAM_PART_PAGE_SIZE = 32;
 
 export function historyContentToText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -1344,6 +1387,102 @@ export class EngineApi {
     const query = new URLSearchParams({ ref: reference });
     return this.json<{ session_id: string; content: unknown }>(
       `/sessions/${encodeURIComponent(sessionId)}/history/output?${query}`,
+    );
+  }
+
+  getChatStreamToolOutput(
+    sessionId: string,
+    rowId: string,
+    toolCallId: string,
+    outputRevision: string,
+    options: { offset: number; limit?: number } = { offset: 0 },
+  ) {
+    if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+      throw new RangeError("Tool output revision must be a SHA-256 hex digest.");
+    }
+    const offset = options.offset;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RangeError("Tool output offset must be a non-negative integer.");
+    }
+    const requestedLimit = options.limit ?? CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+      throw new RangeError("Tool output limit must be a positive integer.");
+    }
+    const limit = Math.min(requestedLimit, CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE);
+    const query = new URLSearchParams({
+      tool_call_id: toolCallId,
+      output_revision: outputRevision,
+      offset: String(offset),
+      limit: String(limit),
+    });
+    return this.json<ChatStreamToolOutputChunk>(
+      `/sessions/${encodeURIComponent(sessionId)}/chat-stream/rows/${encodeURIComponent(rowId)}/tool-output?${query}`,
+    );
+  }
+
+  getChatStreamContent(
+    sessionId: string,
+    rowId: string,
+    partIndex: number,
+    field: ChatStreamContentField,
+    outputRevision: string,
+    options: { offset: number; limit?: number } = { offset: 0 },
+  ) {
+    if (!Number.isSafeInteger(partIndex) || partIndex < 0) {
+      throw new RangeError("Chat stream content part index must be a non-negative integer.");
+    }
+    if (field !== "text" && field !== "reasoning" && field !== "args" && field !== "part") {
+      throw new RangeError("Chat stream content field is invalid.");
+    }
+    if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+      throw new RangeError("Chat stream content revision must be a SHA-256 hex digest.");
+    }
+    const offset = options.offset;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RangeError("Chat stream content offset must be a non-negative integer.");
+    }
+    const requestedLimit = options.limit ?? CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+      throw new RangeError("Chat stream content limit must be a positive integer.");
+    }
+    const limit = Math.min(requestedLimit, CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE);
+    const query = new URLSearchParams({
+      part_index: String(partIndex),
+      field,
+      output_revision: outputRevision,
+      offset: String(offset),
+      limit: String(limit),
+    });
+    return this.json<ChatStreamContentChunk>(
+      `/sessions/${encodeURIComponent(sessionId)}/chat-stream/rows/${encodeURIComponent(rowId)}/content?${query}`,
+    );
+  }
+
+  getChatStreamParts(
+    sessionId: string,
+    rowId: string,
+    outputRevision: string,
+    options: { offset: number; limit?: number } = { offset: 0 },
+  ) {
+    if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+      throw new RangeError("Chat stream parts revision must be a SHA-256 hex digest.");
+    }
+    const offset = options.offset;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RangeError("Chat stream parts offset must be a non-negative integer.");
+    }
+    const requestedLimit = options.limit ?? CHAT_STREAM_PART_PAGE_SIZE;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+      throw new RangeError("Chat stream parts limit must be a positive integer.");
+    }
+    const limit = Math.min(requestedLimit, CHAT_STREAM_PART_PAGE_SIZE);
+    const query = new URLSearchParams({
+      output_revision: outputRevision,
+      offset: String(offset),
+      limit: String(limit),
+    });
+    return this.json<ChatStreamPartsPage>(
+      `/sessions/${encodeURIComponent(sessionId)}/chat-stream/rows/${encodeURIComponent(rowId)}/parts?${query}`,
     );
   }
 

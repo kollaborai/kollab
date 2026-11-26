@@ -14,7 +14,14 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
-import { newInputId, type ChatPart, type ChatRow, type ChatStore, type TurnInfo } from "./chat-stream";
+import {
+  CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND,
+  newInputId,
+  type ChatPart,
+  type ChatRow,
+  type ChatStore,
+  type TurnInfo,
+} from "./chat-stream";
 import { imageAttachmentAdapter } from "./image-attachment";
 import type { ChatSnapshot, LiveStore } from "./chat-store";
 
@@ -31,9 +38,24 @@ const isTextPart = (part: { readonly type: string }): part is TextMessagePart =>
 function toPart(part: ChatPart): LikePart {
   switch (part.type) {
     case "text":
-      return { type: "text", text: part.text };
+      return {
+        type: "text",
+        text: part.text,
+        ...(part.chat_stream_content_preview || part.chat_stream_part_preview
+          ? { providerMetadata: { kollab: {
+              ...(part.chat_stream_content_preview ? { chat_stream_content_preview: part.chat_stream_content_preview } : {}),
+              ...(part.chat_stream_part_preview ? { chat_stream_part_preview: part.chat_stream_part_preview } : {}),
+            } } }
+          : {}),
+      };
     case "reasoning":
-      return { type: "reasoning", text: part.text };
+      return {
+        type: "reasoning",
+        text: part.text,
+        ...(part.chat_stream_content_preview
+          ? { providerMetadata: { kollab: { chat_stream_content_preview: part.chat_stream_content_preview } } }
+          : {}),
+      };
     case "tool-call":
       return {
         type: "tool-call",
@@ -43,11 +65,24 @@ function toPart(part: ChatPart): LikePart {
         argsText: JSON.stringify(part.args ?? {}),
         result: part.result,
         isError: part.is_error ?? undefined,
+          ...(part.chat_stream_args_preview
+          || part.chat_stream_result_preview
+          ? { providerMetadata: { kollab: {
+              ...(part.chat_stream_args_preview ? { chat_stream_args_preview: part.chat_stream_args_preview } : {}),
+              ...(part.chat_stream_result_preview ? { chat_stream_result_preview: part.chat_stream_result_preview } : {}),
+            } } }
+          : {}),
       };
     case "image":
       return { type: "image", image: part.url };
     case "prompt":
-      return { type: "data-prompt", id: part.prompt_id, data: part.data };
+      return {
+        type: "data-prompt",
+        id: part.prompt_id,
+        data: part.chat_stream_part_preview
+          ? { kind: CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND, marker: part.chat_stream_part_preview }
+          : part.data,
+      };
     case "hub-note":
       // The thread draws hub notes from the store row; assistant-ui only needs a valid part.
       return { type: "data-hub-note", data: part };
@@ -65,7 +100,13 @@ export function toThreadMessageLike(row: ChatRow, turns: Readonly<Record<string,
     role: hasStructuredSystemParts ? "assistant" : row.role,
     createdAt: new Date(row.created_at),
     content: row.parts.map(toPart),
-    metadata: { custom: { chatRowKind: row.kind, chatRowStatus: row.status, chatTurnId: row.turn_id, chatRowRole: row.role } },
+    metadata: { custom: {
+      chatRowKind: row.kind,
+      chatRowStatus: row.status,
+      chatTurnId: row.turn_id,
+      chatRowRole: row.role,
+      ...(row.chat_stream_parts_preview ? { chatStreamPartsPreview: row.chat_stream_parts_preview } : {}),
+    } },
     ...(row.role === "assistant" && row.status === "failed"
       ? { status: { type: "incomplete" as const, reason: "error" as const } }
       : {}),

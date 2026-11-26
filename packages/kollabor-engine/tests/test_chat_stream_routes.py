@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
-from kollabor_engine import server
+from kollabor_engine import auth, server
 from kollabor_engine.routes import stream
 
 from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
@@ -25,6 +26,9 @@ class _Rpc:
             "state": "started",
             "turn_id": "turn-1",
         }
+        self.tool_output_result = None
+        self.content_result = None
+        self.parts_result = None
         self.subscribe_results = []
 
     async def call(self, method: str, params: dict, *, timeout: float | None = None):
@@ -58,6 +62,12 @@ class _Rpc:
             return {"found": False, "cancelled": False}
         if method == "state.chat_stream.send_now":
             return self.send_now_result
+        if method == "state.chat_stream.tool_output":
+            return self.tool_output_result
+        if method == "state.chat_stream.content":
+            return self.content_result
+        if method == "state.chat_stream.parts":
+            return self.parts_result
         raise AssertionError(f"unexpected daemon method: {method}")
 
 
@@ -1095,3 +1105,766 @@ def test_stream_recovers_dropped_tail_even_without_a_later_chat_event(monkeypatc
     recovered = asyncio.run(run())
     assert recovered is not None
     assert json.loads(recovered["data"])["seq"] == 8
+
+
+def test_tool_output_route_returns_a_validated_chunk(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.tool_output_result = {
+        "row_id": "row-1",
+        "tool_call_id": "call-1",
+        "output_revision": "a" * 64,
+        "offset": 4,
+        "next_offset": 7,
+        "total_chars": 9,
+        "output_type": "text",
+        "content": "abc",
+        "done": False,
+    }
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/tool-output",
+        params={
+            "tool_call_id": "call-1",
+            "output_revision": "a" * 64,
+            "offset": 4,
+            "limit": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == session.rpc.tool_output_result
+    assert session.rpc.calls[-1] == (
+        "state.chat_stream.tool_output",
+        {
+            "row_id": "row-1",
+            "tool_call_id": "call-1",
+            "output_revision": "a" * 64,
+            "offset": 4,
+            "limit": 3,
+        },
+    )
+
+
+def test_tool_output_route_rejects_a_changed_output_revision(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.tool_output_result = {"error": "output_changed"}
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/tool-output",
+        params={"tool_call_id": "call-1", "output_revision": "a" * 64},
+    )
+
+    assert response.status_code == 409
+
+
+def test_chat_content_route_returns_a_validated_chunk(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.content_result = {
+        "row_id": "row-1",
+        "part_index": 2,
+        "field": "reasoning",
+        "offset": 4,
+        "next_offset": 7,
+        "total_chars": 9,
+        "output_type": "text",
+        "output_revision": "b" * 64,
+        "content": "abc",
+        "done": False,
+    }
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/content",
+        params={
+            "part_index": 2,
+            "field": "reasoning",
+            "output_revision": "b" * 64,
+            "offset": 4,
+            "limit": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == session.rpc.content_result
+    assert session.rpc.calls[-1] == (
+        "state.chat_stream.content",
+        {
+            "row_id": "row-1",
+            "part_index": 2,
+            "field": "reasoning",
+            "output_revision": "b" * 64,
+            "offset": 4,
+            "limit": 3,
+        },
+    )
+
+
+def test_chat_content_route_rejects_a_changed_output_revision(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.content_result = {"error": "output_changed"}
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/content",
+        params={
+            "part_index": 0,
+            "field": "text",
+            "output_revision": "c" * 64,
+        },
+    )
+
+    assert response.status_code == 409
+
+
+def test_chat_parts_route_returns_validated_page_and_materializes_marker_session(
+    monkeypatch,
+):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.parts_result = {
+        "row_id": "row-1",
+        "offset": 4,
+        "next_offset": 5,
+        "total_parts": 5,
+        "output_revision": "d" * 64,
+        "parts": [
+            {
+                "type": "text",
+                "text": "Large part. Expand to load full content.",
+                "chat_stream_part_preview": {
+                    "kind": "chat-stream-part-preview",
+                    "row_id": "row-1",
+                    "part_index": 4,
+                    "output_bytes": 200_000,
+                    "output_chars": 200_000,
+                    "output_type": "json",
+                    "output_revision": "e" * 64,
+                    "preview": "{...}",
+                },
+            }
+        ],
+        "done": True,
+    }
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64, "offset": 4, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["parts"][0]["chat_stream_part_preview"]["session_id"] == "s1"
+    assert session.rpc.calls[-1] == (
+        "state.chat_stream.parts",
+        {
+            "row_id": "row-1",
+            "output_revision": "d" * 64,
+            "offset": 4,
+            "limit": 1,
+        },
+    )
+
+
+def test_chat_parts_route_bounds_materialized_page_and_advances_cursor(
+    monkeypatch,
+):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    parts = [
+        {
+            "type": "text",
+            "text": "bounded preview",
+            "chat_stream_part_preview": {
+                "kind": "chat-stream-part-preview",
+                "row_id": "row-1",
+                "part_index": index,
+                "output_bytes": 40_000,
+                "output_chars": 40_000,
+                "output_type": "json",
+                "output_revision": "e" * 64,
+                "preview": "preview",
+            },
+        }
+        for index in range(stream._PART_PAGE_SIZE)
+    ]
+    raw_payload = {
+        "row_id": "row-1",
+        "offset": 0,
+        "next_offset": len(parts),
+        "total_parts": len(parts),
+        "output_revision": "d" * 64,
+        "parts": parts,
+        "done": True,
+    }
+    raw_size = len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    parts[0]["text"] += "x" * (stream._PART_PAGE_RPC_BYTES - raw_size)
+    assert len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) == stream._PART_PAGE_RPC_BYTES
+    session.rpc.parts_result = raw_payload
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64, "limit": stream._PART_PAGE_SIZE},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["parts"]) == payload["next_offset"] - payload["offset"]
+    assert all(
+        part["chat_stream_part_preview"]["session_id"] == "s1"
+        for part in payload["parts"]
+    )
+    assert len(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) <= stream._PART_PAGE_RPC_BYTES
+    assert 0 < len(payload["parts"]) < len(parts)
+    assert payload["next_offset"] == len(payload["parts"])
+    assert payload["done"] is False
+    next_offset = payload["next_offset"]
+    session.rpc.parts_result = {
+        "row_id": "row-1",
+        "offset": next_offset,
+        "next_offset": len(parts),
+        "total_parts": len(parts),
+        "output_revision": "d" * 64,
+        "parts": parts[next_offset:],
+        "done": True,
+    }
+
+    next_response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={
+            "output_revision": "d" * 64,
+            "offset": next_offset,
+            "limit": stream._PART_PAGE_SIZE,
+        },
+    )
+
+    assert next_response.status_code == 200
+    next_payload = next_response.json()
+    assert next_payload["offset"] == next_offset
+    assert next_payload["next_offset"] == len(parts)
+    assert next_payload["done"] is True
+    assert len(payload["parts"]) + len(next_payload["parts"]) == len(parts)
+
+
+def test_chat_parts_route_replaces_single_oversized_materialized_part(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    parts = [
+        {
+            "type": "text",
+            "text": "bounded preview",
+            "chat_stream_part_preview": {
+                "kind": "chat-stream-part-preview",
+                "row_id": "row-1",
+                "part_index": 5,
+                "output_bytes": 200_000,
+                "output_chars": 200_000,
+                "output_type": "json",
+                "output_revision": "e" * 64,
+                "preview": "preview",
+            },
+        }
+    ]
+    raw_payload = {
+        "row_id": "row-1",
+        "offset": 5,
+        "next_offset": 6,
+        "total_parts": 6,
+        "output_revision": "d" * 64,
+        "parts": parts,
+        "done": True,
+    }
+    raw_size = len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    parts[0]["text"] += "x" * (stream._PART_PAGE_RPC_BYTES - raw_size)
+    assert len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) == stream._PART_PAGE_RPC_BYTES
+    session.rpc.parts_result = raw_payload
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64, "offset": 5, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["offset"] == 5
+    assert payload["next_offset"] == 6
+    assert payload["total_parts"] == 6
+    assert payload["done"] is True
+    assert len(payload["parts"]) == 1
+    assert len(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) <= stream._PART_PAGE_RPC_BYTES
+    assert payload["parts"][0]["text"] == (
+        "[Large part. Expand to load full content.]"
+    )
+    assert payload["parts"][0]["chat_stream_part_preview"]["session_id"] == "s1"
+
+
+def test_chat_parts_route_makes_unmarked_oversized_item_retrievable(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    original_part = {
+        "type": "image",
+        "url": "kollab-queue-image:?conversation_uid=c&request_id=r&ref=x",
+    }
+    parts = [original_part.copy()]
+    raw_payload = {
+        "row_id": "row-1",
+        "offset": 0,
+        "next_offset": 1,
+        "total_parts": 1,
+        "output_revision": "d" * 64,
+        "parts": parts,
+        "done": True,
+    }
+    raw_size = len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    parts[0]["url"] += "x" * (stream._PART_PAGE_RPC_BYTES - raw_size)
+    original_part = parts[0].copy()
+    assert len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) == stream._PART_PAGE_RPC_BYTES
+    session.rpc.parts_result = raw_payload
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["next_offset"] == 1
+    assert payload["done"] is True
+    assert len(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) <= stream._PART_PAGE_RPC_BYTES
+    marker = payload["parts"][0]["chat_stream_part_preview"]
+    assert marker["kind"] == "chat-stream-part-preview"
+    assert marker["session_id"] == "s1"
+    canonical = json.dumps(
+        original_part,
+        ensure_ascii=False,
+        allow_nan=False,
+        default=str,
+        separators=(",", ":"),
+    )
+    revision = hashlib.sha256(
+        b"json\0" + canonical.encode("utf-8", errors="replace")
+    ).hexdigest()
+    assert marker["row_id"] == "row-1"
+    assert marker["part_index"] == 0
+    assert marker["output_bytes"] == len(canonical.encode("utf-8"))
+    assert marker["output_chars"] == len(canonical)
+    assert marker["output_type"] == "json"
+    assert marker["output_revision"] == revision
+    assert marker["preview"] == canonical[:1024]
+
+    chunk = canonical[: stream._TOOL_OUTPUT_CHUNK_CHARS]
+    session.rpc.content_result = {
+        "row_id": "row-1",
+        "part_index": 0,
+        "field": "part",
+        "offset": 0,
+        "next_offset": len(chunk),
+        "total_chars": len(canonical),
+        "output_type": "json",
+        "output_revision": revision,
+        "content": chunk,
+        "done": len(chunk) == len(canonical),
+    }
+    content_response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/content",
+        params={
+            "part_index": 0,
+            "field": "part",
+            "output_revision": revision,
+            "offset": 0,
+        },
+    )
+    assert content_response.status_code == 200
+    assert session.rpc.calls[-1] == (
+        "state.chat_stream.content",
+        {
+            "row_id": "row-1",
+            "part_index": 0,
+            "field": "part",
+            "output_revision": revision,
+            "offset": 0,
+            "limit": stream._TOOL_OUTPUT_CHUNK_CHARS,
+        },
+    )
+
+
+def test_chat_parts_route_preserves_unresolved_image_slots(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.parts_result = {
+        "row_id": "row-1",
+        "offset": 0,
+        "next_offset": 1,
+        "total_parts": 1,
+        "output_revision": "d" * 64,
+        "parts": [{"type": "image", "url": "kollab-queue-image:unresolvable"}],
+        "done": True,
+    }
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["parts"] == [
+        {"type": "text", "text": "[Image attachment unavailable.]"}
+    ]
+    assert len(payload["parts"]) == payload["next_offset"] - payload["offset"]
+
+
+def test_chat_parts_route_rejects_a_changed_parts_revision(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.parts_result = {"error": "output_changed"}
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64},
+    )
+
+    assert response.status_code == 409
+
+
+def test_snapshot_materializes_tool_output_marker_with_session_id(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    user_result = {
+        "kind": "chat-stream-tool-output-preview",
+        "payload": "ordinary result data",
+        "session_id": "user-owned-value",
+    }
+    session.rpc.subscribe_results = [
+        {
+            "events": [
+                {
+                    "seq": 0,
+                    "conversation_uid": "conv-1",
+                    "generation": "daemon-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [
+                            {
+                                "id": "row-1",
+                                "seq": 1,
+                                "kind": "tool",
+                                "role": "assistant",
+                                "turn_id": "turn-1",
+                                "status": "completed",
+                                "parts": [
+                                    {
+                                        "type": "tool-call",
+                                        "tool_call_id": "call-1",
+                                        "result": user_result,
+                                        "chat_stream_result_preview": {
+                                            "kind": "chat-stream-tool-output-preview",
+                                            "row_id": "row-1",
+                                            "tool_call_id": "call-1",
+                                            "output_bytes": 100,
+                                            "output_chars": 100,
+                                            "output_type": "text",
+                                            "output_revision": "a" * 64,
+                                            "preview": "preview",
+                                        },
+                                    }
+                                ],
+                                "created_at": "2026-11-01T00:00:00Z",
+                            }
+                        ],
+                        "next_seq": 1,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        }
+    ]
+
+    response = client.get("/sessions/s1/stream")
+    data_line = next(
+        line[6:] for line in response.text.splitlines() if line.startswith("data: ")
+    )
+    part = json.loads(data_line)["data"]["rows"][0]["parts"][0]
+    marker = part["chat_stream_result_preview"]
+
+    assert response.status_code == 200
+    assert part["result"] == user_result
+    assert marker["session_id"] == "s1"
+
+
+def test_authenticated_tool_preview_retrieval_round_trips_and_rejects_stale_revision(
+    monkeypatch,
+):
+    token = "stream-tool-output-test-token"
+    monkeypatch.setattr(auth, "_current_token", token)
+    client, session = _install_client(monkeypatch, bypass_auth=False)
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),
+        get_conversation_uid=lambda: "conv-1",
+    )
+    stream_service = ChatStreamService(state)
+    daemon_rpc = RpcServer()
+    register_chat_stream_handlers(daemon_rpc, stream_service)
+    adapter = _DispatchingRpc(daemon_rpc)
+    session.daemon.rpc = adapter
+    output = "large 🌵 output\n" + "x" * 8_500
+    long_text = "assistant reply 🌵\n" * 20_000
+    row = {
+        "id": "tool-row-live",
+        "seq": 0,
+        "kind": "tool",
+        "role": "assistant",
+        "turn_id": "turn-tool-output",
+        "status": "completed",
+        "parts": [
+            {
+                "type": "tool-call",
+                "tool_call_id": "call-live",
+                "tool_name": "read",
+                "args": {},
+                "result": output,
+            },
+            {"type": "text", "text": long_text},
+        ],
+        "created_at": "2026-11-01T00:00:00Z",
+    }
+    stream_service._upsert("conv-1", row)
+
+    unauthorized = client.get(
+        "/sessions/s1/chat-stream/rows/tool-row-live/tool-output",
+        params={"tool_call_id": "call-live", "output_revision": "a" * 64},
+    )
+    assert unauthorized.status_code == 401
+
+    stream_response = client.get(
+        "/sessions/s1/stream", headers={"Authorization": f"Bearer {token}"}
+    )
+    data_line = next(
+        line[6:]
+        for line in stream_response.text.splitlines()
+        if line.startswith("data: ")
+    )
+    event = json.loads(data_line)
+    tool_part = event["data"]["rows"][0]["parts"][0]
+    tool_marker = tool_part["chat_stream_result_preview"]
+    content_marker = event["data"]["rows"][0]["parts"][1][
+        "chat_stream_content_preview"
+    ]
+    assert event["type"] == "snapshot"
+    assert "result" not in tool_part
+    assert tool_marker["kind"] == "chat-stream-tool-output-preview"
+    assert tool_marker["session_id"] == "s1"
+    assert content_marker["kind"] == "chat-stream-content-preview"
+    assert content_marker["session_id"] == "s1"
+
+    chunk = client.get(
+        "/sessions/s1/chat-stream/rows/tool-row-live/tool-output",
+        params={
+            "tool_call_id": "call-live",
+            "output_revision": tool_marker["output_revision"],
+            "offset": 0,
+            "limit": 32_768,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert chunk.status_code == 200
+    assert chunk.json()["content"] == output
+    assert chunk.json()["done"] is True
+    assert chunk.json()["output_revision"] == tool_marker["output_revision"]
+
+    text_chunks = []
+    text_offset = 0
+    while True:
+        content_chunk = client.get(
+            "/sessions/s1/chat-stream/rows/tool-row-live/content",
+            params={
+                "part_index": 1,
+                "field": "text",
+                "output_revision": content_marker["output_revision"],
+                "offset": text_offset,
+                "limit": 32_768,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert content_chunk.status_code == 200
+        payload = content_chunk.json()
+        assert payload["row_id"] == "tool-row-live"
+        assert payload["field"] == "text"
+        assert payload["output_revision"] == content_marker["output_revision"]
+        text_chunks.append(payload["content"])
+        if payload["done"]:
+            break
+        text_offset = payload["next_offset"]
+    assert "".join(text_chunks) == long_text
+
+    changed_row = {
+        **row,
+        "parts": [
+            dict(row["parts"][0], result="updated output"),
+            {"type": "text", "text": "updated " + long_text},
+        ],
+    }
+    stream_service._upsert("conv-1", changed_row)
+    stale = client.get(
+        "/sessions/s1/chat-stream/rows/tool-row-live/tool-output",
+        params={
+            "tool_call_id": "call-live",
+            "output_revision": tool_marker["output_revision"],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert stale.status_code == 409
+    stale_content = client.get(
+        "/sessions/s1/chat-stream/rows/tool-row-live/content",
+        params={
+            "part_index": 1,
+            "field": "text",
+            "output_revision": content_marker["output_revision"],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert stale_content.status_code == 409
+
+
+def test_authenticated_large_row_pages_parts_and_recovers_oversized_part(
+    monkeypatch,
+):
+    token = "stream-large-row-test-token"
+    monkeypatch.setattr(auth, "_current_token", token)
+    client, session = _install_client(monkeypatch, bypass_auth=False)
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),
+        get_conversation_uid=lambda: "conv-1",
+    )
+    stream_service = ChatStreamService(state)
+    daemon_rpc = RpcServer()
+    register_chat_stream_handlers(daemon_rpc, stream_service)
+    session.daemon.rpc = _DispatchingRpc(daemon_rpc)
+    original_parts = [
+        {"type": "image", "url": "data:image/png;base64," + "A" * 300_000},
+        {"type": "prompt", "prompt_id": "prompt-large", "data": {"payload": "B" * 300_000}},
+        {
+            "type": "hub-note",
+            "from": "agent-large",
+            "to": "",
+            "text": "C" * 300_000,
+            "observed": False,
+        },
+    ]
+    row = {
+        "id": "large-row-live",
+        "seq": 0,
+        "kind": "reply",
+        "role": "assistant",
+        "turn_id": "turn-large-row",
+        "status": "completed",
+        "parts": original_parts,
+        "created_at": "2026-11-01T00:00:00Z",
+    }
+    stream_service._upsert("conv-1", row)
+
+    unauthorized = client.get(
+        "/sessions/s1/chat-stream/rows/large-row-live/parts",
+        params={"output_revision": "a" * 64},
+    )
+    assert unauthorized.status_code == 401
+
+    stream_response = client.get(
+        "/sessions/s1/stream", headers={"Authorization": f"Bearer {token}"}
+    )
+    data_line = next(
+        line[6:]
+        for line in stream_response.text.splitlines()
+        if line.startswith("data: ")
+    )
+    event = json.loads(data_line)
+    projected = event["data"]["rows"][0]
+    marker = projected["chat_stream_parts_preview"]
+    assert marker["session_id"] == "s1"
+    assert len(projected["parts"]) == 1
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/large-row-live/parts",
+        params={
+            "output_revision": marker["output_revision"],
+            "offset": 0,
+            "limit": 3,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    page = response.json()
+    assert page["done"] is True
+    assert len(page["parts"]) == 3
+    part_marker = page["parts"][0]["chat_stream_part_preview"]
+    assert part_marker["session_id"] == "s1"
+
+    chunks = []
+    offset = 0
+    while True:
+        chunk_response = client.get(
+            "/sessions/s1/chat-stream/rows/large-row-live/content",
+            params={
+                "part_index": 0,
+                "field": "part",
+                "output_revision": part_marker["output_revision"],
+                "offset": offset,
+                "limit": 32_768,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert chunk_response.status_code == 200
+        chunk = chunk_response.json()
+        assert len(chunk["content"].encode("utf-8")) <= 32_768
+        chunks.append(chunk["content"])
+        if chunk["done"]:
+            break
+        offset = chunk["next_offset"]
+    assert json.loads("".join(chunks)) == original_parts[0]
+
+    changed = {**row, "parts": [{"type": "text", "text": "new content"}]}
+    stream_service._upsert("conv-1", changed)
+    stale_page = client.get(
+        "/sessions/s1/chat-stream/rows/large-row-live/parts",
+        params={"output_revision": marker["output_revision"]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    stale_part = client.get(
+        "/sessions/s1/chat-stream/rows/large-row-live/content",
+        params={
+            "part_index": 0,
+            "field": "part",
+            "output_revision": part_marker["output_revision"],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert stale_page.status_code == 409
+    assert stale_part.status_code == 409

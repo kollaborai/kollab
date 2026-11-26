@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -26,12 +26,25 @@ from kollabor_events.chat_stream_emit import emit_chat_event
 
 from .chat_stream_history import turn_history_key_index
 from .chat_stream_rows import (
+    CHAT_STREAM_MAX_RESPONSE_BYTES,
+    CHAT_STREAM_MAX_ROW_BYTES,
+    CHAT_STREAM_PART_PAGE_BYTES,
+    CHAT_STREAM_PART_PAGE_SIZE,
+    CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS,
     ChatStreamRowPager,
+    bounded_chat_stream_part,
+    bounded_chat_stream_row,
+    bounded_chat_stream_rows,
+    chat_stream_content_text,
+    chat_stream_tool_output_revision,
+    chat_stream_wire_bytes,
     merge_chat_stream_rows,
     register_chat_stream_rows_handler,
 )
 
 logger = logging.getLogger(__name__)
+
+_CHAT_STREAM_TOOL_OUTPUT_CACHE_BYTES = 32 * 1024 * 1024
 
 
 def _parse_chat_timestamp(value: Any) -> datetime | None:
@@ -177,7 +190,10 @@ class ChatStreamLog:
             first_seq = events[0]["seq"] if events else self._last_seq + 1
             if after < first_seq - 1:
                 return [self._snapshot_event_locked()]
-            return [copy.deepcopy(event) for event in events if event["seq"] > after]
+            replay = [copy.deepcopy(event) for event in events if event["seq"] > after]
+            if chat_stream_wire_bytes({"events": replay}) > CHAT_STREAM_MAX_RESPONSE_BYTES:
+                return [self._snapshot_event_locked()]
+            return replay
 
     def _snapshot_event_locked(self) -> Event:
         state = copy.deepcopy(self._snapshot_provider() or {})
@@ -208,6 +224,8 @@ class ChatStreamLog:
         problems = event_problems(event)
         if problems:
             raise ValueError("; ".join(problems))
+        if chat_stream_wire_bytes({"events": [event]}) > CHAT_STREAM_MAX_RESPONSE_BYTES:
+            raise ValueError("chat stream snapshot exceeds the response byte budget")
         return event
 
     def _record_locked(self, event: Event) -> None:
@@ -252,6 +270,32 @@ class ChatStreamService:
         self._event_bus = getattr(state_service, "_event_bus", None)
         self._logs: dict[str, ChatStreamLog] = {}
         self._rows: dict[str, dict[str, dict[str, Any]]] = {}
+        # Raw JSON row sizes let row.append stay O(delta) while a reply grows.
+        # Re-serializing a large row for every streamed token made oversized
+        # replies quadratic before the bounded preview could be emitted.
+        self._row_wire_sizes: dict[tuple[str, str], int] = {}
+        # A paged row is represented to clients by one placeholder part. Its
+        # original part indexes cannot be used by row.append events.
+        self._row_parts_paged: set[tuple[str, str]] = set()
+        # Large marker contents that were not retained cannot serve the
+        # previous revision after an append; publish a fresh bounded upsert.
+        self._row_content_unretained: set[tuple[str, str]] = set()
+        # References are kept only while the referenced values remain in the
+        # byte-bounded LRUs. Eviction can then mark the owning projected row
+        # unretained without retaining a second unbounded index of old rows.
+        self._row_content_cache_refs: dict[
+            tuple[str, str], set[tuple[Any, ...]]
+        ] = {}
+        self._tool_output_lock = threading.RLock()
+        self._tool_output_cache: OrderedDict[
+            tuple[str, str, str], tuple[Any, str, str, str, int]
+        ] = OrderedDict()
+        self._tool_output_cache_bytes = 0
+        self._content_cache: OrderedDict[
+            tuple[str, str, int, str, str], tuple[Any, str, str, str, int]
+        ] = OrderedDict()
+        self._content_cache_latest: dict[tuple[str, str, int, str], str] = {}
+        self._content_cache_bytes = 0
         # Snapshot lifecycle projection. This is rebuilt when an older saved
         # transcript is restored, so stale running states cannot shadow it.
         self._inputs: dict[str, dict[str, dict[str, Any]]] = {}
@@ -846,36 +890,116 @@ class ChatStreamService:
     def record_event(self, event_type: str, data: dict[str, Any]) -> Event:
         """Record one producer event for the active daemon conversation."""
         uid = self._conversation_uid()
-        with self._log(uid)._lock:
+        log = self._log(uid)
+        with log._lock:
+            if event_type in {"row.upsert", "replace", "row.append"}:
+                with self._tool_output_lock:
+                    if event_type == "row.upsert":
+                        self._invalidate_tool_output_row(uid, data.get("id"))
+                    elif event_type == "replace":
+                        self._clear_tool_output_cache(uid)
+                    else:
+                        row_id = data.get("id")
+                        row = self._rows.get(uid, {}).get(row_id)
+                        # While a text row is streaming, its last projected
+                        # marker names an immutable snapshot. Keep that exact
+                        # revision available while later append events arrive.
+                        # The cache is byte bounded and a final upsert clears it.
+                        if (
+                            not isinstance(row, dict)
+                            or row.get("status") != "streaming"
+                            or (uid, row_id) in self._row_content_unretained
+                        ):
+                            self._invalidate_tool_output_row(uid, row_id)
+                    return self._record_event_locked(uid, event_type, data)
             return self._record_event_locked(uid, event_type, data)
 
     def _record_event_locked(
         self, uid: str, event_type: str, data: dict[str, Any]
     ) -> Event:
+        raw_row = None
+        publish_data = data
         if event_type == "turn.state":
             prior = self._turns.get(uid, {}).get(data.get("turn_id"))
             if prior is not None and prior.get("origin") != data.get("origin"):
                 raise ValueError("turn origin is immutable")
         if event_type == "row.upsert":
-            self._rows.setdefault(uid, {})[data["id"]] = copy.deepcopy(data)
+            raw_row = copy.deepcopy(data)
+            publish_data = self._project_chat_stream_row(uid, raw_row)
         elif event_type == "row.append":
             row = self._rows.setdefault(uid, {}).get(data["id"])
             if row is not None:
+                row_id = data["id"]
+                row_key = (uid, row_id)
+                original_parts = row.get("parts")
+                can_increment_size = isinstance(original_parts, list)
+                row_size = self._row_wire_sizes.get(row_key)
+                row_parts_paged = row_key in self._row_parts_paged
+                row_content_unretained = row_key in self._row_content_unretained
+                if row_size is None:
+                    row_size = chat_stream_wire_bytes(row)
                 parts = row.setdefault("parts", [])
                 part_index = data["part"]
+                original_part_count = len(parts)
+                added_part_count = max(0, part_index + 1 - original_part_count)
+                if added_part_count and can_increment_size:
+                    empty_part = {"type": "text", "text": ""}
+                    row_size += added_part_count * chat_stream_wire_bytes(empty_part)
+                    row_size += (
+                        added_part_count
+                        if original_part_count
+                        else max(0, added_part_count - 1)
+                    )
                 while len(parts) <= part_index:
                     parts.append({"type": "text", "text": ""})
                 part = parts[part_index]
                 if not isinstance(part, dict) or part.get("type") != "text":
+                    empty_part = {"type": "text", "text": ""}
+                    if can_increment_size:
+                        row_size += chat_stream_wire_bytes(empty_part) - chat_stream_wire_bytes(part)
                     part = {"type": "text", "text": ""}
                     parts[part_index] = part
                 part["text"] = str(part.get("text") or "") + data["text"]
+                if not can_increment_size:
+                    row_size = chat_stream_wire_bytes(row)
+                else:
+                    # JSON escaping is character-local for a string value, so
+                    # the serialized row grows by exactly the encoded suffix.
+                    suffix_json_bytes = len(
+                        json.dumps(
+                            data["text"],
+                            ensure_ascii=True,
+                            allow_nan=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ) - 2
+                    row_size += suffix_json_bytes
+                self._row_wire_sizes[row_key] = row_size
+                oversized_event = chat_stream_wire_bytes(data) > CHAT_STREAM_MAX_ROW_BYTES
+                if row_parts_paged or row_content_unretained or (
+                    row_size > CHAT_STREAM_MAX_ROW_BYTES
+                    and (row.get("status") != "streaming" or oversized_event)
+                ):
+                    raw_row = copy.deepcopy(row)
+                    publish_data = self._project_chat_stream_row(uid, raw_row)
+                    event_type = "row.upsert"
         elif event_type == "replace":
             rows = data.get("rows", [])
-            self._rows[uid] = {
-                row["id"]: copy.deepcopy(row)
+            raw_rows = [
+                copy.deepcopy(row)
                 for row in rows
                 if isinstance(row, dict) and isinstance(row.get("id"), str)
+            ]
+            self._rows[uid] = {
+                row["id"]: row for row in raw_rows
+            }
+            projected_rows = self._project_chat_stream_rows(
+                uid, raw_rows, max_bytes=3 * 1024 * 1024
+            )
+            self._remember_row_sizes(uid, raw_rows, projected_rows)
+            publish_data = {
+                **data,
+                "rows": projected_rows,
             }
         elif event_type == "turn.state":
             turn_id = data.get("turn_id")
@@ -901,7 +1025,18 @@ class ChatStreamService:
                     else:
                         self._native_plugin_inputs.discard(key)
                 admitted[input_id] = admission_data
-        return self._log(uid).publish(event_type, data)
+        def store_raw_row(event: Event) -> None:
+            if raw_row is None:
+                return
+            raw_row["seq"] = event["seq"]
+            self._rows.setdefault(uid, {})[raw_row["id"]] = raw_row
+            self._remember_raw_row(uid, raw_row, publish_data)
+
+        return self._log(uid).publish(
+            event_type,
+            publish_data,
+            on_commit=store_raw_row if raw_row is not None else None,
+        )
 
     def attach_display_tap(self) -> None:
         """Listen to daemon semantic events and translate turns into rows."""
@@ -1984,6 +2119,7 @@ class ChatStreamService:
     def replace_transcript(self) -> Event:
         """Replace the row window after a daemon transcript compaction."""
         uid = self._conversation_uid()
+        self._clear_tool_output_cache(uid)
         llm_service = getattr(self._state_service, "_llm_service", None)
         manager = getattr(llm_service, "conversation_manager", None)
         history = getattr(llm_service, "conversation_history", None)
@@ -2267,8 +2403,15 @@ class ChatStreamService:
         if marker["turn_id"] is None:
             marker["turn_id"] = active_turn
         replacement_rows = [marker, *rows][-REPLAY_WINDOW:]
-        event = self._log(uid).publish("replace", {"rows": replacement_rows})
+        projected_rows = self._project_chat_stream_rows(
+            uid,
+            replacement_rows,
+            max_bytes=3 * 1024 * 1024,
+            max_rows=REPLAY_WINDOW,
+        )
+        event = self._log(uid).publish("replace", {"rows": projected_rows})
         self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in replacement_rows}
+        self._remember_row_sizes(uid, replacement_rows, projected_rows)
         return event
 
     def publish_conversation_reset(self) -> Event:
@@ -2281,17 +2424,13 @@ class ChatStreamService:
         self._logs.pop(uid, None)
         rows = self._snapshot_rows(uid)
 
-        def store_rows(_event: Event) -> None:
-            self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in rows}
-
         # The engine detects the new conversation UID on this live event and
         # asks the daemon for a full snapshot, which also carries turns/inputs.
-        return self._log(uid).publish(
-            "replace", {"rows": rows}, on_commit=store_rows
-        )
+        return self._log(uid).publish("replace", {"rows": rows})
 
     def _reset_conversation_cache(self, uid: str) -> None:
         """Rebuild transcript projections while retaining admission ownership."""
+        self._clear_tool_output_cache(uid)
         previous_rows = self._rows.get(uid, {})
         admitted_inputs = self._admission_inputs.get(uid, {})
         queued_ids = {
@@ -2314,6 +2453,7 @@ class ChatStreamService:
             self._rows[uid] = queued_rows
         else:
             self._rows.pop(uid, None)
+        self._remember_row_sizes(uid, list(queued_rows.values()))
 
         # Rebuild live projection from retained accepted work. In particular,
         # stale started entries stay in the admission ledger for idempotency,
@@ -2391,6 +2531,575 @@ class ChatStreamService:
         """Build a pager over this conversation's transcript and live rows."""
         return self._row_pager(uid=uid)
 
+    def get_tool_output(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return one bounded chunk of a tool result by row and call identity."""
+        if not isinstance(params, dict):
+            return {"error": "invalid_request"}
+        row_id = params.get("row_id")
+        tool_call_id = params.get("tool_call_id")
+        output_revision = params.get("output_revision")
+        offset = params.get("offset", 0)
+        limit = params.get("limit", CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS)
+        if (
+            not isinstance(row_id, str)
+            or not row_id
+            or len(row_id) > 512
+            or not isinstance(tool_call_id, str)
+            or not tool_call_id
+            or len(tool_call_id) > 512
+            or not isinstance(output_revision, str)
+            or len(output_revision) != 64
+            or any(character not in "0123456789abcdef" for character in output_revision)
+            or isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or offset < 0
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS
+        ):
+            return {"error": "invalid_request"}
+
+        uid = self._conversation_uid()
+        key = (uid, row_id, tool_call_id)
+        cached = None
+        result = None
+        result_found = False
+
+        def result_from_row(row: dict[str, Any]) -> tuple[bool, Any]:
+            parts = row.get("parts")
+            if not isinstance(parts, list):
+                return False, None
+            for part in parts:
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "tool-call"
+                    and part.get("tool_call_id") == tool_call_id
+                    and "result" in part
+                ):
+                    return True, part["result"]
+            return False, None
+
+        # Match the writer's log-before-output-cache lock order. A live hit is
+        # read atomically with row updates; transcript reconstruction happens
+        # only after both locks have been released.
+        with self._log(uid)._lock:
+            with self._tool_output_lock:
+                cached = self._tool_output_cache.get(key)
+                if cached is not None:
+                    self._tool_output_cache.move_to_end(key)
+                    _result, content, output_type, current_revision, _size = cached
+            if cached is None:
+                live = self._rows.get(uid, {}).get(row_id)
+                if isinstance(live, dict):
+                    result_found, result = result_from_row(live)
+                if result_found and result is not None:
+                    try:
+                        content, output_type, current_revision = self._cached_tool_output(
+                            uid, row_id, tool_call_id, result
+                        )
+                    except (TypeError, ValueError):
+                        content, output_type = str(result), "text"
+                        current_revision = chat_stream_tool_output_revision(
+                            content, output_type
+                        )
+
+        if cached is None and (not result_found or result is None):
+            transcript_found = False
+            transcript_result = None
+            for row in self._transcript_rows(uid):
+                if not isinstance(row, dict) or row.get("id") != row_id:
+                    continue
+                transcript_found, transcript_result = result_from_row(row)
+                if transcript_found:
+                    break
+            if transcript_found and transcript_result is None:
+                transcript_found = False
+            if transcript_found:
+                transcript_result = copy.deepcopy(transcript_result)
+
+            def preview_revision_from_row(row: dict[str, Any]) -> str | None:
+                parts = row.get("parts")
+                if not isinstance(parts, list):
+                    return None
+                for part in parts:
+                    if (
+                        not isinstance(part, dict)
+                        or part.get("type") != "tool-call"
+                        or part.get("tool_call_id") != tool_call_id
+                    ):
+                        continue
+                    marker = part.get("chat_stream_result_preview")
+                    revision = (
+                        marker.get("output_revision")
+                        if isinstance(marker, dict)
+                        else None
+                    )
+                    return revision if isinstance(revision, str) else None
+                return None
+
+            # Transcript reconstruction can race with a newer row upsert. Take
+            # the log lock again, inspect any cache/live source created during
+            # the read, and only then cache a transcript fallback. Keep the
+            # writer's log-before-cache lock order throughout.
+            with self._log(uid)._lock:
+                with self._tool_output_lock:
+                    cached = self._tool_output_cache.get(key)
+                    if cached is not None:
+                        self._tool_output_cache.move_to_end(key)
+                        _result, content, output_type, current_revision, _size = cached
+                if cached is None:
+                    live = self._rows.get(uid, {}).get(row_id)
+                    live_found = False
+                    live_result = None
+                    if isinstance(live, dict):
+                        live_found, live_result = result_from_row(live)
+                    if live_found and live_result is not None:
+                        result = live_result
+                    elif isinstance(live, dict):
+                        marker_revision = preview_revision_from_row(live)
+                        if marker_revision != output_revision:
+                            if marker_revision is not None:
+                                return {"error": "output_changed"}
+                            return {"error": "not_found"}
+                        if not transcript_found:
+                            return {"error": "not_found"}
+                        result = transcript_result
+                    elif transcript_found:
+                        result = transcript_result
+                    else:
+                        return {"error": "not_found"}
+                    try:
+                        content, output_type, current_revision = (
+                            self._cached_tool_output(
+                                uid, row_id, tool_call_id, result
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        content, output_type = str(result), "text"
+                        current_revision = chat_stream_tool_output_revision(
+                            content, output_type
+                        )
+        if output_revision != current_revision:
+            return {"error": "output_changed"}
+        total_chars = len(content)
+        if offset > total_chars:
+            return {"error": "invalid_request"}
+        next_offset = self._tool_output_chunk_end(content, offset, limit)
+        chunk = {
+            "row_id": row_id,
+            "tool_call_id": tool_call_id,
+            "offset": offset,
+            "next_offset": next_offset,
+            "total_chars": total_chars,
+            "output_type": output_type,
+            "output_revision": current_revision,
+            "content": content[offset:next_offset],
+            "done": next_offset >= total_chars,
+        }
+        if chat_stream_wire_bytes(chunk) > 256 * 1024:
+            # A 32k-character Unicode chunk can be large when JSON escaped.
+            # Return a smaller chunk rather than relying on the RPC hard cap.
+            safe_limit = max(1, limit // 4)
+            next_offset = self._tool_output_chunk_end(content, offset, safe_limit)
+            chunk["next_offset"] = next_offset
+            chunk["content"] = content[offset:next_offset]
+            chunk["done"] = next_offset >= total_chars
+        return chunk
+
+    def get_content(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a bounded chunk of content or a serialized oversized part."""
+        if not isinstance(params, dict):
+            return {"error": "invalid_request"}
+        row_id = params.get("row_id")
+        part_index = params.get("part_index")
+        field = params.get("field")
+        output_revision = params.get("output_revision")
+        offset = params.get("offset", 0)
+        limit = params.get("limit", CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS)
+        if (
+            not isinstance(row_id, str)
+            or not row_id
+            or len(row_id) > 512
+            or isinstance(part_index, bool)
+            or not isinstance(part_index, int)
+            or part_index < 0
+            or not isinstance(field, str)
+            or field not in {"text", "reasoning", "args", "part"}
+            or not isinstance(output_revision, str)
+            or len(output_revision) != 64
+            or any(character not in "0123456789abcdef" for character in output_revision)
+            or isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or offset < 0
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS
+        ):
+            return {"error": "invalid_request"}
+
+        uid = self._conversation_uid()
+        base_key = (uid, row_id, part_index, field)
+
+        def part_value(row: dict[str, Any]) -> tuple[bool, Any]:
+            parts = row.get("parts")
+            if not isinstance(parts, list) or part_index >= len(parts):
+                return False, None
+            part = parts[part_index]
+            if not isinstance(part, dict):
+                return False, None
+            if field == "part":
+                return (
+                    not isinstance(part.get("chat_stream_part_preview"), dict),
+                    part,
+                )
+            expected_type = {
+                "text": "text",
+                "reasoning": "reasoning",
+                "args": "tool-call",
+            }[field]
+            if part.get("type") != expected_type:
+                return False, None
+            key_name = "args" if field == "args" else "text"
+            if key_name not in part:
+                return False, None
+            value = part[key_name]
+            args_preview = part.get("chat_stream_args_preview")
+            found = not (
+                field == "args"
+                and isinstance(args_preview, dict)
+                and args_preview.get("kind") == "chat-stream-content-preview"
+                and args_preview.get("field") == "args"
+            )
+            return found, value
+
+        def preview_revision_from_row(row: dict[str, Any]) -> str | None:
+            parts = row.get("parts")
+            if not isinstance(parts, list) or part_index >= len(parts):
+                return None
+            part = parts[part_index]
+            if not isinstance(part, dict):
+                return None
+            if field == "part":
+                marker = part.get("chat_stream_part_preview")
+            elif field == "args":
+                marker = part.get("chat_stream_args_preview")
+                if not isinstance(marker, dict) or marker.get("field") != "args":
+                    return None
+            else:
+                marker = part.get("chat_stream_content_preview")
+                if not isinstance(marker, dict) or marker.get("field") != field:
+                    return None
+            revision = (
+                marker.get("output_revision") if isinstance(marker, dict) else None
+            )
+            return revision if isinstance(revision, str) else None
+
+        def cache_value(value: Any) -> tuple[str, str, str]:
+            try:
+                return self._cached_stream_content(
+                    uid, row_id, part_index, field, value
+                )
+            except (TypeError, ValueError):
+                content, output_type = chat_stream_content_text(str(value), field)
+                return (
+                    content,
+                    output_type,
+                    chat_stream_tool_output_revision(content, output_type),
+                )
+
+        # Match the producer lock order: log lock before cache lock. This makes
+        # the revision check and source read atomic with respect to row.append.
+        value_found = False
+        with self._log(uid)._lock:
+            with self._tool_output_lock:
+                requested_key = (*base_key, output_revision)
+                cached = self._content_cache.get(requested_key)
+                if cached is not None:
+                    self._content_cache.move_to_end(requested_key)
+                    _value, content, output_type, current_revision, _size = cached
+                else:
+                    live = self._rows.get(uid, {}).get(row_id)
+                    if isinstance(live, dict) and live.get("id") == row_id:
+                        value_found, value = part_value(live)
+                        if value_found:
+                            content, output_type, current_revision = cache_value(value)
+        if cached is None and not value_found:
+            transcript_found = False
+            transcript_value = None
+            for candidate in self._transcript_rows(uid):
+                if not isinstance(candidate, dict) or candidate.get("id") != row_id:
+                    continue
+                transcript_found, transcript_value = part_value(candidate)
+                if transcript_found:
+                    transcript_value = copy.deepcopy(transcript_value)
+                    break
+
+            # Revalidate after transcript I/O. A row can be inserted or
+            # updated while history is reconstructed, and stale fallbacks must
+            # never repopulate a cache invalidated by that write.
+            requested_key = (*base_key, output_revision)
+            with self._log(uid)._lock:
+                with self._tool_output_lock:
+                    cached = self._content_cache.get(requested_key)
+                    if cached is not None:
+                        self._content_cache.move_to_end(requested_key)
+                        _value, content, output_type, current_revision, _size = cached
+                    latest_revision = self._content_cache_latest.get(base_key)
+                    latest_cached = (
+                        self._content_cache.get((*base_key, latest_revision))
+                        if latest_revision is not None
+                        else None
+                    )
+                if cached is None:
+                    live = self._rows.get(uid, {}).get(row_id)
+                    if isinstance(live, dict):
+                        value_found, value = part_value(live)
+                        if value_found:
+                            content, output_type, current_revision = cache_value(value)
+                        else:
+                            marker_revision = preview_revision_from_row(live)
+                            if marker_revision is not None:
+                                if marker_revision != output_revision:
+                                    return {"error": "output_changed"}
+                                if not transcript_found:
+                                    return {"error": "not_found"}
+                                value = transcript_value
+                                content, output_type, current_revision = cache_value(
+                                    value
+                                )
+                            else:
+                                return {"error": "not_found"}
+                    elif latest_cached is not None and latest_revision != output_revision:
+                        return {"error": "output_changed"}
+                    elif transcript_found:
+                        value = transcript_value
+                        content, output_type, current_revision = cache_value(value)
+                    else:
+                        return {"error": "not_found"}
+        if output_revision != current_revision:
+            return {"error": "output_changed"}
+        total_chars = len(content)
+        if offset > total_chars:
+            return {"error": "invalid_request"}
+        next_offset = self._tool_output_chunk_end(content, offset, limit)
+        chunk = {
+            "row_id": row_id,
+            "part_index": part_index,
+            "field": field,
+            "offset": offset,
+            "next_offset": next_offset,
+            "total_chars": total_chars,
+            "output_type": output_type,
+            "output_revision": current_revision,
+            "content": content[offset:next_offset],
+            "done": next_offset >= total_chars,
+        }
+        if chat_stream_wire_bytes(chunk) > 256 * 1024:
+            safe_limit = max(1, limit // 4)
+            next_offset = self._tool_output_chunk_end(content, offset, safe_limit)
+            chunk["next_offset"] = next_offset
+            chunk["content"] = content[offset:next_offset]
+            chunk["done"] = next_offset >= total_chars
+        return chunk
+
+    def get_parts(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a bounded part page for a row replaced by a paging marker."""
+        if not isinstance(params, dict):
+            return {"error": "invalid_request"}
+        row_id = params.get("row_id")
+        output_revision = params.get("output_revision")
+        offset = params.get("offset", 0)
+        limit = params.get("limit", CHAT_STREAM_PART_PAGE_SIZE)
+        if (
+            not isinstance(row_id, str)
+            or not row_id
+            or len(row_id) > 512
+            or not isinstance(output_revision, str)
+            or len(output_revision) != 64
+            or any(character not in "0123456789abcdef" for character in output_revision)
+            or isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or offset < 0
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= CHAT_STREAM_PART_PAGE_SIZE
+        ):
+            return {"error": "invalid_request"}
+
+        uid = self._conversation_uid()
+        # The revision and the requested page must describe one row version.
+        # row.append mutates the live parts list in place, so hold the event log
+        # lock while fingerprinting it and copying this page. The copy remains
+        # stable if a later append lands while the page is being serialized.
+        base_key = (uid, row_id, -1, "parts")
+        requested_key = (*base_key, output_revision)
+        source_parts = None
+        page_source_parts = None
+        current_revision = None
+        total_parts = 0
+        with self._log(uid)._lock:
+            live = self._rows.get(uid, {}).get(row_id)
+            if isinstance(live, dict):
+                candidate_parts = live.get("parts")
+                if isinstance(candidate_parts, list):
+                    source_parts = candidate_parts
+                    _content, _output_type, current_revision = (
+                        self._cached_stream_content(
+                            uid, row_id, -1, "parts", source_parts
+                        )
+                    )
+                    if output_revision != current_revision:
+                        return {"error": "output_changed"}
+                    total_parts = len(source_parts)
+                    if offset > total_parts:
+                        return {"error": "invalid_request"}
+                    page_source_parts = copy.deepcopy(
+                        source_parts[offset : min(total_parts, offset + limit)]
+                    )
+
+        if source_parts is None:
+            transcript_parts = None
+            for row in self._transcript_rows(uid):
+                if not isinstance(row, dict) or row.get("id") != row_id:
+                    continue
+                candidate_parts = row.get("parts")
+                if isinstance(candidate_parts, list):
+                    transcript_parts = copy.deepcopy(candidate_parts)
+                    break
+
+            # Recheck the live row and cache after transcript I/O. The source
+            # copy and cache fill must share the writer's log-before-cache lock
+            # order so a concurrent upsert cannot be overwritten by this
+            # fallback.
+            with self._log(uid)._lock:
+                live = self._rows.get(uid, {}).get(row_id)
+                if isinstance(live, dict):
+                    source_parts = live.get("parts")
+                    if not isinstance(source_parts, list):
+                        return {"error": "not_found"}
+                    _content, _output_type, current_revision = (
+                        self._cached_stream_content(
+                            uid, row_id, -1, "parts", source_parts
+                        )
+                    )
+                else:
+                    with self._tool_output_lock:
+                        cached = self._content_cache.get(requested_key)
+                        if cached is not None:
+                            self._content_cache.move_to_end(requested_key)
+                            source_parts = copy.deepcopy(cached[0])
+                            current_revision = cached[3]
+                        latest_revision = self._content_cache_latest.get(base_key)
+                        latest_cached = (
+                            self._content_cache.get((*base_key, latest_revision))
+                            if latest_revision is not None
+                            else None
+                        )
+                    if source_parts is None:
+                        if (
+                            latest_cached is not None
+                            and latest_revision != output_revision
+                        ):
+                            return {"error": "output_changed"}
+                        if transcript_parts is None:
+                            return {"error": "not_found"}
+                        source_parts = transcript_parts
+                        _content, _output_type, current_revision = (
+                            self._cached_stream_content(
+                                uid, row_id, -1, "parts", source_parts
+                            )
+                        )
+                if output_revision != current_revision:
+                    return {"error": "output_changed"}
+                total_parts = len(source_parts)
+                if offset > total_parts:
+                    return {"error": "invalid_request"}
+                page_source_parts = copy.deepcopy(
+                    source_parts[offset : min(total_parts, offset + limit)]
+                )
+
+        page_parts: list[dict[str, Any]] = []
+
+        def uncached_content(
+            _row_id: str | None, _part_index: int, field: str, value: Any
+        ) -> tuple[str, str, str]:
+            content, output_type = chat_stream_content_text(value, field)
+            return (
+                content,
+                output_type,
+                chat_stream_tool_output_revision(content, output_type),
+            )
+
+        for part_index, part in enumerate(page_source_parts, start=offset):
+            if not isinstance(part, dict):
+                # A malformed persisted part should be surfaced as an explicit
+                # error, never silently omitted from a supposedly lossless page.
+                return {"error": "invalid_parts"}
+            projected = bounded_chat_stream_part(
+                row_id,
+                part_index,
+                part,
+                content_resolver=uncached_content,
+            )
+            candidate_parts = [*page_parts, projected]
+            next_offset = offset + len(candidate_parts)
+            candidate = {
+                "row_id": row_id,
+                "offset": offset,
+                "next_offset": next_offset,
+                "total_parts": total_parts,
+                "output_revision": current_revision,
+                "parts": candidate_parts,
+                "done": next_offset >= total_parts,
+            }
+            if chat_stream_wire_bytes(candidate) > CHAT_STREAM_PART_PAGE_BYTES:
+                if not page_parts:
+                    return {"error": "part_too_large"}
+                break
+            page_parts.append(projected)
+        next_offset = offset + len(page_parts)
+        response = {
+            "row_id": row_id,
+            "offset": offset,
+            "next_offset": next_offset,
+            "total_parts": total_parts,
+            "output_revision": current_revision,
+            "parts": page_parts,
+            "done": next_offset >= total_parts,
+        }
+        if chat_stream_wire_bytes(response) > CHAT_STREAM_PART_PAGE_BYTES:
+            return {"error": "part_page_too_large"}
+        return response
+
+    @staticmethod
+    def _tool_output_chunk_end(content: str, offset: int, max_chars: int) -> int:
+        """Find the largest chunk fitting both char and UTF-8 byte limits."""
+        low = 0
+        high = min(max_chars, len(content) - offset)
+        while low < high:
+            middle = (low + high + 1) // 2
+            size = len(content[offset : offset + middle].encode("utf-8", errors="replace"))
+            if size <= CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS:
+                low = middle
+            else:
+                high = middle - 1
+        return offset + low
+
+    @staticmethod
+    def _tool_output_text(value: Any) -> tuple[str, str]:
+        if isinstance(value, str):
+            return value, "text"
+        return (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                default=str,
+                separators=(",", ":"),
+            ),
+            "json",
+        )
+
     def _row_pager(
         self,
         *,
@@ -2421,6 +3130,242 @@ class ChatStreamService:
             ),
             row_log_provider=lambda: list(self._rows.get(current_uid(), {}).values()),
             compaction_seq_provider=current_compaction_seq,
+            row_projector=lambda row: self._project_chat_stream_row(
+                current_uid(), row
+            ),
+        )
+
+    def _invalidate_tool_output_row(self, uid: str, row_id: str | None) -> None:
+        """Drop cached output projections for one row after an upsert."""
+        if not isinstance(row_id, str):
+            return
+        with self._tool_output_lock:
+            for key in tuple(self._tool_output_cache):
+                if key[0] == uid and key[1] == row_id:
+                    entry = self._tool_output_cache.pop(key)
+                    self._tool_output_cache_bytes -= entry[4]
+                    self._forget_projected_cache_ref(
+                        "output", key, entry[3]
+                    )
+            for key in tuple(self._content_cache):
+                if key[0] == uid and key[1] == row_id:
+                    entry = self._content_cache.pop(key)
+                    self._content_cache_bytes -= entry[4]
+                    self._content_cache_latest.pop(key[:4], None)
+                    self._forget_projected_cache_ref("content", key)
+
+    def _clear_tool_output_cache(self, uid: str) -> None:
+        """Drop cached output projections when a transcript is replaced."""
+        with self._tool_output_lock:
+            for key in tuple(self._tool_output_cache):
+                if key[0] == uid:
+                    entry = self._tool_output_cache.pop(key)
+                    self._tool_output_cache_bytes -= entry[4]
+            for key in tuple(self._content_cache):
+                if key[0] == uid:
+                    entry = self._content_cache.pop(key)
+                    self._content_cache_bytes -= entry[4]
+            for key in tuple(self._content_cache_latest):
+                if key[0] == uid:
+                    self._content_cache_latest.pop(key, None)
+            for key in tuple(self._row_content_cache_refs):
+                if key[0] == uid:
+                    self._row_content_cache_refs.pop(key, None)
+
+    def _forget_projected_cache_ref(
+        self,
+        cache_kind: str,
+        cache_key: tuple[Any, ...],
+        revision: str | None = None,
+    ) -> None:
+        """Mark a row stale when a currently published value leaves the LRU."""
+        if (
+            len(cache_key) < 2
+            or not isinstance(cache_key[0], str)
+            or not isinstance(cache_key[1], str)
+        ):
+            return
+        row_key = (cache_key[0], cache_key[1])
+        refs = self._row_content_cache_refs.get(row_key)
+        if refs is None:
+            return
+        ref = (cache_kind, *cache_key)
+        if cache_kind == "output":
+            ref = (*ref, revision)
+        if ref not in refs:
+            return
+        refs.discard(ref)
+        if not refs:
+            self._row_content_cache_refs.pop(row_key, None)
+        self._row_content_unretained.add(row_key)
+
+    def _cached_tool_output(
+        self,
+        uid: str,
+        row_id: str | None,
+        tool_call_id: str | None,
+        result: Any,
+    ) -> tuple[str, str, str]:
+        """Serialize and fingerprint a result once for all projections/chunks."""
+        if not isinstance(row_id, str) or not isinstance(tool_call_id, str):
+            content, output_type = self._tool_output_text(result)
+            return (
+                content,
+                output_type,
+                chat_stream_tool_output_revision(content, output_type),
+            )
+        key = (uid, row_id, tool_call_id)
+        with self._tool_output_lock:
+            cached = self._tool_output_cache.get(key)
+            if cached is not None and cached[0] is result:
+                self._tool_output_cache.move_to_end(key)
+                return cached[1], cached[2], cached[3]
+            if cached is not None:
+                self._tool_output_cache_bytes -= cached[4]
+                del self._tool_output_cache[key]
+                self._forget_projected_cache_ref("output", key, cached[3])
+
+            content, output_type = self._tool_output_text(result)
+            revision = chat_stream_tool_output_revision(content, output_type)
+            output_bytes = len(content.encode("utf-8", errors="replace"))
+            if output_bytes <= _CHAT_STREAM_TOOL_OUTPUT_CACHE_BYTES:
+                self._tool_output_cache[key] = (
+                    result,
+                    content,
+                    output_type,
+                    revision,
+                    output_bytes,
+                )
+                self._tool_output_cache_bytes += output_bytes
+                while (
+                    self._tool_output_cache_bytes
+                    > _CHAT_STREAM_TOOL_OUTPUT_CACHE_BYTES
+                ):
+                    _old_key, old_entry = self._tool_output_cache.popitem(last=False)
+                    self._tool_output_cache_bytes -= old_entry[4]
+                    self._forget_projected_cache_ref(
+                        "output", _old_key, old_entry[3]
+                    )
+            return content, output_type, revision
+
+    def _project_chat_stream_row(
+        self, uid: str, row: dict[str, Any]
+    ) -> dict[str, Any]:
+        return bounded_chat_stream_row(
+            row,
+            output_resolver=lambda row_id, call_id, result: self._cached_tool_output(
+                uid, row_id, call_id, result
+            ),
+            content_resolver=lambda row_id, part_index, field, value: self._cached_stream_content(
+                uid, row_id, part_index, field, value
+            ),
+        )
+
+    def _cached_stream_content(
+        self,
+        uid: str,
+        row_id: str | None,
+        part_index: int,
+        field: str,
+        value: Any,
+    ) -> tuple[str, str, str]:
+        valid_parts = (
+            isinstance(part_index, int)
+            and not isinstance(part_index, bool)
+            and isinstance(field, str)
+            and (
+                (part_index == -1 and field == "parts")
+                or (part_index >= 0 and field in {"text", "reasoning", "args", "part"})
+            )
+        )
+        if (
+            not isinstance(row_id, str)
+            or isinstance(part_index, bool)
+            or not isinstance(part_index, int)
+            or not isinstance(field, str)
+            or not valid_parts
+        ):
+            content, output_type = self._tool_output_text(value)
+        else:
+            base_key = (uid, row_id, part_index, field)
+            with self._tool_output_lock:
+                latest_revision = self._content_cache_latest.get(base_key)
+                latest_key = (
+                    (*base_key, latest_revision)
+                    if latest_revision is not None
+                    else None
+                )
+                cached = (
+                    self._content_cache.get(latest_key)
+                    if latest_key is not None
+                    else None
+                )
+                # Only immutable scalar values can use identity as a cache
+                # shortcut. A dict/list part may be mutated in place by a
+                # subsequent append, so it must be serialized and fingerprinted.
+                if (
+                    cached is not None
+                    and isinstance(value, (str, int, float, bool, type(None)))
+                    and cached[0] is value
+                ):
+                    self._content_cache.move_to_end(latest_key)
+                    return cached[1], cached[2], cached[3]
+                content, output_type = chat_stream_content_text(value, field)
+                revision = chat_stream_tool_output_revision(content, output_type)
+                output_bytes = len(content.encode("utf-8", errors="replace"))
+                content_key = (*base_key, revision)
+                existing = self._content_cache.get(content_key)
+                if existing is not None:
+                    self._content_cache[content_key] = (
+                        value,
+                        existing[1],
+                        existing[2],
+                        existing[3],
+                        existing[4],
+                    )
+                    self._content_cache.move_to_end(content_key)
+                    self._content_cache_latest[base_key] = revision
+                    return existing[1], existing[2], existing[3]
+                if output_bytes <= _CHAT_STREAM_TOOL_OUTPUT_CACHE_BYTES:
+                    self._content_cache[content_key] = (
+                        value,
+                        content,
+                        output_type,
+                        revision,
+                        output_bytes,
+                    )
+                    self._content_cache_bytes += output_bytes
+                    self._content_cache_latest[base_key] = revision
+                    while (
+                        self._content_cache_bytes
+                        > _CHAT_STREAM_TOOL_OUTPUT_CACHE_BYTES
+                    ):
+                        _old_key, old_entry = self._content_cache.popitem(last=False)
+                        self._content_cache_bytes -= old_entry[4]
+                        self._forget_projected_cache_ref("content", _old_key)
+                        old_base_key = _old_key[:4]
+                        if self._content_cache_latest.get(old_base_key) == _old_key[4]:
+                            self._content_cache_latest.pop(old_base_key, None)
+                return content, output_type, revision
+        return (
+            content,
+            output_type,
+            chat_stream_tool_output_revision(content, output_type),
+        )
+
+    def _project_chat_stream_rows(
+        self,
+        uid: str,
+        rows: list[dict[str, Any]],
+        *,
+        max_bytes: int = CHAT_STREAM_MAX_RESPONSE_BYTES,
+        max_rows: int | None = None,
+    ) -> list[dict[str, Any]]:
+        return bounded_chat_stream_rows(
+            rows,
+            max_bytes=max_bytes,
+            max_rows=max_rows,
+            row_projector=lambda row: self._project_chat_stream_row(uid, row),
         )
 
     def _snapshot_components(
@@ -2428,6 +3373,7 @@ class ChatStreamService:
         uid: str,
         *,
         transcript_rows: list[dict[str, Any]] | None = None,
+        row_byte_budget: int = 3 * 1024 * 1024,
     ) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
@@ -2470,7 +3416,15 @@ class ChatStreamService:
             if isinstance(item, dict) and item.get("id")
         }
         inputs.update(copy.deepcopy(self._inputs.get(uid, {})))
-        snapshot_rows = list(rows_by_id.values())[-REPLAY_WINDOW:]
+        snapshot_rows = self._project_chat_stream_rows(
+            uid,
+            list(rows_by_id.values()),
+            max_bytes=row_byte_budget,
+            max_rows=REPLAY_WINDOW,
+        )
+        with self._log(uid)._lock:
+            for row in snapshot_rows:
+                self._remember_projected_row(uid, row)
         visible_input_ids = {
             row["id"] for row in snapshot_rows if row.get("kind") == "input"
         }
@@ -2488,10 +3442,16 @@ class ChatStreamService:
             inputs[input_id] = self._input_lifecycle_from_history(
                 row, history_replies
             )
+        active_input_ids = {
+            input_id
+            for input_id, info in inputs.items()
+            if info.get("state") in {"queued", "started", "joined"}
+        }
+        retained_input_ids = visible_input_ids | active_input_ids
         inputs = {
             input_id: info
             for input_id, info in inputs.items()
-            if input_id in visible_input_ids
+            if input_id in retained_input_ids
         }
 
         turn_ids = list(
@@ -2503,6 +3463,27 @@ class ChatStreamService:
                 and row["turn_id"]
             )
         )
+        turn_ids.extend(
+            item["turn_id"]
+            for item in inputs.values()
+            if item.get("state") in {"queued", "started", "joined"}
+            and isinstance(item.get("turn_id"), str)
+            and item["turn_id"] not in turn_ids
+        )
+        turn_ids.extend(
+            turn_id
+            for turn_id, turn in turns.items()
+            if turn.get("state") == "running"
+            and isinstance(turn.get("origin"), dict)
+            and turn["origin"].get("kind") == "goal"
+            and turn_id not in turn_ids
+        )
+        retained_turn_ids = set(turn_ids)
+        turns = {
+            turn_id: turn
+            for turn_id, turn in turns.items()
+            if turn_id in retained_turn_ids
+        }
         for turn_id, current in turns.items():
             current_inputs = current.get("input_ids", [])
             turns[turn_id] = {
@@ -2510,7 +3491,7 @@ class ChatStreamService:
                 "input_ids": [
                     input_id
                     for input_id in current_inputs
-                    if input_id in visible_input_ids
+                    if input_id in retained_input_ids
                 ],
             }
         for turn_id in turn_ids:
@@ -2598,20 +3579,43 @@ class ChatStreamService:
 
     def _snapshot(self, uid: str) -> dict[str, Any]:
         transcript_rows = self._transcript_rows(uid)
-        rows, turns, inputs, state = self._snapshot_components(
-            uid, transcript_rows=transcript_rows
-        )
-        older = self._row_pager(
-            uid=uid,
-            snapshot_rows=rows,
-            transcript_rows=transcript_rows,
-        ).snapshot_older_cursor()
-        return {
-            "rows": rows,
-            "turns": turns,
-            "inputs": inputs,
-            "older": older if older is not None else state.get("older"),
-        }
+        row_budget = 3 * 1024 * 1024
+        while True:
+            rows, turns, inputs, state = self._snapshot_components(
+                uid,
+                transcript_rows=transcript_rows,
+                row_byte_budget=row_budget,
+            )
+            older = self._row_pager(
+                uid=uid,
+                snapshot_rows=rows,
+                transcript_rows=transcript_rows,
+            ).snapshot_older_cursor()
+            snapshot = {
+                "rows": rows,
+                "turns": turns,
+                "inputs": inputs,
+                "older": older if older is not None else state.get("older"),
+            }
+            log = self._logs.get(uid)
+            snapshot_event = {
+                "seq": 0,
+                "conversation_uid": uid,
+                "generation": log.generation if log is not None else "0" * 32,
+                "type": "snapshot",
+                "data": {
+                    **snapshot,
+                    "next_seq": log.next_seq if log is not None else 1,
+                },
+            }
+            if (
+                chat_stream_wire_bytes({"events": [snapshot_event]})
+                <= CHAT_STREAM_MAX_RESPONSE_BYTES
+            ):
+                return snapshot
+            if row_budget == 0:
+                raise ValueError("chat stream snapshot metadata exceeds the response byte budget")
+            row_budget = max(0, row_budget // 2)
 
     def _transcript_rows(self, uid: str) -> list[dict[str, Any]]:
         if uid != self._conversation_uid():
@@ -3466,12 +4470,148 @@ class ChatStreamService:
         log.publish("turn.state", data)
 
     def _upsert(self, uid: str, row: dict[str, Any]) -> None:
-        def store_row(event: Event) -> None:
-            self._rows.setdefault(uid, {})[event["data"]["id"]] = copy.deepcopy(
-                event["data"]
-            )
+        raw_row = copy.deepcopy(row)
+        log = self._log(uid)
+        projected_row: dict[str, Any]
 
-        self._log(uid).publish("row.upsert", row, on_commit=store_row)
+        def store_row(event: Event) -> None:
+            raw_row["seq"] = event["seq"]
+            self._rows.setdefault(uid, {})[raw_row["id"]] = copy.deepcopy(raw_row)
+            self._remember_raw_row(uid, raw_row, projected_row)
+
+        with log._lock:
+            with self._tool_output_lock:
+                self._invalidate_tool_output_row(uid, raw_row.get("id"))
+                projected_row = self._project_chat_stream_row(uid, raw_row)
+                log.publish(
+                    "row.upsert",
+                    projected_row,
+                    on_commit=store_row,
+                )
+
+    def _remember_projected_row(self, uid: str, row: dict[str, Any]) -> None:
+        row_id = row.get("id")
+        if not isinstance(row_id, str):
+            return
+        key = (uid, row_id)
+        if isinstance(row.get("chat_stream_parts_preview"), dict):
+            self._row_parts_paged.add(key)
+        else:
+            self._row_parts_paged.discard(key)
+        content_keys, output_refs = self._projected_content_cache_refs(uid, row)
+        retained_refs: set[tuple[Any, ...]] = set()
+        unretained = False
+        with self._tool_output_lock:
+            for content_key in content_keys:
+                if content_key in self._content_cache:
+                    retained_refs.add(("content", *content_key))
+                else:
+                    unretained = True
+            for output_key, revision in output_refs:
+                cached = self._tool_output_cache.get(output_key)
+                if cached is not None and cached[3] == revision:
+                    retained_refs.add(("output", *output_key, revision))
+                else:
+                    unretained = True
+            if retained_refs:
+                self._row_content_cache_refs[key] = retained_refs
+            else:
+                self._row_content_cache_refs.pop(key, None)
+            if unretained:
+                self._row_content_unretained.add(key)
+            else:
+                self._row_content_unretained.discard(key)
+
+    def _projected_content_cache_refs(
+        self, uid: str, row: dict[str, Any]
+    ) -> tuple[
+        list[tuple[str, str, int, str, str]],
+        list[tuple[tuple[str, str, str], str]],
+    ]:
+        row_id = row.get("id")
+        if not isinstance(row_id, str):
+            return [], []
+        content_keys: list[tuple[str, str, int, str, str]] = []
+        output_refs: list[tuple[tuple[str, str, str], str]] = []
+        parts_marker = row.get("chat_stream_parts_preview")
+        if isinstance(parts_marker, dict):
+            revision = parts_marker.get("output_revision")
+            if isinstance(revision, str):
+                content_keys.append((uid, row_id, -1, "parts", revision))
+        parts = row.get("parts")
+        if isinstance(parts, list):
+            for index, part in enumerate(parts):
+                if not isinstance(part, dict):
+                    continue
+                for name, fallback_field in (
+                    ("chat_stream_content_preview", None),
+                    ("chat_stream_args_preview", "args"),
+                    ("chat_stream_part_preview", "part"),
+                ):
+                    marker = part.get(name)
+                    if not isinstance(marker, dict):
+                        continue
+                    field = marker.get("field", fallback_field)
+                    revision = marker.get("output_revision")
+                    marker_index = marker.get("part_index", index)
+                    if (
+                        isinstance(field, str)
+                        and isinstance(revision, str)
+                        and isinstance(marker_index, int)
+                        and not isinstance(marker_index, bool)
+                    ):
+                        content_keys.append((uid, row_id, marker_index, field, revision))
+                result_marker = part.get("chat_stream_result_preview")
+                result = part.get("result")
+                if not isinstance(result_marker, dict) and isinstance(result, dict):
+                    # Compatibility with the pre-migration projected shape.
+                    result_marker = result if result.get("kind") == "chat-stream-tool-output-preview" else None
+                if isinstance(result_marker, dict):
+                    tool_call_id = result_marker.get(
+                        "tool_call_id", part.get("tool_call_id")
+                    )
+                    revision = result_marker.get("output_revision")
+                    if isinstance(tool_call_id, str) and isinstance(revision, str):
+                        output_refs.append(((uid, row_id, tool_call_id), revision))
+        return content_keys, output_refs
+
+    def _remember_raw_row(
+        self,
+        uid: str,
+        row: dict[str, Any],
+        projected_row: dict[str, Any] | None = None,
+    ) -> None:
+        row_id = row.get("id")
+        if isinstance(row_id, str):
+            self._row_wire_sizes[(uid, row_id)] = chat_stream_wire_bytes(row)
+            if projected_row is not None:
+                self._remember_projected_row(uid, projected_row)
+
+    def _remember_row_sizes(
+        self,
+        uid: str,
+        rows: list[dict[str, Any]],
+        projected_rows: list[dict[str, Any]] | None = None,
+    ) -> None:
+        for key in tuple(self._row_wire_sizes):
+            if key[0] == uid:
+                self._row_wire_sizes.pop(key, None)
+        for key in tuple(self._row_parts_paged):
+            if key[0] == uid:
+                self._row_parts_paged.discard(key)
+        for key in tuple(self._row_content_unretained):
+            if key[0] == uid:
+                self._row_content_unretained.discard(key)
+        for key in tuple(self._row_content_cache_refs):
+            if key[0] == uid:
+                self._row_content_cache_refs.pop(key, None)
+        projected_by_id = {
+            row["id"]: row
+            for row in projected_rows or []
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        }
+        for row in rows:
+            self._remember_raw_row(uid, row, projected_by_id.get(row.get("id")))
 
     def _publish_live(self, event: Event) -> None:
         get_service = getattr(self._event_bus, "get_service", None)
@@ -3598,6 +4738,9 @@ def register_chat_stream_handlers(
         "state.chat_stream.add_input": stream_service.add_input,
         "state.chat_stream.cancel_queued_input": stream_service.cancel_queued_input,
         "state.chat_stream.send_now": stream_service.send_now,
+        "state.chat_stream.tool_output": stream_service.get_tool_output,
+        "state.chat_stream.content": stream_service.get_content,
+        "state.chat_stream.parts": stream_service.get_parts,
     }
     for method, handler in handlers.items():
         try:

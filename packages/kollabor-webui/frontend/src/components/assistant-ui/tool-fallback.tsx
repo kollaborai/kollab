@@ -31,8 +31,21 @@ import {
   summarizeToolCall,
 } from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
+import {
+  ChatStreamContentPreview,
+  chatStreamArgsPreviewFromMetadata,
+  chatStreamResultPreviewFromMetadata,
+  chatStreamContentIdentity,
+  type ChatStreamContentPreviewMarker,
+} from "@/chat-stream-content";
+import { isChatStreamToolOutputPreviewMarker, type ChatStreamToolOutputPreviewMarker } from "@/chat-stream";
 
-import { EngineApi } from "@/api";
+import {
+  CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE,
+  EngineApi,
+  type ChatStreamToolOutputChunk,
+  type ChatStreamToolOutputType,
+} from "@/api";
 
 const ANIMATION_DURATION = 200;
 
@@ -78,6 +91,125 @@ async function fetchHistoryOutput(
     }
   })();
   pendingHistoryOutputs.set(key, load);
+  return load;
+}
+
+const chatStreamToolOutputApi = new EngineApi();
+const chatStreamToolOutputCache = new Map<string, string>();
+const CHAT_STREAM_TOOL_OUTPUT_CACHE_LIMIT = 5;
+const pendingChatStreamToolOutputs = new Map<string, Promise<string>>();
+const failedChatStreamToolOutputs = new Set<string>();
+
+function chatStreamToolOutputKey(
+  sessionId: string,
+  rowId: string,
+  toolCallId: string,
+  outputRevision: string,
+): string {
+  return `${sessionId}\u0000${rowId}\u0000${toolCallId}\u0000${outputRevision}`;
+}
+
+function validChunk(chunk: ChatStreamToolOutputChunk): boolean {
+  return Boolean(
+    chunk &&
+    typeof chunk.row_id === "string" &&
+    typeof chunk.tool_call_id === "string" &&
+    typeof chunk.output_revision === "string" &&
+    Number.isSafeInteger(chunk.offset) &&
+    Number.isSafeInteger(chunk.next_offset) &&
+    Number.isSafeInteger(chunk.total_chars) &&
+    (chunk.output_type === "text" || chunk.output_type === "json") &&
+    typeof chunk.content === "string" &&
+    typeof chunk.done === "boolean",
+  );
+}
+
+function characterCount(value: string): number {
+  return Array.from(value).length;
+}
+
+/** Fetch and join the bounded slices for one exact stream row and tool call. */
+export async function fetchChatStreamToolOutput(
+  sessionId: string,
+  rowId: string,
+  toolCallId: string,
+  outputRevision: string,
+  outputChars: number,
+  outputType: ChatStreamToolOutputType,
+  api: Pick<EngineApi, "getChatStreamToolOutput"> = chatStreamToolOutputApi,
+): Promise<string> {
+  const key = chatStreamToolOutputKey(sessionId, rowId, toolCallId, outputRevision);
+  if (chatStreamToolOutputCache.has(key)) return chatStreamToolOutputCache.get(key)!;
+  const pending = pendingChatStreamToolOutputs.get(key);
+  if (pending) return pending;
+
+  const load = (async () => {
+    try {
+      if (!Number.isSafeInteger(outputChars) || outputChars < 0) {
+        throw new Error("Tool output preview has an invalid character count.");
+      }
+      if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+        throw new Error("Tool output preview has an invalid revision.");
+      }
+      if (outputType !== "text" && outputType !== "json") {
+        throw new Error("Tool output preview has an invalid output type.");
+      }
+
+      let content = "";
+      let offset = 0;
+      for (;;) {
+        const chunk = await api.getChatStreamToolOutput(sessionId, rowId, toolCallId, outputRevision, {
+          offset,
+          limit: CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE,
+        });
+        if (
+          !validChunk(chunk) ||
+          chunk.row_id !== rowId ||
+          chunk.tool_call_id !== toolCallId ||
+          chunk.output_revision !== outputRevision ||
+          chunk.offset !== offset ||
+          chunk.total_chars !== outputChars ||
+          chunk.output_type !== outputType
+        ) {
+          throw new Error("Tool output chunk does not match the requested result.");
+        }
+
+        const chunkChars = characterCount(chunk.content);
+        const nextOffset = offset + chunkChars;
+        const isEmptyFinalChunk =
+          outputChars === 0 && offset === 0 && chunk.done && chunk.content === "";
+        if (
+          chunk.next_offset !== nextOffset ||
+          (!isEmptyFinalChunk && chunk.next_offset <= offset) ||
+          chunkChars > CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE ||
+          chunk.next_offset > outputChars ||
+          chunk.done !== (chunk.next_offset === outputChars)
+        ) {
+          throw new Error("Tool output chunk has an invalid offset range.");
+        }
+
+        content += chunk.content;
+        offset = chunk.next_offset;
+        if (chunk.done) break;
+      }
+
+      if (characterCount(content) !== outputChars) {
+        throw new Error("Tool output ended before all characters were received.");
+      }
+      chatStreamToolOutputCache.set(key, content);
+      if (chatStreamToolOutputCache.size > CHAT_STREAM_TOOL_OUTPUT_CACHE_LIMIT) {
+        chatStreamToolOutputCache.delete(chatStreamToolOutputCache.keys().next().value as string);
+      }
+      failedChatStreamToolOutputs.delete(key);
+      return content;
+    } catch (error) {
+      failedChatStreamToolOutputs.add(key);
+      throw error;
+    } finally {
+      pendingChatStreamToolOutputs.delete(key);
+    }
+  })();
+  pendingChatStreamToolOutputs.set(key, load);
   return load;
 }
 
@@ -211,6 +343,8 @@ export const toolErrorLine = (result: unknown): string => {
   );
   const raw =
     typeof result === "string" ? result :
+      record?.kind === "chat-stream-tool-output-preview" && typeof record.preview === "string"
+        ? record.preview :
       record?.error || asRecord(asRecord(textBlock)?.content)?.text || record?.output;
   const text = typeof raw === "string" ? stripErrorPrefix(raw).trim() : "";
   return text.split(/\r?\n/, 1)[0] || "Tool call failed";
@@ -359,11 +493,30 @@ function ToolFallbackContent({
 
 function ToolFallbackArgs({
   argsText,
+  preview,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
   argsText?: string;
+  preview?: ChatStreamContentPreviewMarker;
 }) {
+  if (preview) {
+    return (
+      <div
+        data-slot="tool-fallback-args"
+        className={cn("aui-tool-fallback-args", className)}
+        {...props}
+      >
+        <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+          {(content) => (
+            <pre className="aui-tool-fallback-args-value bg-muted/50 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
+              {formatContent(content)}
+            </pre>
+          )}
+        </ChatStreamContentPreview>
+      </div>
+    );
+  }
   if (!argsText) return null;
 
   return (
@@ -448,18 +601,120 @@ function HistoryOutputResult({
   );
 }
 
+function ChatStreamToolOutputResult({
+  sessionId,
+  rowId,
+  toolCallId,
+  outputRevision,
+  outputChars,
+  outputType,
+  preview,
+}: {
+  sessionId: string;
+  rowId: string;
+  toolCallId: string;
+  outputRevision: string;
+  outputChars: number;
+  outputType: ChatStreamToolOutputType;
+  preview: string;
+}) {
+  const cacheKey = chatStreamToolOutputKey(sessionId, rowId, toolCallId, outputRevision);
+  const [content, setContent] = useState<string | undefined>(() => chatStreamToolOutputCache.get(cacheKey));
+  const [loaded, setLoaded] = useState(() => chatStreamToolOutputCache.has(cacheKey));
+  const [error, setError] = useState<string | null>(() =>
+    failedChatStreamToolOutputs.has(cacheKey)
+      ? "Full tool output could not be loaded. Check the connection and retry."
+      : null,
+  );
+  const [loading, setLoading] = useState(false);
+  const requestedRef = useRef(false);
+
+  const load = useCallback(async () => {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const full = await fetchChatStreamToolOutput(
+        sessionId,
+        rowId,
+        toolCallId,
+        outputRevision,
+        outputChars,
+        outputType,
+      );
+      setContent(full);
+      setLoaded(true);
+    } catch {
+      setError("Full tool output could not be loaded. Check the connection and retry.");
+    } finally {
+      setLoading(false);
+    }
+  }, [loading, outputChars, outputRevision, outputType, rowId, sessionId, toolCallId]);
+
+  // This component mounts inside the collapsible content, so a request begins
+  // only after the tool card is expanded.
+  useEffect(() => {
+    if (loaded || error || requestedRef.current) return;
+    requestedRef.current = true;
+    void load();
+  }, [error, load, loaded]);
+
+  return (
+    <div data-slot="chat-stream-tool-output-preview" className="mt-1 space-y-2">
+      <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
+        {loaded ? "Output:" : "Output preview:"}
+      </p>
+      <pre className="bg-muted/50 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
+        {formatContent(loaded ? content : preview)}
+      </pre>
+      {!loaded && loading ? (
+        <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+          <LoaderIcon className="size-3.5 animate-spin" aria-hidden="true" />
+          Loading full output…
+        </p>
+      ) : null}
+      {!loaded && error ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span role="alert" className="text-destructive text-xs">{error}</span>
+          <Button type="button" size="sm" variant="outline" onClick={() => void load()}>
+            Retry
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 
 function ToolFallbackResult({
   result,
+  resultPreview,
   isError,
   asked,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
   result?: unknown;
+  resultPreview?: ChatStreamToolOutputPreviewMarker;
   isError?: boolean;
   asked?: boolean;
 }) {
+  if (isChatStreamToolOutputPreviewMarker(resultPreview)) {
+    return (
+      <div data-slot="tool-fallback-result" className={cn("aui-tool-fallback-result", className)} {...props}>
+        <ChatStreamToolOutputResult
+          key={resultPreview.output_revision}
+          sessionId={resultPreview.session_id}
+          rowId={resultPreview.row_id}
+          toolCallId={resultPreview.tool_call_id}
+          outputRevision={resultPreview.output_revision}
+          outputChars={resultPreview.output_chars}
+          outputType={resultPreview.output_type}
+          preview={resultPreview.preview}
+        />
+      </div>
+    );
+  }
   if (result === undefined) return null;
 
   const historyOutput = asRecord(result);
@@ -476,7 +731,7 @@ function ToolFallbackResult({
           preview={historyOutput.preview}
         />
       </div>
-    );
+      );
   }
   const card = harnessCard(result);
   // Typed card content can include a diff beside rawOutput. Keep that richer
@@ -794,8 +1049,11 @@ function ToolFallbackApproval({
 }
 
 const ToolFallbackImpl: ToolCallMessagePartComponent = ({
+  toolCallId,
   toolName,
+  args,
   argsText,
+  providerMetadata,
   result,
   isError,
   status,
@@ -805,6 +1063,11 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   approval,
   respondToApproval,
 }) => {
+  const argsPreview = chatStreamArgsPreviewFromMetadata(providerMetadata);
+  const candidateResultPreview = chatStreamResultPreviewFromMetadata(providerMetadata);
+  const resultPreview = candidateResultPreview?.tool_call_id === toolCallId
+    ? candidateResultPreview
+    : undefined;
   const card = harnessCard(result);
   const cardTitle =
     typeof card?.title === "string" && card.title.trim() ? card.title.trim() : undefined;
@@ -896,7 +1159,8 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
         {/* A harness diff already shows the edit as Before/After; its raw args repeat it. */}
         {!(Array.isArray(card?.content) && card.content.some((block) => asRecord(block)?.type === "diff")) && (
           <ToolFallbackArgs
-            argsText={argsText}
+            argsText={argsPreview ? undefined : argsText}
+            preview={argsPreview}
             className={cn(isCancelled && "opacity-60")}
           />
         )}
@@ -909,7 +1173,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
             respondToApproval={respondToApproval}
           />
         )}
-        {(!isCancelled || card) && <ToolFallbackResult result={result} isError={failed} asked={asked} />}
+        {(!isCancelled || card) && <ToolFallbackResult result={result} resultPreview={resultPreview} isError={failed} asked={asked} />}
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );
