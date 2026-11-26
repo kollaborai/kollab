@@ -549,6 +549,7 @@ export class LiveChatStore implements LiveStore {
 
   private async pollGoalReply(inputId: string, ownerId: string, controller: AbortController): Promise<void> {
     let unconfirmedPolls = 0;
+    let confirmedMissingPolls = 0;
     while (this.isCurrentGoalPoll(inputId, ownerId, controller)) {
       try {
         const response = await this.transport.request(`/sessions/${this.enc}/goal-replies/poll`, {
@@ -575,6 +576,7 @@ export class LiveChatStore implements LiveStore {
             // A pending mailbox can only exist after the server admitted this private goal.
             this.confirmGoalReplyAdmission(inputId, ownerId, false);
             unconfirmedPolls = 0;
+            confirmedMissingPolls = 0;
           }
           if (isRecord(result) && result.status === "missing") {
             if (this.uncertainGoalAdmissions.get(inputId) === ownerId) {
@@ -584,7 +586,14 @@ export class LiveChatStore implements LiveStore {
               this.confirmedGoalAdmissions.get(inputId) === ownerId &&
               this.state.inputs[inputId]?.state !== "ended"
             ) {
-              // An accepted input may still be queued, before its private mailbox is registered.
+              // A confirmed input may have lost its mailbox on restart. Bound misses so stale or
+              // absent stream state remains manually recoverable instead of polling forever.
+              confirmedMissingPolls += 1;
+              if (confirmedMissingPolls >= this.maxUnconfirmedGoalPolls) {
+                this.uncertainGoalAdmissions.set(inputId, ownerId);
+                this.setGoalReplyUncertain(inputId, ownerId);
+                return;
+              }
             } else {
               this.finishGoalReply(inputId, ownerId, {
                 state: "complete",
