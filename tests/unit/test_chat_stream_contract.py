@@ -267,6 +267,12 @@ def test_snapshot_problems_check_cursors_and_entries(data, needle):
     assert any(needle in problem for problem in problems), problems
 
 
+def test_snapshot_next_seq_cannot_precede_snapshot_seq():
+    snapshot = _event("snapshot", {**SNAPSHOT, "next_seq": 5}, seq=10)
+    problems = sequence_problems([snapshot])
+    assert any("next_seq" in problem and "seq" in problem for problem in problems), problems
+
+
 def _lifecycle(*states):
     """A stream with one input row and the given input.state events, in order."""
     events = [
@@ -484,6 +490,16 @@ def test_input_cannot_change_its_turn_binding_to_end_early():
         {"id": "web-a1", "state": "started", "turn_id": "t1"},
         {"turn_id": "t2", "state": "ended", "input_ids": []},
         {"id": "web-a1", "state": "ended", "turn_id": "t2", "outcome": "completed"},
+    )
+    problems = sequence_problems(events)
+    assert any("turn" in problem and "t1" in problem for problem in problems), problems
+
+
+def test_input_cannot_drop_turn_binding_when_ending():
+    events = _lifecycle(
+        {"id": "web-a1", "state": "started", "turn_id": "t1"},
+        {"turn_id": "t1", "state": "ended", "input_ids": ["web-a1"]},
+        {"id": "web-a1", "state": "ended", "turn_id": None, "outcome": "completed"},
     )
     problems = sequence_problems(events)
     assert any("turn" in problem and "t1" in problem for problem in problems), problems
