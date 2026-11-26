@@ -3,9 +3,8 @@ import { refreshesSessionData } from "./session-refresh-events";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import type { ReactNode } from "react";
-import { ChatStoreProvider, LiveChatStore, useChatStore, WEB_INPUT_PREFIX } from "./chat-store";
+import { ChatStoreProvider, LiveChatStore, useChatStore } from "./chat-store";
 import { useChatRuntime } from "./chat-runtime";
-import { newInputId } from "./chat-stream";
 import { PermissionCancellationProvider } from "./permission-cancellation";
 import { respondToPermission } from "./permission-respond";
 import { PermissionResponseContext, type PermissionArgs, type PermissionResult } from "./components/PermissionTool";
@@ -203,12 +202,12 @@ function ChatRuntime({ api: engine, sessionId, store, children }: {
       respondToPermission({ api: engine, sessionId, toolCallId, args, answer: result, rows: () => store.rows }),
     [engine, sessionId, store],
   );
-  const sendCommand = useCallback((text: string) => chat.send({ id: newInputId(WEB_INPUT_PREFIX), text }), [chat.send]);
+  const sendCommand = useCallback((text: string, inputId: string) => chat.send({ id: inputId, text }), [chat.send]);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <PermissionResponseContext.Provider value={respond}>
         <PermissionCancellationProvider api={engine} sessionId={sessionId} store={store}>
-          <VoiceModeProvider api={engine} sessionId={sessionId} running={chat.running} sendCommand={sendCommand}>
+          <VoiceModeProvider api={engine} sessionId={sessionId} running={chat.running} store={store} sendCommand={sendCommand}>
             {children}
           </VoiceModeProvider>
         </PermissionCancellationProvider>

@@ -9,6 +9,8 @@ import {
   type ReactNode,
 } from "react";
 import type { EngineApi } from "./api";
+import { newInputId, type InputInfo } from "./chat-stream";
+import { WEB_INPUT_PREFIX, type LiveStore } from "./chat-store";
 
 /** VoicePlugin._activity, polled while voice is on. */
 export type VoiceActivity = {
@@ -44,6 +46,8 @@ const ACTIVITY_POLL_MS = 600;
 
 const VoiceModeContext = createContext<VoiceMode>(IDLE);
 
+type VoiceInputStore = Pick<LiveStore, "inputs" | "subscribe">;
+
 export const useVoiceMode = () => useContext(VoiceModeContext);
 
 /**
@@ -65,6 +69,7 @@ export function VoiceModeProvider({
   api,
   sessionId,
   running,
+  store,
   sendCommand,
   children,
 }: {
@@ -72,15 +77,17 @@ export function VoiceModeProvider({
   sessionId: string;
   /** A chat turn is in progress; the toggle waits for it to end. */
   running: boolean;
-  /** Sends one chat turn. The toggle sends `/voice on` or `/voice off` through it. */
-  sendCommand: (text: string) => void | Promise<void>;
+  /** The session store reports this command's queued, running and ended states. */
+  store: VoiceInputStore;
+  /** Sends one chat turn under the input ID supplied by the toggle. */
+  sendCommand: (text: string, inputId: string) => void | Promise<void>;
   children: ReactNode;
 }) {
   const [on, setOn] = useState(false);
   const [pending, setPending] = useState<"on" | "off" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activity, setActivity] = useState<VoiceActivity | null>(null);
-  const sawRun = useRef(false);
+  const activeInput = useRef<{ id: string; started: boolean } | null>(null);
 
   /** The daemon's voice_requested, or undefined when it cannot say. */
   const readRequested = useCallback(async () => {
@@ -106,38 +113,59 @@ export function VoiceModeProvider({
   const toggle = useCallback(() => {
     if (pending || running) return;
     const action = on ? "off" : "on";
-    sawRun.current = false;
+    const inputId = newInputId(WEB_INPUT_PREFIX);
+    activeInput.current = { id: inputId, started: false };
     setError(null);
     setPending(action);
     void Promise.resolve()
-      .then(() => sendCommand(`/voice ${action}`))
+      .then(() => sendCommand(`/voice ${action}`, inputId))
       .catch(() => {
+        // A stream completion wins over a late ambiguous POST failure.
+        if (activeInput.current?.id !== inputId) return;
+        activeInput.current = null;
         setPending((current) => current === action ? null : current);
         setError("Could not change voice mode. Try again.");
       });
   }, [on, pending, running, sendCommand]);
 
-  // The command is a chat turn: once its run has started and ended, the
-  // daemon's voice_requested says whether the mic is on. The reply in history
-  // is not read.
+  // Follow this exact input in the store. The store publishes every event
+  // synchronously, so a started and ended pair in one SSE read is not lost to
+  // React batching or a transient `running` render.
   useEffect(() => {
     if (!pending) return;
-    if (running) {
-      sawRun.current = true;
-      return;
-    }
-    if (!sawRun.current) return;
     let cancelled = false;
-    void (async () => {
-      const requested = await readRequested();
-      if (cancelled) return;
-      if (requested !== undefined) setOn(requested);
-      setPending(null);
-    })();
+    const reconcile = () => {
+      const active = activeInput.current;
+      if (!active) return;
+      const input: InputInfo | undefined = store.inputs[active.id];
+      if (!input) return;
+      if (input.state === "started" || input.state === "joined") active.started = true;
+      const endedAfterRun = input.state === "ended" && (active.started || input.turn_id !== null);
+      if (!endedAfterRun) return;
+      activeInput.current = null;
+      void readRequested().then((requested) => {
+        if (cancelled) return;
+        if (requested !== undefined) setOn(requested);
+        setPending(null);
+      });
+    };
+    const unsubscribe = store.subscribe(reconcile);
+    reconcile();
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [pending, readRequested, running]);
+  }, [pending, readRequested, store]);
+
+  // A command whose input never starts must not leave the mic stuck.
+  useEffect(() => {
+    if (!pending) return;
+    const timer = window.setTimeout(() => {
+      activeInput.current = null;
+      setPending(null);
+    }, 15_000);
+    return () => window.clearTimeout(timer);
+  }, [pending]);
 
   // While voice is on, follow the service: a stopped service or /voice off from
   // the terminal turns the mic off here too.
@@ -166,13 +194,6 @@ export function VoiceModeProvider({
       window.clearTimeout(timer);
     };
   }, [api, on, pending, sessionId]);
-
-  // A command whose run never started must not leave the mic stuck.
-  useEffect(() => {
-    if (!pending) return;
-    const timer = window.setTimeout(() => setPending(null), 15_000);
-    return () => window.clearTimeout(timer);
-  }, [pending]);
 
   const value = useMemo(
     () => ({ pending: pending !== null, error, on, toggle, activity }),
