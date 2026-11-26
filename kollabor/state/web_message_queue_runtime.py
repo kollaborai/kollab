@@ -873,16 +873,23 @@ class WebMessageQueueRuntime:
                             if callable(get_service)
                             else None
                         )
-                        bind_scope = getattr(stream, "bind_queued_input_scope", None)
+                        bind_scope = getattr(stream, "bind_queued_input_scopes", None)
                         if callable(bind_scope):
                             scope = (
                                 binding.scope_id,
                                 binding.conversation_uid,
                                 binding.principal_id,
                             )
-                            for item in batch.items:
-                                if request_id is None or item.request_id == request_id:
-                                    bind_scope(item.request_id, scope)
+                            selected_ids = [
+                                item.request_id
+                                for item in batch.items
+                                if request_id is None or item.request_id == request_id
+                            ]
+                            if not await bind_scope(selected_ids, scope):
+                                return {
+                                    "status": WorkerStatus.NOT_SENT.value,
+                                    "accepted": False,
+                                }
                         last_result = await worker.dispatch_batch(
                             batch.batch_id,
                             send_now=send_now,

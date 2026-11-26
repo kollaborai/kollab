@@ -240,7 +240,8 @@ class ChatStreamService:
         runtime = self._queue_runtime()
         scope = await runtime.input_scope(uid)
         known = self._inputs.setdefault(uid, {}).get(input_id)
-        if known is not None and self._input_scopes.get((uid, input_id)) != scope:
+        owner = self._input_scopes.get((uid, input_id))
+        if owner != scope and (owner is not None or known is not None):
             return {"error": "input was not admitted"}
         if known is not None:
             previous_text = self._input_text.get((uid, input_id), text)
@@ -320,11 +321,24 @@ class ChatStreamService:
                 self._upsert(uid, updated)
         return {"found": True, "cancelled": cancelled}
 
-    def bind_queued_input_scope(
-        self, input_id: str, scope: tuple[str, str, str]
-    ) -> None:
-        """Retain the trusted queue owner before an input can emit lifecycle events."""
-        self._input_scopes.setdefault((scope[1], input_id), scope)
+    async def bind_queued_input_scopes(
+        self, input_ids: list[str], scope: tuple[str, str, str]
+    ) -> bool:
+        """Reserve all selected IDs atomically before queue dispatch."""
+        async with self._input_lock:
+            keys = [(scope[1], input_id) for input_id in input_ids]
+            if any(
+                self._input_scopes.get(key, scope) != scope
+                or (
+                    key[1] in self._inputs.get(key[0], {})
+                    and key not in self._input_scopes
+                )
+                for key in keys
+            ):
+                return False
+            for key in keys:
+                self._input_scopes[key] = scope
+            return True
 
     async def send_now(self, params: dict[str, Any]) -> dict[str, Any]:
         input_id = params.get("id")
@@ -349,7 +363,8 @@ class ChatStreamService:
         if await runtime.input_scope(uid) != scope:
             return {"found": False}
         current = self._inputs.get(uid, {}).get(input_id, {})
-        if current and self._input_scopes.get((uid, input_id)) != scope:
+        owner = self._input_scopes.get((uid, input_id))
+        if owner is not None and owner != scope:
             return {"found": False}
         if (
             (not isinstance(result, dict) or result.get("found") is not True)
