@@ -86,6 +86,32 @@ async def test_native_admission_saves_the_sender_request_id_with_its_row():
 
 
 @pytest.mark.asyncio
+async def test_native_managed_image_admission_persists_authenticated_media_ref(tmp_path):
+    from kollabor_engine.media_store import open_media
+
+    service = await _native_service()
+    service.conversation_logger.conversations_dir = tmp_path
+    service.conversation_logger.session_id = "s1"
+
+    result = await service.process_user_input(
+        [{"type": "image", "image": "data:image/png;base64,AQID"}],
+        request_id="native-managed-image-row",
+    )
+
+    assert result == {"status": "queued", "request_id": "native-managed-image-row"}
+    saved = service.conversation_logger.log_user_message.await_args
+    metadata = saved.kwargs["message_metadata"]
+    assert metadata["request_id"] == "native-managed-image-row"
+    assert len(metadata["chat_stream_parts"]) == 1
+    image = metadata["chat_stream_parts"][0]
+    assert image["type"] == "image"
+    assert image["url"].startswith("/media/")
+    assert open_media(
+        tmp_path, image["url"].removeprefix("/media/"), session_id="s1"
+    ) == (b"\x01\x02\x03", "image/png")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("arrives_as", ["device-voice", "livekit-room"])
 async def test_native_voice_admission_queues_under_the_sender_request_id(arrives_as):
     service = await _native_service(idle=True)
