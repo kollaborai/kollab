@@ -365,7 +365,7 @@ describe("LiveChatStore", () => {
     return { transport, request, streamSse, streamChatEvents, streams };
   }
 
-  function make(options: { maxAttempts?: number } = {}) {
+  function make(options: { maxAttempts?: number; maxUnconfirmedGoalPolls?: number; goalReplyPollIntervalMs?: number } = {}) {
     const fake = fakeTransport();
     const store = new LiveChatStore(fake.transport, "s1", { retryBaseMs: 0, ...options });
     stores.push(store);
@@ -654,14 +654,16 @@ describe("LiveChatStore", () => {
       }
       return new Response(null, { status: 202 });
     });
-    const stream = await startOpen(store, streams);
-    stream.emit(snapshot(10));
-
     await expect(store.send(input)).rejects.toThrow("connection reset after admission");
     await vi.waitFor(() => expect(polls).toBe(1));
     expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "pending" });
 
-    stream.emit(streamEvent(10, "input.state", { id: input.id, state: "queued", turn_id: null }));
+    // The input.state event may have passed while this client was disconnected.
+    // A later snapshot must recover the admission and restart the private poll.
+    const stream = await startOpen(store, streams);
+    stream.emit(snapshot(10, [row(input.id, input.text, "input", "user")], {
+      inputs: [{ id: input.id, state: "queued", turn_id: null }],
+    }));
     await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
       state: "complete",
       success: true,
@@ -674,7 +676,7 @@ describe("LiveChatStore", () => {
     expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
   });
 
-  it("bounds unresolved admission polling and lets the user check status without resending", async () => {
+  it("bounds unresolved polling and keeps status check recoverable after a rejected retry", async () => {
     const { store, request } = make({ maxUnconfirmedGoalPolls: 2, goalReplyPollIntervalMs: 1 });
     const input = {
       id: "web-goal-unresolved",
@@ -687,7 +689,9 @@ describe("LiveChatStore", () => {
     request.mockImplementation(async (path) => {
       if (path.endsWith("/inputs")) {
         sends += 1;
-        throw new Error("connection reset after admission");
+        return sends === 1
+          ? Promise.reject(new Error("connection reset after admission"))
+          : new Response(null, { status: 400 });
       }
       if (path.endsWith("/goal-replies/poll")) {
         polls += 1;
@@ -703,13 +707,17 @@ describe("LiveChatStore", () => {
     expect(store.getSnapshot().running).toBe(false);
     expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
 
+    await expect(store.send(input)).rejects.toThrow("send failed: 400");
+    expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "uncertain" });
+    expect(store.getSnapshot().running).toBe(false);
+
     store.checkGoalReply(input.id);
     await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
       state: "complete",
       success: true,
       message: "Found later.",
     }));
-    expect(sends).toBe(1);
+    expect(sends).toBe(2);
     expect(polls).toBe(4);
     expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
   });
