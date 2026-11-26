@@ -277,6 +277,9 @@ class ChatStreamService:
         # A paged row is represented to clients by one placeholder part. Its
         # original part indexes cannot be used by row.append events.
         self._row_parts_paged: set[tuple[str, str]] = set()
+        # Large marker contents that were not retained cannot serve the
+        # previous revision after an append; publish a fresh bounded upsert.
+        self._row_content_unretained: set[tuple[str, str]] = set()
         self._tool_output_lock = threading.RLock()
         self._tool_output_cache: OrderedDict[
             tuple[str, str, str], tuple[Any, str, str, str, int]
@@ -860,13 +863,18 @@ class ChatStreamService:
                     elif event_type == "replace":
                         self._clear_tool_output_cache(uid)
                     else:
-                        row = self._rows.get(uid, {}).get(data.get("id"))
+                        row_id = data.get("id")
+                        row = self._rows.get(uid, {}).get(row_id)
                         # While a text row is streaming, its last projected
                         # marker names an immutable snapshot. Keep that exact
                         # revision available while later append events arrive.
                         # The cache is byte bounded and a final upsert clears it.
-                        if not isinstance(row, dict) or row.get("status") != "streaming":
-                            self._invalidate_tool_output_row(uid, data.get("id"))
+                        if (
+                            not isinstance(row, dict)
+                            or row.get("status") != "streaming"
+                            or (uid, row_id) in self._row_content_unretained
+                        ):
+                            self._invalidate_tool_output_row(uid, row_id)
                     return self._record_event_locked(uid, event_type, data)
             return self._record_event_locked(uid, event_type, data)
 
@@ -891,6 +899,7 @@ class ChatStreamService:
                 can_increment_size = isinstance(original_parts, list)
                 row_size = self._row_wire_sizes.get(row_key)
                 row_parts_paged = row_key in self._row_parts_paged
+                row_content_unretained = row_key in self._row_content_unretained
                 if row_size is None:
                     row_size = chat_stream_wire_bytes(row)
                 parts = row.setdefault("parts", [])
@@ -931,7 +940,7 @@ class ChatStreamService:
                     row_size += suffix_json_bytes
                 self._row_wire_sizes[row_key] = row_size
                 oversized_event = chat_stream_wire_bytes(data) > CHAT_STREAM_MAX_ROW_BYTES
-                if row_parts_paged or (
+                if row_parts_paged or row_content_unretained or (
                     row_size > CHAT_STREAM_MAX_ROW_BYTES
                     and (row.get("status") != "streaming" or oversized_event)
                 ):
@@ -4164,6 +4173,58 @@ class ChatStreamService:
             self._row_parts_paged.add(key)
         else:
             self._row_parts_paged.discard(key)
+        if self._projected_content_unretained(uid, row):
+            self._row_content_unretained.add(key)
+        else:
+            self._row_content_unretained.discard(key)
+
+    def _projected_content_unretained(self, uid: str, row: dict[str, Any]) -> bool:
+        row_id = row.get("id")
+        if not isinstance(row_id, str):
+            return False
+        content_keys: list[tuple[str, str, int, str, str]] = []
+        output_keys: list[tuple[str, str, str]] = []
+        parts_marker = row.get("chat_stream_parts_preview")
+        if isinstance(parts_marker, dict):
+            revision = parts_marker.get("output_revision")
+            if isinstance(revision, str):
+                content_keys.append((uid, row_id, -1, "parts", revision))
+        parts = row.get("parts")
+        if isinstance(parts, list):
+            for index, part in enumerate(parts):
+                if not isinstance(part, dict):
+                    continue
+                for name, fallback_field in (
+                    ("chat_stream_content_preview", None),
+                    ("chat_stream_args_preview", "args"),
+                    ("chat_stream_part_preview", "part"),
+                ):
+                    marker = part.get(name)
+                    if not isinstance(marker, dict):
+                        continue
+                    field = marker.get("field", fallback_field)
+                    revision = marker.get("output_revision")
+                    marker_index = marker.get("part_index", index)
+                    if (
+                        isinstance(field, str)
+                        and isinstance(revision, str)
+                        and isinstance(marker_index, int)
+                        and not isinstance(marker_index, bool)
+                    ):
+                        content_keys.append((uid, row_id, marker_index, field, revision))
+                result_marker = part.get("chat_stream_result_preview")
+                result = part.get("result")
+                if not isinstance(result_marker, dict) and isinstance(result, dict):
+                    # Compatibility with the pre-migration projected shape.
+                    result_marker = result if result.get("kind") == "chat-stream-tool-output-preview" else None
+                if isinstance(result_marker, dict):
+                    tool_call_id = result_marker.get("tool_call_id", part.get("tool_call_id"))
+                    if isinstance(tool_call_id, str):
+                        output_keys.append((uid, row_id, tool_call_id))
+        with self._tool_output_lock:
+            return any(key not in self._content_cache for key in content_keys) or any(
+                key not in self._tool_output_cache for key in output_keys
+            )
 
     def _remember_raw_row(
         self,
@@ -4189,6 +4250,9 @@ class ChatStreamService:
         for key in tuple(self._row_parts_paged):
             if key[0] == uid:
                 self._row_parts_paged.discard(key)
+        for key in tuple(self._row_content_unretained):
+            if key[0] == uid:
+                self._row_content_unretained.discard(key)
         projected_by_id = {
             row["id"]: row
             for row in projected_rows or []

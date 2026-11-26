@@ -193,6 +193,45 @@ def bounded_chat_stream_row(
             content,
         )
 
+    def part_preview(part_index: int, part: dict[str, Any]) -> dict[str, Any]:
+        ensure_retrievable_row_id()
+        _content_marker, content = content_preview(part_index, "part", part)
+        return {
+            "kind": "chat-stream-part-preview",
+            "row_id": row_id,
+            "part_index": part_index,
+            "output_bytes": len(content.encode("utf-8", errors="replace")),
+            "output_chars": len(content),
+            "output_type": "json",
+            "output_revision": chat_stream_tool_output_revision(content, "json"),
+            "preview": content[:CHAT_STREAM_CONTENT_PREVIEW_CHARS],
+        }
+
+    permission_identity_fields = {
+        "permission_id",
+        "prompt_id",
+        "request_id",
+        "source",
+        "tool_id",
+        "acp_options",
+    }
+
+    def compact_permission_data(value: Any, *, field: str | None = None) -> Any:
+        if field in permission_identity_fields:
+            return copy.deepcopy(value)
+        if isinstance(value, str):
+            if len(value.encode("utf-8", errors="replace")) <= CHAT_STREAM_PART_INLINE_BYTES:
+                return value
+            return value[:CHAT_STREAM_CONTENT_PREVIEW_CHARS]
+        if isinstance(value, dict):
+            return {
+                key: compact_permission_data(item, field=key)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [compact_permission_data(item) for item in value]
+        return copy.deepcopy(value)
+
     def preview_args(part: dict[str, Any], part_index: int) -> None:
         args = part.get("args")
         marker = part.get("chat_stream_args_preview")
@@ -230,6 +269,13 @@ def bounded_chat_stream_row(
         for part_index, part in enumerate(parts):
             if not isinstance(part, dict):
                 continue
+            if part.get("type") == "prompt":
+                value = part.get("data")
+                compact_data = compact_permission_data(value)
+                if compact_data != value:
+                    part_marker = part_preview(part_index, part)
+                    part["data"] = compact_data
+                    part["chat_stream_part_preview"] = part_marker
             if part.get("type") in {"text", "reasoning"}:
                 value = part.get("text")
                 field = part["type"]
@@ -309,6 +355,8 @@ def bounded_chat_stream_row(
                             part_index, field, value
                         )[0]
                     compact_parts.append(compact)
+                else:
+                    compact_parts.append(copy.deepcopy(part))
             else:
                 compact_parts.append(copy.deepcopy(part))
         copied["parts"] = compact_parts

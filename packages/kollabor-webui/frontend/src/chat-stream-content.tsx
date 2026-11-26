@@ -10,6 +10,8 @@ import {
   isChatStreamPartPreviewMarker,
   isChatStreamPartsPreviewMarker,
   isChatStreamContentPreviewMarker,
+  isChatStreamToolOutputPreviewMarker,
+  CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND,
   type ChatStreamPartPreviewMarker,
   type ChatStreamPartsPreviewMarker,
   type ChatStreamContentPreviewMarker,
@@ -60,16 +62,27 @@ export function messageHasRecoverableChatStreamPreview(
       "text",
     ) ?? chatStreamContentPreviewFromMetadata(value.providerMetadata, "reasoning");
     const argsMarker = chatStreamArgsPreviewFromMetadata(value.providerMetadata);
+    const resultMarker = chatStreamResultPreviewFromMetadata(value.providerMetadata);
+    const promptEnvelope = isRecord(value.data) &&
+      value.data.kind === CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND &&
+      isChatStreamPartPreviewMarker(value.data.marker);
     return Boolean(
       providerMarker ||
       argsMarker ||
+      resultMarker ||
       chatStreamPartPreviewFromMetadata(value.providerMetadata) ||
       isRecoverableMarker(value.chat_stream_content_preview) ||
       isRecoverableMarker(value.chat_stream_part_preview) ||
       isRecoverableMarker(value.chat_stream_args_preview) ||
-      isRecoverableMarker(value.result),
+      isRecoverableMarker(value.chat_stream_result_preview) ||
+      promptEnvelope,
     );
   });
+}
+
+/** Markdown export uses the same completeness boundary as Copy. */
+export function canExportChatStreamMarkdown(custom: unknown, parts: unknown): boolean {
+  return !messageHasRecoverableChatStreamPreview(custom, parts);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -213,6 +226,19 @@ export function chatStreamArgsPreviewFromMetadata(
   return isChatStreamContentPreviewMarker(marker) && marker.field === "args" ? marker : undefined;
 }
 
+/** Read the daemon-owned result preview marker without inspecting result data. */
+export function chatStreamResultPreviewFromMetadata(
+  providerMetadata: unknown,
+) {
+  if (!providerMetadata || typeof providerMetadata !== "object" || Array.isArray(providerMetadata)) {
+    return undefined;
+  }
+  const namespace = (providerMetadata as Record<string, unknown>).kollab;
+  if (!namespace || typeof namespace !== "object" || Array.isArray(namespace)) return undefined;
+  const marker = (namespace as Record<string, unknown>).chat_stream_result_preview;
+  return isChatStreamToolOutputPreviewMarker(marker) ? marker : undefined;
+}
+
 export function chatStreamPartPreviewFromMetadata(providerMetadata: unknown): ChatStreamPartPreviewMarker | undefined {
   if (!providerMetadata || typeof providerMetadata !== "object" || Array.isArray(providerMetadata)) return undefined;
   const namespace = (providerMetadata as Record<string, unknown>).kollab;
@@ -247,7 +273,7 @@ export function ChatStreamContentPreview({
   marker: ChatStreamContentPreviewMarker;
   autoLoad?: boolean;
   loadLabel?: string;
-  children: (content: string) => ReactNode;
+  children: (content: string, loaded: boolean) => ReactNode;
 }) {
   const markerRef = useRef(marker);
   markerRef.current = marker;
@@ -278,7 +304,7 @@ export function ChatStreamContentPreview({
 
   return (
     <div data-slot="chat-stream-content-preview" className="space-y-1">
-      {children(content ?? marker.preview)}
+      {children(content ?? marker.preview, content !== undefined)}
       {!autoLoad && content === undefined && error === null && !loading ? (
         <Button type="button" size="sm" variant="outline" onClick={() => void load()}>
           {loadLabel}

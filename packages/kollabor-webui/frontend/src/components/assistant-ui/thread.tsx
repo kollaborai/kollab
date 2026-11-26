@@ -17,6 +17,7 @@ import {
   chatStreamContentPreviewFromMetadata,
   chatStreamPartPreviewFromMetadata,
   chatStreamPartsPreviewFromCustom,
+  canExportChatStreamMarkdown,
   messageHasRecoverableChatStreamPreview,
 } from "@/chat-stream-content";
 import { ChatStreamPartPreview, ChatStreamPartsPreview } from "@/chat-stream-parts";
@@ -1546,7 +1547,7 @@ const AssistantMessage: FC = () => {
 };
 
 const AssistantActionBar: FC = () => {
-  const canCopy = useAuiState((s) => !messageHasRecoverableChatStreamPreview(
+  const canUseCompleteTextActions = useAuiState((s) => canExportChatStreamMarkdown(
     s.message.metadata.custom,
     s.message.parts,
   ));
@@ -1556,7 +1557,7 @@ const AssistantActionBar: FC = () => {
       autohide="not-last"
       className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in col-start-3 row-start-2 -ms-1 flex gap-1 duration-200"
     >
-      {canCopy ? (
+      {canUseCompleteTextActions ? (
         <ActionBarPrimitive.Copy asChild>
           <TooltipIconButton tooltip="Copy">
             <AuiIf condition={(s) => s.message.isCopied}>
@@ -1584,12 +1585,14 @@ const AssistantActionBar: FC = () => {
           sideOffset={6}
           className="aui-action-bar-more-content bg-popover/95 text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-xl border p-1.5 shadow-lg backdrop-blur-sm"
         >
-          <ActionBarPrimitive.ExportMarkdown asChild>
-            <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
-              <DownloadIcon className="size-4" />
-              Export as Markdown
-            </ActionBarMorePrimitive.Item>
-          </ActionBarPrimitive.ExportMarkdown>
+          {canUseCompleteTextActions ? (
+            <ActionBarPrimitive.ExportMarkdown asChild>
+              <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
+                <DownloadIcon className="size-4" />
+                Export as Markdown
+              </ActionBarMorePrimitive.Item>
+            </ActionBarPrimitive.ExportMarkdown>
+          ) : null}
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
     </ActionBarPrimitive.Root>

@@ -9,7 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useAuthenticatedImage } from "@/components/media/media-view";
 import { ToolFallbackResult } from "@/components/assistant-ui/tool-fallback";
-import { PermissionPromptData } from "@/components/PermissionTool";
+import { RecoveredPermissionPrompt } from "@/components/PermissionTool";
 import {
   ChatStreamContentPreview,
   chatStreamContentIdentity,
@@ -17,6 +17,7 @@ import {
 } from "./chat-stream-content";
 import {
   isChatStreamContentPreviewMarker,
+  isChatStreamToolOutputPreviewMarker,
   isChatStreamPartPreviewMarker,
   isChatStreamPartsPreviewMarker,
   type ChatPart,
@@ -25,7 +26,11 @@ import {
 } from "./chat-stream";
 
 const chatStreamPartsApi = new EngineApi();
-const RecoveredPermissionPrompt = PermissionPromptData as FC<{ id?: string; data: unknown }>;
+const RecoveredPermissionPromptPart = RecoveredPermissionPrompt as FC<{
+  id: string;
+  data: unknown;
+  serializedPart: string;
+}>;
 
 export function chatStreamPartsIdentity(marker: ChatStreamPartsPreviewMarker): string {
   return [marker.session_id, marker.row_id, marker.output_revision].join("\u0000");
@@ -64,7 +69,6 @@ function validPartIdentity(
   const partPreview = part.chat_stream_part_preview;
   if (partPreview !== undefined && partPreview !== null) {
     if (
-      part.type !== "text" ||
       !isChatStreamPartPreviewMarker(partPreview) ||
       partPreview.session_id !== marker.session_id ||
       partPreview.row_id !== marker.row_id ||
@@ -91,13 +95,11 @@ function validPartIdentity(
       argsPreview.part_index !== expectedIndex
     ) return false;
   }
-  if (
-    part.type === "tool-call" &&
-    isRecord(part.result) &&
-    part.result.kind === "chat-stream-tool-output-preview"
-  ) {
-    const result = part.result;
+  if (part.chat_stream_result_preview !== undefined && part.chat_stream_result_preview !== null) {
+    const result = part.chat_stream_result_preview;
     if (
+      part.type !== "tool-call" ||
+      !isChatStreamToolOutputPreviewMarker(result) ||
       result.session_id !== marker.session_id ||
       result.row_id !== marker.row_id ||
       result.tool_call_id !== part.tool_call_id ||
@@ -147,15 +149,31 @@ function partJson(value: unknown): string {
   }
 }
 
-function RecoveredImage({ url }: { url: string }) {
-  const protectedPath = url.startsWith("/") ? url : null;
+function recoveredImagePath(url: string, sessionId?: string): string | null {
+  if (url.startsWith("/")) return url;
+  if (!sessionId || !url.startsWith("kollab-queue-image:")) return null;
+  try {
+    const parsed = new URL(url);
+    const conversationUid = parsed.searchParams.get("conversation_uid");
+    const requestId = parsed.searchParams.get("request_id");
+    const ref = parsed.searchParams.get("ref");
+    if (!conversationUid || !requestId || !ref) return null;
+    return `/sessions/${encodeURIComponent(sessionId)}/web-message-queue/items/${encodeURIComponent(requestId)}/attachments/${encodeURIComponent(ref)}?conversation_uid=${encodeURIComponent(conversationUid)}`;
+  } catch {
+    return null;
+  }
+}
+
+function RecoveredImage({ url, sessionId }: { url: string; sessionId?: string }) {
+  const isQueueImage = url.startsWith("kollab-queue-image:");
+  const protectedPath = recoveredImagePath(url, sessionId);
   const authenticated = useAuthenticatedImage(protectedPath);
-  const src = protectedPath ? authenticated : url;
+  const src = protectedPath ? authenticated : isQueueImage ? undefined : url;
   return <img src={typeof src === "string" ? src : undefined} alt="Recovered chat image" className="my-1 max-h-80 max-w-full rounded-md object-contain" />;
 }
 
 /** Read-only rendering for an exact structured part recovered from the stream row. */
-export function RecoveredChatPart({ part }: { part: unknown }) {
+export function RecoveredChatPart({ part, sessionId }: { part: unknown; sessionId?: string }) {
   if (!isRecord(part)) return <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{partJson(part)}</pre>;
   const textPreview = part.chat_stream_content_preview;
   if (
@@ -191,7 +209,19 @@ export function RecoveredChatPart({ part }: { part: unknown }) {
           {part.result !== undefined ? (
             <div>
               <p className="text-muted-foreground text-xs">Result</p>
-              <ToolFallbackResult result={part.result} isError={part.is_error === true} />
+              <ToolFallbackResult
+                result={part.result}
+                resultPreview={isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview)
+                  ? part.chat_stream_result_preview
+                  : undefined}
+                isError={part.is_error === true}
+              />
+            </div>
+          ) : null}
+          {part.result === undefined && isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview) ? (
+            <div>
+              <p className="text-muted-foreground text-xs">Result</p>
+              <ToolFallbackResult resultPreview={part.chat_stream_result_preview} isError={part.is_error === true} />
             </div>
           ) : null}
         </div>
@@ -206,7 +236,7 @@ export function RecoveredChatPart({ part }: { part: unknown }) {
         : <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{partJson(part)}</pre>;
     case "image":
       return typeof part.url === "string"
-        ? <RecoveredImage url={part.url} />
+        ? <RecoveredImage url={part.url} sessionId={sessionId} />
         : <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{partJson(part)}</pre>;
     case "hub-note":
       return (
@@ -220,13 +250,9 @@ export function RecoveredChatPart({ part }: { part: unknown }) {
       );
     case "prompt":
       return (
-        <div className="space-y-2">
-          <RecoveredPermissionPrompt id={typeof part.prompt_id === "string" ? part.prompt_id : undefined} data={part.data} />
-          <details>
-            <summary className="cursor-pointer text-xs">Prompt data</summary>
-            <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{partJson(part)}</pre>
-          </details>
-        </div>
+        typeof part.prompt_id === "string"
+          ? <RecoveredPermissionPromptPart id={part.prompt_id} data={part.data} serializedPart={partJson(part)} />
+          : <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{partJson(part)}</pre>
       );
     default:
       return <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{partJson(part)}</pre>;
@@ -256,7 +282,7 @@ export function ChatStreamPartPreview({ marker }: { marker: ChatStreamPartPrevie
     >
       {(serialized) => {
         try {
-          return <RecoveredChatPart part={JSON.parse(serialized) as ChatPart} />;
+          return <RecoveredChatPart part={JSON.parse(serialized) as ChatPart} sessionId={marker.session_id} />;
         } catch {
           return <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{serialized}</pre>;
         }
@@ -319,7 +345,7 @@ export function ChatStreamPartsPreview({ marker }: { marker: ChatStreamPartsPrev
         <div key={`${identity}:${index}`} data-chat-recovered-part={index}>
           {isRecord(part) && isChatStreamPartPreviewMarker(part.chat_stream_part_preview)
             ? <ChatStreamPartPreview marker={part.chat_stream_part_preview} />
-            : <RecoveredChatPart part={part} />}
+            : <RecoveredChatPart part={part} sessionId={marker.session_id} />}
         </div>
       ))}
       {loading ? <p role="status">Loading chat parts…</p> : null}

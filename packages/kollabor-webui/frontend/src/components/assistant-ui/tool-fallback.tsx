@@ -34,9 +34,11 @@ import { Button } from "@/components/ui/button";
 import {
   ChatStreamContentPreview,
   chatStreamArgsPreviewFromMetadata,
+  chatStreamResultPreviewFromMetadata,
   chatStreamContentIdentity,
   type ChatStreamContentPreviewMarker,
 } from "@/chat-stream-content";
+import { isChatStreamToolOutputPreviewMarker, type ChatStreamToolOutputPreviewMarker } from "@/chat-stream";
 
 import {
   CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE,
@@ -686,15 +688,33 @@ function ChatStreamToolOutputResult({
 
 function ToolFallbackResult({
   result,
+  resultPreview,
   isError,
   asked,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
   result?: unknown;
+  resultPreview?: ChatStreamToolOutputPreviewMarker;
   isError?: boolean;
   asked?: boolean;
 }) {
+  if (isChatStreamToolOutputPreviewMarker(resultPreview)) {
+    return (
+      <div data-slot="tool-fallback-result" className={cn("aui-tool-fallback-result", className)} {...props}>
+        <ChatStreamToolOutputResult
+          key={resultPreview.output_revision}
+          sessionId={resultPreview.session_id}
+          rowId={resultPreview.row_id}
+          toolCallId={resultPreview.tool_call_id}
+          outputRevision={resultPreview.output_revision}
+          outputChars={resultPreview.output_chars}
+          outputType={resultPreview.output_type}
+          preview={resultPreview.preview}
+        />
+      </div>
+    );
+  }
   if (result === undefined) return null;
 
   const historyOutput = asRecord(result);
@@ -712,38 +732,6 @@ function ToolFallbackResult({
         />
       </div>
       );
-  }
-  if (
-    historyOutput?.kind === "chat-stream-tool-output-preview" &&
-    typeof historyOutput.session_id === "string" &&
-    historyOutput.session_id.length > 0 &&
-    typeof historyOutput.row_id === "string" &&
-    historyOutput.row_id.length > 0 &&
-    typeof historyOutput.tool_call_id === "string" &&
-    historyOutput.tool_call_id.length > 0 &&
-    typeof historyOutput.output_revision === "string" &&
-    /^[0-9a-f]{64}$/.test(historyOutput.output_revision) &&
-    Number.isSafeInteger(historyOutput.output_bytes) &&
-    (historyOutput.output_bytes as number) >= 0 &&
-    Number.isSafeInteger(historyOutput.output_chars) &&
-    (historyOutput.output_chars as number) >= 0 &&
-    (historyOutput.output_type === "text" || historyOutput.output_type === "json") &&
-    typeof historyOutput.preview === "string"
-  ) {
-    return (
-      <div data-slot="tool-fallback-result" className={cn("aui-tool-fallback-result", className)} {...props}>
-        <ChatStreamToolOutputResult
-          key={historyOutput.output_revision}
-          sessionId={historyOutput.session_id}
-          rowId={historyOutput.row_id}
-          toolCallId={historyOutput.tool_call_id}
-          outputRevision={historyOutput.output_revision}
-          outputChars={historyOutput.output_chars as number}
-          outputType={historyOutput.output_type}
-          preview={historyOutput.preview}
-        />
-      </div>
-    );
   }
   const card = harnessCard(result);
   // Typed card content can include a diff beside rawOutput. Keep that richer
@@ -1061,6 +1049,7 @@ function ToolFallbackApproval({
 }
 
 const ToolFallbackImpl: ToolCallMessagePartComponent = ({
+  toolCallId,
   toolName,
   args,
   argsText,
@@ -1075,6 +1064,10 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   respondToApproval,
 }) => {
   const argsPreview = chatStreamArgsPreviewFromMetadata(providerMetadata);
+  const candidateResultPreview = chatStreamResultPreviewFromMetadata(providerMetadata);
+  const resultPreview = candidateResultPreview?.tool_call_id === toolCallId
+    ? candidateResultPreview
+    : undefined;
   const card = harnessCard(result);
   const cardTitle =
     typeof card?.title === "string" && card.title.trim() ? card.title.trim() : undefined;
@@ -1180,7 +1173,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
             respondToApproval={respondToApproval}
           />
         )}
-        {(!isCancelled || card) && <ToolFallbackResult result={result} isError={failed} asked={asked} />}
+        {(!isCancelled || card) && <ToolFallbackResult result={result} resultPreview={resultPreview} isError={failed} asked={asked} />}
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );

@@ -1,6 +1,14 @@
 import type { ChatRow } from "../chat-stream.ts";
+import { isChatStreamPartPreviewMarker } from "../chat-stream.ts";
+import { permissionPromptPreviewKey } from "../permission-preview-state.ts";
 
-export type PendingPermission = { toolId: string; requestId?: string; source?: string; parked?: boolean };
+export type PendingPermission = {
+  toolId: string;
+  requestId?: string;
+  source?: string;
+  parked?: boolean;
+  previewKey?: string;
+};
 
 export function permissionOwner(payload: unknown): PendingPermission | null {
   if (!payload || typeof payload !== "object") return null;
@@ -41,7 +49,18 @@ export function pendingPermissions(rows: readonly ChatRow[]): PendingPermission[
       return [];
     }
     const owner = permissionOwner(payload);
-    return owner?.requestId ? [owner] : [];
+    if (!owner?.requestId) return [];
+    if (part.type === "prompt" && isChatStreamPartPreviewMarker(part.chat_stream_part_preview)) {
+      return [{
+        ...owner,
+        previewKey: permissionPromptPreviewKey({
+          sessionId: part.chat_stream_part_preview.session_id,
+          promptId: part.prompt_id,
+          revision: part.chat_stream_part_preview.output_revision,
+        }),
+      }];
+    }
+    return [owner];
   }));
 }
 
@@ -75,7 +94,7 @@ export async function cancelPendingPermission({
 function samePermissionOwner(expected: PendingPermission, candidates: readonly PendingPermission[]): boolean {
   return candidates.some((candidate) => candidate.toolId === expected.toolId &&
     candidate.requestId === expected.requestId && candidate.source === expected.source &&
-    candidate.parked === expected.parked);
+    candidate.parked === expected.parked && candidate.previewKey === expected.previewKey);
 }
 
 export function samePendingPermission(a: readonly PendingPermission[], b: readonly PendingPermission[]): boolean {
