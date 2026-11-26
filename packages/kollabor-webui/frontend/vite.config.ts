@@ -270,6 +270,7 @@ const mainConfig = defineConfig({
       "tests/queue-state.test.ts",
       "tests/voice-mode-toggle.test.tsx",
       "tests/permission-respond.test.ts",
+      "tests/permission-cancellation-provider.test.tsx",
       "tests/thread-queue-controls.test.tsx",
       "tests/history-status.test.ts",
       "tests/thread-activity.test.ts",

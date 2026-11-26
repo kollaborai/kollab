@@ -901,6 +901,23 @@ describe("LiveChatStore", () => {
     await sent;
   });
 
+  it("send keeps image attachments visible on its optimistic row", async () => {
+    const { store, request } = make();
+    const answer = holdRequest(request);
+    const attachment = {
+      name: "photo.png",
+      content_type: "image/png",
+      data_url: "data:image/png;base64,cGhvdG8=",
+    };
+    const sent = store.send({ id: "web-image", text: "", attachments: [attachment] });
+    expect(store.rows[0]?.parts).toEqual([
+      { type: "text", text: "" },
+      { type: "image", url: attachment.data_url },
+    ]);
+    answer(new Response(null, { status: 202 }));
+    await sent;
+  });
+
   it("the stream's row with the pending row's id replaces it in place: one row, no second bubble", async () => {
     const { store, streams } = make();
     const first = await startOpen(store, streams);

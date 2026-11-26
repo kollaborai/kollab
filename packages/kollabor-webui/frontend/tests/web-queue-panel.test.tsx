@@ -72,7 +72,7 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-function mountOnStore(live: LiveStore): HTMLElement {
+function mountOnStore(live: LiveStore, canSendNow = true): HTMLElement {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -80,7 +80,7 @@ function mountOnStore(live: LiveStore): HTMLElement {
   act(() => {
     root.render(
       <ChatStoreProvider store={live}>
-        <QueuePanel />
+        <QueuePanel canSendNow={canSendNow} />
       </ChatStoreProvider>,
     );
   });
@@ -176,6 +176,17 @@ describe("QueuePanel on the chat store", () => {
     expect(store.sendNow).toHaveBeenCalledTimes(1);
     expect(store.sendNow).toHaveBeenCalledWith("web-a");
     expect(store.cancel).not.toHaveBeenCalled();
+  });
+
+  it("hides Send Now for a running harness session", () => {
+    const { live } = fakeChatStore(chatSnapshot(
+      [chatRow("web-a", "Queued text")],
+      { "web-a": queuedInput("web-a") },
+      true,
+    ));
+    const container = mountOnStore(live, false);
+    expect(container.querySelector('[data-slot="web-queue-send-now"]')).toBeNull();
+    expect(container.textContent).toContain("Waiting for this turn to finish.");
   });
 
   it("shows nothing when no input is queued", () => {

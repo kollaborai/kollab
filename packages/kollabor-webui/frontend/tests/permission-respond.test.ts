@@ -65,16 +65,16 @@ describe("respondToPermission", () => {
     expect(posts(sent)[0].body).toEqual({ tool_id: "shell-1", permission_id: "perm-1", decision: "deny", scope: "once" });
   });
 
-  it("returns 'stale' on the status runtime.tsx 1454 treats as stale", async () => {
+  it("answers an unanswered permission prompt regardless of its row status", async () => {
     const { api, sent } = engine([promptArgs]);
     for (const status of ["complete", "running"]) {
       const outcome = await respondToPermission({
         api, sessionId: "s", toolCallId: "call-1", args: promptArgs, answer: { decision: "approve" },
         rows: () => [openRow(status)],
       });
-      expect(outcome).toBe("stale");
+      expect(outcome).toBe("answered");
     }
-    expect(sent).toEqual([]);
+    expect(posts(sent)).toHaveLength(2);
   });
 
   it("returns 'stale' with no POST once the row carries its answer", async () => {
