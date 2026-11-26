@@ -285,6 +285,72 @@ async def test_image_only_batch_retry_returns_the_original_idempotent_receipt():
 
 
 @pytest.mark.asyncio
+async def test_large_image_batch_snapshot_uses_small_resolvable_image_references():
+    server = RpcServer()
+    state = _ChatStreamState("conversation-a")
+    stream = ChatStreamService(state)
+    state._event_bus.register_service("chat_stream", stream)
+    runtime = register_web_message_queue_runtime(server, state)
+    binding = {"expected_conversation_uid": "conversation-a"}
+    image_count = 5
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * (3 * 1024 * 1024)
+    allocated = await _call(
+        server,
+        "state.web_queue.allocate_ids",
+        {
+            **binding,
+            "item_count": 1,
+            "operation_count": 1,
+            "attachment_operation_count": image_count,
+        },
+    )
+    ids = allocated["result"]
+    refs = []
+    for operation_id in ids["attachment_operation_ids"]:
+        staged = await _call(
+            server,
+            "state.web_queue.stage_attachment",
+            {
+                **binding,
+                "operation_id": operation_id,
+                "mime": "image/png",
+                "payload_b64": base64.b64encode(image_bytes).decode("ascii"),
+            },
+        )
+        assert staged["error"] is None
+        refs.append(staged["result"]["ref"])
+    enqueued = await _call(
+        server,
+        "state.web_queue.enqueue_batch",
+        {
+            **binding,
+            "operation_id": ids["operation_ids"][0],
+            "batch_id": ids["batch_id"],
+            "items": [
+                {
+                    "request_id": ids["request_ids"][0],
+                    "payload_b64": base64.b64encode(
+                        json.dumps({"text": "inspect these"}, separators=(",", ":")).encode()
+                    ).decode("ascii"),
+                    "attachment_refs": refs,
+                }
+            ],
+        },
+    )
+
+    assert enqueued["error"] is None
+    snapshot = stream._snapshot("conversation-a")
+    serialized = json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
+    row = next(row for row in snapshot["rows"] if row["id"] == ids["request_ids"][0])
+    image_parts = [part for part in row["parts"] if part["type"] == "image"]
+
+    assert len(image_parts) == image_count
+    assert len(serialized) < 16 * 1024 * 1024
+    assert all(not part["url"].startswith("data:") for part in image_parts)
+    assert await runtime.close() is True
+
+
+@pytest.mark.asyncio
 async def test_runtime_registers_trusted_send_now_dispatch_for_a_busy_batch():
     server = RpcServer()
     state = _DispatchState("conversation-a")
