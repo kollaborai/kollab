@@ -6,12 +6,17 @@ import {
   ToolFallbackRoot,
   fetchHistoryOutput,
 } from "./tool-fallback";
+import * as toolFallback from "./tool-fallback";
 
-const mocks = vi.hoisted(() => ({ getHistoryOutput: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  getHistoryOutput: vi.fn(),
+  getChatStreamToolOutput: vi.fn(),
+}));
 
 vi.mock("@/api", () => ({
   EngineApi: class {
     getHistoryOutput = mocks.getHistoryOutput;
+    getChatStreamToolOutput = mocks.getChatStreamToolOutput;
   },
 }));
 
@@ -24,6 +29,31 @@ function previewResult(sessionId: string, preview: string) {
     reference: "opaque-output-ref",
     preview,
   };
+}
+
+function chatStreamPreviewResult(sessionId: string, preview: string) {
+  return {
+    kind: "chat-stream-tool-output-preview",
+    session_id: sessionId,
+    row_id: "row-1",
+    tool_call_id: "tool-call-1",
+    output_bytes: 40_000,
+    output_chars: 40_000,
+    output_type: "text",
+    preview,
+  };
+}
+
+function fetchChatStreamToolOutput() {
+  return (toolFallback as unknown as {
+    fetchChatStreamToolOutput?: (
+      sessionId: string,
+      rowId: string,
+      toolCallId: string,
+      outputChars: number,
+      outputType: "text" | "json",
+    ) => Promise<string>;
+  }).fetchChatStreamToolOutput;
 }
 
 /** The card the thread renders for a paged tool output: closed, it mounts nothing. */
@@ -137,5 +167,75 @@ describe("history output cache", () => {
     expect(mocks.getHistoryOutput).toHaveBeenCalledTimes(21);
     await fetchHistoryOutput("session-bound", "ref-0");
     expect(mocks.getHistoryOutput).toHaveBeenCalledTimes(22);
+  });
+});
+
+describe("expanding a chat stream tool output preview", () => {
+  beforeEach(() => {
+    mocks.getChatStreamToolOutput.mockReset();
+  });
+
+  it("renders the preview without exposing the marker as generic tool output", () => {
+    const markup = cardMarkup(true, chatStreamPreviewResult("stream-session", "first lines of output"));
+
+    expect(markup).toContain("Output preview:");
+    expect(markup).toContain("first lines of output");
+    expect(markup).not.toContain("chat-stream-tool-output-preview");
+    expect(markup).not.toContain("tool_call_id");
+    expect(mocks.getChatStreamToolOutput).not.toHaveBeenCalled();
+  });
+
+  it("loads every bounded chunk in order and renders the complete output", async () => {
+    const fetchOutput = fetchChatStreamToolOutput();
+    expect(fetchOutput).toBeTypeOf("function");
+    if (!fetchOutput) return;
+
+    mocks.getChatStreamToolOutput
+      .mockResolvedValueOnce({
+        row_id: "row-1", tool_call_id: "tool-call-1", offset: 0,
+        next_offset: 5, total_chars: 8, output_type: "text", content: "first", done: false,
+      })
+      .mockResolvedValueOnce({
+        row_id: "row-1", tool_call_id: "tool-call-1", offset: 5,
+        next_offset: 8, total_chars: 8, output_type: "text", content: "end", done: true,
+      });
+
+    await expect(fetchOutput("stream-session", "row-1", "tool-call-1", 8, "text"))
+      .resolves.toBe("firstend");
+    expect(mocks.getChatStreamToolOutput).toHaveBeenNthCalledWith(
+      1, "stream-session", "row-1", "tool-call-1", { offset: 0, limit: 32768 },
+    );
+    expect(mocks.getChatStreamToolOutput).toHaveBeenNthCalledWith(
+      2, "stream-session", "row-1", "tool-call-1", { offset: 5, limit: 32768 },
+    );
+
+    const markup = cardMarkup(true, chatStreamPreviewResult("stream-session", "first lines of output"));
+    expect(markup).toContain("Output:");
+    expect(markup).toContain("firstend");
+    expect(markup).not.toContain("Output preview:");
+  });
+
+  it("rejects a chunk that belongs to a different row", async () => {
+    const fetchOutput = fetchChatStreamToolOutput();
+    expect(fetchOutput).toBeTypeOf("function");
+    if (!fetchOutput) return;
+    mocks.getChatStreamToolOutput.mockResolvedValueOnce({
+      row_id: "another-row", tool_call_id: "tool-call-1", offset: 0,
+      next_offset: 4, total_chars: 4, output_type: "text", content: "nope", done: true,
+    });
+    await expect(fetchOutput("stream-session", "row-1", "tool-call-1", 4, "text"))
+      .rejects.toThrow();
+  });
+
+  it("rejects a chunk that makes no progress", async () => {
+    const fetchOutput = fetchChatStreamToolOutput();
+    expect(fetchOutput).toBeTypeOf("function");
+    if (!fetchOutput) return;
+    mocks.getChatStreamToolOutput.mockResolvedValueOnce({
+      row_id: "row-1", tool_call_id: "tool-call-1", offset: 0,
+      next_offset: 0, total_chars: 4, output_type: "text", content: "", done: false,
+    });
+    await expect(fetchOutput("stream-session", "row-1", "tool-call-1", 4, "text"))
+      .rejects.toThrow();
   });
 });
