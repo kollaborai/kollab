@@ -195,6 +195,28 @@ describe("composer send, queue, Stop and Send Now on the chat store", () => {
     expect(runtimeSpies.onNew).not.toHaveBeenCalled();
   });
 
+  it("reuses the goal capability for a rejected draft retry and makes a new one after edits", async () => {
+    const { store, live } = fakeStore([], {}, false);
+    store.send
+      .mockRejectedValueOnce(new Error("connection lost"))
+      .mockRejectedValueOnce(Object.assign(new Error("rejected"), { status: 400 }));
+    const container = mount(live, spies());
+
+    await typeText("/goal inspect the build");
+    await click(byLabel(container, "Send message"));
+    await click(byLabel(container, "Send message"));
+
+    const first = store.send.mock.calls[0]?.[0] as { id: string; goal_reply_id: string };
+    const retry = store.send.mock.calls[1]?.[0] as { id: string; goal_reply_id: string };
+    expect(retry).toEqual(first);
+
+    await typeText("/goal inspect the docs");
+    await click(byLabel(container, "Send message"));
+    const edited = store.send.mock.calls[2]?.[0] as { id: string; goal_reply_id: string };
+    expect(edited.id).not.toBe(first.id);
+    expect(edited.goal_reply_id).not.toBe(first.goal_reply_id);
+  });
+
   it("renders the private goal outcome below only its initiating input row", () => {
     const id = "web-goal-result";
     const { live } = fakeStore(
