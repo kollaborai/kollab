@@ -1288,10 +1288,10 @@ describe("LiveChatStore", () => {
     first.emit(streamEvent(2, "replace", { rows: replacementWindow }));
 
     expect(first.signal.aborted).toBe(true);
-    expect(store.rows).toEqual([visibleBeforeCompaction]);
+    expect(store.rows).toEqual(replacementWindow);
     await vi.waitFor(() => expect(streams).toHaveLength(2));
     expect(streams[1].path).toBe("/sessions/s1/stream");
-    expect(store.rows).toEqual([visibleBeforeCompaction]);
+    expect(store.rows).toEqual(replacementWindow);
 
     streams[1].open();
     streams[1].emit(snapshot(3, replacementWindow, { older: "cursor:400" }));
