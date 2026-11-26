@@ -16,6 +16,37 @@ import {
 } from "../scripts/chat-recorder-analysis.mjs";
 
 const ready = [{ t: 0, name: "READY" }];
+const privateGoalReplyId = "recorder-private-goal-capability";
+
+function privateGoalPage(shortGoalId: string, conversationUid: string) {
+  let legacyReceiptRead = false;
+  let replyIdRead = false;
+  return {
+    evaluate: async (_fn: unknown, marker?: unknown) => {
+      // Keep old-flow fixtures useful while the implementation moves to polling.
+      if (typeof marker === "string") {
+        legacyReceiptRead = true;
+        return { goal_id: shortGoalId, conversation_uid: conversationUid };
+      }
+      if (legacyReceiptRead || replyIdRead) return false;
+      replyIdRead = true;
+      return privateGoalReplyId;
+    },
+  };
+}
+
+function privateGoalPoll(shortGoalId: string, objective: () => string) {
+  return async (route: string, init: any) => {
+    expect(route).toMatch(/\/goal-replies\/poll$/);
+    expect(init).toMatchObject({ method: "POST" });
+    expect(JSON.parse(init.body)).toEqual({ goal_reply_id: privateGoalReplyId });
+    return {
+      status: "complete",
+      success: true,
+      message: `goal ${shortGoalId} created — turn 1 scheduled\nobjective: ${objective()}`,
+    };
+  };
+}
 
 function frame(overrides: Record<string, unknown> = {}) {
   return {
@@ -149,13 +180,13 @@ describe("chat recorder analysis", () => {
       },
     });
     let after: any = null;
-    let evaluateCount = 0;
     const command = async (text: string) => {
       after = text === "/goal clear" ? null : makePersisted(text);
     };
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
-      activeRuntime: "native", command, mark: async () => {}, hasMatchingGoalTurn,
-      page: { evaluate: async () => ++evaluateCount === 1 ? { goal_id: "goal-ful", conversation_uid: "conv-full" } : false },
+      activeRuntime: "native", command, mark: async () => {}, hasMatchingGoalTurn, session: "test-session",
+      page: privateGoalPage("goal-ful", "conv-full"),
+      apiJson: privateGoalPoll("goal-ful", () => after?.goal?.objective ?? ""),
       readPersistedGoal: async () => after, currentStreamState: async () => stream,
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
@@ -165,15 +196,16 @@ describe("chat recorder analysis", () => {
     });
     await expect(flow()).rejects.toThrow(/goal reload proof inconclusive/i);
     let successAfter: any = null;
-    evaluateCount = 0;
     const successCommand = async (text: string) => {
       successAfter = text === "/goal clear" ? null : makePersisted(text);
     };
     const success = runInNewContext(`({${body}})["goal-reload"]`, {
-      activeRuntime: "native", command: successCommand, mark: async () => {}, hasMatchingGoalTurn,
-      page: { evaluate: async () => ++evaluateCount === 1 ? { goal_id: "goal-ful", conversation_uid: "conv-full" } : false },
+      activeRuntime: "native", command: successCommand, mark: async () => {}, hasMatchingGoalTurn, session: "test-session",
+      page: privateGoalPage("goal-ful", "conv-full"),
+      apiJson: privateGoalPoll("goal-ful", () => successAfter?.goal?.objective ?? ""),
       readPersistedGoal: async () => successAfter,
       currentStreamState: async () => stream,
+      sleep: async () => {},
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
         await check.after(turn, stream, stream);
@@ -200,6 +232,7 @@ describe("chat recorder analysis", () => {
     const commands: string[] = [];
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
       activeRuntime: "native",
+      session: "test-session",
       command: async (text: string) => {
         commands.push(text);
         if (text === "/goal clear") persisted = null;
@@ -243,14 +276,16 @@ describe("chat recorder analysis", () => {
     const foreignGoal = makePersisted("foreign-goal", "another goal", "foreign-attempt", "foreign-turn");
     let persisted: any = null;
     const commands: string[] = [];
+    const marks: string[] = [];
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
       activeRuntime: "native",
+      session: "test-session",
       command: async (text: string) => {
         commands.push(text);
         if (text === "/goal clear") persisted = null;
         else persisted = makePersisted("recorder-goal", text.slice("/goal ".length), "recorder-attempt", "recorder-turn");
       },
-      mark: async () => {},
+      mark: async (name: string) => { marks.push(name); },
       readPersistedGoal: async () => persisted,
       currentStreamState: async () => stream,
       reloadDuringRun: async (_reply: string, check: any) => {
@@ -259,7 +294,8 @@ describe("chat recorder analysis", () => {
         await check.after(turn, stream, stream);
       },
       hasMatchingGoalTurn: () => true,
-      page: { evaluate: async () => ({ goal_id: "recorder", conversation_uid: "conv-owned" }) },
+      page: privateGoalPage("recorder", "conv-owned"),
+      apiJson: privateGoalPoll("recorder", () => persisted?.goal?.objective ?? ""),
       sleep: async () => {},
       U: () => "recorder-objective",
       R: () => "recorder-reply",
@@ -270,6 +306,173 @@ describe("chat recorder analysis", () => {
       commands: [expect.stringMatching(/^\/goal /)],
       persisted: foreignGoal,
       failure: expect.objectContaining({ message: expect.stringMatching(/refus|changed|inconclusive/i) }),
+    });
+  });
+
+  it("clears the same owned goal after its attempt identity changes", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    const turn = { turn_id: "turn-first", state: "running", input_ids: [], origin: { kind: "goal", goal_id: "goal-full", attempt_id: "attempt-first" } };
+    const stream = { conversation_uid: "conv-owned", turns: [turn], inputs: [] };
+    const makePersisted = (attemptId: string, turnId: string, objective: string) => ({
+      conversation_uid: "conv-owned",
+      goal: { goal_id: "goal-full", objective, status: "active", attempt: { attempt_id: attemptId, turn_id: turnId } },
+    });
+    let persisted: any = null;
+    let objective = "";
+    const commands: string[] = [];
+    const marks: string[] = [];
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native", session: "test-session",
+      command: async (text: string) => {
+        commands.push(text);
+        if (text === "/goal clear") persisted = null;
+        else {
+          objective = text.slice("/goal ".length);
+          persisted = makePersisted("attempt-first", "turn-first", objective);
+        }
+      },
+      mark: async (name: string) => { marks.push(name); },
+      page: privateGoalPage("goal-ful", "conv-owned"),
+      apiJson: privateGoalPoll("goal-ful", () => persisted?.goal?.objective ?? ""),
+      readPersistedGoal: async () => persisted,
+      currentStreamState: async () => stream,
+      hasMatchingGoalTurn: () => true,
+      reloadDuringRun: async (_reply: string, check: any) => {
+        await check.before(turn, stream);
+        persisted = makePersisted("attempt-next", "turn-next", objective);
+        await check.after(turn, stream, stream);
+      },
+      sleep: async () => {},
+      U: () => "recorder-objective", R: () => "recorder-reply",
+    });
+
+    await expect(flow()).rejects.toThrow(/proof inconclusive|changed during reload/i);
+    expect(commands).toEqual([expect.stringMatching(/^\/goal /), "/goal clear"]);
+    expect(persisted).toBeNull();
+    expect(JSON.stringify(marks)).not.toContain(objective);
+  });
+
+  it("claims a goal from its private reply when the creation event was missed", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    const goal = { conversation_uid: "conv-owned", goal: { goal_id: "goal-full", status: "active", attempt: { attempt_id: "attempt-one", turn_id: "turn-one" } } };
+    let persisted: any = null;
+    let objective = "";
+    let clock = 0;
+    let polls = 0;
+    let reloads = 0;
+    const commands: string[] = [];
+    const privateMessage = () => `goal goal-ful created — turn 1 scheduled\nobjective: ${objective}`;
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      Date: { now: () => clock },
+      activeRuntime: "native", session: "test-session",
+      command: async (text: string) => {
+        commands.push(text);
+        if (text === "/goal clear") persisted = null;
+        else { objective = text.slice("/goal ".length); persisted = goal; }
+      },
+      mark: async () => {},
+      page: { evaluate: async (_fn: unknown, marker?: unknown) => typeof marker === "string" ? null : privateGoalReplyId },
+      apiJson: async (route: string, init: any) => {
+        polls += 1;
+        expect(route).toBe("/sessions/test-session/goal-replies/poll");
+        expect(JSON.parse(init.body)).toEqual({ goal_reply_id: privateGoalReplyId });
+        return { status: "complete", success: true, message: privateMessage() };
+      },
+      readPersistedGoal: async () => persisted,
+      currentStreamState: async () => ({ conversation_uid: "conv-owned", turns: [], inputs: [] }),
+      reloadDuringRun: async () => { reloads += 1; throw new Error("injected proof failure"); },
+      sleep: async (ms: number) => { clock += ms; },
+      U: () => "recorder-objective", R: () => "recorder-reply",
+    });
+
+    await expect(flow()).rejects.toThrow(/injected proof failure/i);
+    expect({ polls, reloads, commands, persisted }).toEqual({
+      polls: 1, reloads: 1, commands: [expect.stringMatching(/^\/goal /), "/goal clear"], persisted: null,
+    });
+    expect(JSON.stringify(commands)).not.toContain(privateGoalReplyId);
+  });
+
+  it("does not clear or resubmit when a concurrent goal replaces the private receipt target", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    const foreignGoal = { conversation_uid: "conv-other", goal: { goal_id: "foreign-full", status: "active", attempt: { attempt_id: "foreign-attempt", turn_id: "foreign-turn" } } };
+    let objective = "";
+    let clock = 0;
+    let pollCount = 0;
+    let persisted: any = null;
+    const commands: string[] = [];
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      Date: { now: () => clock },
+      activeRuntime: "native", session: "test-session",
+      command: async (text: string) => {
+        commands.push(text);
+        if (text === "/goal clear") persisted = null;
+        else { objective = text.slice("/goal ".length); persisted = foreignGoal; }
+      },
+      mark: async () => {},
+      page: { evaluate: async (_fn: unknown, marker?: unknown) => typeof marker === "string" ? null : privateGoalReplyId },
+      apiJson: async (route: string, init: any) => {
+        pollCount += 1;
+        expect(route).toBe("/sessions/test-session/goal-replies/poll");
+        expect(JSON.parse(init.body)).toEqual({ goal_reply_id: privateGoalReplyId });
+        return { status: "complete", success: true, message: `goal owned-by-run created\nobjective: ${objective}` };
+      },
+      readPersistedGoal: async () => persisted,
+      currentStreamState: async () => ({ conversation_uid: "conv-owned", turns: [], inputs: [] }),
+      sleep: async (ms: number) => { clock += ms; },
+      U: () => "recorder-objective", R: () => "recorder-reply",
+    });
+
+    const failure = await flow().then(() => null, (error: unknown) => error);
+    expect({ pollCount, commands, persisted, failure }).toMatchObject({
+      pollCount: 1,
+      commands: [expect.stringMatching(/^\/goal /)],
+      persisted: foreignGoal,
+      failure: expect.objectContaining({ message: expect.stringMatching(/refus|claim|identity/i) }),
+    });
+  });
+
+  it("does not claim a matching private receipt in a different conversation", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    const foreignGoal = {
+      conversation_uid: "conv-other",
+      goal: { goal_id: "goal-full", objective: "", status: "active", attempt: { attempt_id: "foreign-attempt", turn_id: "foreign-turn" } },
+    };
+    let persisted: any = null;
+    let objective = "";
+    const commands: string[] = [];
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native", session: "test-session",
+      command: async (text: string) => {
+        commands.push(text);
+        if (text === "/goal clear") persisted = null;
+        else {
+          objective = text.slice("/goal ".length);
+          foreignGoal.goal.objective = objective;
+          persisted = foreignGoal;
+        }
+      },
+      mark: async () => {},
+      page: privateGoalPage("goal-ful", "conv-other"),
+      apiJson: privateGoalPoll("goal-ful", () => objective),
+      readPersistedGoal: async () => persisted,
+      currentStreamState: async () => ({ conversation_uid: "conv-owned", turns: [], inputs: [] }),
+      sleep: async () => {},
+      U: () => "recorder-objective", R: () => "recorder-reply",
+    });
+
+    const failure = await flow().then(() => null, (error: unknown) => error);
+    expect({ commands, persisted, failure }).toMatchObject({
+      commands: [expect.stringMatching(/^\/goal /)],
+      persisted: foreignGoal,
+      failure: expect.objectContaining({ message: expect.stringMatching(/conversation|claim|identity/i) }),
     });
   });
 
@@ -298,6 +501,7 @@ describe("chat recorder analysis", () => {
     let cleared = false;
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
       activeRuntime: "native",
+      session: "test-session",
       command: async (text: string) => {
         commands.push(text);
         if (text === "/goal clear") {
@@ -316,7 +520,8 @@ describe("chat recorder analysis", () => {
       hasMatchingGoalTurn: () => false,
       readPersistedGoal: async () => cleared ? null : persisted,
       currentStreamState: async () => stream,
-      page: { evaluate: async () => ({ goal_id: "goal-ful", conversation_uid: "conv-full" }) },
+      page: privateGoalPage("goal-ful", "conv-full"),
+      apiJson: privateGoalPoll("goal-ful", () => persisted?.goal?.objective ?? ""),
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
       },
@@ -343,6 +548,7 @@ describe("chat recorder analysis", () => {
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
       Date: { now: () => clock },
       activeRuntime: "native",
+      session: "test-session",
       command: async (text: string) => {
         commands.push(text);
         if (text !== "/goal clear") {
@@ -359,7 +565,8 @@ describe("chat recorder analysis", () => {
       hasMatchingGoalTurn: () => false,
       readPersistedGoal: async () => persisted,
       currentStreamState: async () => stream,
-      page: { evaluate: async () => ({ goal_id: "goal-ful", conversation_uid: "conv-full" }) },
+      page: privateGoalPage("goal-ful", "conv-full"),
+      apiJson: privateGoalPoll("goal-ful", () => persisted?.goal?.objective ?? ""),
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
       },
@@ -646,9 +853,8 @@ describe("chat recorder analysis", () => {
     const goal = { conversation_uid: "conversation", goal: { goal_id: "g", attempt: { attempt_id: "a", turn_id: "goal-turn" } } };
     const stream = { conversation_uid: "conversation", turns: [turn] };
     let persisted: any = null;
-    let evalCount = 0;
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
-      activeRuntime: "native", command: async (text: string) => {
+      activeRuntime: "native", session: "test-session", command: async (text: string) => {
         if (text === "/goal clear") {
           persisted = null;
         } else if (text.startsWith("/goal ")) {
@@ -658,10 +864,8 @@ describe("chat recorder analysis", () => {
           };
         }
       }, U: () => "u", R: () => "r",
-      page: { evaluate: async (_fn: unknown, marker: string) => {
-        if (marker) return ++evalCount === 1 ? { goal_id: "g", conversation_uid: "conversation" } : false;
-        return false;
-      } },
+      page: privateGoalPage("g", "conversation"),
+      apiJson: privateGoalPoll("g", () => persisted?.goal?.objective ?? ""),
       readPersistedGoal: async () => persisted,
       sleep: async () => {},
       currentStreamState: async () => stream,
@@ -942,10 +1146,124 @@ describe("chat recorder analysis", () => {
       status: "active", kind: "created", objective: "[chat-recorder-marker] objective",
     };
     await (await window.fetch("http://localhost/sessions/target/events")).text();
-    expect((window as any).__rec.net.find((entry: any) => entry.ev === "goal.state_changed")).toMatchObject({
+    const goalEvent = (window as any).__rec.net.find((entry: any) => entry.ev === "goal.state_changed");
+    expect(goalEvent).toMatchObject({
       goal_id: "goal-short", goal_conversation_uid: "conversation", goal_status: "active",
-      goal_kind: "created", goal_objective: "[chat-recorder-marker] objective",
+      goal_kind: "created",
     });
+    expect(goalEvent).not.toHaveProperty("goal_objective");
+    const rec = (window as any).__rec;
+    rec.mark("PAGE START GOAL");
+    await (window.fetch as any)("http://localhost/sessions/target/inputs", {
+      method: "POST",
+      body: JSON.stringify({
+        id: "goal-input", text: "/goal private-objective-marker and instructions", goal_reply_id: privateGoalReplyId,
+      }),
+    });
+    expect(rec.goalReplyId).toBe(privateGoalReplyId);
+    expect(JSON.stringify({ net: rec.net, marks: rec.marks })).not.toContain(privateGoalReplyId);
+    expect(JSON.stringify({ net: rec.net, marks: rec.marks })).not.toContain("private-objective-marker");
+  });
+
+  it("captures the private goal capability from the actual message request without recording it", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    const privateReply = "goal goal-short created\nobjective: private-objective-marker";
+    const window = {
+      fetch: async () => new Response(`data: ${JSON.stringify({ type: "token", text: privateReply })}\n\n`),
+    };
+    const install = runInNewContext(`(${body})`, {
+      window, Request, Response, ReadableStream, TextDecoder, URL, performance,
+      location: { href: "http://localhost/" },
+      sessionStorage: { getItem: () => null, removeItem: () => {} },
+      requestAnimationFrame: () => {},
+    });
+    install({ wall0: Date.now(), sessionStreamSuffix: chatRecorderStreamSuffix("target"), user: [], reply: [] });
+    const rec = (window as any).__rec;
+    rec.mark("PAGE START GOAL");
+    const response = await (window.fetch as any)("http://localhost/sessions/target/message", {
+      method: "POST",
+      body: JSON.stringify({
+        request_id: "goal-input", content: [{ type: "text", text: "/goal private-objective-marker" }],
+        goal_reply_id: privateGoalReplyId,
+      }),
+    });
+    await response.text();
+    expect(rec.goalReplyId).toBe(privateGoalReplyId);
+    expect(JSON.stringify({ net: rec.net, marks: rec.marks })).not.toContain(privateGoalReplyId);
+    expect(JSON.stringify({ net: rec.net, marks: rec.marks })).not.toContain("private-objective-marker");
+  });
+
+  it("masks private goal command and reply rows from evidence while retaining tool cards", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    const makeRow = (role: string, text: string, hasToolCard = false) => {
+      const attributes: Record<string, string> = {};
+      const styles: Record<string, string> = {};
+      return {
+        dataset: { role } as Record<string, string>, textContent: text, parentElement: null,
+        style: { setProperty: (name: string, value: string) => { styles[name] = value; } },
+        setAttribute: (name: string, value: string) => { attributes[name] = value; },
+        getAttribute: (name: string) => attributes[name] ?? null,
+        querySelector: () => hasToolCard ? {} : null,
+        __attrs: attributes, __styles: styles,
+      };
+    };
+    const marker = "private-objective-marker";
+    const rows = [
+      makeRow("user", `/goal ${marker} and instructions`),
+      makeRow("assistant", `goal goal-short created — turn 1 scheduled\nobjective: ${marker}`),
+      makeRow("assistant", "terminal tool call: sleep 10", true),
+      makeRow("assistant", "unrelated assistant reply"),
+    ];
+    let nextFrame: Function | null = null;
+    const window = {
+      fetch: async (url: string) => url.endsWith("/history")
+        ? new Response(JSON.stringify({
+          start_index: 0, end_index: 2, total_messages: 2,
+          history: [
+            { role: "user", content: `/goal ${marker} and instructions` },
+            { role: "assistant", content: `goal goal-short created — turn 1 scheduled\nobjective: ${marker}` },
+          ],
+        }))
+        : new Response(""),
+    };
+    const document = {
+      documentElement: {},
+      querySelectorAll: (selector: string) => {
+        if (selector === '[data-role="user"]') return rows.filter((row: any) => row.dataset.role === "user");
+        if (selector === '[data-role="assistant"]') return rows.filter((row: any) => row.dataset.role === "assistant");
+        if (selector === '[data-role="user"], [data-role="assistant"]' || selector === "[data-role]") return rows;
+        return [];
+      },
+      querySelector: () => null,
+    };
+    class FakeMutationObserver { observe() {} }
+    const install = runInNewContext(`(${body})`, {
+      window, document, Request, Response, ReadableStream, TextDecoder, URL, performance,
+      MutationObserver: FakeMutationObserver,
+      getComputedStyle: () => ({ opacity: "1", overflowY: "visible" }),
+      location: { href: "http://localhost/" },
+      sessionStorage: { getItem: () => null, removeItem: () => {} },
+      requestAnimationFrame: (callback: Function) => { nextFrame = callback; },
+    });
+    install({ wall0: Date.now(), sessionStreamSuffix: "/sessions/target/stream", user: [marker], reply: [], });
+    const rec = (window as any).__rec;
+    rec.mark("PAGE START GOAL");
+    nextFrame?.();
+
+    expect(rows.map((row: any) => row.dataset.recorderPrivateGoal ?? null)).toEqual([
+      "command", "reply", null, null,
+    ]);
+    expect(rows.slice(0, 2).map((row: any) => row.__styles.visibility)).toEqual(["hidden", "hidden"]);
+    expect(JSON.stringify({ frames: rec.frames, users: rec.snapshotUserRows() })).not.toContain(marker);
+    expect(JSON.stringify(rec.frames)).toContain("terminal tool call: sleep 10");
+    const historyResponse = await (window.fetch as any)("http://localhost/sessions/target/history");
+    await historyResponse.json();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const historyEntry = rec.net.find((entry: any) => entry.kind === "history" && entry.tail);
+    expect(historyEntry.tail).toEqual(["u:<private goal command>", "a:<private goal reply>"]);
+    expect(JSON.stringify(rec.net)).not.toContain(marker);
   });
 
   it("requires a known approval mode before the prompt flow changes it", () => {
