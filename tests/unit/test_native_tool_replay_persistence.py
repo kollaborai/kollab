@@ -183,6 +183,41 @@ async def test_empty_xml_display_text_survives_jsonl_resume(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tagged_voice_ignore_period_stays_silent_after_jsonl_resume(tmp_path):
+    writer = KollaborConversationLogger(tmp_path)
+    parent = await writer.log_user_message(
+        "spoken request",
+        message_metadata={
+            "source": "voice",
+            "voice": {"event_ids": ["voice-turn"]},
+        },
+    )
+    raw = "<think>considering</think>."
+    parsed = ResponseParser().parse_response(raw)
+    assert parsed["content"] == "."
+
+    assistant_id = await writer.log_assistant_message(
+        parsed["content"],
+        parent_uuid=parent,
+        display_content=parsed["content"],
+        voice_turn_id="voice-turn",
+    )
+    record = next(
+        json.loads(line)
+        for line in writer.session_file.read_text().splitlines()
+        if json.loads(line).get("uuid") == assistant_id
+    )
+    assert record["display_content"] == "."
+    assert record["voice_turn_id"] == "voice-turn"
+
+    _state, _reader, history, result = await resume(tmp_path, writer.session_id)
+    assert history[-1].content == "."
+    assert history[-1].metadata["display_content"] == "."
+    assert history[-1].metadata["voice_turn_id"] == "voice-turn"
+    assert [message for message in result["messages"] if message["role"] == "assistant"] == []
+
+
+@pytest.mark.asyncio
 async def test_xml_tool_row_identity_survives_jsonl_resume(tmp_path):
     writer = KollaborConversationLogger(tmp_path)
     saved_base = manager(tmp_path)
