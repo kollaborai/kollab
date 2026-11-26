@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,18 +13,22 @@ import pytest
 from kollabor.llm.agent_hud import AgentHudEntry, merge_agent_hud_with_user_message
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
-from kollabor.state.chat_stream import ChatStreamService
+from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
 from kollabor_agent.queue_processor import QueueProcessor, TaggedInput, batch_request_ids
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_ai.message_content import combine_message_contents
 from kollabor_events.chat_stream import sequence_problems
 from kollabor_events.data_models import ConversationMessage
+from kollabor_rpc import RpcRequest, RpcServer
 from kollabor_tui.display_tap import DisplayTap, publish_semantic
 from kollabor_tui.turn_context import current_turn
 
 
 class _QueueRuntime:
+    def __init__(self):
+        self.calls = []
+
     async def input_scope(self, conversation_uid):
         return ("scope", conversation_uid, "principal")
 
@@ -34,6 +39,14 @@ class _QueueRuntime:
             "state": "queued",
             "attachment_refs": [f"ref-{i}" for i, _ in enumerate(params["attachments"])],
         }
+
+    async def cancel_queued_input(self, params):
+        self.calls.append(("cancel", params))
+        return {"found": False, "cancelled": False}
+
+    async def send_now(self, params):
+        self.calls.append(("send-now", params))
+        return {"found": False}
 
 
 class _Bus:
@@ -136,6 +149,73 @@ def _plugin_queue_processor(state: _State, logger, *, max_queue_size: int):
     processor._native_stream_messages = {}
     processor._persisted_native_stream_ids = set()
     return processor
+
+
+def _prepare_triggered_plugin_stream(state: _State, tmp_path, *, max_queue_size: int):
+    conversation_dir = tmp_path / "conversations"
+    logger = KollaborConversationLogger(conversation_dir)
+    manager = ConversationManager(_manager_config(conversation_dir), logger)
+    manager.conversation_metadata["conversation_uid"] = "conversation-a"
+    coordinator = state._llm_service
+    coordinator.conversation_manager = manager
+    coordinator.conversation_logger = logger
+    coordinator._acp_owns_chat = lambda: False
+    coordinator._profile_selects_acp = lambda: (False, None)
+    coordinator._active_acp = lambda: None
+    coordinator._add_conversation_message = coordinator.add
+    coordinator.current_parent_uuid = None
+    coordinator.is_processing = False
+    coordinator.session_stats = {"messages": 0}
+    coordinator.api_service = SimpleNamespace(model="test-model")
+    coordinator.create_background_task = lambda *_args, **_kwargs: None
+    coordinator.message_display_service = SimpleNamespace(
+        show_loading=lambda *_args: None,
+        hide_loading=lambda: None,
+        message_coordinator=SimpleNamespace(display_message_sequence=lambda *_args: None),
+    )
+    processor = _plugin_queue_processor(state, logger, max_queue_size=max_queue_size)
+    coordinator._queue_processor = processor
+    coordinator._enqueue_with_overflow_strategy = processor.enqueue
+    state._event_bus.services["llm_service"] = coordinator
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    rpc = RpcServer()
+    register_chat_stream_handlers(rpc, stream)
+    return logger, coordinator, processor, stream, rpc
+
+
+async def _rpc_call(server: RpcServer, method: str, params: dict):
+    response = await server.handle_request(
+        RpcRequest(
+            request_id=f"{method}-{uuid.uuid4().hex}",
+            method=method,
+            params=params,
+        )
+    )
+    assert response.error is None
+    return response.result
+
+
+async def _add_triggered_plugin_input(coordinator, text: str) -> str:
+    result = await MessageHandler(coordinator).handle_add_message(
+        {
+            "messages": [{"role": "user", "content": text}],
+            "options": {
+                "show_loading": False,
+                "display_messages": True,
+                "trigger_llm": True,
+            },
+        },
+        None,
+    )
+    assert result["success"] is True
+    queue_items = [
+        item
+        for item in coordinator._queue_processor.processing_queue._queue
+        if isinstance(item, TaggedInput)
+    ]
+    queue_item = queue_items[-1]
+    return queue_item.request_ids[0]
 
 
 def _events(stream: ChatStreamService, initial: dict):
@@ -540,6 +620,67 @@ async def test_plugin_multipart_input_identity_and_text_survive_snapshot_reload(
             "outcome": "completed",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_plugin_cancel_rpc_controls_exact_native_tagged_input(tmp_path):
+    state = _State()
+    logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=2
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "cancel plugin input")
+
+    result = await _rpc_call(
+        rpc, "state.chat_stream.cancel_queued_input", {"id": input_id}
+    )
+
+    assert result == {"found": True, "cancelled": True}
+    assert processor.processing_queue.empty()
+    assert state._event_bus.services["web_message_queue_runtime"].calls == []
+    user_record = next(
+        json.loads(line)
+        for line in logger.session_file.read_text().splitlines()
+        if json.loads(line).get("type") == "user"
+    )
+    assert user_record["message"]["metadata"]["chat_stream_outcome"] == "cancelled"
+    snapshot = await _rpc_call(rpc, "state.chat_stream.subscribe", {})
+    input_state = next(
+        event["data"]
+        for event in snapshot["events"]
+        if event["type"] == "snapshot"
+    )
+    assert input_state["inputs"] == [
+        {
+            "id": input_id,
+            "state": "ended",
+            "turn_id": None,
+            "outcome": "cancelled",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plugin_send_now_rpc_prioritizes_exact_native_tagged_input(tmp_path):
+    state = _State()
+    _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    scheduled = []
+    coordinator.create_background_task = lambda _task, *, name=None: scheduled.append(name)
+    first_id = await _add_triggered_plugin_input(coordinator, "older plugin input")
+    selected_id = await _add_triggered_plugin_input(coordinator, "send this plugin input now")
+
+    result = await _rpc_call(
+        rpc, "state.chat_stream.send_now", {"id": selected_id}
+    )
+
+    assert result == {"found": True, "accepted": True, "state": "queued"}
+    assert [item.request_ids[0] for item in processor.processing_queue._queue] == [
+        selected_id,
+        first_id,
+    ]
+    assert scheduled == ["force_send_plugin_input"]
+    assert state._event_bus.services["web_message_queue_runtime"].calls == []
 
 
 @pytest.mark.asyncio
