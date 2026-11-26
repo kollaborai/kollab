@@ -971,6 +971,23 @@ class ChatStreamService:
                     },
                 )
             return
+        # Plugin ADD_MESSAGE events can carry an explicit authored string
+        # from the producer. This is separate from `text`, which may be a
+        # model payload containing HUD context or image placeholders.
+        display_text = event.get("display_text")
+        if isinstance(display_text, str) and display_text.strip():
+            self._on_user_message_input(
+                uid,
+                {
+                    **event,
+                    "request_id": "",
+                    "request_ids": [],
+                    "operator_inputs": [],
+                    "text": display_text,
+                    "_authored_text": True,
+                },
+            )
+            return
         # Without a request ID or authenticated operator text, this event's
         # text is only the model payload. It may contain HUD context or image
         # placeholders and is not safe to project as authored input.

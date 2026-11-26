@@ -35,6 +35,22 @@ logger = logging.getLogger(__name__)
 ACP_SUBMIT_REASON = "acp_requires_submit_human_input"
 
 
+def _plugin_display_text(content: Any) -> str:
+    """Extract authored plugin text without rendering image placeholders."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        part["text"]
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and isinstance(part.get("text"), str)
+        and part["text"]
+    )
+
+
 class MessageHandler:
     """Handles incoming events and messages for the LLM service.
 
@@ -652,8 +668,21 @@ class MessageHandler:
                 if add_to_history:
                     from kollabor_events.data_models import ConversationMessage
 
+                    message_metadata = {}
+                    display_text = _plugin_display_text(content)
+                    if role == "user" and display_messages and display_text.strip():
+                        # This is the plugin's authored, displayable string,
+                        # captured before any model-only context is merged.
+                        # For structured content only text parts are copied,
+                        # so content_to_text image placeholders cannot become
+                        # chat input text.
+                        message_metadata["chat_stream_display_text"] = display_text
                     coord._add_conversation_message(
-                        ConversationMessage(role=role, content=content),
+                        ConversationMessage(
+                            role=role,
+                            content=content,
+                            metadata=message_metadata,
+                        ),
                         parent_uuid=parent_uuid,
                     )
 
