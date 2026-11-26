@@ -259,7 +259,8 @@ def test_daemon_preview_markers_are_valid_before_engine_adds_session_identity():
                     "type": "tool-call",
                     "tool_call_id": "call-1",
                     "tool_name": "shell",
-                    "args": _content_preview(field="args"),
+                    "args": {},
+                    "chat_stream_args_preview": _content_preview(field="args"),
                 }
             ],
         },
@@ -312,7 +313,7 @@ def test_contract_rejects_invalid_content_preview_metadata(marker):
     assert event_problems(_event("row.upsert", row))
 
 
-def test_contract_checks_content_preview_field_and_type_on_tool_args():
+def test_contract_checks_content_preview_field_and_type_on_tool_args_marker():
     for marker in (
         _content_preview(field="text"),
         _content_preview(field="args", output_type="text"),
@@ -324,11 +325,31 @@ def test_contract_checks_content_preview_field_and_type_on_tool_args():
                     "type": "tool-call",
                     "tool_call_id": "call-1",
                     "tool_name": "shell",
-                    "args": marker,
+                    "args": {},
+                    "chat_stream_args_preview": marker,
                 }
             ],
         }
         assert event_problems(_event("row.upsert", row))
+
+
+def test_contract_treats_preview_like_tool_args_as_ordinary_data():
+    row = {
+        **ROW,
+        "parts": [
+            {
+                "type": "tool-call",
+                "tool_call_id": "call-1",
+                "tool_name": "shell",
+                "args": {
+                    "kind": "chat-stream-content-preview",
+                    "field": "args",
+                },
+            }
+        ],
+    }
+
+    assert event_problems(_event("row.upsert", row)) == []
 
 
 @pytest.mark.parametrize(
