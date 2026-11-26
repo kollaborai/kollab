@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 from kollabor_ai.message_content import (
     MessageContent,
@@ -26,6 +26,82 @@ class AgentHudEntry:
     section: str
     label: str
     content: str
+    message_id: str | None = None
+    hub_note: dict[str, Any] | None = None
+    hub_admission: str | None = None
+
+
+def build_hub_note(message: Any, *, observed: bool) -> dict[str, Any]:
+    """Build the stream part from structured HubMessage fields, never its text."""
+    metadata = getattr(message, "metadata", None)
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    sender = getattr(message, "from_identity", "") or getattr(message, "from_agent", "")
+    recipient = str(getattr(message, "to", "") or "")
+    scope = getattr(message, "scope", "")
+    if scope == "broadcast" or recipient.lower() in {
+        "*",
+        "all",
+        "everyone",
+        "team",
+        "project",
+    }:
+        recipient = ""
+
+    note: dict[str, Any] = {
+        "type": "hub-note",
+        "from": str(sender),
+        "to": recipient,
+        "text": str(getattr(message, "content", "") or ""),
+        "observed": bool(observed),
+        "is_direct": scope == "direct",
+    }
+    kind = (
+        metadata.get("kind")
+        or metadata.get("relay_event")
+        or metadata.get("relay_kind")
+        or getattr(message, "type", None)
+    )
+    if isinstance(kind, str) and kind:
+        note["kind"] = kind
+    for field, value in (
+        ("thread_id", getattr(message, "thread_id", None)),
+        ("reply_to", getattr(message, "reply_to", None)),
+    ):
+        if isinstance(value, str) and value:
+            note[field] = value
+
+    presence = metadata.get("presence")
+    if not isinstance(presence, str) or presence not in {"online", "offline"}:
+        presence = {
+            "arrival": "online",
+            "departure": "offline",
+        }.get(metadata.get("lifecycle_event"))
+    if presence in {"online", "offline"}:
+        note["presence"] = presence
+    return note
+
+
+def agent_hud_hub_metadata(entries: Iterable[AgentHudEntry]) -> dict[str, Any]:
+    """Return the structured hub identities carried by prompt-only HUD text."""
+    notes = [
+        {
+            "id": entry.message_id,
+            "part": dict(entry.hub_note),
+            "admission": entry.hub_admission,
+        }
+        for entry in entries
+        if entry.message_id and entry.hub_note is not None
+    ]
+    if not notes:
+        return {}
+    if len(notes) == 1:
+        item = notes[0]
+        return {
+            "hub_message_id": item["id"],
+            "hub_note": item["part"],
+            "hub_admission": item["admission"],
+        }
+    return {"hub_notes": notes}
 
 
 def normalize_hud_label(value: str, fallback: str = "info") -> str:

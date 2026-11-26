@@ -2909,6 +2909,15 @@ class ContextCompactionPlugin(BasePlugin):
             f"{pre_len} -> {post_len} messages"
         )
 
+        get_service = getattr(self.event_bus, "get_service", None)
+        chat_stream = get_service("chat_stream") if callable(get_service) else None
+        replace_transcript = getattr(chat_stream, "replace_transcript", None)
+        if callable(replace_transcript):
+            try:
+                replace_transcript()
+            except Exception:
+                logger.debug("chat stream compaction replacement failed", exc_info=True)
+
         self._display_compaction_event(pre_len, post_len)
 
         # Sync conversation_manager if available

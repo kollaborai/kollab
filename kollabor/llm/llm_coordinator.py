@@ -64,6 +64,7 @@ from kollabor_tui.display_tap import publish_semantic
 from .acp_bridge import ACPError, ACPSteeringUnconfirmed
 from .agent_hud import (
     AgentHudEntry,
+    agent_hud_hub_metadata,
     format_agent_hud,
     merge_agent_hud_with_user_message,
     normalize_hud_label,
@@ -314,6 +315,18 @@ class LLMService:
                 "user_message",
                 role="user",
                 text=content_to_text(content),
+                **(
+                    {"request_id": message.metadata["request_id"]}
+                    if isinstance(message.metadata, dict)
+                    and isinstance(message.metadata.get("request_id"), str)
+                    else {}
+                ),
+                **(
+                    {"turn_id": message.metadata["turn_id"]}
+                    if isinstance(message.metadata, dict)
+                    and isinstance(message.metadata.get("turn_id"), str)
+                    else {}
+                ),
             )
 
         return cast(str, message_uuid)
@@ -706,8 +719,8 @@ class LLMService:
         if not isinstance(queue_handoff, QueueHandoffContext):
             return {"status": "rejected", "reason": "invalid_queue_capability"}
         if queue_handoff.force_send:
-            return await self._submit_forced_queue_handoff(
-                message, queue_handoff, batch_lease
+            return await self.submit_forced_queue_handoff_input(
+                message, queue_handoff, batch_lease=batch_lease
             )
         if batch_lease is not None:
             return {"status": "rejected", "reason": "invalid_queue_batch"}
@@ -726,6 +739,73 @@ class LLMService:
                 queue_handoff=queue_handoff,
                 force_next_turn=queue_handoff.force_send,
             )
+
+    async def submit_forced_queue_handoff_input(
+        self,
+        message: MessageContent,
+        queue_handoff: Any,
+        *,
+        batch_lease: object | None = None,
+    ) -> Dict[str, Any]:
+        """Admit one Send Now item through the shared native/ACP queue gate.
+
+        Batch workers pass their existing lease. A standalone input reserves
+        the same gate as a batch of one, so both paths stop the current owner
+        and place this input ahead of the waiting queue without steering.
+        """
+        from .queue_handoff import QueueHandoffContext
+
+        if (
+            not isinstance(queue_handoff, QueueHandoffContext)
+            or not queue_handoff.force_send
+        ):
+            return {"status": "rejected", "reason": "invalid_queue_capability"}
+        if batch_lease is not None:
+            return await self._submit_forced_queue_handoff(
+                message, queue_handoff, batch_lease
+            )
+
+        lease = await self.begin_queue_handoff_batch(
+            conversation_uid=queue_handoff.conversation_uid,
+            conversation_revision=queue_handoff.conversation_revision,
+            queue_scope_id=queue_handoff.queue_scope_id or "",
+            queue_incarnation=queue_handoff.queue_incarnation or "",
+            batch_id=queue_handoff.batch_id or "",
+            claim_id=queue_handoff.claim_id or "",
+            request_ids=(queue_handoff.request_id,),
+        )
+        if lease is None:
+            return {"status": "rejected", "reason": "force_send_unavailable"}
+
+        uncertain = getattr(lease, "in_doubt", False) is True
+        try:
+            result = await self._submit_forced_queue_handoff(
+                message, queue_handoff, lease
+            )
+        except BaseException:
+            uncertain = uncertain or (
+                queue_handoff.provider_admission_started
+                or queue_handoff.history_row_preexisting
+                or queue_handoff.recording_status == "uncertain"
+            )
+            try:
+                self.finish_queue_handoff_batch(
+                    lease,
+                    accepted_count=getattr(lease, "accepted_count", 0),
+                    uncertain=uncertain,
+                )
+            except Exception:
+                logger.warning("Single-input queue handoff finalization failed")
+            raise
+
+        uncertain = uncertain or queue_handoff.recording_status == "uncertain"
+        if not self.finish_queue_handoff_batch(
+            lease,
+            accepted_count=getattr(lease, "accepted_count", 0),
+            uncertain=uncertain,
+        ):
+            raise RuntimeError("Single-input queue handoff finalization failed")
+        return result
 
     async def begin_queue_handoff_batch(
         self,
@@ -2666,6 +2746,9 @@ class LLMService:
             combined = combine_message_contents(
                 [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
+            # This is the model prompt payload. Admission rows were captured
+            # before this merge, so HUD wrappers stay context and never become
+            # the text part of a user's input row.
             combined = self.merge_pending_agent_hud(combined)
             if voice_inputs:
                 merged_input = QueuedInput(
@@ -2750,17 +2833,20 @@ class LLMService:
         if self._pending_agent_hud and getattr(
             self._queue_processor, "turn_completed", False
         ):
-            hud_content = self.drain_pending_agent_hud()
+            hud_entries = self.pop_pending_agent_hud()
+            hud_content = format_agent_hud(hud_entries)
             if hud_content:
                 from kollabor_events.data_models import ConversationMessage
 
+                hud_metadata = {
+                    "agent_hud": True,
+                    "agent_hud_sources": ["pending"],
+                    **agent_hud_hub_metadata(hud_entries),
+                }
                 hud_message = ConversationMessage(
                     role="user",
                     content=hud_content,
-                    metadata={
-                        "agent_hud": True,
-                        "agent_hud_sources": ["pending"],
-                    },
+                    metadata=hud_metadata,
                 )
                 image_scope = current_goal_image_scope()
                 if (
@@ -2813,8 +2899,12 @@ class LLMService:
         section: str,
         label: str,
         content: str,
+        *,
+        message_id: str | None = None,
+        hub_note: dict[str, Any] | None = None,
+        hub_admission: str | None = None,
     ) -> AgentHudEntry | None:
-        """Queue one changed HUD item for the next model-visible turn."""
+        """Queue model context, retaining structured identity for hub entries."""
         body = (content or "").strip()
         if not body:
             return None
@@ -2824,6 +2914,9 @@ class LLMService:
             section=normalize_hud_label(section, fallback="state"),
             label=normalize_hud_label(label, fallback="info"),
             content=body,
+            message_id=message_id,
+            hub_note=dict(hub_note) if hub_note is not None else None,
+            hub_admission=hub_admission,
         )
         self._pending_agent_hud.append(entry)
         return entry
@@ -2958,6 +3051,9 @@ class LLMService:
         may_answer: bool = False,
         native_only: bool = False,
         request_id: str | None = None,
+        thread_id: str | None = None,
+        hub_message_id: str | None = None,
+        hub_note: dict[str, Any] | None = None,
         operator_source: str | None = None,
         queue_handoff: Any = None,
         queue_handoff_batch: object | None = None,
@@ -2982,6 +3078,9 @@ class LLMService:
                 generation writes files); refused while ACP owns the chat.
             request_id: the client follows this turn by it (#551): its events
                 carry it in ``request_ids``, and the result echoes it.
+            thread_id: hub thread associated with this admission, when present.
+            hub_message_id: stable id of the structured hub message, when present.
+            hub_note: structured hub fields retained for the transcript row.
             operator_source: authenticated source of words spoken/written by the
                 human operator. Untrusted or absent sources are not preserved.
 
@@ -3085,6 +3184,10 @@ class LLMService:
                 acp,
                 {
                     "message": normalized_message,
+                    "request_id": request_id,
+                    "thread_id": thread_id,
+                    "hub_message_id": hub_message_id,
+                    "hub_note": hub_note,
                     "voice": voice,
                     "origin_context": origin_context,
                     "operator_inputs": operator_inputs,
@@ -3172,7 +3275,11 @@ class LLMService:
         history_row_uuid: str | None = None
         try:
             user_uuid = await self.conversation_logger.log_user_message(
-                display_text, parent_uuid=admission_parent_uuid
+                display_text,
+                parent_uuid=admission_parent_uuid,
+                # The saved row names the sender's id, so it pairs with the input
+                # it admits and with the events that answer that input (#1371).
+                message_metadata={"request_id": request_id} if request_id else None,
             )
         except Exception as exc:
             logger.error("User message not written to history: %s", exc)
@@ -3201,6 +3308,7 @@ class LLMService:
                 admission_serial=turn_serial,
                 operator_inputs=operator_inputs,
                 history_row_uuid=history_row_uuid,
+                request_ids=(request_id,) if request_id else (),
             )
             if voice or trusted_origin_context
             else TaggedInput(
@@ -3241,7 +3349,7 @@ class LLMService:
             # Dropped, or swept by a Stop: its stream already ended, so it is not
             # reported as queued (#589).
             return {"status": "rejected", "reason": "input_not_queued"}
-        if request_id and not (voice or trusted_origin_context):
+        if request_id:
             return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
 
@@ -3558,7 +3666,10 @@ class LLMService:
         origin_context: dict[str, Any] | None,
         queue_handoff: Any,
     ) -> Dict[str, Any]:
-        """Stop a native turn to terminal settlement, then admit once at head."""
+        """Force a turn boundary before admitting a trusted Send Now input."""
+        if queue_handoff is not None:
+            return await self.submit_forced_queue_handoff_input(message, queue_handoff)
+
         processor = getattr(self, "_queue_processor", None)
         begin = getattr(processor, "begin_forced_send", None)
         end = getattr(processor, "end_forced_send", None)
@@ -3963,6 +4074,11 @@ class LLMService:
         if queue_handoff is not None and queue_handoff.force_send and queue_handoff_batch is None:
             return {"status": "rejected", "reason": "invalid_queue_batch"}
         origin = dict(data.get("origin_context") or {})
+        if isinstance(data.get("hub_note"), dict):
+            origin["hub_note"] = dict(data["hub_note"])
+            hub_message_id = data.get("hub_message_id") or request_id
+            if isinstance(hub_message_id, str) and hub_message_id:
+                origin["hub_message_id"] = hub_message_id
         origin.setdefault("operator", source != "agent")
         if not self._manual_relay_origin_authorized(origin):
             return {
@@ -4045,6 +4161,8 @@ class LLMService:
             try:
                 steered = await acp.steer(
                     message, origin=origin, thread_id=data.get("thread_id"),
+                    request_id=data.get("request_id") or None,
+                    record_request_id=request_id,
                     **({"images": images} if images else {}),
                 )
             except ACPSteeringUnconfirmed:
@@ -4058,7 +4176,12 @@ class LLMService:
                     return {"status": "rejected", "reason": "This harness can't take images."}
                 raise
             if steered:
-                return {"status": "injected", "request_id": request_id}
+                result = {"status": "injected", "request_id": request_id}
+                if isinstance(steered, dict):
+                    for key in ("joined_request_id", "joined_turn_id"):
+                        if key in steered:
+                            result[key] = steered[key]
+                return result
         # `steer` above can await while a relay is revoked; re-check at the
         # actual queue-admission boundary before sending anything to ACP.
         if not self._manual_relay_origin_authorized(origin):
