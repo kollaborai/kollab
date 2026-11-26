@@ -15,7 +15,7 @@ _AUTH_SCHEME_ASSIGNMENT = re.compile(
     r"(?P<scheme>bearer|basic)\s+[^\s,;]+"
 )
 _SECRET_VALUE = re.compile(
-    r"(?i)\b(?:secret[-_]token[-_][A-Za-z0-9_-]{6,}|sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]*"
+    r"(?i)\b(?:secret[-_]token[-_][A-Za-z0-9_-]{6,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_|github_pat_)[A-Za-z0-9_-]*"
 )
 _URL = re.compile(r"(?:https?|ssh)://[^\s'\"<>]+", re.IGNORECASE)
 _PATH = re.compile(

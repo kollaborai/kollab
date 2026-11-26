@@ -24,7 +24,20 @@ export function splitPluginTags(text: string, names: readonly string[]): TaggedT
   if (!openers.test(text)) {
     return [{ type: "text", text }];
   }
-  const opens = pairTags(text, allowed, maskedRanges(text));
+  const masked = maskedRanges(text);
+  let maskedCursor = 0;
+  let hasUnmaskedOpener = false;
+  for (const range of masked) {
+    if (openers.test(text.slice(maskedCursor, range.start))) {
+      hasUnmaskedOpener = true;
+      break;
+    }
+    maskedCursor = range.end;
+  }
+  if (!hasUnmaskedOpener) hasUnmaskedOpener = openers.test(text.slice(maskedCursor));
+  if (!hasUnmaskedOpener) return [{ type: "text", text }];
+
+  const opens = pairTags(text, allowed, masked);
   const parts: TaggedTextPart[] = [];
   let cursor = 0;
   for (const [index, open] of opens) {

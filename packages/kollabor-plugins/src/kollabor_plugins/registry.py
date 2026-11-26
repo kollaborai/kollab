@@ -795,11 +795,7 @@ def _normalize_declared(value: object) -> str | dict | None:
         if key not in value:
             continue
         normalizer = _bounded_inventory_text if key in {"label", "title"} else _bounded_inventory_identifier
-        if key == "tag" and value[key] == "sk-fetch":
-            # This documented tag is valid, but the secret-prefix filter mistakes it for a key.
-            safe = "sk-fetch"
-        else:
-            safe = normalizer(value[key], 512)
+        safe = normalizer(value[key], 512)
         if not safe or (key not in {"label", "title"} and not _DECLARATION_ID.fullmatch(safe)):
             return None
         result[key] = safe

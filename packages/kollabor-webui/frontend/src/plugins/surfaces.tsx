@@ -262,6 +262,15 @@ export function PluginModalHost() {
 
 export type PluginViewTab = readonly [PluginViewKey, string, ComponentType<{ className?: string }>];
 
+type CachedPluginViewIcon = {
+  record: PluginRecord;
+  viewId: string;
+  icon: unknown;
+  Component: ComponentType<{ className?: string }>;
+};
+
+const pluginViewIconCache = new Map<PluginViewKey, CachedPluginViewIcon>();
+
 function PluginViewIcon({
   record,
   viewId,
@@ -290,17 +299,35 @@ function PluginViewIcon({
 
 /** The plugin tabs for the chat's view list; one that needs a folder hides for a chat with none. */
 export function pluginViews(snapshot: PluginsSnapshot, hasFolder: boolean): PluginViewTab[] {
-  return snapshot.plugins.flatMap((record) =>
-    record.status !== "ready"
-      ? []
-      : record.contributions.views
-          .filter((view) => hasFolder || !view.needs_folder)
-          .map((view) => [
-            pluginViewKey(record.id, view.id),
-            view.label,
-            (props) => <PluginViewIcon record={record} viewId={view.id} icon={view.icon} {...props} />,
-          ] as const),
-  );
+  const liveKeys = new Set<PluginViewKey>();
+  const tabs: PluginViewTab[] = [];
+  for (const record of snapshot.plugins) {
+    if (record.status !== "ready") continue;
+    for (const view of record.contributions.views) {
+      const key = pluginViewKey(record.id, view.id);
+      liveKeys.add(key);
+      let cached = pluginViewIconCache.get(key);
+      if (!cached) {
+        const Component: ComponentType<{ className?: string }> = (props) => {
+          const current = pluginViewIconCache.get(key);
+          return current ? (
+            <PluginViewIcon record={current.record} viewId={current.viewId} icon={current.icon} {...props} />
+          ) : null;
+        };
+        cached = { record, viewId: view.id, icon: view.icon, Component };
+        pluginViewIconCache.set(key, cached);
+      } else {
+        cached.record = record;
+        cached.viewId = view.id;
+        cached.icon = view.icon;
+      }
+      if (hasFolder || !view.needs_folder) tabs.push([key, view.label, cached.Component]);
+    }
+  }
+  for (const key of pluginViewIconCache.keys()) {
+    if (!liveKeys.has(key)) pluginViewIconCache.delete(key);
+  }
+  return tabs;
 }
 
 /** Whether a chat can show this plugin view now; a chat on a removed or unavailable one shows Chat. */

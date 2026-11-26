@@ -17,7 +17,7 @@ const JWT_VALUE = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/i;
 const JWT_VALUES = new RegExp(JWT_VALUE.source, "gi");
 const PRIVATE_KEY_PEM_BLOCK = /-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*?-----END \1-----/i;
 const PRIVATE_KEY_PEM_BLOCKS = new RegExp(PRIVATE_KEY_PEM_BLOCK.source, "gi");
-const SENSITIVE_KEY_NAME = String.raw`(?:api[ _-]?key|(?:oauth[ _-]?)?client[ _-]?(?:key|secret|token)|(?:private|signing|encryption|ssh|secret|access|master)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization|bearer)`;
+const SENSITIVE_KEY_NAME = String.raw`(?:api[ _-]?key|(?:oauth[ _-]?)?client[ _-]?(?:key|secret|token)|(?:private|signing|encryption|ssh|secret|access|master)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|passphrase|passwd|pwd|password|credential|authorization|bearer)`;
 const SENSITIVE_ASSIGNMENT = new RegExp(
   String.raw`((?:^|[^A-Za-z0-9])(?:"${SENSITIVE_KEY_NAME}(?:[_-][A-Za-z0-9]+)*"|${SENSITIVE_KEY_NAME}(?:[_-][A-Za-z0-9]+)*)(?![A-Za-z0-9_])\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)`,
   "gi",
