@@ -143,7 +143,7 @@ def _hub_events(tap):
 
 
 @pytest.mark.asyncio
-async def test_native_turn_start_is_an_input_row_under_the_hub_message_id():
+async def test_native_hub_admission_stays_a_note_until_a_turn_starts():
     tap = DisplayTap()
     llm = _LLM()
     plugin = _plugin(llm=llm, tap=tap)
@@ -160,7 +160,8 @@ async def test_native_turn_start_is_an_input_row_under_the_hub_message_id():
 
     events = _hub_events(tap)
     assert len(events) == 1
-    _assert_valid_stream(events, row_kind="input", message_id=message.id)
+    assert events[0]["hub_admission"] == "note"
+    _assert_valid_stream(events, row_kind="note", message_id=message.id)
 
 
 @pytest.mark.asyncio
@@ -191,8 +192,58 @@ async def test_real_hub_message_projects_one_row_into_chat_stream():
 
     rows = list(stream._rows["conversation-a"].values())
     assert [row["id"] for row in rows] == [message.id]
-    assert rows[0]["kind"] == "input"
+    assert rows[0]["kind"] == "note"
     assert rows[0]["parts"][0]["type"] == "hub-note"
+    assert message.id not in stream._inputs.get("conversation-a", {})
+    persisted_row = llm.conversation_logger.log_system_message.await_args.kwargs[
+        "chat_stream_row"
+    ]
+    assert persisted_row["id"] == message.id
+    assert persisted_row["kind"] == "note"
+    assert persisted_row["parts"] == rows[0]["parts"]
+
+
+@pytest.mark.asyncio
+async def test_buffered_native_wake_has_no_input_lifecycle_before_turn_start():
+    tap = DisplayTap()
+    tap.conversation_source = lambda: "conversation-a"
+    llm = _LLM()
+    plugin = _plugin(llm=llm, tap=tap)
+    plugin._decide_hub_wake = lambda *args, **kwargs: SimpleNamespace(
+        should_trigger=True, mode="buffer", reason="native turn is busy"
+    )
+    plugin._display_tap = tap
+    state = SimpleNamespace(
+        _event_bus=plugin.event_bus,
+        _llm_service=llm,
+        get_conversation_uid=lambda: "conversation-a",
+        chat_stream_snapshot=lambda: {"rows": [], "turns": [], "inputs": []},
+    )
+    stream = ChatStreamService(state)
+    stream.subscribe({"after": None, "conversation_uid": None})
+    message = HubMessage(
+        id="buffered-native-wake",
+        from_agent="peer-id",
+        from_identity="peer",
+        to="koordinator",
+        scope=MessageScope.DIRECT.value,
+        content="Please hold this for the active turn.",
+    )
+
+    await plugin._on_message_received(message)
+
+    events = _hub_events(tap)
+    assert len(events) == 1
+    assert events[0]["hub_admission"] == "note"
+    assert stream._rows["conversation-a"][message.id]["kind"] == "note"
+    assert message.id not in stream._inputs.get("conversation-a", {})
+    assert not any(
+        event.get("type") == "input.state"
+        and event.get("data", {}).get("id") == message.id
+        for event in stream._log("conversation-a").read(
+            after=0, conversation_uid="conversation-a"
+        )
+    )
 
 
 @pytest.mark.asyncio

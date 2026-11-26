@@ -10491,7 +10491,10 @@ class HubPlugin(BasePlugin):
                     "hub_message": True,
                     "hub_message_id": message.id,
                     "hub_note": hub_note,
-                    "hub_admission": "input" if wake_decision.should_trigger else "note",
+                    # The native continuation claims the input only when its
+                    # turn actually starts. Until then this transcript copy
+                    # and the live row remain a note.
+                    "hub_admission": "note",
                     "hub_from": message.from_identity,
                     "hub_to": message.to,
                     "hub_is_intended": is_intended,
@@ -10596,12 +10599,35 @@ class HubPlugin(BasePlugin):
                         and llm_service.conversation_logger
                     ):
                         try:
+                            from kollabor_ai.conversation_logger import utc_stamp
+
+                            chat_stream_row = {
+                                "id": message.id,
+                                "seq": 0,
+                                "kind": "note",
+                                "role": "system",
+                                "turn_id": None,
+                                "status": "done",
+                                "parts": [dict(hub_note)],
+                                "created_at": utc_stamp(),
+                            }
+                            conversation_manager = getattr(
+                                llm_service, "conversation_manager", None
+                            )
+                            record_row = getattr(
+                                conversation_manager,
+                                "record_hub_chat_stream_row",
+                                None,
+                            )
+                            if callable(record_row):
+                                record_row(chat_stream_row)
                             await llm_service.conversation_logger.log_system_message(
                                 hud_content or formatted,
                                 parent_uuid=getattr(
                                     llm_service, "current_parent_uuid", None
                                 ),
                                 subtype="hub_incoming",
+                                chat_stream_row=chat_stream_row,
                             )
                         except Exception as e:
                             logger.debug(f"incoming message injection failed: {e}")
@@ -10627,9 +10653,10 @@ class HubPlugin(BasePlugin):
                         request_id=message.id,
                         input_source="hub",
                         hub_note=hub_note,
-                        hub_admission=(
-                            "input" if should_trigger_llm else "note"
-                        ),
+                        # A requested wake can still be absorbed by an active
+                        # turn or declined before it starts. MessageHandler
+                        # promotes it to an input at the actual turn_start.
+                        hub_admission="note",
                     )
                 # Trigger LLM if this agent is the intended target (or broadcast).
                 # Skip departures to avoid feedback loops.

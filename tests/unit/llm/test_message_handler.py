@@ -424,7 +424,7 @@ class TestMessageHandler(unittest.TestCase):
                 request_id=request_id,
                 input_source="hub",
                 hub_note=note,
-                hub_admission="input",
+                hub_admission="note",
             )
 
         async def complete_turn():
@@ -471,7 +471,15 @@ class TestMessageHandler(unittest.TestCase):
         start = next(event for event in tap._history if event.get("type") == "turn_start")
         self.assertEqual(start["request_ids"], ["wake-a", "wake-b"])
         self.assertTrue(start.get("turn_id"))
+        promoted = [
+            event
+            for event in tap._history
+            if event.get("type") == "hub_message"
+            and event.get("hub_admission") == "input"
+        ]
+        self.assertEqual([event["message_id"] for event in promoted], ["wake-a", "wake-b"])
         for request_id in notes:
+            self.assertEqual(stream._rows["conversation-a"][request_id]["kind"], "input")
             self.assertEqual(stream._inputs["conversation-a"][request_id]["state"], "ended")
 
     def test_hub_wake_absorbed_by_later_turn_downgrades_to_note(self):
@@ -493,8 +501,9 @@ class TestMessageHandler(unittest.TestCase):
             request_id=request_id,
             input_source="hub",
             hub_note=note,
-            hub_admission="input",
+            hub_admission="note",
         )
+        self.assertNotIn(request_id, stream._inputs.get("conversation-a", {}))
         coord.renderer.input_handler.buffer_manager.content = "still typing"
 
         async def run():
@@ -533,8 +542,160 @@ class TestMessageHandler(unittest.TestCase):
         row = stream._rows["conversation-a"][request_id]
         self.assertEqual(row["kind"], "note")
         self.assertEqual(row["parts"], [note])
+        self.assertNotIn(request_id, stream._inputs.get("conversation-a", {}))
+        self.assertFalse(
+            any(
+                event.get("type") == "input.state"
+                and event.get("data", {}).get("id") == request_id
+                for event in stream._log("conversation-a").read(
+                    after=0, conversation_uid="conversation-a"
+                )
+            )
+        )
+
+    def test_hub_continuation_exception_ends_turn_and_input_once_as_failed(self):
+        coord = _make_coordinator()
+        handler = MessageHandler(coordinator=coord)
+        tap, stream = _hub_stream(coord)
+        coord._queue_processor.processing_queue = asyncio.Queue()
+        coord.pop_pending_agent_hud = MagicMock(return_value=[])
+        request_id = "failing-native-wake"
+        note = {
+            "type": "hub-note",
+            "from": "peer",
+            "to": "koordinator",
+            "text": "Run this and report failure.",
+            "observed": False,
+        }
+        publish_semantic(
+            tap,
+            "hub_message",
+            message_id=request_id,
+            request_id=request_id,
+            input_source="hub",
+            hub_note=note,
+            hub_admission="note",
+        )
+        coord._continue_conversation = AsyncMock(side_effect=RuntimeError("provider failed"))
+
+        async def run():
+            await handler.handle_llm_continue(
+                {
+                    "source": "hub:peer",
+                    "request_id": request_id,
+                    "hub_message_id": request_id,
+                    "hub_note": note,
+                    "pending_hub_message_ids": [request_id],
+                },
+                MagicMock(),
+            )
+            hub_factory = coord.create_background_task.call_args.args[0]
+            await hub_factory()
+
+        self.loop.run_until_complete(run())
+
+        starts = [event for event in tap._history if event.get("type") == "turn_start"]
+        self.assertEqual(len(starts), 1)
+        turn_id = starts[0]["turn_id"]
+        terminals = [
+            event
+            for event in tap._history
+            if event.get("type") == "turn_complete" and event.get("turn_id") == turn_id
+        ]
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0].get("stop_reason"), "error")
+        self.assertEqual(terminals[0].get("request_ids"), [request_id])
+        self.assertEqual(stream._turns["conversation-a"][turn_id]["state"], "ended")
         self.assertEqual(stream._inputs["conversation-a"][request_id]["state"], "ended")
-        self.assertEqual(stream._inputs["conversation-a"][request_id]["outcome"], "cancelled")
+        self.assertEqual(stream._inputs["conversation-a"][request_id]["outcome"], "failed")
+
+    def test_hub_abnormal_exits_end_claimed_turn_once(self):
+        scenarios = (
+            ("queue_yield", "interrupted", "cancelled"),
+            ("cancel", "cancelled", "cancelled"),
+            ("continuation_cap", "error", "failed"),
+            ("repeated_tool_error", "error", "failed"),
+        )
+        for scenario, expected_reason, expected_outcome in scenarios:
+            with self.subTest(scenario=scenario):
+                coord = _make_coordinator()
+                handler = MessageHandler(coordinator=coord)
+                tap, stream = _hub_stream(coord)
+                qp = coord._queue_processor
+                qp.processing_queue = asyncio.Queue()
+                coord.pop_pending_agent_hud = MagicMock(return_value=[])
+                request_id = f"abnormal-{scenario}"
+                note = {
+                    "type": "hub-note",
+                    "from": "peer",
+                    "to": "koordinator",
+                    "text": f"Exercise {scenario}.",
+                    "observed": False,
+                }
+                publish_semantic(
+                    tap,
+                    "hub_message",
+                    message_id=request_id,
+                    request_id=request_id,
+                    input_source="hub",
+                    hub_note=note,
+                    hub_admission="note",
+                )
+                calls = {"count": 0}
+
+                async def continue_turn():
+                    calls["count"] += 1
+                    if scenario == "queue_yield":
+                        qp.processing_queue.put_nowait("human input")
+                    elif scenario == "cancel":
+                        qp.cancel_processing = True
+                    elif scenario == "repeated_tool_error":
+                        qp._last_tool_error_sig = "same tool failure"
+
+                if scenario == "repeated_tool_error":
+                    qp._last_tool_error_sig = "same tool failure"
+                coord._continue_conversation = AsyncMock(side_effect=continue_turn)
+
+                async def run():
+                    await handler.handle_llm_continue(
+                        {
+                            "source": "hub:peer",
+                            "request_id": request_id,
+                            "hub_message_id": request_id,
+                            "hub_note": note,
+                            "pending_hub_message_ids": [request_id],
+                        },
+                        MagicMock(),
+                    )
+                    hub_factory = coord.create_background_task.call_args.args[0]
+                    if scenario == "continuation_cap":
+                        with patch(
+                            "kollabor.llm.message_handler.MAX_CONTINUATION_TURNS", 0
+                        ):
+                            await hub_factory()
+                    else:
+                        await hub_factory()
+
+                self.loop.run_until_complete(run())
+
+                starts = [
+                    event for event in tap._history if event.get("type") == "turn_start"
+                ]
+                self.assertEqual(len(starts), 1)
+                turn_id = starts[0]["turn_id"]
+                terminals = [
+                    event
+                    for event in tap._history
+                    if event.get("type") == "turn_complete"
+                    and event.get("turn_id") == turn_id
+                ]
+                self.assertEqual(len(terminals), 1)
+                self.assertEqual(terminals[0].get("stop_reason"), expected_reason)
+                self.assertEqual(
+                    stream._inputs["conversation-a"][request_id]["outcome"],
+                    expected_outcome,
+                )
+                self.assertEqual(calls["count"], 3 if scenario == "repeated_tool_error" else 1)
 
     # ------------------------------------------------------------------ #
     # Regression: background terminal stalls user message delivery         #
