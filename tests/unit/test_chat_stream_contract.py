@@ -522,6 +522,15 @@ def test_input_cannot_change_its_turn_binding_to_end_early():
     assert any("turn" in problem and "t1" in problem for problem in problems), problems
 
 
+def test_input_cannot_rebind_turn_when_its_state_repeats():
+    events = _lifecycle(
+        {"id": "web-a1", "state": "started", "turn_id": "t1"},
+        {"id": "web-a1", "state": "started", "turn_id": "t2"},
+    )
+    problems = sequence_problems(events, complete=False)
+    assert any("changed turn" in problem for problem in problems), problems
+
+
 def test_input_cannot_drop_turn_binding_when_ending():
     events = _lifecycle(
         {"id": "web-a1", "state": "started", "turn_id": "t1"},
