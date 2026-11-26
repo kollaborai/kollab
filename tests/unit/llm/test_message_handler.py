@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
+from kollabor.state.chat_stream import ChatStreamService
+from kollabor_tui.display_tap import DisplayTap, publish_semantic
 
 
 def _make_coordinator(**overrides):
@@ -92,6 +94,31 @@ def _set_acp_state(coord, *, runner=None, selects_acp=False):
     coord.event_bus.get_service = MagicMock(
         side_effect=lambda name: runner if name == "acp_orchestrator" else base_get_service(name)
     )
+
+
+def _hub_stream(coord):
+    tap = DisplayTap()
+    tap.conversation_source = lambda: "conversation-a"
+    startup_ready = asyncio.Event()
+    startup_ready.set()
+
+    def get_service(name):
+        if name == "display_tap":
+            return tap
+        if name in {"acp_orchestrator", "hub_plugin"}:
+            return None
+        return startup_ready
+
+    coord.event_bus.get_service.side_effect = get_service
+    state = SimpleNamespace(
+        _event_bus=coord.event_bus,
+        _llm_service=SimpleNamespace(conversation_history=[]),
+        get_conversation_uid=lambda: "conversation-a",
+        chat_stream_snapshot=lambda: {"rows": [], "turns": [], "inputs": []},
+    )
+    stream = ChatStreamService(state)
+    stream.subscribe({"after": None, "conversation_uid": None})
+    return tap, stream
     coord.profile_manager.get_active_profile = MagicMock(
         return_value=SimpleNamespace(get_provider=lambda: "acp" if selects_acp else "openai")
     )
@@ -372,6 +399,142 @@ class TestMessageHandler(unittest.TestCase):
 
         self.assertEqual(result["status"], "coalesced")
         coord.create_background_task.assert_not_called()
+
+    def test_coalesced_hub_wakes_share_the_retried_turn_lifecycle(self):
+        coord = _make_coordinator(is_processing=True)
+        handler = MessageHandler(coordinator=coord)
+        tap, stream = _hub_stream(coord)
+        coord._queue_processor.processing_queue = asyncio.Queue()
+        coord.pop_pending_agent_hud = MagicMock(return_value=[])
+        notes = {
+            request_id: {
+                "type": "hub-note",
+                "from": "peer",
+                "to": "koordinator",
+                "text": f"message {request_id}",
+                "observed": False,
+            }
+            for request_id in ("wake-a", "wake-b")
+        }
+        for request_id, note in notes.items():
+            publish_semantic(
+                tap,
+                "hub_message",
+                message_id=request_id,
+                request_id=request_id,
+                input_source="hub",
+                hub_note=note,
+                hub_admission="input",
+            )
+
+        async def complete_turn():
+            publish_semantic(coord.event_bus, "response", text="done")
+            publish_semantic(
+                coord.event_bus, "turn_complete", stop_reason="end_turn"
+            )
+            coord._queue_processor.turn_completed = True
+
+        coord._continue_conversation = AsyncMock(side_effect=complete_turn)
+
+        async def run():
+            first = {
+                "source": "hub:peer",
+                "request_id": "wake-a",
+                "hub_message_id": "wake-a",
+                "hub_note": notes["wake-a"],
+                "pending_hub_message_ids": ["wake-a"],
+            }
+            second = {
+                "source": "hub:peer",
+                "request_id": "wake-b",
+                "hub_message_id": "wake-b",
+                "hub_note": notes["wake-b"],
+                "pending_hub_message_ids": ["wake-a", "wake-b"],
+            }
+            self.assertEqual(
+                (await handler.handle_llm_continue(first, MagicMock()))["status"],
+                "queued_for_retry",
+            )
+            retry_factory = coord.create_background_task.call_args.args[0]
+            coord.create_background_task.reset_mock()
+            self.assertEqual(
+                (await handler.handle_llm_continue(second, MagicMock()))["status"],
+                "coalesced",
+            )
+            coord.is_processing = False
+            await retry_factory()
+            hub_factory = coord.create_background_task.call_args.args[0]
+            await hub_factory()
+
+        self.loop.run_until_complete(run())
+
+        start = next(event for event in tap._history if event.get("type") == "turn_start")
+        self.assertEqual(start["request_ids"], ["wake-a", "wake-b"])
+        self.assertTrue(start.get("turn_id"))
+        for request_id in notes:
+            self.assertEqual(stream._inputs["conversation-a"][request_id]["state"], "ended")
+
+    def test_hub_wake_absorbed_by_later_turn_downgrades_to_note(self):
+        coord = _make_coordinator()
+        handler = MessageHandler(coordinator=coord)
+        tap, stream = _hub_stream(coord)
+        request_id = "deferred-wake"
+        note = {
+            "type": "hub-note",
+            "from": "peer",
+            "to": "koordinator",
+            "text": "A deferred wake.",
+            "observed": False,
+        }
+        publish_semantic(
+            tap,
+            "hub_message",
+            message_id=request_id,
+            request_id=request_id,
+            input_source="hub",
+            hub_note=note,
+            hub_admission="input",
+        )
+        coord.renderer.input_handler.buffer_manager.content = "still typing"
+
+        async def run():
+            result = await handler.handle_llm_continue(
+                {
+                    "source": "hub:peer",
+                    "request_id": request_id,
+                    "hub_message_id": request_id,
+                    "hub_note": note,
+                    "pending_hub_message_ids": [request_id],
+                },
+                MagicMock(),
+            )
+            self.assertEqual(result["status"], "queued_for_retry")
+            retry_factory = coord.create_background_task.call_args.args[0]
+
+            async def another_turn_started(_seconds):
+                coord.renderer.input_handler.buffer_manager.content = ""
+                coord.is_processing = True
+                publish_semantic(
+                    tap,
+                    "turn_start",
+                    request_id="human-request",
+                    request_ids=["human-request"],
+                    turn_id="human-turn",
+                    input_source="native",
+                )
+
+            with patch(
+                "kollabor.llm.message_handler.asyncio.sleep", another_turn_started
+            ):
+                await retry_factory()
+
+        self.loop.run_until_complete(run())
+
+        row = stream._rows["conversation-a"][request_id]
+        self.assertEqual(row["kind"], "note")
+        self.assertEqual(row["parts"], [note])
+        self.assertEqual(stream._inputs["conversation-a"][request_id]["state"], "ended")
+        self.assertEqual(stream._inputs["conversation-a"][request_id]["outcome"], "cancelled")
 
     # ------------------------------------------------------------------ #
     # Regression: background terminal stalls user message delivery         #
