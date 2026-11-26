@@ -162,6 +162,35 @@ def _part_preview_problems(marker: Any, where: str, *, row_id: Any) -> list[str]
     )
 
 
+def _tool_output_preview_problems(
+    marker: Any, where: str, *, row_id: Any, tool_call_id: Any
+) -> list[str]:
+    output_type = marker.get("output_type") if isinstance(marker, dict) else None
+    output_type_valid = isinstance(output_type, str) and output_type in {
+        "text",
+        "json",
+    }
+    expected_output_type = output_type if output_type_valid else "text"
+    problems = _preview_marker_problems(
+        marker,
+        where,
+        kind="chat-stream-tool-output-preview",
+        row_id=row_id,
+        count_fields=("output_bytes", "output_chars"),
+        output_type=expected_output_type,
+        preview_required=True,
+    )
+    if not output_type_valid:
+        problems.append(f"{where}: preview marker has an invalid output_type")
+    if (
+        not _is_id(tool_call_id)
+        or not isinstance(marker, dict)
+        or marker.get("tool_call_id") != tool_call_id
+    ):
+        problems.append(f"{where}: preview marker tool_call_id does not match its part")
+    return problems
+
+
 def _parts_preview_problems(marker: Any, where: str, *, row_id: Any) -> list[str]:
     return _preview_marker_problems(
         marker,
@@ -228,11 +257,22 @@ def _part_problems(part: Any, where: str, *, row_id: Any) -> list[str]:
             problems += _content_preview_problems(
                 content_preview, where, row_id=row_id, field="reasoning"
             )
+    elif kind == "prompt":
+        if part_preview is not None:
+            problems += _part_preview_problems(part_preview, where, row_id=row_id)
     elif kind == "tool-call":
         args_preview = part.get("chat_stream_args_preview")
         if args_preview is not None:
             problems += _content_preview_problems(
                 args_preview, f"{where} args", row_id=row_id, field="args"
+            )
+        result_preview = part.get("chat_stream_result_preview")
+        if result_preview is not None:
+            problems += _tool_output_preview_problems(
+                result_preview,
+                f"{where} result",
+                row_id=row_id,
+                tool_call_id=part.get("tool_call_id"),
             )
     return problems
 

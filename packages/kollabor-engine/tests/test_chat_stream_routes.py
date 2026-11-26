@@ -1482,6 +1482,11 @@ def test_chat_parts_route_rejects_a_changed_parts_revision(monkeypatch):
 
 def test_snapshot_materializes_tool_output_marker_with_session_id(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
+    user_result = {
+        "kind": "chat-stream-tool-output-preview",
+        "payload": "ordinary result data",
+        "session_id": "user-owned-value",
+    }
     session.rpc.subscribe_results = [
         {
             "events": [
@@ -1503,7 +1508,8 @@ def test_snapshot_materializes_tool_output_marker_with_session_id(monkeypatch):
                                     {
                                         "type": "tool-call",
                                         "tool_call_id": "call-1",
-                                        "result": {
+                                        "result": user_result,
+                                        "chat_stream_result_preview": {
                                             "kind": "chat-stream-tool-output-preview",
                                             "row_id": "row-1",
                                             "tool_call_id": "call-1",
@@ -1532,9 +1538,11 @@ def test_snapshot_materializes_tool_output_marker_with_session_id(monkeypatch):
     data_line = next(
         line[6:] for line in response.text.splitlines() if line.startswith("data: ")
     )
-    marker = json.loads(data_line)["data"]["rows"][0]["parts"][0]["result"]
+    part = json.loads(data_line)["data"]["rows"][0]["parts"][0]
+    marker = part["chat_stream_result_preview"]
 
     assert response.status_code == 200
+    assert part["result"] == user_result
     assert marker["session_id"] == "s1"
 
 
@@ -1591,11 +1599,13 @@ def test_authenticated_tool_preview_retrieval_round_trips_and_rejects_stale_revi
         if line.startswith("data: ")
     )
     event = json.loads(data_line)
-    tool_marker = event["data"]["rows"][0]["parts"][0]["result"]
+    tool_part = event["data"]["rows"][0]["parts"][0]
+    tool_marker = tool_part["chat_stream_result_preview"]
     content_marker = event["data"]["rows"][0]["parts"][1][
         "chat_stream_content_preview"
     ]
     assert event["type"] == "snapshot"
+    assert "result" not in tool_part
     assert tool_marker["kind"] == "chat-stream-tool-output-preview"
     assert tool_marker["session_id"] == "s1"
     assert content_marker["kind"] == "chat-stream-content-preview"

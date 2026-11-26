@@ -141,7 +141,7 @@ def test_individually_oversized_tool_result_has_a_bounded_preview_and_fetchable_
 
     tool_row = next(row for row in event["data"]["rows"] if row["kind"] == "tool")
     tool_part = tool_row["parts"][0]
-    preview = tool_part["result"]
+    preview = tool_part["chat_stream_result_preview"]
     assert preview["kind"] == "chat-stream-tool-output-preview"
     assert preview["row_id"] == tool_row["id"]
     assert preview["tool_call_id"] == tool_part["tool_call_id"]
@@ -191,14 +191,14 @@ def test_individually_oversized_tool_result_has_a_bounded_preview_and_fetchable_
     live_event = stream._log(state.get_conversation_uid())._events[-1]
     assert _wire_bytes({"events": [live_event]}) <= _WIRE_BUDGET
     assert stream._rows[state.get_conversation_uid()]["live-tool-row"]["parts"][0]["result"] == output
-    assert live_event["data"]["parts"][0]["result"]["kind"] == (
+    assert live_event["data"]["parts"][0]["chat_stream_result_preview"]["kind"] == (
         "chat-stream-tool-output-preview"
     )
     live_chunk = stream.get_tool_output(
         {
             "row_id": "live-tool-row",
             "tool_call_id": "live-call",
-            "output_revision": live_event["data"]["parts"][0]["result"]["output_revision"],
+            "output_revision": live_event["data"]["parts"][0]["chat_stream_result_preview"]["output_revision"],
             "offset": 0,
             "limit": 1024,
         }
@@ -211,7 +211,7 @@ def test_individually_oversized_tool_result_has_a_bounded_preview_and_fetchable_
         {
             "row_id": "live-tool-row",
             "tool_call_id": "live-call",
-            "output_revision": live_event["data"]["parts"][0]["result"]["output_revision"],
+            "output_revision": live_event["data"]["parts"][0]["chat_stream_result_preview"]["output_revision"],
             "offset": 0,
             "limit": 1024,
         }

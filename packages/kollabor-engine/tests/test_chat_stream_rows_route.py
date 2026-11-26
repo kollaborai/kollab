@@ -129,14 +129,20 @@ def test_rows_route_materializes_queue_image_refs_for_authenticated_fetch(monkey
     )
 
 
-def test_rows_route_materializes_tool_output_preview_session_identity(monkeypatch):
+def test_rows_route_materializes_tool_output_preview_without_touching_result(monkeypatch):
     row = _row("tool-row-1", 1)
     row.update({"kind": "tool", "role": "assistant"})
+    user_result = {
+        "kind": "chat-stream-tool-output-preview",
+        "payload": "ordinary result data",
+        "session_id": "user-owned-value",
+    }
     row["parts"] = [
         {
             "type": "tool-call",
             "tool_call_id": "call-1",
-            "result": {
+            "result": user_result,
+            "chat_stream_result_preview": {
                 "kind": "chat-stream-tool-output-preview",
                 "row_id": "tool-row-1",
                 "tool_call_id": "call-1",
@@ -156,8 +162,9 @@ def test_rows_route_materializes_tool_output_preview_session_identity(monkeypatc
     response = client.get("/sessions/s1/rows")
 
     assert response.status_code == 200
-    result = response.json()["rows"][0]["parts"][0]["result"]
-    assert result["session_id"] == "s1"
+    part = response.json()["rows"][0]["parts"][0]
+    assert part["result"] == user_result
+    assert part["chat_stream_result_preview"]["session_id"] == "s1"
 
 
 def test_rows_route_materializes_text_and_args_content_preview_session_identity(
