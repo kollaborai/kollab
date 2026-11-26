@@ -2498,51 +2498,79 @@ class ChatStreamService:
 
         uid = self._conversation_uid()
         key = (uid, row_id, tool_call_id)
-        with self._tool_output_lock:
-            cached = self._tool_output_cache.get(key)
-            if cached is not None:
-                self._tool_output_cache.move_to_end(key)
-                _result, content, output_type, current_revision, _size = cached
-            else:
-                candidates = []
+        cached = None
+        result = None
+        result_found = False
+
+        def result_from_row(row: dict[str, Any]) -> tuple[bool, Any]:
+            parts = row.get("parts")
+            if not isinstance(parts, list):
+                return False, None
+            for part in parts:
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "tool-call"
+                    and part.get("tool_call_id") == tool_call_id
+                    and "result" in part
+                ):
+                    return True, part["result"]
+            return False, None
+
+        # Match the writer's log-before-output-cache lock order. A live hit is
+        # read atomically with row updates; transcript reconstruction happens
+        # only after both locks have been released.
+        with self._log(uid)._lock:
+            with self._tool_output_lock:
+                cached = self._tool_output_cache.get(key)
+                if cached is not None:
+                    self._tool_output_cache.move_to_end(key)
+                    _result, content, output_type, current_revision, _size = cached
+            if cached is None:
                 live = self._rows.get(uid, {}).get(row_id)
                 if isinstance(live, dict):
-                    candidates.append(live)
-                candidates.extend(
-                    row
-                    for row in self._transcript_rows(uid)
-                    if isinstance(row, dict) and row.get("id") == row_id
-                )
-                result = None
-                for row in candidates:
-                    parts = row.get("parts")
-                    if not isinstance(parts, list):
-                        continue
-                    for part in parts:
-                        if (
-                            isinstance(part, dict)
-                            and part.get("type") == "tool-call"
-                            and part.get("tool_call_id") == tool_call_id
-                            and "result" in part
-                        ):
-                            result = part["result"]
-                            break
-                    if result is not None:
-                        break
-                if result is None or (
+                    result_found, result = result_from_row(live)
+                if result_found and result is not None and not (
                     isinstance(result, dict)
                     and result.get("kind") == "chat-stream-tool-output-preview"
                 ):
-                    return {"error": "not_found"}
-                try:
-                    content, output_type, current_revision = self._cached_tool_output(
-                        uid, row_id, tool_call_id, result
-                    )
-                except (TypeError, ValueError):
-                    content, output_type = str(result), "text"
-                    current_revision = chat_stream_tool_output_revision(
-                        content, output_type
-                    )
+                    try:
+                        content, output_type, current_revision = self._cached_tool_output(
+                            uid, row_id, tool_call_id, result
+                        )
+                    except (TypeError, ValueError):
+                        content, output_type = str(result), "text"
+                        current_revision = chat_stream_tool_output_revision(
+                            content, output_type
+                        )
+
+        if cached is None and (
+            not result_found
+            or result is None
+            or (
+                isinstance(result, dict)
+                and result.get("kind") == "chat-stream-tool-output-preview"
+            )
+        ):
+            for row in self._transcript_rows(uid):
+                if not isinstance(row, dict) or row.get("id") != row_id:
+                    continue
+                result_found, result = result_from_row(row)
+                if result_found:
+                    break
+            if not result_found or result is None or (
+                isinstance(result, dict)
+                and result.get("kind") == "chat-stream-tool-output-preview"
+            ):
+                return {"error": "not_found"}
+            try:
+                content, output_type, current_revision = self._cached_tool_output(
+                    uid, row_id, tool_call_id, copy.deepcopy(result)
+                )
+            except (TypeError, ValueError):
+                content, output_type = str(result), "text"
+                current_revision = chat_stream_tool_output_revision(
+                    content, output_type
+                )
         if output_revision != current_revision:
             return {"error": "output_changed"}
         total_chars = len(content)
@@ -2603,8 +2631,42 @@ class ChatStreamService:
 
         uid = self._conversation_uid()
         base_key = (uid, row_id, part_index, field)
+
+        def part_value(row: dict[str, Any]) -> tuple[bool, Any]:
+            parts = row.get("parts")
+            if not isinstance(parts, list) or part_index >= len(parts):
+                return False, None
+            part = parts[part_index]
+            if not isinstance(part, dict):
+                return False, None
+            if field == "part":
+                return (
+                    not isinstance(part.get("chat_stream_part_preview"), dict),
+                    part,
+                )
+            expected_type = {
+                "text": "text",
+                "reasoning": "reasoning",
+                "args": "tool-call",
+            }[field]
+            if part.get("type") != expected_type:
+                return False, None
+            key_name = "args" if field == "args" else "text"
+            if key_name not in part:
+                return False, None
+            value = part[key_name]
+            args_preview = part.get("chat_stream_args_preview")
+            found = not (
+                field == "args"
+                and isinstance(args_preview, dict)
+                and args_preview.get("kind") == "chat-stream-content-preview"
+                and args_preview.get("field") == "args"
+            )
+            return found, value
+
         # Match the producer lock order: log lock before cache lock. This makes
         # the revision check and source read atomic with respect to row.append.
+        value_found = False
         with self._log(uid)._lock:
             with self._tool_output_lock:
                 requested_key = (*base_key, output_revision)
@@ -2613,64 +2675,42 @@ class ChatStreamService:
                     self._content_cache.move_to_end(requested_key)
                     _value, content, output_type, current_revision, _size = cached
                 else:
-                    candidates = []
                     live = self._rows.get(uid, {}).get(row_id)
-                    if isinstance(live, dict):
-                        candidates.append(live)
-                    candidates.extend(
-                        row
-                        for row in self._transcript_rows(uid)
-                        if isinstance(row, dict) and row.get("id") == row_id
-                    )
-                    value = None
-                    value_found = False
-                    for row in candidates:
-                        parts = row.get("parts")
-                        if not isinstance(parts, list) or part_index >= len(parts):
-                            continue
-                        part = parts[part_index]
-                        if not isinstance(part, dict):
-                            continue
-                        if field == "part":
-                            value = part
-                            value_found = not (
-                                isinstance(value.get("chat_stream_part_preview"), dict)
-                            )
-                            if value_found:
-                                break
-                            continue
-                        expected_type = {
-                            "text": "text",
-                            "reasoning": "reasoning",
-                            "args": "tool-call",
-                        }[field]
-                        key_name = "args" if field == "args" else "text"
-                        if part.get("type") != expected_type:
-                            continue
-                        if key_name in part:
-                            value = part[key_name]
-                            args_preview = part.get("chat_stream_args_preview")
-                            value_found = not (
-                                field == "args"
-                                and isinstance(args_preview, dict)
-                                and args_preview.get("kind") == "chat-stream-content-preview"
-                                and args_preview.get("field") == "args"
-                            )
-                            if value_found:
-                                break
-                    if not value_found:
-                        return {"error": "not_found"}
-                    try:
-                        content, output_type, current_revision = self._cached_stream_content(
-                            uid, row_id, part_index, field, value
-                        )
-                    except (TypeError, ValueError):
-                        content, output_type = chat_stream_content_text(
-                            str(value), field
-                        )
-                        current_revision = chat_stream_tool_output_revision(
-                            content, output_type
-                        )
+                    if isinstance(live, dict) and live.get("id") == row_id:
+                        value_found, value = part_value(live)
+                        if value_found:
+                            try:
+                                content, output_type, current_revision = self._cached_stream_content(
+                                    uid, row_id, part_index, field, value
+                                )
+                            except (TypeError, ValueError):
+                                content, output_type = chat_stream_content_text(
+                                    str(value), field
+                                )
+                                current_revision = chat_stream_tool_output_revision(
+                                    content, output_type
+                                )
+        if cached is None and not value_found:
+            value_found = False
+            value = None
+            for candidate in self._transcript_rows(uid):
+                if not isinstance(candidate, dict) or candidate.get("id") != row_id:
+                    continue
+                value_found, value = part_value(candidate)
+                if value_found:
+                    value = copy.deepcopy(value)
+                    break
+            if not value_found:
+                return {"error": "not_found"}
+            try:
+                content, output_type, current_revision = self._cached_stream_content(
+                    uid, row_id, part_index, field, value
+                )
+            except (TypeError, ValueError):
+                content, output_type = chat_stream_content_text(str(value), field)
+                current_revision = chat_stream_tool_output_revision(
+                    content, output_type
+                )
         if output_revision != current_revision:
             return {"error": "output_changed"}
         total_chars = len(content)
@@ -2726,25 +2766,39 @@ class ChatStreamService:
         # row.append mutates the live parts list in place, so hold the event log
         # lock while fingerprinting it and copying this page. The copy remains
         # stable if a later append lands while the page is being serialized.
+        source_parts = None
+        page_source_parts = None
+        current_revision = None
         with self._log(uid)._lock:
-            candidates = []
             live = self._rows.get(uid, {}).get(row_id)
             if isinstance(live, dict):
-                candidates.append(live)
-            candidates.extend(
-                row
-                for row in self._transcript_rows(uid)
-                if isinstance(row, dict) and row.get("id") == row_id
-            )
-            source_parts = None
-            for row in candidates:
-                parts = row.get("parts")
-                if isinstance(parts, list):
-                    source_parts = parts
+                candidate_parts = live.get("parts")
+                if isinstance(candidate_parts, list):
+                    source_parts = candidate_parts
+                    _content, _output_type, current_revision = (
+                        self._cached_stream_content(
+                            uid, row_id, -1, "parts", source_parts
+                        )
+                    )
+                    if output_revision != current_revision:
+                        return {"error": "output_changed"}
+                    total_parts = len(source_parts)
+                    if offset > total_parts:
+                        return {"error": "invalid_request"}
+                    page_source_parts = copy.deepcopy(
+                        source_parts[offset : min(total_parts, offset + limit)]
+                    )
+
+        if source_parts is None:
+            for row in self._transcript_rows(uid):
+                if not isinstance(row, dict) or row.get("id") != row_id:
+                    continue
+                candidate_parts = row.get("parts")
+                if isinstance(candidate_parts, list):
+                    source_parts = copy.deepcopy(candidate_parts)
                     break
             if source_parts is None:
                 return {"error": "not_found"}
-
             _content, _output_type, current_revision = self._cached_stream_content(
                 uid, row_id, -1, "parts", source_parts
             )
@@ -3161,6 +3215,12 @@ class ChatStreamService:
             and isinstance(item.get("turn_id"), str)
             and item["turn_id"] not in turn_ids
         )
+        retained_turn_ids = set(turn_ids)
+        turns = {
+            turn_id: turn
+            for turn_id, turn in turns.items()
+            if turn_id in retained_turn_ids
+        }
         for turn_id, current in turns.items():
             current_inputs = current.get("input_ids", [])
             turns[turn_id] = {

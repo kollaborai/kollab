@@ -547,6 +547,7 @@ class ChatStreamRowPager:
             raise ValueError("chat stream row sources must be lists")
 
         all_rows = merge_chat_stream_rows(transcript_rows, snapshot_rows, row_log_rows)
+        boundary_inclusive = False
         if before is None:
             if not snapshot_rows:
                 return {"rows": [], "older": None}
@@ -570,9 +571,13 @@ class ChatStreamRowPager:
                 or len(before) > _MAX_CURSOR_LENGTH
             ):
                 raise InvalidRowCursor("Invalid row cursor.")
-            boundary_id, boundary_seq, cursor_uid, cursor_compaction_seq = (
-                self._decode_cursor(before)
-            )
+            (
+                boundary_id,
+                boundary_seq,
+                cursor_uid,
+                cursor_compaction_seq,
+                boundary_inclusive,
+            ) = self._decode_cursor(before)
             if cursor_uid != conversation_uid:
                 raise ConversationChanged("Row cursor belongs to another conversation.")
             if cursor_compaction_seq != compaction_seq:
@@ -596,7 +601,7 @@ class ChatStreamRowPager:
             if boundary_index is None:
                 raise StaleRowCursor("The row cursor boundary is no longer present.")
 
-        older_rows = all_rows[:boundary_index]
+        older_rows = all_rows[: boundary_index + int(boundary_inclusive)]
         page_rows = older_rows[-limit:]
         projected_rows = [self._row_projector(row) for row in page_rows]
         row_sizes = [chat_stream_wire_bytes(row) for row in projected_rows]
@@ -649,22 +654,29 @@ class ChatStreamRowPager:
             for rows in (snapshot_rows, transcript_rows, row_log_rows)
         ):
             raise ValueError("chat stream row sources must be lists")
-        if not snapshot_rows:
-            return None
-
         all_rows = merge_chat_stream_rows(transcript_rows, snapshot_rows, row_log_rows)
-        boundary = snapshot_rows[0]
-        boundary_index = next(
-            (
-                index
-                for index, row in enumerate(all_rows)
-                if row.get("id") == boundary.get("id")
-            ),
-            None,
-        )
+        if not snapshot_rows:
+            if not all_rows:
+                return None
+            # If the response budget removed every row, anchor an inclusive
+            # cursor at the newest row so the first older page can recover it.
+            boundary = all_rows[-1]
+            boundary_index = len(all_rows) - 1
+            include_boundary = True
+        else:
+            boundary = snapshot_rows[0]
+            boundary_index = next(
+                (
+                    index
+                    for index, row in enumerate(all_rows)
+                    if row.get("id") == boundary.get("id")
+                ),
+                None,
+            )
+            include_boundary = False
         if boundary_index is None:
             raise StaleRowCursor("The snapshot boundary is no longer present.")
-        if boundary_index == 0:
+        if boundary_index == 0 and not include_boundary:
             return None
 
         row = all_rows[boundary_index]
@@ -681,6 +693,7 @@ class ChatStreamRowPager:
             boundary_id,
             boundary_seq,
             compaction_seq,
+            include_boundary=include_boundary,
         )
 
     @staticmethod
@@ -689,15 +702,20 @@ class ChatStreamRowPager:
         boundary_id: str,
         boundary_seq: int,
         compaction_seq: int,
+        *,
+        include_boundary: bool = False,
     ) -> str:
+        payload_data = {
+            "v": 1,
+            "conversation_uid": conversation_uid,
+            "boundary_id": boundary_id,
+            "boundary_seq": boundary_seq,
+            "compaction_seq": compaction_seq,
+        }
+        if include_boundary:
+            payload_data["include_boundary"] = True
         payload = json.dumps(
-            {
-                "v": 1,
-                "conversation_uid": conversation_uid,
-                "boundary_id": boundary_id,
-                "boundary_seq": boundary_seq,
-                "compaction_seq": compaction_seq,
-            },
+            payload_data,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -705,7 +723,7 @@ class ChatStreamRowPager:
         return _b64encode(payload)
 
     @staticmethod
-    def _decode_cursor(cursor: str) -> tuple[str, int, str, int]:
+    def _decode_cursor(cursor: str) -> tuple[str, int, str, int, bool]:
         try:
             payload = json.loads(_b64decode(cursor))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -720,6 +738,7 @@ class ChatStreamRowPager:
         boundary_id = payload.get("boundary_id")
         boundary_seq = payload.get("boundary_seq")
         compaction_seq = payload.get("compaction_seq")
+        include_boundary = payload.get("include_boundary", False)
         if (
             not isinstance(conversation_uid, str)
             or not conversation_uid
@@ -730,9 +749,16 @@ class ChatStreamRowPager:
             or isinstance(compaction_seq, bool)
             or not isinstance(compaction_seq, int)
             or compaction_seq < 0
+            or not isinstance(include_boundary, bool)
         ):
             raise InvalidRowCursor("Invalid row cursor.")
-        return boundary_id, boundary_seq, conversation_uid, compaction_seq
+        return (
+            boundary_id,
+            boundary_seq,
+            conversation_uid,
+            compaction_seq,
+            include_boundary,
+        )
 
 
 def register_chat_stream_rows_handler(
