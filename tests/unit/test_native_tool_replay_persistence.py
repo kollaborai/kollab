@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from kollabor.state.local import LocalStateService
+from kollabor.state.chat_stream import ChatStreamService
 from kollabor_agent.queue_processor import _xml_tool_result_entry
 from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_ai.api_communication_service import APICommunicationService
@@ -52,6 +53,78 @@ async def test_streaming_tool_use_survives_resume_without_model_calls(tmp_path):
         {"role": "user", "content": "Check the file"},
         {"role": "assistant", "content": "Checking"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_xml_tool_call_and_nonempty_result_project_after_jsonl_resume(tmp_path):
+    writer = KollaborConversationLogger(tmp_path)
+    parent = await writer.log_user_message("Run a command")
+    assistant_id = await writer.log_assistant_message(
+        "Running it.\n<terminal>echo actual-result</terminal>",
+        parent_uuid=parent,
+        tool_calls=[
+            {
+                "id": "terminal-round-trip",
+                "name": "terminal",
+                "input": {"command": "echo actual-result"},
+            }
+        ],
+    )
+    entry = _xml_tool_result_entry(
+        ToolExecutionResult(
+            "terminal-round-trip",
+            "terminal",
+            True,
+            output="actual-result",
+            execution_time=0.125,
+        ),
+        "[terminal] actual-result\ncompleted",
+    )
+    await writer.log_system_message(
+        "Original persisted tool result",
+        parent_uuid=assistant_id,
+        subtype="tool_result",
+        tool_use_id="terminal-round-trip",
+        tool_result=entry,
+    )
+
+    state, _reader, history, _result = await resume(tmp_path, writer.session_id)
+    assert history[1].metadata["xml_tool_calls"] == [
+        {
+            "id": "terminal-round-trip",
+            "name": "terminal",
+            "input": {"command": "echo actual-result"},
+        }
+    ]
+    assert any(
+        message.metadata.get("tool_output_batch") is True
+        and message.metadata.get("xml_tool_results") == [entry]
+        for message in history
+    )
+
+    rows = ChatStreamService(state).subscribe({})["events"][0]["data"]["rows"]
+    tools = [row for row in rows if row["kind"] == "tool"]
+    assert len(tools) == 1
+    assert tools[0]["parts"] == [
+        {
+            "type": "tool-call",
+            "tool_call_id": "terminal-round-trip",
+            "tool_name": "terminal",
+            "args": {"command": "echo actual-result"},
+            "result": "[terminal] actual-result\ncompleted",
+            "is_error": False,
+        }
+    ]
+    assert not any(
+        row["kind"] == "input"
+        and row["role"] == "user"
+        and any(
+            part.get("type") == "text"
+            and part.get("text") == "Original persisted tool result"
+            for part in row["parts"]
+        )
+        for row in rows
+    )
 
 
 @pytest.mark.asyncio
