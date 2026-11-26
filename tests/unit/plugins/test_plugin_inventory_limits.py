@@ -345,6 +345,18 @@ def test_plugin_inventory_redacts_long_sk_credential_shaped_renderer_ids():
     assert entry["omitted"]["contributions"] == 1
 
 
+@pytest.mark.parametrize("label", ["Set-Cookie: sid=canary", "cookie: sid=canary"])
+def test_plugin_inventory_rejects_cookie_headers_in_menu_labels(label):
+    from kollabor_plugins.registry import _normalize_contributes
+
+    normalized, omitted = _normalize_contributes(
+        {"menu": [{"id": "session", "label": label, "open": {"page": "settings"}}]}
+    )
+
+    assert normalized["menu"] == []
+    assert omitted == 1
+
+
 def test_plugin_inventory_redacts_colon_delimited_sensitive_assignments():
     entry = _normalize_plugin_entry(
         {

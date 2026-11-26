@@ -72,6 +72,15 @@ describe("plugin tagged text", () => {
       { type: "tag", name: "todo_write", content: "demo" },
     ]);
   });
+  it("does not pair an escaped backtick run as a code-span closer", () => {
+    const text = "\u0060Before <card>ready</card> \\\u0060";
+
+    expect(splitPluginTags(text, ["card"])).toEqual([
+      { type: "text", text: "\u0060Before " },
+      { type: "tag", name: "card", content: "ready" },
+      { type: "text", text: " \\\u0060" },
+    ]);
+  });
   it("scans many unmatched backtick runs in linear time", () => {
     const text = Array.from({ length: 1100 }, (_, index) => "`".repeat(index + 1)).join("x") +
       "<todo_write>demo</todo_write>";

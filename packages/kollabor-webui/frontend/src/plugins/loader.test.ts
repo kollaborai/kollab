@@ -282,6 +282,20 @@ describe("plugin inventory text redaction", () => {
     expect(logged.mock.calls.flat().join(" ")).not.toContain(secret);
   });
 
+  it.each(["sk_live", "sk_test", "rk_live", "pk_live"])(
+    "detects and redacts an unlabelled Stripe %s key",
+    (prefix) => {
+      const secret = `${prefix}_${"A".repeat(24)}`;
+
+      expect(pluginErrors.containsSensitiveText(secret)).toBe(true);
+      expect(redactPluginError(secret)).toBe("[redacted]");
+    },
+  );
+
+  it("accepts status as a safe sensitive-field value", () => {
+    expect(pluginErrors.containsSensitiveText("token=status", true)).toBe(false);
+  });
+
   it("redacts plugin and action text in the log prefix", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
 
