@@ -2656,35 +2656,43 @@ class ChatStreamService:
             return {"error": "invalid_request"}
 
         uid = self._conversation_uid()
-        candidates = []
-        live = self._rows.get(uid, {}).get(row_id)
-        if isinstance(live, dict):
-            candidates.append(live)
-        candidates.extend(
-            row
-            for row in self._transcript_rows(uid)
-            if isinstance(row, dict) and row.get("id") == row_id
-        )
-        source_parts = None
-        for row in candidates:
-            parts = row.get("parts")
-            if isinstance(parts, list):
-                source_parts = parts
-                break
-        if source_parts is None:
-            return {"error": "not_found"}
+        # The revision and the requested page must describe one row version.
+        # row.append mutates the live parts list in place, so hold the event log
+        # lock while fingerprinting it and copying this page. The copy remains
+        # stable if a later append lands while the page is being serialized.
+        with self._log(uid)._lock:
+            candidates = []
+            live = self._rows.get(uid, {}).get(row_id)
+            if isinstance(live, dict):
+                candidates.append(live)
+            candidates.extend(
+                row
+                for row in self._transcript_rows(uid)
+                if isinstance(row, dict) and row.get("id") == row_id
+            )
+            source_parts = None
+            for row in candidates:
+                parts = row.get("parts")
+                if isinstance(parts, list):
+                    source_parts = parts
+                    break
+            if source_parts is None:
+                return {"error": "not_found"}
 
-        _content, _output_type, current_revision = self._cached_stream_content(
-            uid, row_id, -1, "parts", source_parts
-        )
-        if output_revision != current_revision:
-            return {"error": "output_changed"}
-        total_parts = len(source_parts)
-        if offset > total_parts:
-            return {"error": "invalid_request"}
+            _content, _output_type, current_revision = self._cached_stream_content(
+                uid, row_id, -1, "parts", source_parts
+            )
+            if output_revision != current_revision:
+                return {"error": "output_changed"}
+            total_parts = len(source_parts)
+            if offset > total_parts:
+                return {"error": "invalid_request"}
+            page_source_parts = copy.deepcopy(
+                source_parts[offset : min(total_parts, offset + limit)]
+            )
+
         page_parts: list[dict[str, Any]] = []
-        for part_index in range(offset, min(total_parts, offset + limit)):
-            part = source_parts[part_index]
+        for part_index, part in enumerate(page_source_parts, start=offset):
             if not isinstance(part, dict):
                 # A malformed persisted part should be surfaced as an explicit
                 # error, never silently omitted from a supposedly lossless page.
