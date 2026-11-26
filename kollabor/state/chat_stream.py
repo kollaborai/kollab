@@ -1694,7 +1694,10 @@ class ChatStreamService:
                 continue
             metadata = field(message, "metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
-            if metadata.get("stream_context_only") is True:
+            if (
+                metadata.get("hidden") is True
+                or metadata.get("stream_context_only") is True
+            ):
                 continue
             source_role = role
             role = (
