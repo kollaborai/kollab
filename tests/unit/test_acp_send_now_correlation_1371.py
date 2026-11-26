@@ -213,6 +213,34 @@ async def test_legacy_steering_call_still_returns_bool():
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_steering_records_hub_note():
+    runner, _ = _active_runner()
+    runner.steer = AsyncMock(return_value=True)
+    orchestrator = object.__new__(ACPOrchestrator)
+    orchestrator._runner = runner
+    orchestrator._parents = {}
+    recorded: list[tuple] = []
+    orchestrator._record_user = lambda *args: recorded.append(args)
+    hub_note = {"text": "queued by Marco", "from": "Marco"}
+
+    await orchestrator.steer(
+        "message B",
+        origin={"operator": True, "hub_note": hub_note},
+        request_id="client-request-B",
+    )
+
+    assert recorded == [
+        (
+            "client-request-B",
+            "message B",
+            "steering",
+            None,
+            {"hub_note": hub_note},
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_does_not_record_steering_after_runner_replacement():
     runner, _ = _active_runner()
     orchestrator = object.__new__(ACPOrchestrator)
