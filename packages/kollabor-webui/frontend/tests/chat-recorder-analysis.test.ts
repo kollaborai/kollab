@@ -1194,6 +1194,57 @@ describe("chat recorder analysis", () => {
     expect(JSON.stringify({ net: rec.net, marks: rec.marks })).not.toContain("private-objective-marker");
   });
 
+  it("masks private goal command and reply rows from frame evidence while retaining tool cards", () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    const makeRow = (role: string, text: string, hasToolCard = false) => {
+      const attributes: Record<string, string> = {};
+      const styles: Record<string, string> = {};
+      return {
+        dataset: { role } as Record<string, string>, textContent: text, parentElement: null,
+        style: { setProperty: (name: string, value: string) => { styles[name] = value; } },
+        setAttribute: (name: string, value: string) => { attributes[name] = value; },
+        getAttribute: (name: string) => attributes[name] ?? null,
+        querySelector: () => hasToolCard ? {} : null,
+        __attrs: attributes, __styles: styles,
+      };
+    };
+    const marker = "private-objective-marker";
+    const rows = [
+      makeRow("user", `/goal ${marker} and instructions`),
+      makeRow("assistant", `goal goal-short created — turn 1 scheduled\nobjective: ${marker}`),
+      makeRow("assistant", "terminal tool call: sleep 10", true),
+      makeRow("assistant", "unrelated assistant reply"),
+    ];
+    let nextFrame: Function | null = null;
+    const window = { fetch: async () => new Response("") };
+    const document = {
+      documentElement: {},
+      querySelectorAll: (selector: string) => selector === '[data-chat-tool-call-id]' ? [] : rows,
+      querySelector: () => null,
+    };
+    class FakeMutationObserver { observe() {} }
+    const install = runInNewContext(`(${body})`, {
+      window, document, Request, Response, ReadableStream, TextDecoder, URL, performance,
+      MutationObserver: FakeMutationObserver,
+      getComputedStyle: () => ({ opacity: "1", overflowY: "visible" }),
+      location: { href: "http://localhost/" },
+      sessionStorage: { getItem: () => null, removeItem: () => {} },
+      requestAnimationFrame: (callback: Function) => { nextFrame = callback; },
+    });
+    install({ wall0: Date.now(), sessionStreamSuffix: "/sessions/target/stream", user: [marker], reply: [], });
+    const rec = (window as any).__rec;
+    rec.mark("PAGE START GOAL");
+    nextFrame?.();
+
+    expect(rows.map((row: any) => row.dataset.recorderPrivateGoal ?? null)).toEqual([
+      "command", "reply", null, null,
+    ]);
+    expect(rows.slice(0, 2).map((row: any) => row.__styles.visibility)).toEqual(["hidden", "hidden"]);
+    expect(JSON.stringify({ frames: rec.frames, users: rec.snapshotUserRows() })).not.toContain(marker);
+    expect(JSON.stringify(rec.frames)).toContain("terminal tool call: sleep 10");
+  });
+
   it("requires a known approval mode before the prompt flow changes it", () => {
     expect(requireRecorderApprovalMode("trust_all")).toBe("trust_all");
     expect(requireRecorderApprovalMode("confirm_all")).toBe("confirm_all");
