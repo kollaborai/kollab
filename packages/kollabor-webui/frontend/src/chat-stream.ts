@@ -258,7 +258,8 @@ const isRow = (value: unknown): boolean =>
     optional(part, "chat_stream_content_preview", (preview) =>
       isChatStreamContentPreviewMarker(preview) && preview.row_id === value.id) &&
     optional(part, "chat_stream_args_preview", (preview) =>
-      isChatStreamContentPreviewMarker(preview) && preview.field === "args" && preview.row_id === value.id) &&
+      part.type === "tool-call" && isChatStreamContentPreviewMarker(preview) &&
+      preview.field === "args" && preview.row_id === value.id) &&
     optional(part, "chat_stream_result_preview", (preview) =>
       isChatStreamToolOutputPreviewMarker(preview) && preview.row_id === value.id &&
       isRecord(part) && part.type === "tool-call" && preview.tool_call_id === part.tool_call_id));
