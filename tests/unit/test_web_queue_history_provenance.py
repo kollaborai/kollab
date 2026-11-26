@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from kollabor_engine import media_store
 from kollabor_engine.history_store import _wire_message
 from kollabor_engine.media_store import save
 
+from kollabor.state.chat_stream import ChatStreamService
 from kollabor_ai.conversation_logger import KollaborConversationLogger
+from kollabor_ai.conversation_manager import ConversationManager
 
 PNG = "data:image/png;base64,AQID"
 JPEG = "data:image/jpeg;base64,BAUF"
@@ -44,6 +47,52 @@ async def test_queue_handoff_metadata_survives_jsonl_and_history_reload(tmp_path
     history_row = _wire_message(raw_row)
     assert history_row is not None
     assert history_row["metadata"]["queue_handoff"] == handoff
+
+
+@pytest.mark.asyncio
+async def test_reloaded_jsonl_queue_handoff_restores_chat_image_row(tmp_path):
+    logger = KollaborConversationLogger(tmp_path)
+    logger.reset_session("conversation-a")
+    image = save(tmp_path, "conversation-a", PNG)
+    handoff = {
+        "version": 1,
+        "conversation_uid": "conversation-a",
+        "conversation_revision": 9,
+        "request_id": "queue-request-reloaded-image",
+        "force_send": False,
+        "source_attachment_refs": ["stage-a"],
+        "media_refs": [{"source_ref": "stage-a", "ref": image.ref}],
+    }
+    await logger.log_user_message(
+        "inspect this image [image1]",
+        message_metadata={"queue_handoff": handoff},
+    )
+
+    config = SimpleNamespace(
+        _conversations_dir=tmp_path,
+        get=lambda _key, default=None: default,
+    )
+    manager = ConversationManager(config, logger)
+    assert manager.load_session("conversation-a")
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(
+            conversation_manager=manager,
+            conversation_history=None,
+            conversation_logger=logger,
+        ),
+        get_conversation_uid=lambda: "conversation-a",
+    )
+
+    event = ChatStreamService(state).subscribe(
+        {"after": None, "conversation_uid": None, "generation": None}
+    )["events"][0]
+
+    row = event["data"]["rows"][0]
+    assert row["id"] == "queue-request-reloaded-image"
+    assert row["parts"] == [
+        {"type": "text", "text": "inspect this image [image1]"},
+        {"type": "image", "url": f"/media/{image.ref}"},
+    ]
 
 
 def test_media_history_binds_queue_refs_by_request_identity_not_append_order(tmp_path):

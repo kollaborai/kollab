@@ -230,6 +230,54 @@ def test_stream_materializes_queue_image_refs_as_authenticated_attachment_paths(
     )
 
 
+def test_live_stream_materializes_queue_image_refs_before_sending_sse(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.queue = asyncio.Queue()
+    session.queue.put_nowait(
+        {
+            "type": "chat_stream",
+            "event": {
+                "seq": 8,
+                "conversation_uid": "conv-1",
+                "generation": "daemon-1",
+                "type": "row.upsert",
+                "data": {
+                    "id": "live-web-image",
+                    "seq": 8,
+                    "kind": "input",
+                    "role": "user",
+                    "turn_id": None,
+                    "status": "queued",
+                    "parts": [
+                        {
+                            "type": "image",
+                            "url": (
+                                "kollab-queue-image:?conversation_uid=conv-1"
+                                "&request_id=live-web-image&ref=live-att-ref"
+                            ),
+                        }
+                    ],
+                    "created_at": "2026-11-25T12:00:00Z",
+                },
+            },
+        }
+    )
+    session.queue.put_nowait(None)
+
+    response = client.get("/sessions/s1/stream")
+    events = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+    live = next(event for event in events if event["type"] == "row.upsert")
+    assert live["data"]["parts"][0]["url"] == (
+        "/sessions/s1/web-message-queue/items/live-web-image/attachments/live-att-ref"
+        "?conversation_uid=conv-1"
+    )
+
+
 def test_legacy_after_without_identity_forces_a_snapshot_request(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
     session.rpc.subscribe_results = [
