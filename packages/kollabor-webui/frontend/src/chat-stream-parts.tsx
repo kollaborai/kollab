@@ -13,7 +13,6 @@ import { PermissionPromptData } from "@/components/PermissionTool";
 import {
   ChatStreamContentPreview,
   chatStreamContentIdentity,
-  fetchChatStreamContent,
   type ChatStreamContentPreviewMarker,
 } from "./chat-stream-content";
 import {
@@ -132,29 +131,6 @@ export async function fetchChatStreamPartsPage(
     throw new Error("Chat stream parts page does not match the requested row.");
   }
   return page;
-}
-
-export async function fetchChatStreamPart(
-  marker: ChatStreamPartPreviewMarker,
-  api?: Parameters<typeof fetchChatStreamContent>[1],
-): Promise<unknown> {
-  if (!isChatStreamPartPreviewMarker(marker)) {
-    throw new Error("Chat stream part preview has an invalid identity.");
-  }
-  const contentMarker: ChatStreamContentPreviewMarker = {
-    kind: "chat-stream-content-preview",
-    session_id: marker.session_id,
-    row_id: marker.row_id,
-    part_index: marker.part_index,
-    field: "part",
-    output_bytes: marker.output_bytes,
-    output_chars: marker.output_chars,
-    output_type: "json",
-    output_revision: marker.output_revision,
-    preview: marker.preview,
-  };
-  const serialized = await fetchChatStreamContent(contentMarker, api);
-  return JSON.parse(serialized) as unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

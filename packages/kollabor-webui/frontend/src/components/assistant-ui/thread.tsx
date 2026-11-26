@@ -1631,11 +1631,23 @@ const UserTextBody: FC<{ text?: string }> = ({ text }) => {
         // row carries no media list, so resolving would misclassify.
         if (imageParts > 0 && segment.kind === "token") return null;
         const resolved = resolveMediaSegment(segment, media);
-        if (resolved.kind === "text") return <span key={index}>{resolved.text}</span>;
+        if (resolved.kind === "text") {
+          return (
+            <span key={index} className="whitespace-pre-wrap">
+              {resolved.text}
+            </span>
+          );
+        }
         // Literal [imageN] text: the escaped form, or a slot whose picture
         // is missing or failed - it never requests a ref and never opens
         // the viewer (#1124 P2a).
-        if (resolved.kind === "literal") return <span key={index}>{resolved.text}</span>;
+        if (resolved.kind === "literal") {
+          return (
+            <span key={index} className="whitespace-pre-wrap">
+              {resolved.text}
+            </span>
+          );
+        }
         const { entry } = resolved;
         // The session list may lag behind a new message. Include valid refs
         // from this row so selection and navigation resolve by identity.
