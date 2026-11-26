@@ -137,6 +137,37 @@ describe("chat stream part recovery", () => {
     await expect(fetchChatStreamPartsPage(marker, 0)).rejects.toThrow("does not match");
   });
 
+  it("rejects tool result previews whose nested identity does not match the paged tool call", async () => {
+    const marker = partsMarker("row-tool-result");
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: marker.part_count,
+      output_revision: marker.output_revision,
+      parts: [{
+        type: "tool-call",
+        tool_call_id: "call-expected",
+        tool_name: "lookup",
+        args: {},
+        result: {
+          kind: "chat-stream-tool-output-preview",
+          session_id: marker.session_id,
+          row_id: marker.row_id,
+          tool_call_id: "call-from-another-part",
+          output_bytes: 80_000,
+          output_chars: 80_000,
+          output_type: "text",
+          output_revision: "d".repeat(64),
+          preview: "partial output",
+        },
+      }],
+      done: false,
+    });
+
+    await expect(fetchChatStreamPartsPage(marker, 0)).rejects.toThrow("does not match");
+  });
+
   it("loads a row a page at a time and renders image, hub-note, and prompt parts", async () => {
     const marker = partsMarker("row-render");
     mocks.getChatStreamParts
