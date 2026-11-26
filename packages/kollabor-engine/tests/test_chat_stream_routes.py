@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -1313,6 +1314,96 @@ def test_chat_parts_route_replaces_single_oversized_materialized_part(monkeypatc
         "[Large part. Expand to load full content.]"
     )
     assert payload["parts"][0]["chat_stream_part_preview"]["session_id"] == "s1"
+
+
+def test_chat_parts_route_makes_unmarked_oversized_item_retrievable(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    original_part = {
+        "type": "image",
+        "url": "kollab-queue-image:?conversation_uid=c&request_id=r&ref=x",
+    }
+    parts = [original_part.copy()]
+    raw_payload = {
+        "row_id": "row-1",
+        "offset": 0,
+        "next_offset": 1,
+        "total_parts": 1,
+        "output_revision": "d" * 64,
+        "parts": parts,
+        "done": True,
+    }
+    raw_size = len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    parts[0]["url"] += "x" * (stream._PART_PAGE_RPC_BYTES - raw_size)
+    original_part = parts[0].copy()
+    assert len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) == stream._PART_PAGE_RPC_BYTES
+    session.rpc.parts_result = raw_payload
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["next_offset"] == 1
+    assert payload["done"] is True
+    marker = payload["parts"][0]["chat_stream_part_preview"]
+    assert marker["kind"] == "chat-stream-part-preview"
+    assert marker["session_id"] == "s1"
+    canonical = json.dumps(
+        original_part,
+        ensure_ascii=False,
+        allow_nan=False,
+        default=str,
+        separators=(",", ":"),
+    )
+    revision = hashlib.sha256(
+        b"json\0" + canonical.encode("utf-8", errors="replace")
+    ).hexdigest()
+    assert marker["output_revision"] == revision
+
+    chunk = canonical[: stream._TOOL_OUTPUT_CHUNK_CHARS]
+    session.rpc.content_result = {
+        "row_id": "row-1",
+        "part_index": 0,
+        "field": "part",
+        "offset": 0,
+        "next_offset": len(chunk),
+        "total_chars": len(canonical),
+        "output_type": "json",
+        "output_revision": revision,
+        "content": chunk,
+        "done": len(chunk) == len(canonical),
+    }
+    content_response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/content",
+        params={
+            "part_index": 0,
+            "field": "part",
+            "output_revision": revision,
+            "offset": 0,
+        },
+    )
+    assert content_response.status_code == 200
+    assert session.rpc.calls[-1] == (
+        "state.chat_stream.content",
+        {
+            "row_id": "row-1",
+            "part_index": 0,
+            "field": "part",
+            "output_revision": revision,
+            "offset": 0,
+            "limit": stream._TOOL_OUTPUT_CHUNK_CHARS,
+        },
+    )
 
 
 def test_chat_parts_route_preserves_unresolved_image_slots(monkeypatch):
