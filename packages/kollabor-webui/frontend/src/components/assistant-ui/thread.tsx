@@ -55,6 +55,7 @@ import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-
 import { usePendingPermissionCancellation } from "@/permission-cancellation";
 import { imageAttachmentAdapter, toInputAttachments } from "@/image-attachment";
 import { useChatStore, WEB_INPUT_PREFIX, type ConnectionState } from "@/chat-store";
+import { isGoalText, newGoalReplyId } from "@/utils/goal-cancel";
 import { initialHistoryBanner, useOlderBanner } from "@/history-banner";
 import { newInputId, type ChatRow, type InputRequest } from "@/chat-stream";
 import { composerAction, isWaitingRow } from "@/queue-state";
@@ -698,6 +699,7 @@ const Composer: FC<{
           id: newInputId(WEB_INPUT_PREFIX),
           text: state.text,
           attachments: toInputAttachments(attachments),
+          ...(isGoalText(state.text) ? { goal_reply_id: newGoalReplyId() } : {}),
         };
         retryInput.current = { fingerprint, input };
       }
@@ -1603,6 +1605,7 @@ export const UserMessage: FC = () => {
   const id = useAuiState((s) => s.message.id);
   const failed = useAuiState((s) => s.message.metadata.custom.chatRowStatus === "failed");
   const queued = useContext(QueuedIdsContext).has(id);
+  const goalReply = useChatStore().goalReplies[id];
   // A message that was queued keeps the note's row, empty, once it is sent:
   // the rows under it stay where they are.
   const [wasQueued, setWasQueued] = useState(queued);
@@ -1623,6 +1626,25 @@ export const UserMessage: FC = () => {
         {failed ? (
           <p data-slot="aui_user-send-failure" role="alert" className="text-destructive mt-1 text-xs">
             Send was not confirmed. Retry this draft to avoid a duplicate.
+          </p>
+        ) : null}
+        {goalReply?.state === "pending" ? (
+          <p data-slot="kollab_goal-reply" role="status" className="mt-1 text-xs text-muted-foreground">
+            Goal is running…
+          </p>
+        ) : goalReply?.state === "complete" ? (
+          <div
+            data-slot="kollab_goal-reply"
+            data-success={goalReply.success}
+            role={goalReply.success ? "status" : "alert"}
+            className={cn("mt-1 text-xs", goalReply.success ? "text-muted-foreground" : "text-destructive")}
+          >
+            <p>{goalReply.success ? "Goal completed" : "Goal failed"}</p>
+            <p className="whitespace-pre-wrap">{goalReply.message}</p>
+          </div>
+        ) : goalReply?.state === "cancelled" ? (
+          <p data-slot="kollab_goal-reply" role="status" className="mt-1 text-xs text-muted-foreground">
+            Goal cancelled.
           </p>
         ) : null}
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">

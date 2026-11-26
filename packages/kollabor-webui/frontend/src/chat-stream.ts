@@ -69,6 +69,8 @@ export type InputRequest = {
   id: string;
   text: string;
   attachments?: readonly { name: string; content_type: string; data_url: string }[];
+  /** Client-private capability for polling and cancelling this goal command. Never part of a stream row. */
+  goal_reply_id?: string;
 };
 
 /** What the chat store gives the rest of the chat: lane 3 builds it, lane 4 builds on it. */

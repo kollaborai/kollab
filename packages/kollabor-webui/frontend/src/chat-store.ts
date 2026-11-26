@@ -21,6 +21,12 @@ export type ConnectionState = "connecting" | "live" | "reconnecting" | "failed";
 
 export type OlderStatus = ChatStore["olderStatus"];
 
+/** Private goal output held only by this client's chat store, keyed by its input row id. */
+export type LocalGoalReply =
+  | { readonly state: "pending" }
+  | { readonly state: "complete"; readonly success: boolean; readonly message: string }
+  | { readonly state: "cancelled" };
+
 export type ApplyOutcome =
   | { kind: "applied" }
   | { kind: "duplicate" }
@@ -151,6 +157,8 @@ export type ChatSnapshot = {
   readonly rows: readonly ChatRow[];
   readonly inputs: Readonly<Record<string, InputInfo>>;
   readonly turns?: Readonly<Record<string, TurnInfo>>;
+  /** Local-only private replies; these values never enter StreamState or a persisted row. */
+  readonly goalReplies: Readonly<Record<string, LocalGoalReply>>;
   readonly running: boolean;
   readonly connection: ConnectionState;
   readonly hasEarlier: boolean;
@@ -181,6 +189,9 @@ type HistoryPage = { rows: ChatRow[]; older: string | null };
 /** A send whose row the stream has not delivered yet: the row, and how many POSTs for its id are still running. */
 type LocalSend = { row: ChatRow; posts: number; succeeded: boolean };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 /** The HTTP status carried by an error the transport threw, if it has one. */
 function errorStatus(error: unknown): number | undefined {
   const status = (error as { status?: unknown } | null | undefined)?.status;
@@ -204,6 +215,10 @@ export class LiveChatStore implements LiveStore {
   private pageRequestId = 0;
   // Sends the stream has not delivered yet, kept separately from authoritative rows.
   private readonly sends = new Map<string, LocalSend>();
+  // A private owner capability is associated with its initiating input, never copied into stream state or a row.
+  private readonly goalReplyOwners = new Map<string, string>();
+  private readonly goalReplyPolls = new Map<string, { ownerId: string; controller: AbortController }>();
+  private goalReplies: Record<string, LocalGoalReply> = {};
   private attempts = 0;
   private started = false;
   private disposed = false;
@@ -280,15 +295,27 @@ export class LiveChatStore implements LiveStore {
   dispose(): void {
     this.disposed = true;
     this.controller?.abort();
+    for (const poll of this.goalReplyPolls.values()) poll.controller.abort();
+    this.goalReplyPolls.clear();
+    this.goalReplyOwners.clear();
+    this.goalReplies = {};
     clearTimeout(this.timer);
     const wake = this.wake;
     this.wake = null;
     wake?.();
     this.listeners.clear();
+    this.snapshot = this.snapshotOf();
   }
 
   /** Shows the input at once as a pending row, then posts it. A failed post leaves the row as failed, and rethrows. */
   async send(input: InputRequest): Promise<void> {
+    const terminalGoalReply = this.goalReplies[input.id]?.state === "complete" ||
+      this.goalReplies[input.id]?.state === "cancelled";
+    const tracksGoalReply = Boolean(input.goal_reply_id) && !terminalGoalReply;
+    if (input.goal_reply_id && tracksGoalReply) {
+      this.goalReplyOwners.set(input.id, input.goal_reply_id);
+      this.setGoalReplyPending(input.id);
+    }
     const localSend = this.beginSend(input);
     let response: Response;
     try {
@@ -298,10 +325,26 @@ export class LiveChatStore implements LiveStore {
       });
     } catch (error) {
       this.endSend(input.id, localSend, false);
+      const status = errorStatus(error);
+      if (input.goal_reply_id && tracksGoalReply && (status === undefined || status >= 500)) {
+        // A dropped response or server error may follow admission. Poll with the same capability while
+        // the composer retains this exact input for retry.
+        this.startGoalReplyPolling(input.id, input.goal_reply_id);
+      } else if (input.goal_reply_id && tracksGoalReply && !this.goalReplyPolls.has(input.id)) {
+        this.forgetRejectedGoalReply(input.id, input.goal_reply_id);
+      }
       throw error;
     }
     this.endSend(input.id, localSend, response.ok);
-    if (!response.ok) throw new Error(`send failed: ${response.status}`);
+    if (!response.ok) {
+      if (input.goal_reply_id && tracksGoalReply && response.status >= 500) {
+        this.startGoalReplyPolling(input.id, input.goal_reply_id);
+      } else if (input.goal_reply_id && tracksGoalReply && !this.goalReplyPolls.has(input.id)) {
+        this.forgetRejectedGoalReply(input.id, input.goal_reply_id);
+      }
+      throw new Error(`send failed: ${response.status}`);
+    }
+    if (input.goal_reply_id && tracksGoalReply) this.startGoalReplyPolling(input.id, input.goal_reply_id);
   }
 
   /** Adds the pending row at the end of the rows. A send whose id is already on screen adds nothing. */
@@ -359,8 +402,134 @@ export class LiveChatStore implements LiveStore {
   }
 
   async stop(): Promise<void> {
+    const goalInputId = this.activeGoalInputId();
+    const ownerId = goalInputId ? this.goalReplyOwners.get(goalInputId) : undefined;
+    if (goalInputId && ownerId) {
+      const response = await this.transport.request(`/sessions/${this.enc}/cancel-owned`, {
+        method: "POST",
+        body: JSON.stringify({ request_id: ownerId }),
+      });
+      if (!response.ok) throw new Error(`stop failed: ${response.status}`);
+      let result: unknown;
+      try {
+        result = await response.json();
+      } catch {
+        result = null;
+      }
+      if (isRecord(result) && result.cancelled === true) {
+        this.finishGoalReply(goalInputId, ownerId, { state: "cancelled" });
+      }
+      return;
+    }
     const response = await this.transport.request(`/sessions/${this.enc}/cancel`, { method: "POST" });
     if (!response.ok) throw new Error(`stop failed: ${response.status}`);
+  }
+
+  /** Finds the private goal owned by the currently active shared turn, or a private-only pending goal. */
+  private activeGoalInputId(): string | null {
+    const activeTurns = Object.values(this.state.turns).filter((turn) => turn.state === "running");
+    for (const turn of activeTurns) {
+      const inputId = turn.input_ids.find((candidate) => this.goalReplyOwners.has(candidate));
+      if (inputId) return inputId;
+    }
+    if (activeTurns.length === 0) {
+      const pending = Object.entries(this.goalReplies).filter(([inputId, reply]) =>
+        reply.state === "pending" && this.goalReplyOwners.has(inputId),
+      );
+      return pending.at(-1)?.[0] ?? null;
+    }
+    return null;
+  }
+
+  private startGoalReplyPolling(inputId: string, ownerId: string): void {
+    if (this.disposed || this.goalReplyOwners.get(inputId) !== ownerId) return;
+    if (this.goalReplies[inputId]?.state === "complete" || this.goalReplies[inputId]?.state === "cancelled") return;
+    const previous = this.goalReplyPolls.get(inputId);
+    if (previous?.ownerId === ownerId && !previous.controller.signal.aborted) return;
+    previous?.controller.abort();
+    const controller = new AbortController();
+    this.goalReplyPolls.set(inputId, { ownerId, controller });
+    this.setGoalReplyPending(inputId);
+    void this.pollGoalReply(inputId, ownerId, controller);
+  }
+
+  private setGoalReplyPending(inputId: string): void {
+    if (this.goalReplies[inputId]?.state === "pending") return;
+    this.goalReplies = { ...this.goalReplies, [inputId]: { state: "pending" } };
+    this.publish();
+  }
+
+  private forgetRejectedGoalReply(inputId: string, ownerId: string): void {
+    if (this.goalReplyOwners.get(inputId) === ownerId) this.goalReplyOwners.delete(inputId);
+    if (this.goalReplies[inputId]?.state !== "pending") return;
+    const next = { ...this.goalReplies };
+    delete next[inputId];
+    this.goalReplies = next;
+    this.publish();
+  }
+
+  private async pollGoalReply(inputId: string, ownerId: string, controller: AbortController): Promise<void> {
+    while (this.isCurrentGoalPoll(inputId, ownerId, controller)) {
+      try {
+        const response = await this.transport.request(`/sessions/${this.enc}/goal-replies/poll`, {
+          method: "POST",
+          body: JSON.stringify({ goal_reply_id: ownerId }),
+          signal: controller.signal,
+        });
+        if (!this.isCurrentGoalPoll(inputId, ownerId, controller)) return;
+        if (response.ok) {
+          const result: unknown = await response.json();
+          if (!this.isCurrentGoalPoll(inputId, ownerId, controller)) return;
+          if (
+            isRecord(result) && result.status === "complete" &&
+            typeof result.success === "boolean" && typeof result.message === "string"
+          ) {
+            this.finishGoalReply(inputId, ownerId, {
+              state: "complete",
+              success: result.success,
+              message: result.message,
+            });
+            return;
+          }
+          if (isRecord(result) && result.status === "missing") {
+            this.finishGoalReply(inputId, ownerId, {
+              state: "complete",
+              success: false,
+              message: typeof result.message === "string"
+                ? result.message
+                : "Goal reply expired or is unavailable.",
+            });
+            return;
+          }
+        }
+      } catch {
+        if (!this.isCurrentGoalPoll(inputId, ownerId, controller)) return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  private isCurrentGoalPoll(inputId: string, ownerId: string, controller: AbortController): boolean {
+    return !this.disposed && !controller.signal.aborted &&
+      this.goalReplyOwners.get(inputId) === ownerId &&
+      this.goalReplyPolls.get(inputId)?.controller === controller;
+  }
+
+  private finishGoalReply(inputId: string, ownerId: string, reply: LocalGoalReply): void {
+    if (this.disposed || this.goalReplyOwners.get(inputId) !== ownerId) return;
+    this.goalReplyOwners.delete(inputId);
+    const poll = this.goalReplyPolls.get(inputId);
+    poll?.controller.abort();
+    this.goalReplyPolls.delete(inputId);
+    this.goalReplies = { ...this.goalReplies, [inputId]: reply };
+    this.publish();
+  }
+
+  private clearGoalReplies(): void {
+    for (const poll of this.goalReplyPolls.values()) poll.controller.abort();
+    this.goalReplyPolls.clear();
+    this.goalReplyOwners.clear();
+    this.goalReplies = {};
   }
 
   async loadOlder(): Promise<void> {
@@ -431,7 +600,8 @@ export class LiveChatStore implements LiveStore {
       rows: this.sends.size === 0 ? this.state.rows : [...this.state.rows, ...Array.from(this.sends.values(), (send) => send.row)],
       inputs: this.state.inputs,
       turns: this.state.turns,
-      running: turnsRunning(this.state.turns),
+      goalReplies: this.goalReplies,
+      running: turnsRunning(this.state.turns) || Object.values(this.goalReplies).some((reply) => reply.state === "pending"),
       connection: this.connectionState,
       hasEarlier: this.state.olderCursor !== null && this.state.lastSeq !== null,
       olderStatus: this.paging,
@@ -511,7 +681,10 @@ export class LiveChatStore implements LiveStore {
     }
     if (result.outcome.kind === "duplicate") return;
     if (event.type === "snapshot") {
-      if (this.lastConversationUid !== null && this.lastConversationUid !== event.conversation_uid) this.sends.clear();
+      if (this.lastConversationUid !== null && this.lastConversationUid !== event.conversation_uid) {
+        this.sends.clear();
+        this.clearGoalReplies();
+      }
       this.lastConversationUid = event.conversation_uid;
     }
     this.state = result.state;
