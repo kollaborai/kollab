@@ -224,6 +224,83 @@ async def test_tagged_voice_ignore_period_stays_silent_after_jsonl_resume(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_live_voice_period_is_reconciled_with_resumed_silent_transcript(
+    tmp_path, monkeypatch
+):
+    from kollabor.llm.streaming_handler import StreamingHandler
+    from kollabor_tui.display_tap import publish_semantic
+
+    writer = KollaborConversationLogger(tmp_path)
+    parent = await writer.log_user_message(
+        "spoken request",
+        message_metadata={
+            "source": "voice",
+            "voice": {"event_ids": ["voice-turn"]},
+        },
+    )
+    await writer.log_assistant_message(
+        ".",
+        parent_uuid=parent,
+        display_content=".",
+        turn_id="voice-turn",
+        voice_turn_id="voice-turn",
+    )
+    state, _reader, _history, _result = await resume(tmp_path, writer.session_id)
+    tap = DisplayTap()
+    state._event_bus.register_service("display_tap", tap)
+    stream = state.chat_stream
+    stream.attach_display_tap()
+    initial = stream.subscribe({})["events"][0]
+    after = initial["data"]["next_seq"] - 1
+
+    token_io = SimpleNamespace(
+        start_receiving=lambda: None,
+        add_chunk=lambda _count: None,
+    )
+    monkeypatch.setattr(
+        "kollabor.llm.streaming_handler.get_token_io_state", lambda: token_io
+    )
+    handler = StreamingHandler(
+        SimpleNamespace(_profile=None),
+        SimpleNamespace(start_streaming_response=lambda: None),
+        tap,
+    )
+    publish_semantic(tap, "turn_start", turn_id="voice-turn")
+    handler._stream_response_chunk(".")
+    publish_semantic(
+        tap,
+        "turn_complete",
+        turn_id="voice-turn",
+        stop_reason="end_turn",
+    )
+
+    updates = stream.subscribe(
+        {
+            "after": after,
+            "conversation_uid": initial["conversation_uid"],
+            "generation": initial["generation"],
+        }
+    )["events"]
+    row_updates = [
+        event
+        for event in updates
+        if event["type"] == "row.upsert"
+        and event["data"].get("kind") == "reply"
+    ]
+    assert row_updates[-1]["data"]["parts"] == []
+    token_append = next(
+        event
+        for event in updates
+        if event["type"] == "row.append" and event["data"].get("text") == "."
+    )
+    assert token_append["seq"] < row_updates[-1]["seq"]
+    snapshot = stream.subscribe({})["events"][0]["data"]["rows"]
+    reply_rows = [row for row in snapshot if row["kind"] == "reply"]
+    assert len(reply_rows) == 1
+    assert reply_rows[0]["parts"] == []
+
+
+@pytest.mark.asyncio
 async def test_xml_tool_row_identity_survives_jsonl_resume(tmp_path):
     writer = KollaborConversationLogger(tmp_path)
     saved_base = manager(tmp_path)
