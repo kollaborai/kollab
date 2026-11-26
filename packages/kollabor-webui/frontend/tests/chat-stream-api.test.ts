@@ -40,6 +40,7 @@ test("initial chat stream request omits a replay cursor and receives a snapshot"
 
 test("chat stream tool output reads one bounded, identity-bound chunk", async () => {
   const requests: Array<{ url: string; authorization: string | null }> = [];
+  const revision = "a".repeat(64);
   vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     if (url === "/api/config") {
@@ -52,6 +53,7 @@ test("chat stream tool output reads one bounded, identity-bound chunk", async ()
     return new Response(JSON.stringify({
       row_id: "row/one",
       tool_call_id: "call&one",
+      output_revision: revision,
       offset: 0,
       next_offset: 5,
       total_chars: 5,
@@ -68,13 +70,15 @@ test("chat stream tool output reads one bounded, identity-bound chunk", async ()
       sessionId: string,
       rowId: string,
       toolCallId: string,
+      outputRevision: string,
       options: { offset: number; limit: number },
     ) => Promise<unknown>;
-  }).getChatStreamToolOutput("session/one", "row/one", "call&one", { offset: 0, limit: 32768 });
+  }).getChatStreamToolOutput("session/one", "row/one", "call&one", revision, { offset: 0, limit: 32768 });
 
   expect(chunk).toMatchObject({
     row_id: "row/one",
     tool_call_id: "call&one",
+    output_revision: revision,
     offset: 0,
     next_offset: 5,
     total_chars: 5,
@@ -83,7 +87,7 @@ test("chat stream tool output reads one bounded, identity-bound chunk", async ()
     done: true,
   });
   expect(requests).toEqual([{
-    url: "http://engine/sessions/session%2Fone/chat-stream/rows/row%2Fone/tool-output?tool_call_id=call%26one&offset=0&limit=32768",
+    url: `http://engine/sessions/session%2Fone/chat-stream/rows/row%2Fone/tool-output?tool_call_id=call%26one&output_revision=${revision}&offset=0&limit=32768`,
     authorization: "Bearer session-token",
   }]);
 });
