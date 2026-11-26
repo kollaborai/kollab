@@ -2641,6 +2641,10 @@ class ContextCompactionPlugin(BasePlugin):
             operator_word_records=operator_word_records,
             operator_words_omitted=operator_words_omitted,
             open_state=open_state,
+            compaction_snapshot_count=len(history),
+            compaction_retained_positions=self._compaction_retained_positions(
+                history, [system_msg, *preserved_tasks, *recent]
+            ),
         )
         self._pending_compaction = compacted_history
         self._pending_session_id = self._get_current_session_id()
@@ -2662,6 +2666,10 @@ class ContextCompactionPlugin(BasePlugin):
             reason=self._compaction_reason,
             duration_seconds=duration_seconds,
             summarization_model=None,
+            compaction_snapshot_count=len(history),
+            compaction_retained_positions=self._compaction_retained_positions(
+                history, [system_msg, *preserved_tasks, *recent]
+            ),
         )
         logger.warning(
             "[context_compaction][agent=%s][hub=%s] emergency rollover applied "
@@ -3715,6 +3723,11 @@ class ContextCompactionPlugin(BasePlugin):
                 operator_word_records=operator_word_records,
                 operator_words_omitted=operator_words_omitted,
                 open_state=open_state,
+                compaction_snapshot_count=snapshot_len,
+                compaction_retained_positions=self._compaction_retained_positions(
+                    history_snapshot,
+                    [system_msg, *ledger_handled, *preserved_tasks, *to_keep],
+                ),
             )
 
             # Write checkpoint before staging the compaction swap
@@ -3750,6 +3763,11 @@ class ContextCompactionPlugin(BasePlugin):
                 reason=getattr(self, "_compaction_reason", "threshold"),
                 duration_seconds=duration_seconds,
                 summarization_model=self._last_summarization_model,
+                compaction_snapshot_count=snapshot_len,
+                compaction_retained_positions=self._compaction_retained_positions(
+                    history_snapshot,
+                    [system_msg, *ledger_handled, *preserved_tasks, *to_keep],
+                ),
             )
 
             logger.info(
@@ -4197,6 +4215,63 @@ class ContextCompactionPlugin(BasePlugin):
             metadata={"compacted_from": ctx_ids, "ledger_decision": "keep"},
         )
 
+    @staticmethod
+    def _compaction_retained_positions(
+        history_snapshot: List[ConversationMessage],
+        retained_messages: List[Optional[ConversationMessage]],
+    ) -> List[int]:
+        """Map retained source messages back to their pre-compaction indexes.
+
+        Some preservation paths clone or rewrite a message (for example, a
+        bounded TaskLedger excerpt or a detached tool result). Identity is the
+        most reliable match; role/timestamp/content and ledger source IDs cover
+        those transformed copies without making timestamp the pruning boundary.
+        """
+
+        retained = [message for message in retained_messages if message is not None]
+        identities = {id(message) for message in retained}
+
+        def field(message: Any, name: str, default: Any = None) -> Any:
+            if isinstance(message, dict):
+                return message.get(name, default)
+            return getattr(message, name, default)
+
+        def signature(message: Any) -> tuple[str, str, str]:
+            timestamp = field(message, "timestamp")
+            if hasattr(timestamp, "isoformat"):
+                timestamp = timestamp.isoformat()
+            return (
+                str(field(message, "role", "")),
+                str(timestamp or ""),
+                str(field(message, "content", "") or ""),
+            )
+
+        signatures = {signature(message) for message in retained}
+        compacted_from = set()
+        for message in retained:
+            metadata = field(message, "metadata", {})
+            values = metadata.get("compacted_from", []) if isinstance(metadata, dict) else []
+            if isinstance(values, list):
+                compacted_from.update(
+                    ctx_id for ctx_id in values if isinstance(ctx_id, str) and ctx_id
+                )
+        positions = []
+        for index, source in enumerate(history_snapshot):
+            metadata = field(source, "metadata", {})
+            source_ctx_ids = (
+                metadata.get("ctx_ids", []) if isinstance(metadata, dict) else []
+            )
+            if (
+                id(source) in identities
+                or signature(source) in signatures
+                or (
+                    isinstance(source_ctx_ids, list)
+                    and any(ctx_id in compacted_from for ctx_id in source_ctx_ids)
+                )
+            ):
+                positions.append(index)
+        return positions
+
     def _build_compacted_history(
         self,
         system_msg: Optional[ConversationMessage],
@@ -4210,6 +4285,8 @@ class ContextCompactionPlugin(BasePlugin):
         operator_words_omitted: int = 0,
         open_state: str = "",
         _dropped_preserved: int = 0,
+        compaction_snapshot_count: Optional[int] = None,
+        compaction_retained_positions: Optional[List[int]] = None,
     ) -> List[ConversationMessage]:
         """Build the new compacted history list.
 
@@ -4298,6 +4375,24 @@ class ContextCompactionPlugin(BasePlugin):
             summary_metadata["compaction_round"] = compaction_round
         if pre_message_count is not None:
             summary_metadata["pre_message_count"] = pre_message_count
+        if (
+            isinstance(compaction_snapshot_count, int)
+            and not isinstance(compaction_snapshot_count, bool)
+            and compaction_snapshot_count >= 0
+        ):
+            summary_metadata["compaction_snapshot_count"] = (
+                compaction_snapshot_count
+            )
+        if isinstance(compaction_retained_positions, list):
+            summary_metadata["compaction_retained_positions"] = sorted(
+                {
+                    position
+                    for position in compaction_retained_positions
+                    if isinstance(position, int)
+                    and not isinstance(position, bool)
+                    and position >= 0
+                }
+            )
 
         summary_message = ConversationMessage(
             role="user",
@@ -4411,6 +4506,8 @@ class ContextCompactionPlugin(BasePlugin):
                 operator_words_omitted=operator_words_omitted,
                 open_state=open_state,
                 _dropped_preserved=_dropped_preserved + 1,
+                compaction_snapshot_count=compaction_snapshot_count,
+                compaction_retained_positions=compaction_retained_positions,
             )
 
         if pre_message_count is not None:
@@ -4519,6 +4616,8 @@ class ContextCompactionPlugin(BasePlugin):
         reason: Optional[str] = None,
         duration_seconds: Optional[float] = None,
         summarization_model: Optional[str] = None,
+        compaction_snapshot_count: Optional[int] = None,
+        compaction_retained_positions: Optional[List[int]] = None,
     ) -> None:
         """Append compaction record to session JSONL.
 
@@ -4554,6 +4653,22 @@ class ContextCompactionPlugin(BasePlugin):
             "post_message_count": post_count,
             "tasks_preserved": tasks_preserved,
         }
+        if (
+            isinstance(compaction_snapshot_count, int)
+            and not isinstance(compaction_snapshot_count, bool)
+            and compaction_snapshot_count >= 0
+        ):
+            record["compaction_snapshot_count"] = compaction_snapshot_count
+        if isinstance(compaction_retained_positions, list):
+            record["compaction_retained_positions"] = sorted(
+                {
+                    position
+                    for position in compaction_retained_positions
+                    if isinstance(position, int)
+                    and not isinstance(position, bool)
+                    and position >= 0
+                }
+            )
         agent, hub_identity = self._get_agent_labels()
         record["agent"] = agent
         record["hub_identity"] = hub_identity

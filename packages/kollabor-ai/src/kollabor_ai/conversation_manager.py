@@ -224,6 +224,13 @@ def _native_hub_chat_stream_row(value: Any) -> Dict[str, Any] | None:
         # This is persistence metadata for branch filtering, not part of the
         # public chat-stream row shape. ChatStreamService strips it on output.
         row["_history_index"] = history_index
+    history_compaction_round = value.get("_history_compaction_round")
+    if (
+        isinstance(history_compaction_round, int)
+        and not isinstance(history_compaction_round, bool)
+        and history_compaction_round >= 0
+    ):
+        row["_history_compaction_round"] = history_compaction_round
     row.setdefault("seq", 0)
     row["parts"] = [
         {key: deepcopy(source_note[key]) for key in note_keys if key in source_note}
@@ -231,6 +238,10 @@ def _native_hub_chat_stream_row(value: Any) -> Dict[str, Any] | None:
     event = {
         "seq": 0,
         "conversation_uid": "persisted-native-hub-row",
+        # Newer chat-stream contracts require a daemon generation even for
+        # validation-only events. This value is deliberately synthetic: it is
+        # never persisted or exposed to clients.
+        "generation": "persisted-native-hub-row",
         "type": "row.upsert",
         "data": row,
     }
@@ -363,7 +374,30 @@ class ConversationManager:
         if normalized is None:
             raise ValueError("invalid native Hub chat stream row")
         if "_history_index" not in normalized:
-            normalized["_history_index"] = max(0, len(self.messages) - 1)
+            # Store the insertion boundary: a row recorded after N messages
+            # belongs after message N-1 and has boundary N. Branch points are
+            # inclusive message indexes, so this also excludes a row received
+            # after the selected message.
+            normalized["_history_index"] = len(self.messages)
+        if "_history_compaction_round" not in normalized:
+            for message in reversed(self.messages):
+                metadata = (
+                    message.get("metadata")
+                    if isinstance(message, dict)
+                    else getattr(message, "metadata", None)
+                )
+                if not isinstance(metadata, dict) or not metadata.get(
+                    "context_compaction"
+                ):
+                    continue
+                round_number = metadata.get("compaction_round")
+                if (
+                    isinstance(round_number, int)
+                    and not isinstance(round_number, bool)
+                    and round_number >= 0
+                ):
+                    normalized["_history_compaction_round"] = round_number
+                break
         row_id = normalized["id"]
         for index, existing in enumerate(self.chat_stream_rows):
             if existing.get("id") == row_id:
@@ -374,6 +408,10 @@ class ConversationManager:
                 )
                 if isinstance(existing.get("_history_index"), int):
                     normalized["_history_index"] = existing["_history_index"]
+                if isinstance(existing.get("_history_compaction_round"), int):
+                    normalized["_history_compaction_round"] = existing[
+                        "_history_compaction_round"
+                    ]
                 self.chat_stream_rows[index] = normalized
                 break
         else:
@@ -1140,6 +1178,9 @@ class ConversationManager:
         result_batches: Dict[str, Dict[str, Any]] = {}
         pending_compaction: Dict[str, Any] = {}  # last-round-wins
         last_compaction_at: Optional[datetime] = None
+        last_compaction_snapshot_count: Optional[int] = None
+        last_compaction_retained_positions: Optional[List[int]] = None
+        last_compaction_round: Optional[int] = None
         compaction_uuids: set[str] = set()
         current_parent_uuid: Optional[str] = None
         session_stats: Optional[Dict[str, Any]] = None
@@ -1173,6 +1214,39 @@ class ConversationManager:
                 row["status"] = "failed"
             chat_stream_rows_by_id[row_id] = row
             return True
+
+        def restore_compaction_positions(data: Dict[str, Any]) -> None:
+            """Keep the latest real compaction's source-position boundary.
+
+            Later bookkeeping-only compaction records may omit these fields;
+            they must not erase metadata from the actual summary record.
+            """
+            nonlocal last_compaction_snapshot_count
+            nonlocal last_compaction_retained_positions
+            nonlocal last_compaction_round
+            round_number = data.get("compaction_round")
+            if isinstance(round_number, int) and not isinstance(round_number, bool):
+                last_compaction_round = round_number
+            count = data.get("compaction_snapshot_count")
+            positions = data.get("compaction_retained_positions")
+            if (
+                isinstance(count, int)
+                and not isinstance(count, bool)
+                and count >= 0
+                and isinstance(positions, list)
+                and all(
+                    isinstance(position, int)
+                    and not isinstance(position, bool)
+                    and position >= 0
+                    for position in positions
+                )
+            ):
+                last_compaction_snapshot_count = count
+                last_compaction_retained_positions = sorted(set(positions))
+            elif data.get("content"):
+                # A newer legacy summary has no reliable positional boundary.
+                last_compaction_snapshot_count = None
+                last_compaction_retained_positions = None
 
         try:
             with open(session_file, "r") as f:
@@ -1221,6 +1295,14 @@ class ConversationManager:
                                 isinstance(saved_metadata, dict),
                             )
                             continue
+                        # The saved base replaces all earlier streaming state.
+                        pending_compaction = {}
+                        last_compaction_at = None
+                        last_compaction_snapshot_count = None
+                        last_compaction_retained_positions = None
+                        last_compaction_round = None
+                        tool_calls_by_message.clear()
+                        result_batches.clear()
                         # A resumed session starts with this durable base,
                         # then the logger appends ordinary streaming turns.
                         # Keep reading instead of discarding that later tail.
@@ -1231,14 +1313,33 @@ class ConversationManager:
                         if isinstance(saved_chat_rows, list):
                             for value in saved_chat_rows:
                                 restore_native_hub_row(value)
+                        # A full snapshot may be the only durable copy of a
+                        # compacted summary (for example, after a session save
+                        # but before another streaming append). Restore its
+                        # source-position boundary alongside the rows.
+                        for saved_message in saved_messages:
+                            saved_message_metadata = (
+                                saved_message.get("metadata")
+                                if isinstance(saved_message, dict)
+                                else None
+                            )
+                            if not isinstance(saved_message_metadata, dict) or not (
+                                saved_message_metadata.get("context_compaction")
+                                or saved_message_metadata.get("compaction_summary")
+                            ):
+                                continue
+                            restore_compaction_positions(
+                                {**saved_message_metadata, "content": "saved summary"}
+                            )
+                            saved_stamp = _parse_record_stamp(
+                                saved_message.get("timestamp")
+                            )
+                            if saved_stamp is not None:
+                                last_compaction_at = saved_stamp
                         current_parent_uuid = data.get("current_parent_uuid")
                         session_stats = data.get("session_stats")
                         has_saved_base = True
                         has_streaming_tail = False
-                        pending_compaction = {}
-                        last_compaction_at = None
-                        tool_calls_by_message.clear()
-                        result_batches.clear()
                         recognized_record = True
                         continue
 
@@ -1285,19 +1386,26 @@ class ConversationManager:
                             # stamp keeps the prior boundary: resetting to
                             # None would un-suppress pre-boundary history.
                             last_compaction_at = parsed_stamp
+                        restore_compaction_positions(data)
                         if content:
+                            summary_metadata = {
+                                "context_compaction": True,
+                                "compaction_round": data.get("compaction_round"),
+                            }
+                            if last_compaction_snapshot_count is not None:
+                                summary_metadata[
+                                    "compaction_snapshot_count"
+                                ] = last_compaction_snapshot_count
+                                summary_metadata[
+                                    "compaction_retained_positions"
+                                ] = list(last_compaction_retained_positions or [])
                             pending_compaction = {
                                 "uuid": data.get("uuid") or str(uuid4()),
                                 "role": "user",
                                 "content": content,
                                 "timestamp": data.get("timestamp"),
                                 "parent_uuid": None,
-                                "metadata": {
-                                    "context_compaction": True,
-                                    "compaction_round": data.get(
-                                        "compaction_round"
-                                    ),
-                                },
+                                "metadata": summary_metadata,
                                 "session_id": session_file.stem.replace(
                                     "session_", ""
                                 ),
@@ -1476,20 +1584,27 @@ class ConversationManager:
                                 compaction_uuids.add(sidecar_uuid)
                             if parsed_stamp is not None:
                                 last_compaction_at = parsed_stamp
+                            restore_compaction_positions(data)
                             has_streaming_tail = has_saved_base
                             tool_calls_by_message.clear()
+                            summary_metadata = {
+                                "context_compaction": True,
+                                "compaction_round": data.get("compaction_round"),
+                            }
+                            if last_compaction_snapshot_count is not None:
+                                summary_metadata[
+                                    "compaction_snapshot_count"
+                                ] = last_compaction_snapshot_count
+                                summary_metadata[
+                                    "compaction_retained_positions"
+                                ] = list(last_compaction_retained_positions or [])
                             pending_compaction = {
                                 "uuid": sidecar_uuid or str(uuid4()),
                                 "role": "user",
                                 "content": content,
                                 "timestamp": data.get("timestamp"),
                                 "parent_uuid": None,
-                                "metadata": {
-                                    "context_compaction": True,
-                                    "compaction_round": data.get(
-                                        "compaction_round"
-                                    ),
-                                },
+                                "metadata": summary_metadata,
                                 "session_id": session_file.stem.replace(
                                     "session_", ""
                                 ),
@@ -1525,13 +1640,49 @@ class ConversationManager:
             # Native Hub rows live beside the model transcript. Apply the
             # same last-compaction boundary so a restart cannot resurrect
             # display rows that were removed from the compacted history.
-            if last_compaction_at is not None:
+            if (
+                last_compaction_at is not None
+                or (
+                    last_compaction_snapshot_count is not None
+                    and last_compaction_retained_positions is not None
+                )
+            ):
                 retained_hub_rows: Dict[str, Dict[str, Any]] = {}
                 for row_id, row in chat_stream_rows_by_id.items():
                     row_stamp = _parse_record_stamp(row.get("created_at"))
-                    if row_stamp is not None and row_stamp <= last_compaction_at:
+                    row_position = row.get("_history_index")
+                    row_compaction_round = row.get("_history_compaction_round")
+                    has_position_metadata = (
+                        last_compaction_snapshot_count is not None
+                        and last_compaction_retained_positions is not None
+                    )
+                    if (
+                        row_compaction_round == last_compaction_round
+                        and last_compaction_round is not None
+                    ):
+                        retained_hub_rows[row_id] = row
                         continue
-                    if row_stamp is not None:
+                    if has_position_metadata and isinstance(row_position, int) and not isinstance(row_position, bool):
+                        adjacent_to_retained = (
+                            row_position - 1 in last_compaction_retained_positions
+                            or row_position in last_compaction_retained_positions
+                        )
+                        if not (
+                            row_position >= last_compaction_snapshot_count
+                            or adjacent_to_retained
+                        ):
+                            continue
+                    elif (
+                        row_stamp is not None
+                        and last_compaction_at is not None
+                        and row_stamp <= last_compaction_at
+                    ):
+                        continue
+                    if (
+                        row_stamp is not None
+                        and not has_position_metadata
+                        and last_compaction_at is not None
+                    ):
                         preceding = [
                             index
                             for index, message in enumerate(messages)
@@ -1540,7 +1691,9 @@ class ConversationManager:
                             )) is not None
                             and message_stamp <= row_stamp
                         ]
-                        row["_history_index"] = max(preceding, default=0)
+                        # Position is a boundary count, not the last message
+                        # index. The replayed summary is already in `messages`.
+                        row["_history_index"] = len(preceding)
                     retained_hub_rows[row_id] = row
                 chat_stream_rows_by_id = retained_hub_rows
 
@@ -1645,6 +1798,45 @@ class ConversationManager:
             # transcript's timeline. Do not carry rows recorded after the
             # selected message into a branch. Older rows without an explicit
             # position can be located by their timestamps when possible.
+            compaction_summary_index = None
+            compaction_snapshot_count = None
+            compaction_retained_positions: set[int] = set()
+            compaction_round = None
+            for index, message in enumerate(self.messages):
+                message_metadata = message.get("metadata")
+                if not isinstance(message_metadata, dict) or not (
+                    message_metadata.get("context_compaction")
+                    or message_metadata.get("compaction_summary")
+                ):
+                    continue
+                compaction_summary_index = index
+                snapshot_count = message_metadata.get("compaction_snapshot_count")
+                retained_positions = message_metadata.get(
+                    "compaction_retained_positions"
+                )
+                if (
+                    isinstance(snapshot_count, int)
+                    and not isinstance(snapshot_count, bool)
+                    and snapshot_count >= 0
+                    and isinstance(retained_positions, list)
+                    and all(
+                        isinstance(position, int)
+                        and not isinstance(position, bool)
+                        and position >= 0
+                        for position in retained_positions
+                    )
+                ):
+                    compaction_snapshot_count = snapshot_count
+                    compaction_retained_positions = set(retained_positions)
+                round_number = message_metadata.get("compaction_round")
+                if isinstance(round_number, int) and not isinstance(round_number, bool):
+                    compaction_round = round_number
+
+            def message_field(message: Any, name: str, default: Any = None) -> Any:
+                if isinstance(message, dict):
+                    return message.get(name, default)
+                return getattr(message, name, default)
+
             branched_hub_rows = []
             for row in self.chat_stream_rows:
                 history_index = row.get("_history_index")
@@ -1664,7 +1856,45 @@ class ConversationManager:
                     ]
                     if row_stamp is None:
                         continue
-                    history_index = max(message_positions, default=0)
+                    history_index = len(message_positions)
+                row_compaction_round = row.get("_history_compaction_round")
+                if (
+                    compaction_snapshot_count is not None
+                    and compaction_summary_index is not None
+                    and row_compaction_round != compaction_round
+                ):
+                    adjacent_to_retained = (
+                        history_index - 1 in compaction_retained_positions
+                        or history_index in compaction_retained_positions
+                    )
+                    if not (
+                        history_index >= compaction_snapshot_count
+                        or adjacent_to_retained
+                    ):
+                        continue
+                    row_stamp = _parse_record_stamp(row.get("created_at"))
+                    if row_stamp is None:
+                        history_index = compaction_summary_index + int(
+                            history_index >= compaction_snapshot_count
+                        )
+                    else:
+                        preceding_tail = sum(
+                            1
+                            for index, message in enumerate(self.messages)
+                            if index > compaction_summary_index
+                            and (message_stamp := _parse_record_stamp(
+                                message_field(message, "timestamp")
+                            )) is not None
+                            and message_stamp <= row_stamp
+                        )
+                        history_index = (
+                            compaction_summary_index
+                            + preceding_tail
+                            + int(
+                                preceding_tail > 0
+                                or history_index >= compaction_snapshot_count
+                            )
+                        )
                 if history_index <= branch_point_index:
                     branched_row = deepcopy(row)
                     branched_row["_history_index"] = history_index
