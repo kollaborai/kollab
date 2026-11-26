@@ -16,6 +16,7 @@ from kollabor_events.chat_stream import ROLES, ROW_KINDS
 from kollabor_rpc import RpcError, RpcHandlerError, RpcMethodNotFound
 
 from ..server import get_session_registry
+from ..session_context import PHONE_STREAM_REVOKED, SESSION_READ_CONTEXT_SCOPE_KEY, SessionReadContext
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["chat-stream"])
@@ -223,12 +224,17 @@ async def chat_stream(
 ):
     """Relay initial replay and live daemon events as SSE data lines."""
     session, _rpc = _get_rpc(session_id)
+    scope_state = request.scope.get("state", {})
+    context = scope_state.get(SESSION_READ_CONTEXT_SCOPE_KEY) if isinstance(scope_state, dict) else None
+    if not isinstance(context, SessionReadContext):
+        context = None
     try:
-        queue = session.subscribe()
+        queue = session.subscribe(context=context) if context else session.subscribe()
     except AttributeError, RuntimeError:
         raise HTTPException(
             status_code=503, detail="The session event stream is unavailable."
         ) from None
+    initial_drops = getattr(queue, "dropped_count", 0)
 
     # `after` alone, or a cursor without all identity fields, cannot be
     # replayed safely. Treat it as a fresh connection for older callers.
@@ -253,8 +259,12 @@ async def chat_stream(
         last_uid = conversation_uid
         last_generation = generation
         received_initial_cursor = False
+        drops_seen = initial_drops
+        pending_frame = None
         try:
             for event in initial:
+                if context and context.revoked:
+                    return
                 seq = event.get("seq")
                 uid = event.get("conversation_uid")
                 event_generation = event.get("generation")
@@ -274,17 +284,53 @@ async def chat_stream(
                     event_generation,
                 )
                 received_initial_cursor = True
+                if context and context.revoked:
+                    return
                 yield _sse_event(event)
             if not received_initial_cursor and cursor_is_complete:
                 last_seq = requested_after if requested_after is not None else -1
 
             while not await request.is_disconnected():
+                if context and context.revoked:
+                    return
+                if getattr(queue, "dropped_count", 0) != drops_seen:
+                    drops_seen = getattr(queue, "dropped_count", 0)
+                    replay = await _read_events(
+                        session_id, after=last_seq if last_seq >= 0 else None,
+                        conversation_uid=last_uid, generation=last_generation,
+                    )
+                    for missed in replay:
+                        if context and context.revoked:
+                            return
+                        missed_seq = missed.get("seq")
+                        missed_uid = missed.get("conversation_uid")
+                        missed_generation = missed.get("generation")
+                        if (not isinstance(missed_seq, int) or isinstance(missed_seq, bool)
+                                or not isinstance(missed_uid, str) or not isinstance(missed_generation, str)):
+                            continue
+                        if missed.get("type") != "snapshot" and (
+                            missed_uid != last_uid or missed_generation != last_generation or missed_seq <= last_seq
+                        ):
+                            continue
+                        last_seq, last_uid, last_generation = _cursor_after(missed), missed_uid, missed_generation
+                        if context and context.revoked:
+                            return
+                        yield _sse_event(missed)
                 try:
-                    frame = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    if pending_frame is not None:
+                        frame, pending_frame = pending_frame, None
+                    else:
+                        frame = await asyncio.wait_for(queue.get(), timeout=15.0)
                 except asyncio.TimeoutError:
                     yield {"comment": "keepalive"}
                     continue
-                if frame is None or getattr(frame, "name", None) == "daemon_closed":
+                if frame is PHONE_STREAM_REVOKED or (context and context.revoked):
+                    return
+                if getattr(queue, "dropped_count", 0) != drops_seen:
+                    pending_frame = frame
+                    continue
+                if (frame is None or (isinstance(frame, dict) and frame.get("type") == "daemon_closed")
+                        or getattr(frame, "name", None) == "daemon_closed"):
                     return
 
                 event = _event_payload(frame)
@@ -319,6 +365,8 @@ async def chat_stream(
                             current_uid,
                             current_generation,
                         )
+                        if context and context.revoked:
+                            return
                         yield _sse_event(current)
                         refreshed = True
                         break
@@ -353,6 +401,8 @@ async def chat_stream(
                                 missed_uid,
                                 missed_generation,
                             )
+                            if context and context.revoked:
+                                return
                             yield _sse_event(missed)
                             continue
                         if (
@@ -365,6 +415,8 @@ async def chat_stream(
                         ):
                             continue
                         last_seq, last_uid = missed_seq, missed_uid
+                        if context and context.revoked:
+                            return
                         yield _sse_event(missed)
                     if (
                         seq <= last_seq
@@ -377,6 +429,8 @@ async def chat_stream(
                     event["conversation_uid"],
                     event_generation,
                 )
+                if context and context.revoked:
+                    return
                 yield _sse_event(event)
         finally:
             session.unsubscribe(queue)
