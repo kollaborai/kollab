@@ -779,6 +779,12 @@ class ChatStreamService:
                         "state": current_state,
                         "turn_id": current_turn_id,
                     }
+                if current_state == "ended":
+                    return {
+                        "found": True,
+                        "accepted": False,
+                        "state": "ended",
+                    }
             return (
                 result
                 if isinstance(result, dict) and result.get("found") is True
