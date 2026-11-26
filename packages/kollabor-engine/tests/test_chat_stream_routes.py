@@ -1251,6 +1251,32 @@ def test_chat_parts_route_bounds_materialized_page_and_advances_cursor(
     assert 0 < len(payload["parts"]) < len(parts)
     assert payload["next_offset"] == len(payload["parts"])
     assert payload["done"] is False
+    next_offset = payload["next_offset"]
+    session.rpc.parts_result = {
+        "row_id": "row-1",
+        "offset": next_offset,
+        "next_offset": len(parts),
+        "total_parts": len(parts),
+        "output_revision": "d" * 64,
+        "parts": parts[next_offset:],
+        "done": True,
+    }
+
+    next_response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={
+            "output_revision": "d" * 64,
+            "offset": next_offset,
+            "limit": stream._PART_PAGE_SIZE,
+        },
+    )
+
+    assert next_response.status_code == 200
+    next_payload = next_response.json()
+    assert next_payload["offset"] == next_offset
+    assert next_payload["next_offset"] == len(parts)
+    assert next_payload["done"] is True
+    assert len(payload["parts"]) + len(next_payload["parts"]) == len(parts)
 
 
 def test_chat_parts_route_replaces_single_oversized_materialized_part(monkeypatch):
