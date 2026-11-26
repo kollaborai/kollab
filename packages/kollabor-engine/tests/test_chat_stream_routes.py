@@ -1187,6 +1187,93 @@ def test_chat_parts_route_returns_validated_page_and_materializes_marker_session
     )
 
 
+def test_chat_parts_route_keeps_a_daemon_page_valid_after_marker_materialization(
+    monkeypatch,
+):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    parts = [
+        {
+            "type": "text",
+            "text": "bounded preview",
+            "chat_stream_part_preview": {
+                "kind": "chat-stream-part-preview",
+                "row_id": "row-1",
+                "part_index": index,
+                "output_bytes": 40_000,
+                "output_chars": 40_000,
+                "output_type": "json",
+                "output_revision": "e" * 64,
+                "preview": "preview",
+            },
+        }
+        for index in range(stream._PART_PAGE_SIZE)
+    ]
+    raw_payload = {
+        "row_id": "row-1",
+        "offset": 0,
+        "next_offset": len(parts),
+        "total_parts": len(parts),
+        "output_revision": "d" * 64,
+        "parts": parts,
+        "done": True,
+    }
+    raw_size = len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    parts[0]["text"] += "x" * (stream._PART_PAGE_RPC_BYTES - raw_size)
+    assert len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) == stream._PART_PAGE_RPC_BYTES
+    session.rpc.parts_result = raw_payload
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64, "limit": stream._PART_PAGE_SIZE},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["parts"]) == payload["next_offset"] - payload["offset"]
+    assert all(
+        part["chat_stream_part_preview"]["session_id"] == "s1"
+        for part in payload["parts"]
+    )
+    assert len(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) > stream._PART_PAGE_RPC_BYTES
+
+
+def test_chat_parts_route_preserves_unresolved_image_slots(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.parts_result = {
+        "row_id": "row-1",
+        "offset": 0,
+        "next_offset": 1,
+        "total_parts": 1,
+        "output_revision": "d" * 64,
+        "parts": [{"type": "image", "url": "kollab-queue-image:unresolvable"}],
+        "done": True,
+    }
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["parts"] == [
+        {"type": "text", "text": "[Image attachment unavailable.]"}
+    ]
+    assert len(payload["parts"]) == payload["next_offset"] - payload["offset"]
+
+
 def test_chat_parts_route_rejects_a_changed_parts_revision(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
     session.rpc.parts_result = {"error": "output_changed"}
