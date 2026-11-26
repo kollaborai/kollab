@@ -423,6 +423,7 @@ describe("chat recorder analysis", () => {
         return { status: "complete", success: true, message: `goal owned-by-run created\nobjective: ${objective}` };
       },
       readPersistedGoal: async () => persisted,
+      currentStreamState: async () => ({ conversation_uid: "conv-owned", turns: [], inputs: [] }),
       sleep: async (ms: number) => { clock += ms; },
       U: () => "recorder-objective", R: () => "recorder-reply",
     });
