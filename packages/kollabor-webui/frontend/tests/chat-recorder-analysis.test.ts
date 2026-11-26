@@ -149,11 +149,13 @@ describe("chat recorder analysis", () => {
       },
     });
     let after: any = null;
+    let evaluateCount = 0;
     const command = async (text: string) => {
       after = text === "/goal clear" ? null : makePersisted(text);
     };
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
       activeRuntime: "native", command, mark: async () => {}, hasMatchingGoalTurn,
+      page: { evaluate: async () => ++evaluateCount === 1 ? { goal_id: "goal-ful", conversation_uid: "conv-full" } : false },
       readPersistedGoal: async () => after, currentStreamState: async () => stream,
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
@@ -163,11 +165,13 @@ describe("chat recorder analysis", () => {
     });
     await expect(flow()).rejects.toThrow(/goal reload proof inconclusive/i);
     let successAfter: any = null;
+    evaluateCount = 0;
     const successCommand = async (text: string) => {
       successAfter = text === "/goal clear" ? null : makePersisted(text);
     };
     const success = runInNewContext(`({${body}})["goal-reload"]`, {
       activeRuntime: "native", command: successCommand, mark: async () => {}, hasMatchingGoalTurn,
+      page: { evaluate: async () => ++evaluateCount === 1 ? { goal_id: "goal-ful", conversation_uid: "conv-full" } : false },
       readPersistedGoal: async () => successAfter,
       currentStreamState: async () => stream,
       reloadDuringRun: async (_reply: string, check: any) => {
@@ -255,7 +259,7 @@ describe("chat recorder analysis", () => {
         await check.after(turn, stream, stream);
       },
       hasMatchingGoalTurn: () => true,
-      page: { evaluate: async () => true },
+      page: { evaluate: async () => ({ goal_id: "recorder", conversation_uid: "conv-owned" }) },
       sleep: async () => {},
       U: () => "recorder-objective",
       R: () => "recorder-reply",
@@ -312,6 +316,7 @@ describe("chat recorder analysis", () => {
       hasMatchingGoalTurn: () => false,
       readPersistedGoal: async () => cleared ? null : persisted,
       currentStreamState: async () => stream,
+      page: { evaluate: async () => ({ goal_id: "goal-ful", conversation_uid: "conv-full" }) },
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
       },
@@ -354,6 +359,7 @@ describe("chat recorder analysis", () => {
       hasMatchingGoalTurn: () => false,
       readPersistedGoal: async () => persisted,
       currentStreamState: async () => stream,
+      page: { evaluate: async () => ({ goal_id: "goal-ful", conversation_uid: "conv-full" }) },
       reloadDuringRun: async (_reply: string, check: any) => {
         await check.before(turn, stream);
       },
@@ -639,10 +645,25 @@ describe("chat recorder analysis", () => {
     const turn = { turn_id: "goal-turn", input_ids: [], origin: { type: "goal" } };
     const goal = { conversation_uid: "conversation", goal: { goal_id: "g", attempt: { attempt_id: "a", turn_id: "goal-turn" } } };
     const stream = { conversation_uid: "conversation", turns: [turn] };
-    let goalReads = 0;
+    let persisted: any = null;
+    let evalCount = 0;
     const flow = runInNewContext(`({${body}})["goal-reload"]`, {
-      activeRuntime: "native", command: async () => {}, U: () => "u", R: () => "r",
-      readPersistedGoal: async () => ++goalReads <= 2 ? goal : null,
+      activeRuntime: "native", command: async (text: string) => {
+        if (text === "/goal clear") {
+          persisted = null;
+        } else if (text.startsWith("/goal ")) {
+          persisted = {
+            ...goal,
+            goal: { ...goal.goal, objective: text.slice("/goal ".length) },
+          };
+        }
+      }, U: () => "u", R: () => "r",
+      page: { evaluate: async (_fn: unknown, marker: string) => {
+        if (marker) return ++evalCount === 1 ? { goal_id: "g", conversation_uid: "conversation" } : false;
+        return false;
+      } },
+      readPersistedGoal: async () => persisted,
+      sleep: async () => {},
       currentStreamState: async () => stream,
       hasMatchingGoalTurn: () => true, mark: async () => {},
       reloadDuringRun: async (_reply: string, check: any) => {
@@ -903,7 +924,8 @@ describe("chat recorder analysis", () => {
   it("records event streams only for the selected session", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
-    const window = { fetch: async (_url: string) => new Response('data: {"type":"context_compaction_status","status":"idle"}\n\n') };
+    let event: any = { type: "context_compaction_status", status: "idle" };
+    const window = { fetch: async (_url: string) => new Response(`data: ${JSON.stringify(event)}\n\n`) };
     const install = runInNewContext(`(${body})`, {
       window, Request, Response, ReadableStream, TextDecoder, URL, performance,
       location: { href: "http://localhost/" },
@@ -915,6 +937,15 @@ describe("chat recorder analysis", () => {
     await (await window.fetch("http://localhost/sessions/target/events")).text();
     const entries = (window as any).__rec.net.filter((entry: any) => entry.ev === "context_compaction_status");
     expect(entries).toHaveLength(1);
+    event = {
+      type: "goal.state_changed", goal_id: "goal-short", conversation_uid: "conversation",
+      status: "active", kind: "created", objective: "[chat-recorder-marker] objective",
+    };
+    await (await window.fetch("http://localhost/sessions/target/events")).text();
+    expect((window as any).__rec.net.find((entry: any) => entry.ev === "goal.state_changed")).toMatchObject({
+      goal_id: "goal-short", goal_conversation_uid: "conversation", goal_status: "active",
+      goal_kind: "created", goal_objective: "[chat-recorder-marker] objective",
+    });
   });
 
   it("requires a known approval mode before the prompt flow changes it", () => {

@@ -223,6 +223,13 @@ function installRecorder(cfg) {
       for (const key of ["stop_reason", "message", "input_source", "queued", "tool_name", "status", "action"]) {
         if (event[key] !== undefined) entry[key] = brief(event[key], 60);
       }
+      if (type === "goal.state_changed") {
+        entry.goal_id = event.goal_id;
+        entry.goal_conversation_uid = event.conversation_uid;
+        entry.goal_status = event.status;
+        entry.goal_kind = event.kind;
+        entry.goal_objective = brief(event.objective, 120);
+      }
       if (type === "user_message") entry.text = brief(event.content ?? event.text ?? event.message, 50);
       return void rec.net.push(entry);
     }
@@ -870,15 +877,78 @@ async function record(flow, session, browser, target) {
     // ACP does not expose the persisted goal capability required by this flow.
     async "goal-reload"() {
       if (activeRuntime !== "native") throw new Error("goal-reload is unsupported for ACP: persisted goals are unavailable");
-      await command(`/goal ${U(1)}: Use your terminal tool to run ` + "`sleep 10`" + `, then complete this goal with a concise report containing exactly ${R(1)}.`, "PAGE START GOAL");
+      const existingGoal = await readPersistedGoal();
+      if (existingGoal?.goal) {
+        throw new Error("goal-reload requires a session with no active goal; refusing to replace or clear it");
+      }
+      const goalMarker = `[chat-recorder-${Date.now()}-${Math.random().toString(36).slice(2)}]`;
+      const goalObjective = `${goalMarker} ${U(1)}: Use your terminal tool to run ` + "`sleep 10`" + `, then complete this goal with a concise report containing exactly ${R(1)}.`;
+      let ownedGoal = null;
+      const matchesOwnedGoal = (persisted) => {
+        const goal = persisted?.goal;
+        if (!ownedGoal || !goal || persisted.conversation_uid !== ownedGoal.conversation_uid ||
+            goal.goal_id !== ownedGoal.goal_id) return false;
+        const attempt = goal.attempt ?? {};
+        if (ownedGoal.attempt_id && attempt.attempt_id !== ownedGoal.attempt_id) return false;
+        if (ownedGoal.turn_id && attempt.turn_id !== ownedGoal.turn_id) return false;
+        return true;
+      };
+      const readCreationReceipt = () => page.evaluate((marker) => {
+        const event = window.__rec.net.find((entry) => entry.ev === "goal.state_changed" &&
+          entry.goal_kind === "created" && entry.goal_objective?.startsWith(marker));
+        return event ? {
+          goal_id: event.goal_id,
+          conversation_uid: event.goal_conversation_uid,
+        } : null;
+      }, goalMarker);
+      const captureAttemptIdentity = (persisted) => {
+        if (!matchesOwnedGoal(persisted)) return false;
+        const attempt = persisted.goal.attempt ?? {};
+        if (attempt.attempt_id) {
+          if (ownedGoal.attempt_id && attempt.attempt_id !== ownedGoal.attempt_id) return false;
+          ownedGoal.attempt_id = attempt.attempt_id;
+        }
+        if (attempt.turn_id) {
+          if (ownedGoal.turn_id && attempt.turn_id !== ownedGoal.turn_id) return false;
+          ownedGoal.turn_id = attempt.turn_id;
+        }
+        return true;
+      };
+      await command(`/goal ${goalObjective}`, "PAGE START GOAL");
       let expectedGoal;
       let proofFailure = null;
       try {
+        const createDeadline = Date.now() + 45000;
+        let created = await readPersistedGoal();
+        let receipt = await readCreationReceipt();
+        while (!created?.goal || !created.goal.goal_id || !created.conversation_uid || !receipt) {
+          if (created?.goal && receipt &&
+              (receipt.conversation_uid !== created.conversation_uid ||
+               !created.goal.goal_id.startsWith(receipt.goal_id ?? ""))) {
+            throw new Error("goal reload could not claim the active goal; refusing to clear a goal not created by this run");
+          }
+          if (Date.now() >= createDeadline) {
+            throw new Error("goal reload could not confirm its goal-created event and persisted goal identity");
+          }
+          await sleep(250);
+          created = await readPersistedGoal();
+          receipt = await readCreationReceipt();
+        }
+        if (receipt.conversation_uid !== created.conversation_uid ||
+            !receipt.goal_id || !created.goal.goal_id.startsWith(receipt.goal_id)) {
+          throw new Error("goal reload could not claim the active goal; refusing to clear a goal not created by this run");
+        }
+        ownedGoal = {
+          conversation_uid: created.conversation_uid,
+          goal_id: created.goal.goal_id,
+          attempt_id: created.goal.attempt?.attempt_id ?? null,
+          turn_id: created.goal.attempt?.turn_id ?? null,
+        };
         await reloadDuringRun(R(1), {
           allowEmptyInputs: true,
           before: async (turn, stream) => {
             expectedGoal = await readPersistedGoal();
-            if (!hasMatchingGoalTurn(stream, expectedGoal, turn) ||
+            if (!captureAttemptIdentity(expectedGoal) || !hasMatchingGoalTurn(stream, expectedGoal, turn) ||
                 !hasMatchingGoalTurn(await currentStreamState(), expectedGoal, turn)) {
               throw new Error("goal reload proof inconclusive: persisted goal and running stream turn do not match before reload");
             }
@@ -887,7 +957,7 @@ async function record(flow, session, browser, target) {
           },
           after: async (turn, snapshot, stream) => {
             const restored = await readPersistedGoal();
-            if (!hasMatchingGoalTurn(snapshot, restored, turn) ||
+            if (!captureAttemptIdentity(restored) || !hasMatchingGoalTurn(snapshot, restored, turn) ||
                 !hasMatchingGoalTurn(stream, restored, turn) ||
                 !hasMatchingGoalTurn(await currentStreamState(), restored, turn) ||
                 restored.conversation_uid !== expectedGoal.conversation_uid ||
@@ -910,12 +980,18 @@ async function record(flow, session, browser, target) {
       } finally {
         try {
           let persisted = await readPersistedGoal();
-          if (persisted?.goal) {
+          if (persisted?.goal && !matchesOwnedGoal(persisted)) {
+            throw new Error("persisted goal identity changed; refusing to clear a goal not created by this run");
+          }
+          if (ownedGoal && persisted?.goal) {
             await command("/goal clear", "PAGE CLEANUP /goal clear");
             const cleanupDeadline = Date.now() + 60000;
             while (persisted?.goal && Date.now() < cleanupDeadline) {
               await sleep(500);
               persisted = await readPersistedGoal();
+              if (persisted?.goal && !matchesOwnedGoal(persisted)) {
+                throw new Error("persisted goal identity changed during cleanup; refusing to clear another goal");
+              }
             }
             if (persisted?.goal) {
               throw new Error("timed out waiting for /goal clear to remove the persisted goal");
