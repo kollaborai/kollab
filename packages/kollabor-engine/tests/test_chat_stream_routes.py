@@ -801,13 +801,14 @@ def test_send_now_route_returns_409_when_input_is_not_queued(monkeypatch):
     session.rpc.send_now_result = {
         "found": True,
         "accepted": False,
-        "state": "queued",
+        "state": "ended",
         "turn_id": None,
     }
 
     response = client.post("/sessions/s1/inputs/web-a1/send-now")
 
     assert response.status_code == 409
+    assert response.json()["detail"] == "Input is no longer queued"
 
 
 def test_send_now_route_explains_that_queued_input_remains_queued(monkeypatch):
