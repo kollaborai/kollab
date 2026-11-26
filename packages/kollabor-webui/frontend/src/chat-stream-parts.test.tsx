@@ -118,6 +118,25 @@ describe("chat stream part recovery", () => {
     await expect(fetchChatStreamPartsPage(marker, 0)).rejects.toThrow("does not match");
   });
 
+  it("rejects nested part previews that point at a different row or part index", async () => {
+    const marker = partsMarker("row-nested");
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: marker.part_count,
+      output_revision: marker.output_revision,
+      parts: [{
+        type: "text",
+        text: "[Large part]",
+        chat_stream_part_preview: { ...partMarker("another-row", 0), session_id: marker.session_id },
+      }],
+      done: false,
+    });
+
+    await expect(fetchChatStreamPartsPage(marker, 0)).rejects.toThrow("does not match");
+  });
+
   it("loads a row a page at a time and renders image, hub-note, and prompt parts", async () => {
     const marker = partsMarker("row-render");
     mocks.getChatStreamParts
