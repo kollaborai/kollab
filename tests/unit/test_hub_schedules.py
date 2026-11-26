@@ -330,9 +330,29 @@ async def test_timer_records_errors_from_the_fire_callback(tmp_path):
     assert record["result"] == "error"
     assert record["error"] == "refused"
 
-    # A failed fire still counts as fired: the next try is the next grid
-    # point, not an immediate retry loop.
-    assert await timer.pass_due() == pytest.approx(600.0)
+    # A failed fire retries after the first backoff instead of waiting a full
+    # interval or entering an immediate retry loop.
+    assert await timer.pass_due() == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_timer_retries_failed_delivery_with_exponential_backoff(tmp_path):
+    clock = FakeClock(1000.0)
+    attempts = []
+
+    async def fail_twice(row, agent, due, now):
+        attempts.append((due, now))
+        return len(attempts) > 2, "refused" if len(attempts) <= 2 else ""
+
+    timer = _timer(tmp_path, clock, fail_twice, rows=[_row()])
+
+    assert await timer.pass_due() == pytest.approx(30.0)
+    clock.advance(30.0)
+    assert await timer.pass_due() == pytest.approx(60.0)
+    clock.advance(60.0)
+    assert await timer.pass_due() == pytest.approx(510.0)
+
+    assert attempts == [(1000.0, 1000.0), (1000.0, 1030.0), (1000.0, 1090.0)]
 
 
 @pytest.mark.asyncio
