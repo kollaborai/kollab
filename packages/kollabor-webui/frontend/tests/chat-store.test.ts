@@ -1,7 +1,7 @@
 import { EngineApi } from "../src/api";
 import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ChatRow, InputInfo, InputRequest, TurnInfo } from "../src/chat-stream";
+import type { ChatRow, ChatStreamCursor, InputInfo, InputRequest, TurnInfo } from "../src/chat-stream";
 import {
   applyChatStreamEvent,
   initialStreamState,
@@ -29,15 +29,15 @@ function row(id: string, text = "", kind: ChatRow["kind"] = "reply", role: ChatR
   return { id, seq: 1, kind, role, turn_id: null, status: "complete", parts: [{ type: "text", text }], created_at: WHEN };
 }
 
-function streamEvent(seq: number, type: string, data: unknown, conversationUid = CONV): unknown {
-  return { seq, conversation_uid: conversationUid, type, data };
+function streamEvent(seq: number, type: string, data: unknown, conversationUid = CONV, generation = "daemon-1"): unknown {
+  return { seq, conversation_uid: conversationUid, generation, type, data };
 }
 
 /** A snapshot holding `rows`; live events after it start at `nextSeq`. */
 function snapshot(
   nextSeq: number,
   rows: ChatRow[] = [],
-  extra: { inputs?: InputInfo[]; turns?: TurnInfo[]; older?: string | null } = {},
+  extra: { inputs?: InputInfo[]; turns?: TurnInfo[]; older?: string | null; generation?: string; conversationUid?: string } = {},
 ): unknown {
   return streamEvent(1, "snapshot", {
     rows,
@@ -45,7 +45,7 @@ function snapshot(
     older: extra.older ?? null,
     turns: extra.turns ?? [],
     inputs: extra.inputs ?? [],
-  });
+  }, extra.conversationUid ?? CONV, extra.generation ?? "daemon-1");
 }
 
 /** Applies the events in order, expecting each one to apply, and returns the final state. */
@@ -83,6 +83,7 @@ describe("applyChatStreamEvent", () => {
     expect(result.outcome).toEqual({ kind: "applied" });
     expect(result.state).toEqual({
       conversationUid: CONV,
+      generation: "daemon-1",
       lastSeq: 41,
       rows,
       inputs: { "web-a1": input },
@@ -249,7 +250,7 @@ describe("applyChatStreamEvent", () => {
     const start = applyAll([snapshot(2, [row("r1", "one")], { inputs: [input], older: "c1" })]);
     const gap = applyChatStreamEvent(start, streamEvent(5, "row.upsert", row("r2")));
     expect(gap.outcome).toEqual({ kind: "resync", reason: "seq gap" });
-    expect(gap.state).toEqual({ ...start, conversationUid: null, lastSeq: null });
+    expect(gap.state).toEqual({ ...start, conversationUid: null, generation: null, lastSeq: null });
     expect(applyChatStreamEvent(gap.state, streamEvent(6, "row.upsert", row("r2"))).outcome).toEqual({
       kind: "resync",
       reason: "event before snapshot",
@@ -257,6 +258,24 @@ describe("applyChatStreamEvent", () => {
     const restored = applyChatStreamEvent(gap.state, snapshot(9, [row("r2")]));
     expect(restored.outcome).toEqual({ kind: "applied" });
     expect(restored.state.lastSeq).toBe(8);
+  });
+
+  it("resyncs when a live event belongs to an older daemon generation", () => {
+    const start = applyAll([snapshot(5, [row("r1")], { generation: "daemon-old" })]);
+    const result = applyChatStreamEvent(start, streamEvent(5, "row.upsert", row("r2"), CONV, "daemon-new"));
+
+    expect(result.outcome).toEqual({ kind: "resync", reason: "generation changed" });
+    expect(result.state).toEqual({ ...start, conversationUid: null, generation: null, lastSeq: null });
+  });
+
+  it("a snapshot from a new generation resets sequence for the same conversation", () => {
+    const oldWindow = applyAll([snapshot(101, [row("old")], { generation: "daemon-old" })]);
+    const newWindow = applyChatStreamEvent(oldWindow, snapshot(5, [row("new")], { generation: "daemon-new" }));
+    const next = applyChatStreamEvent(newWindow.state, streamEvent(5, "row.upsert", row("next"), CONV, "daemon-new"));
+
+    expect(newWindow.state).toMatchObject({ conversationUid: CONV, generation: "daemon-new", lastSeq: 4 });
+    expect(newWindow.state.rows.map((item) => item.id)).toEqual(["new"]);
+    expect(next).toMatchObject({ outcome: { kind: "applied" }, state: { generation: "daemon-new", lastSeq: 5 } });
   });
 });
 
@@ -325,9 +344,25 @@ describe("LiveChatStore", () => {
           streams.push(stream);
         }),
     );
+    const streamChatEvents = vi.fn((
+      sessionId: string,
+      cursor: ChatStreamCursor | null,
+      signal?: AbortSignal,
+      onEvent?: (event: unknown) => void,
+      onOpen?: () => void,
+    ) => {
+      const query = new URLSearchParams();
+      if (cursor) {
+        query.set("after", String(cursor.after));
+        query.set("conversation_uid", cursor.conversation_uid);
+        query.set("generation", cursor.generation);
+      }
+      const suffix = query.size ? `?${query.toString()}` : "";
+      return streamSse(`/sessions/${encodeURIComponent(sessionId)}/stream${suffix}`, signal, onEvent, onOpen);
+    });
     const request = vi.fn(async (_path: string, _init?: RequestInit) => new Response(null, { status: 202 }));
-    const transport = { request, streamSse } as unknown as ChatTransport;
-    return { transport, request, streamSse, streams };
+    const transport = { request, streamSse, streamChatEvents } as unknown as ChatTransport;
+    return { transport, request, streamSse, streamChatEvents, streams };
   }
 
   function make(options: { maxAttempts?: number } = {}) {
@@ -370,13 +405,13 @@ describe("LiveChatStore", () => {
     expect(store.connection).toBe("connecting");
   });
 
-  it("after a snapshot with next_seq 5, a dropped connection reconnects to /sessions/s1/stream?after=4", async () => {
+  it("after a snapshot with next_seq 5, a dropped connection reconnects with the full stream cursor", async () => {
     const { store, streams } = make();
     const first = await startOpen(store, streams);
     first.emit(snapshot(5, [row("r1")]));
     first.drop();
     await vi.waitFor(() => expect(streams).toHaveLength(2));
-    expect(streams[1].path).toBe("/sessions/s1/stream?after=4");
+    expect(streams[1].path).toBe("/sessions/s1/stream?after=4&conversation_uid=conv-1&generation=daemon-1");
   });
 
   it("a normal end of the stream also reconnects, with after", async () => {
@@ -385,7 +420,27 @@ describe("LiveChatStore", () => {
     first.emit(snapshot(5, [row("r1")]));
     first.finish();
     await vi.waitFor(() => expect(streams).toHaveLength(2));
-    expect(streams[1].path).toBe("/sessions/s1/stream?after=4");
+    expect(streams[1].path).toBe("/sessions/s1/stream?after=4&conversation_uid=conv-1&generation=daemon-1");
+  });
+
+  it("a same-conversation new-generation snapshot resets seq and reconnects with its generation", async () => {
+    const { store, streams, streamChatEvents } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(101, [row("old")], { generation: "daemon-old" }));
+    first.drop();
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streamChatEvents.mock.calls[1][1]).toEqual({
+      after: 100, conversation_uid: CONV, generation: "daemon-old",
+    });
+
+    streams[1].open();
+    streams[1].emit(snapshot(5, [row("new")], { generation: "daemon-new" }));
+    streams[1].drop();
+    await vi.waitFor(() => expect(streams).toHaveLength(3));
+    expect(store.rows.map((item) => item.id)).toEqual(["new"]);
+    expect(streamChatEvents.mock.calls[2][1]).toEqual({
+      after: 4, conversation_uid: CONV, generation: "daemon-new",
+    });
   });
 
   it("a seq gap resyncs: the next connect has no after, and rows stay visible until the next snapshot replaces them", async () => {
