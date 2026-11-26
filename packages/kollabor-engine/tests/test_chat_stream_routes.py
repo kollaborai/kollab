@@ -263,6 +263,55 @@ def test_stream_discards_stale_event_when_daemon_snapshot_is_newer_conversation(
     ]
 
 
+def test_stream_replays_from_requested_cursor_after_empty_initial_replay(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.subscribe_results = [
+        {"events": []},
+        {
+            "events": [
+                {
+                    "seq": 7,
+                    "conversation_uid": "conv-1",
+                    "type": "row.upsert",
+                    "data": {"id": "replayed-input"},
+                }
+            ]
+        },
+    ]
+    session.queue = asyncio.Queue()
+    session.queue.put_nowait(
+        {
+            "type": "chat_stream",
+            "event": {
+                "seq": 8,
+                "conversation_uid": "conv-1",
+                "type": "row.upsert",
+                "data": {"id": "live-input"},
+            },
+        }
+    )
+    session.queue.put_nowait(None)
+
+    response = client.get("/sessions/s1/stream?after=6&conversation_uid=conv-1")
+
+    assert response.status_code == 200
+    data_lines = [
+        line[6:] for line in response.text.splitlines() if line.startswith("data: ")
+    ]
+    events = [json.loads(line) for line in data_lines]
+    assert [event["seq"] for event in events] == [7, 8]
+    assert session.rpc.calls == [
+        (
+            "state.chat_stream.subscribe",
+            {"after": 6, "conversation_uid": "conv-1"},
+        ),
+        (
+            "state.chat_stream.subscribe",
+            {"after": 6, "conversation_uid": "conv-1"},
+        ),
+    ]
+
+
 def test_input_route_returns_202_with_the_sender_id_and_state(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
 
@@ -432,3 +481,45 @@ def test_send_now_route_returns_409_when_input_is_not_queued(monkeypatch):
     response = client.post("/sessions/s1/inputs/web-a1/send-now")
 
     assert response.status_code == 409
+
+
+def test_send_now_after_cancelling_input_returns_409_not_404(monkeypatch):
+    class CancelledInputRuntime:
+        async def input_scope(self, conversation_uid):
+            return ("test-scope", conversation_uid, "test-principal")
+
+        async def add_input(self, params):
+            return {"accepted": True, "id": params["id"], "state": "queued"}
+
+        async def cancel_queued_input(self, params):
+            return {"found": True, "cancelled": True}
+
+        async def send_now(self, params):
+            return {"found": False, "accepted": False}
+
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    runtime = CancelledInputRuntime()
+    bus = SimpleNamespace(
+        get_service=lambda name: (
+            runtime if name == "web_message_queue_runtime" else None
+        )
+    )
+    state = SimpleNamespace(
+        _event_bus=bus,
+        _llm_service=SimpleNamespace(conversation_history=[]),
+        get_conversation_uid=lambda: "conv-1",
+    )
+    daemon_rpc = RpcServer()
+    register_chat_stream_handlers(daemon_rpc, ChatStreamService(state))
+    session.daemon.rpc = _DispatchingRpc(daemon_rpc)
+
+    added = client.post(
+        "/sessions/s1/inputs",
+        json={"id": "web-cancelled", "text": "hello", "attachments": []},
+    )
+    cancelled = client.post("/sessions/s1/inputs/web-cancelled/cancel")
+    sent = client.post("/sessions/s1/inputs/web-cancelled/send-now")
+
+    assert added.status_code == 202
+    assert cancelled.status_code == 200
+    assert sent.status_code == 409
