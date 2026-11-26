@@ -31,9 +31,24 @@ const isTextPart = (part: { readonly type: string }): part is TextMessagePart =>
 function toPart(part: ChatPart): LikePart {
   switch (part.type) {
     case "text":
-      return { type: "text", text: part.text };
+      return {
+        type: "text",
+        text: part.text,
+        ...(part.chat_stream_content_preview || part.chat_stream_part_preview
+          ? { providerMetadata: { kollab: {
+              ...(part.chat_stream_content_preview ? { chat_stream_content_preview: part.chat_stream_content_preview } : {}),
+              ...(part.chat_stream_part_preview ? { chat_stream_part_preview: part.chat_stream_part_preview } : {}),
+            } } }
+          : {}),
+      };
     case "reasoning":
-      return { type: "reasoning", text: part.text };
+      return {
+        type: "reasoning",
+        text: part.text,
+        ...(part.chat_stream_content_preview
+          ? { providerMetadata: { kollab: { chat_stream_content_preview: part.chat_stream_content_preview } } }
+          : {}),
+      };
     case "tool-call":
       return {
         type: "tool-call",
@@ -65,7 +80,13 @@ export function toThreadMessageLike(row: ChatRow, turns: Readonly<Record<string,
     role: hasStructuredSystemParts ? "assistant" : row.role,
     createdAt: new Date(row.created_at),
     content: row.parts.map(toPart),
-    metadata: { custom: { chatRowKind: row.kind, chatRowStatus: row.status, chatTurnId: row.turn_id, chatRowRole: row.role } },
+    metadata: { custom: {
+      chatRowKind: row.kind,
+      chatRowStatus: row.status,
+      chatTurnId: row.turn_id,
+      chatRowRole: row.role,
+      ...(row.chat_stream_parts_preview ? { chatStreamPartsPreview: row.chat_stream_parts_preview } : {}),
+    } },
     ...(row.role === "assistant" && row.status === "failed"
       ? { status: { type: "incomplete" as const, reason: "error" as const } }
       : {}),
