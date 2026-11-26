@@ -16,7 +16,9 @@ from kollabor_engine.media_store import (
     count_image_tokens,
     list_for,
     open_media,
+    open_queue_handoff_media,
     save,
+    save_queue_handoff_media,
 )
 from kollabor_engine.routes.messages import _save_sent_media
 
@@ -179,6 +181,50 @@ def test_queue_handoff_is_idempotent_but_cannot_rebind_request_to_other_media(
     ]
     assert [entry["ref"] for entry in request_entries] == [first.ref]
     assert not any(entry.get("queue_request_id") for entry in entries if entry["ref"] == second.ref)
+
+
+def test_queue_attachment_is_resolvable_only_after_its_history_row_is_bound(
+    tmp_path: Path,
+) -> None:
+    image = b"\x89PNG\r\n\x1a\nattachment bytes"
+    media_refs = save_queue_handoff_media(
+        tmp_path,
+        "s1",
+        request_id="queue-request-a",
+        attachments=(("att-source-a", "image/png", image),),
+    )
+    source_ref, media_ref = media_refs[0]
+
+    with pytest.raises(FileNotFoundError):
+        open_queue_handoff_media(
+            tmp_path,
+            "s1",
+            request_id="queue-request-a",
+            source_ref=source_ref,
+        )
+
+    bind_queue_handoff(
+        tmp_path,
+        "s1",
+        request_id="queue-request-a",
+        history_row_uuid="history-row-a",
+        source_media_refs=media_refs,
+    )
+
+    assert open_queue_handoff_media(
+        tmp_path,
+        "s1",
+        request_id="queue-request-a",
+        source_ref=source_ref,
+    ) == (image, "image/png")
+    with pytest.raises(FileNotFoundError):
+        open_queue_handoff_media(
+            tmp_path,
+            "s1",
+            request_id="queue-request-b",
+            source_ref=source_ref,
+        )
+    assert media_ref
 
 
 def test_non_ascii_digit_tokens_are_not_tokens_and_bind_nothing(tmp_path: Path) -> None:

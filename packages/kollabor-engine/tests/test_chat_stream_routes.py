@@ -173,6 +173,63 @@ def test_stream_route_forwards_generation_and_daemon_restart_returns_snapshot(
     ]
 
 
+def test_stream_materializes_queue_image_refs_as_authenticated_attachment_paths(
+    monkeypatch,
+):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.subscribe_results = [
+        {
+            "events": [
+                {
+                    "seq": 0,
+                    "conversation_uid": "conversation-a",
+                    "generation": "daemon-1",
+                    "type": "snapshot",
+                    "data": {
+                        "rows": [
+                            {
+                                "id": "web-image-1",
+                                "seq": 0,
+                                "kind": "input",
+                                "role": "user",
+                                "turn_id": None,
+                                "status": "queued",
+                                "parts": [
+                                    {
+                                        "type": "image",
+                                        "url": (
+                                            "kollab-queue-image:?conversation_uid="
+                                            "conversation-a&request_id=web-image-1&ref=att-ref"
+                                        ),
+                                    }
+                                ],
+                                "created_at": "2026-11-25T12:00:00Z",
+                            }
+                        ],
+                        "next_seq": 1,
+                        "older": None,
+                        "turns": [],
+                        "inputs": [],
+                    },
+                }
+            ]
+        }
+    ]
+
+    response = client.get("/sessions/s1/stream")
+    events = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+    assert response.status_code == 200
+    assert events[0]["data"]["rows"][0]["parts"][0]["url"] == (
+        "/sessions/s1/web-message-queue/items/web-image-1/attachments/att-ref"
+        "?conversation_uid=conversation-a"
+    )
+
+
 def test_legacy_after_without_identity_forces_a_snapshot_request(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
     session.rpc.subscribe_results = [

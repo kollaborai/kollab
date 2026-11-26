@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -175,7 +176,8 @@ async def test_send_now_dispatches_only_the_input_named_by_the_client():
 
 @pytest.mark.asyncio
 async def test_input_attachments_are_staged_and_bound_to_the_same_client_id():
-    server, _state, runtime = _server_and_runtime()
+    server, state, runtime = _server_and_runtime()
+    stream = state._event_bus.get_service("chat_stream")
     image = b"\x89PNG\r\n\x1a\nchat stream test image"
     data_url = "data:image/png;base64," + base64.b64encode(image).decode("ascii")
 
@@ -210,6 +212,13 @@ async def test_input_attachments_are_staged_and_bound_to_the_same_client_id():
         item.request_id, item.attachment_refs[0]
     )
     assert staged.data == image
+    row = next(
+        row
+        for row in stream._snapshot("conversation-a")["rows"]
+        if row["id"] == "web-a1"
+    )
+    assert row["parts"][1]["url"].startswith("kollab-queue-image:?")
+    assert "data:" not in row["parts"][1]["url"]
 
 
 @pytest.mark.asyncio
@@ -598,9 +607,14 @@ async def test_web_queue_batch_publishes_inputs_and_cancel_lifecycle():
         "text": "second queued",
     }
     assert rows_by_id[second_id]["parts"][1]["type"] == "image"
-    assert rows_by_id[second_id]["parts"][1]["url"].startswith(
-        "data:image/png;base64,"
-    )
+    image_url = rows_by_id[second_id]["parts"][1]["url"]
+    assert image_url.startswith("kollab-queue-image:?")
+    image_ref = parse_qs(urlsplit(image_url).query)
+    assert image_ref == {
+        "conversation_uid": ["conversation-a"],
+        "request_id": [second_id],
+        "ref": [staged["result"]["ref"]],
+    }
 
     cancelled = await _call(
         server,

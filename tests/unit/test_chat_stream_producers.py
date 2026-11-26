@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -26,7 +27,15 @@ class _QueueRuntime:
         return ("scope", conversation_uid, "principal")
 
     async def add_input(self, params):
-        return {"accepted": True, "id": params["id"], "state": "queued"}
+        return {
+            "accepted": True,
+            "id": params["id"],
+            "state": "queued",
+            "attachment_refs": [
+                f"test-ref-{index}"
+                for index, _attachment in enumerate(params.get("attachments", []))
+            ],
+        }
 
 
 class _Bus:
@@ -668,7 +677,10 @@ async def test_input_image_parts_keep_the_clients_row_id_when_the_turn_starts():
     ]
     assert input_rows[-1]["parts"] == [
         {"type": "text", "text": "look"},
-        {"type": "image", "url": "data:image/png;base64,AAAA"},
+        {
+            "type": "image",
+            "url": "kollab-queue-image:?conversation_uid=conversation-a&request_id=web-image-1&ref=test-ref-0",
+        },
     ]
 
 
@@ -868,6 +880,42 @@ def test_snapshot_translates_canonical_transcript_images_to_chat_parts():
         {"type": "text", "text": "look"},
         {"type": "image", "url": "https://example.test/image.png"},
     ]
+
+
+def test_snapshot_resolves_uploaded_transcript_images_without_inline_data():
+    state = _State()
+    state._llm_service._image_store = SimpleNamespace(
+        resolve=lambda _media_id: "data:image/png;base64," + "A" * (20 * 1024 * 1024)
+    )
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content=[
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image",
+                    "source": {"kind": "managed_upload", "media_id": "ephemeral-image"},
+                },
+            ],
+            metadata={
+                "request_id": "native-image-request",
+                "queue_handoff": {
+                    "request_id": "native-image-request",
+                    "media_refs": [
+                        {"source_ref": "att-source-ref", "ref": "20261125-120000-a1b2"}
+                    ],
+                },
+            },
+        )
+    ]
+
+    snapshot, rows = _snapshot_rows(ChatStreamService(state))
+
+    assert rows[0]["parts"] == [
+        {"type": "text", "text": "look"},
+        {"type": "image", "url": "/media/20261125-120000-a1b2"},
+    ]
+    assert "data:image" not in json.dumps(snapshot)
 
 
 def test_snapshot_omits_hidden_voice_transcript_instruction():

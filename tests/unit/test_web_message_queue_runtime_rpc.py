@@ -280,7 +280,7 @@ async def test_image_only_batch_retry_returns_the_original_idempotent_receipt():
     rows = stream._snapshot("conversation-a")["rows"]
     row = next(row for row in rows if row["id"] == ids["request_ids"][0])
     assert row["parts"][0]["type"] == "image"
-    assert row["parts"][0]["url"].startswith("data:image/png;base64,")
+    assert row["parts"][0]["url"].startswith("kollab-queue-image:?")
     assert await runtime.close() is True
 
 
@@ -346,7 +346,7 @@ async def test_large_image_batch_snapshot_uses_small_resolvable_image_references
 
     assert len(image_parts) == image_count
     assert len(serialized) < 16 * 1024 * 1024
-    assert all(not part["url"].startswith("data:") for part in image_parts)
+    assert all(part["url"].startswith("kollab-queue-image:?") for part in image_parts)
     assert await runtime.close() is True
 
 
