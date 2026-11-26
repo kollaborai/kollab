@@ -164,7 +164,7 @@ def test_large_streaming_row_appends_are_coalesced_and_final_upsert_is_current(
     assert append["type"] == "row.append"
     assert full_row_scans == []
 
-    stale = stream.get_content(
+    retained_snapshot = stream.get_content(
         {
             "row_id": "large-streaming-reply",
             "part_index": 0,
@@ -174,16 +174,16 @@ def test_large_streaming_row_appends_are_coalesced_and_final_upsert_is_current(
             "limit": 32,
         }
     )
-    assert stale == {"error": "output_changed"}
+    assert retained_snapshot["content"] == original_text[:32]
+    assert retained_snapshot["total_chars"] == len(original_text)
 
     clock[0] += 1.0
     refresh = stream.record_event(
         "row.append",
         {"id": "large-streaming-reply", "part": 0, "text": "tail-two"},
     )
-    assert refresh["type"] == "row.upsert"
-    refreshed_preview = refresh["data"]["parts"][0]["chat_stream_content_preview"]
-    assert refreshed_preview["output_revision"] != first_preview["output_revision"]
+    assert refresh["type"] == "row.append"
+    assert full_row_scans == []
 
     final_text = original_text + "tail-onetail-two-final"
     stream._reply_rows[(uid, "turn-large")] = "large-streaming-reply"
