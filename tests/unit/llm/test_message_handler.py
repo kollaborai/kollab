@@ -6,6 +6,7 @@ import unittest
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from kollabor_agent.queue_processor import TaggedInput
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 from kollabor.state.chat_stream import ChatStreamService
@@ -1360,7 +1361,12 @@ class TestMessageHandler(unittest.TestCase):
             self.handler.handle_add_message(data, MagicMock())
         )
         self.assertTrue(result["success"])
-        self.coordinator._enqueue_with_overflow_strategy.assert_awaited_once_with("native again")
+        self.coordinator._enqueue_with_overflow_strategy.assert_awaited_once()
+        queued = self.coordinator._enqueue_with_overflow_strategy.await_args.args[0]
+        self.assertIsInstance(queued, TaggedInput)
+        self.assertEqual(queued.content, "native again")
+        self.assertEqual(len(queued.request_ids), 1)
+        self.assertTrue(queued.request_ids[0].startswith("plugin-"))
 
 
 if __name__ == "__main__":
