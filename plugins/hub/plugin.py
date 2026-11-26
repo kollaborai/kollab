@@ -10620,12 +10620,14 @@ class HubPlugin(BasePlugin):
                                 None,
                             )
                             if callable(record_row):
-                                record_row(
+                                recorded_row = record_row(
                                     chat_stream_row,
                                     history=getattr(
                                         llm_service, "conversation_history", None
                                     ),
                                 )
+                                if isinstance(recorded_row, dict):
+                                    chat_stream_row = recorded_row
                             await llm_service.conversation_logger.log_system_message(
                                 hud_content or formatted,
                                 parent_uuid=getattr(

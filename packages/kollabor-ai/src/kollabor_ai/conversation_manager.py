@@ -1351,6 +1351,7 @@ class ConversationManager:
         has_applied_native_hub_compaction = False
         chat_stream_row_revision = 0
         saved_history_compaction_id: Optional[str] = None
+        native_hub_compactions: List[Dict[str, Any]] = []
         compaction_uuids: set[str] = set()
         current_parent_uuid: Optional[str] = None
         session_stats: Optional[Dict[str, Any]] = None
@@ -1397,6 +1398,14 @@ class ConversationManager:
             }:
                 row["status"] = "failed"
             chat_stream_rows_by_id[row_id] = row
+            # A staged compaction is logged before its in-memory history swap.
+            # Rows appended during that window appear after the compaction
+            # record in JSONL, so replay every already-seen coordinate transform
+            # over a newly restored row before processing later records.
+            for compaction in native_hub_compactions:
+                if row_id not in chat_stream_rows_by_id:
+                    break
+                apply_native_hub_compaction(compaction, row_id=row_id)
             return True
 
         def restore_compaction_positions(data: Dict[str, Any]) -> None:
@@ -1470,7 +1479,9 @@ class ConversationManager:
                 last_compaction_retained_positions = None
                 last_compaction_retained_position_map = None
 
-        def apply_native_hub_compaction(data: Dict[str, Any]) -> bool:
+        def apply_native_hub_compaction(
+            data: Dict[str, Any], *, row_id: Optional[str] = None
+        ) -> bool:
             """Filter and translate Hub row coordinates at this compaction."""
             nonlocal has_applied_native_hub_compaction
             snapshot_count = data.get("compaction_snapshot_count")
@@ -1520,15 +1531,17 @@ class ConversationManager:
             )
             retained = set(retained_positions)
             updated: Dict[str, Dict[str, Any]] = {}
-            for row_id, row in chat_stream_rows_by_id.items():
+            for current_row_id, row in list(chat_stream_rows_by_id.items()):
+                if row_id is not None and current_row_id != row_id:
+                    continue
                 coordinate = row.get("_history_compaction_id")
                 if coordinate == compaction_id:
-                    updated[row_id] = row
+                    updated[current_row_id] = row
                     continue
                 if coordinate is not None and coordinate != source_id:
                     # A record may already carry a more recent coordinate, for
                     # example a row update appended after a saved transcript.
-                    updated[row_id] = row
+                    updated[current_row_id] = row
                     continue
                 position = row.get("_history_index")
                 if isinstance(position, int) and not isinstance(position, bool) and position >= 0:
@@ -1547,7 +1560,7 @@ class ConversationManager:
                             output_count + position - snapshot_count
                         )
                         row["_history_compaction_id"] = compaction_id
-                        updated[row_id] = row
+                        updated[current_row_id] = row
                         continue
                     if position_map:
                         left = position_map.get(position - 1)
@@ -1566,16 +1579,22 @@ class ConversationManager:
                         ):
                             continue
                     row["_history_compaction_id"] = compaction_id
-                    updated[row_id] = row
+                    updated[current_row_id] = row
                     continue
                 # New-format rows always carry a position. Keep legacy rows
                 # using their timestamp only when positional metadata is absent.
                 stamp = _parse_record_stamp(row.get("created_at"))
                 boundary = _parse_record_stamp(data.get("timestamp"))
                 if stamp is None or boundary is None or stamp > boundary:
-                    updated[row_id] = row
-            chat_stream_rows_by_id.clear()
-            chat_stream_rows_by_id.update(updated)
+                    updated[current_row_id] = row
+            if row_id is None:
+                chat_stream_rows_by_id.clear()
+                chat_stream_rows_by_id.update(updated)
+                native_hub_compactions.append(deepcopy(data))
+            elif row_id in updated:
+                chat_stream_rows_by_id[row_id] = updated[row_id]
+            else:
+                chat_stream_rows_by_id.pop(row_id, None)
             has_applied_native_hub_compaction = True
             return True
 
@@ -1665,6 +1684,7 @@ class ConversationManager:
                         last_compaction_retained_position_map = None
                         last_compaction_output_count = None
                         has_applied_native_hub_compaction = False
+                        native_hub_compactions.clear()
                         saved_history_compaction_id = (
                             data.get("chat_stream_history_compaction_id")
                             if isinstance(
@@ -2332,6 +2352,9 @@ class ConversationManager:
             # Set up the new session state
             self.current_session_id = new_session_id
             self.messages = new_messages
+            self.set_chat_stream_history_coordinate(
+                self._history_compaction_id(new_messages), len(new_messages)
+            )
             self.message_index = {m["uuid"]: m for m in new_messages}
             self.chat_stream_rows = branched_hub_rows
             self._update_context_window()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +12,8 @@ import pytest
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.state.chat_stream import ChatStreamLog, ChatStreamService
 from kollabor_agent.runtime import AgentRuntime
+from kollabor_ai.conversation_logger import KollaborConversationLogger
+from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_events.chat_stream import sequence_problems
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.models import HubMessage, MessageScope
@@ -165,10 +169,42 @@ async def test_native_hub_admission_stays_a_note_until_a_turn_starts():
 
 
 @pytest.mark.asyncio
-async def test_real_hub_message_projects_one_row_into_chat_stream():
+async def test_real_hub_message_projects_one_row_into_chat_stream(tmp_path):
     tap = DisplayTap()
     tap.conversation_source = lambda: "conversation-a"
     llm = _LLM()
+    conversations = tmp_path / "conversations"
+    config = SimpleNamespace(
+        _conversations_dir=conversations,
+        get=lambda _key, default=None: default,
+    )
+    logger = KollaborConversationLogger(conversations)
+    manager = ConversationManager(config, logger)
+    llm.conversation_logger = logger
+    llm.conversation_manager = manager
+    llm.conversation_history = [
+        {
+            "uuid": "compaction-summary",
+            "role": "user",
+            "content": "compacted history",
+            "timestamp": "2026-11-25T11:00:00Z",
+            "metadata": {
+                "context_compaction": True,
+                "compaction_id": "hub-producer-coordinate",
+            },
+        },
+        {
+            "uuid": "compacted-tail",
+            "role": "assistant",
+            "content": "tail",
+            "timestamp": "2026-11-25T11:00:01Z",
+            "metadata": {},
+        },
+    ]
+    manager.messages = llm.conversation_history
+    manager.message_index = {message["uuid"]: message for message in manager.messages}
+    manager._update_context_window()
+    assert manager.save_session(logger.session_id)
     plugin = _plugin(llm=llm, tap=tap)
     plugin._display_tap = tap
     state = SimpleNamespace(
@@ -195,12 +231,47 @@ async def test_real_hub_message_projects_one_row_into_chat_stream():
     assert rows[0]["kind"] == "note"
     assert rows[0]["parts"][0]["type"] == "hub-note"
     assert message.id not in stream._inputs.get("conversation-a", {})
-    persisted_row = llm.conversation_logger.log_system_message.await_args.kwargs[
-        "chat_stream_row"
-    ]
+    persisted_row = next(
+        record["chat_stream_row"]
+        for record in map(json.loads, logger.session_file.read_text().splitlines())
+        if record.get("chat_stream_row", {}).get("id") == message.id
+    )
     assert persisted_row["id"] == message.id
     assert persisted_row["kind"] == "note"
     assert persisted_row["parts"] == rows[0]["parts"]
+    assert persisted_row["_history_index"] == 2
+    assert persisted_row["_history_compaction_id"] == "hub-producer-coordinate"
+    assert persisted_row["_history_row_revision"] == 1
+
+    compaction_timestamp = (
+        datetime.now(timezone.utc) + timedelta(seconds=5)
+    ).isoformat().replace("+00:00", "Z")
+    with logger.session_file.open("a") as session:
+        session.write(
+            json.dumps(
+                {
+                    "type": "context_compaction",
+                    "uuid": "compact-after-producer",
+                    "timestamp": compaction_timestamp,
+                    "compaction_round": 1,
+                    "compaction_snapshot_count": 2,
+                    "compaction_retained_positions": [0, 1],
+                    "compaction_retained_position_map": {"0": 0, "1": 1},
+                    "compaction_output_count": 2,
+                    "compaction_id": "after-hub-producer",
+                    "compaction_source_id": "hub-producer-coordinate",
+                    "compaction_snapshot_row_revision": 1,
+                    "content": "next compacted summary",
+                }
+            )
+            + "\n"
+        )
+
+    resumed = ConversationManager(config)
+    assert resumed.load_session(logger.session_id)
+    restored = next(row for row in resumed.chat_stream_rows if row["id"] == message.id)
+    assert restored["_history_index"] == 2
+    assert restored["_history_compaction_id"] == "after-hub-producer"
 
 
 @pytest.mark.asyncio
