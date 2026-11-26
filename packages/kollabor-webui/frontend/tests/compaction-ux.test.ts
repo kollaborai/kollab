@@ -43,6 +43,7 @@ function windowOf(rows: ChatRow[], nextSeq: number): StreamState {
   const result = applyChatStreamEvent(initialStreamState, {
     seq: 1,
     conversation_uid: CONV,
+    generation: "fixture-daemon-1",
     type: "snapshot",
     data: { rows, next_seq: nextSeq, older: null, turns: [], inputs: [] },
   });
@@ -52,7 +53,7 @@ function windowOf(rows: ChatRow[], nextSeq: number): StreamState {
 
 /** Applies one live event and asserts it was applied, not resynced or dropped. */
 function applyLive(state: StreamState, seq: number, type: string, data: unknown): StreamState {
-  const result = applyChatStreamEvent(state, { seq, conversation_uid: CONV, type, data });
+  const result = applyChatStreamEvent(state, { seq, conversation_uid: CONV, generation: "fixture-daemon-1", type, data });
   expect(result.outcome).toEqual({ kind: "applied" });
   return result.state;
 }

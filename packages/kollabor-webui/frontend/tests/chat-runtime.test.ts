@@ -152,14 +152,14 @@ describe("toRepository", () => {
     const [snapshot, streaming] = fixture.events;
     const turn = { turn_id: "t1", state: "running", input_ids: [] };
     let state = initialStreamState;
-    for (const event of [snapshot, streaming, { seq: 3, conversation_uid: "conv-1", type: "turn.state", data: turn }]) {
+    for (const event of [snapshot, streaming, { seq: 3, conversation_uid: "conv-1", generation: "fixture-daemon-1", type: "turn.state", data: turn }]) {
       const result = applyChatStreamEvent(state, event);
       expect(result.outcome.kind).toBe("applied");
       state = result.state;
     }
     expect(toRepository(state.rows, state.turns).messages[0].message.status.type).toBe("running");
     const ended = applyChatStreamEvent(state, {
-      seq: 4, conversation_uid: "conv-1", type: "turn.state", data: { ...turn, state: "ended" },
+      seq: 4, conversation_uid: "conv-1", generation: "fixture-daemon-1", type: "turn.state", data: { ...turn, state: "ended" },
     });
     expect(ended.outcome.kind).toBe("applied");
     expect(toRepository(ended.state.rows, ended.state.turns).messages[0].message.status.type).toBe("complete");
