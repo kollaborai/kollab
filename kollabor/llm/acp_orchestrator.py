@@ -1365,6 +1365,9 @@ class ACPOrchestrator:
             "request_id": request_id,
             "source": source,
             "thread_id": thread_id,
+            # Each ACP admission records one user input row, even when its
+            # turn later joins work already running in the provider.
+            "chat_stream_input_count": 1,
         }
         if isinstance(hub_note, dict):
             metadata.update(

@@ -4383,6 +4383,7 @@ class LLMService:
             "request_id": request_id,
             "source": source,
             "thread_id": thread_id,
+            "chat_stream_input_count": 1,
         }
         if operator_inputs:
             metadata["operator_inputs"] = list(operator_inputs)

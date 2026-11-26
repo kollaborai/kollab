@@ -1097,6 +1097,9 @@ async def test_acp_hub_input_admission_keeps_hub_id_and_ends_its_lifecycle(
         hub_note=build_hub_note(message, observed=False),
         hub_admission="input",
     )
+    assert state._llm_service.conversation_history[0].metadata[
+        "chat_stream_input_count"
+    ] == 1
     orchestrator._on_runner_update(
         {
             "kind": "turn_start",
