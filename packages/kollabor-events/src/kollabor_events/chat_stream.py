@@ -295,6 +295,10 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 )
         seen.append(info["state"])
         turn_id = info.get("turn_id")
+        if info["state"] in ("started", "joined") and turn_id in ended_turns:
+            problems.append(
+                f"seq {seq}: input {info['id']} {info['state']} after turn {turn_id} ended"
+            )
         if info["id"] in turn_of:
             previous = turn_of[info["id"]]
             if previous != turn_id and (
