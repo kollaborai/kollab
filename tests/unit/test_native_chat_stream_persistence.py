@@ -226,6 +226,7 @@ def test_single_input_operator_text_keeps_its_unambiguous_image():
             ],
             metadata={
                 "request_id": input_id,
+                "chat_stream_input_count": 1,
                 "operator_inputs": [
                     {
                         "source": "webui",
@@ -251,6 +252,52 @@ def test_single_input_operator_text_keeps_its_unambiguous_image():
         {"type": "text", "text": "describe this"},
         {"type": "image", "url": "https://example.test/single.png"},
     ]
+
+
+def test_single_tracked_id_does_not_claim_image_from_untracked_batch_member():
+    input_id = "web-tracked-next-to-untracked"
+    history = [
+        ConversationMessage(
+            role="user",
+            content=[
+                {"type": "text", "text": "tracked input"},
+                {"type": "text", "text": "untracked input"},
+                {
+                    "type": "image",
+                    "source": {
+                        "kind": "url",
+                        "url": "https://example.test/untracked.png",
+                    },
+                },
+            ],
+            metadata={
+                "request_id": input_id,
+                "request_ids": [input_id],
+                "chat_stream_input_count": 2,
+                "operator_inputs": [
+                    {
+                        "source": "webui",
+                        "timestamp": "2026-11-25T12:00:00Z",
+                        "text": "tracked input",
+                        "request_id": input_id,
+                    }
+                ],
+            },
+        )
+    ]
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_history=history),
+        _event_bus=None,
+        get_conversation_uid=lambda: "conversation-mixed-tracked-untracked",
+        chat_stream_snapshot=lambda: {"rows": [], "turns": [], "inputs": []},
+    )
+
+    rows = _input_rows(
+        ChatStreamService(state), "conversation-mixed-tracked-untracked"
+    )
+
+    assert [row["id"] for row in rows] == [input_id]
+    assert rows[0]["parts"] == [{"type": "text", "text": "tracked input"}]
 
 
 @pytest.mark.asyncio
@@ -285,3 +332,56 @@ async def test_watchdog_ending_a_continuing_native_turn_persists_failure(tmp_pat
 
     assert [row["id"] for row in rows] == [request_id]
     assert rows[0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_native_batch_records_untracked_input_count_for_projection(tmp_path):
+    conversation_logger = KollaborConversationLogger(tmp_path / "conversations")
+    request_id = "web-tracked-input"
+    row_uuid = await conversation_logger.log_user_message(
+        "tracked input", message_metadata={"request_id": request_id}
+    )
+    history = []
+    processor = _native_processor(history, conversation_logger, "end_turn")
+    operator_input = {
+        "source": "webui",
+        "timestamp": "2026-11-25T12:00:00Z",
+        "text": "tracked input",
+        "request_id": request_id,
+    }
+    await processor.process_message_batch(
+        [
+            TaggedInput(
+                "tracked input",
+                (request_id,),
+                operator_inputs=(operator_input,),
+                history_row_uuid=row_uuid,
+            ),
+            [
+                {"type": "text", "text": "untracked input"},
+                {
+                    "type": "image",
+                    "source": {
+                        "kind": "url",
+                        "url": "https://example.test/untracked.png",
+                    },
+                },
+            ],
+        ],
+        "parent-batch",
+    )
+
+    assert history[0].metadata["chat_stream_input_count"] == 2
+    # Simulate an older combined row without the per-input content map. The
+    # count still proves that its image owner is ambiguous.
+    history[0].metadata.pop("chat_stream_inputs")
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_history=history),
+        _event_bus=None,
+        get_conversation_uid=lambda: "conversation-native-batch-count",
+        chat_stream_snapshot=lambda: {"rows": [], "turns": [], "inputs": []},
+    )
+    rows = _input_rows(ChatStreamService(state), "conversation-native-batch-count")
+
+    assert [row["id"] for row in rows] == [request_id]
+    assert rows[0]["parts"] == [{"type": "text", "text": "tracked input"}]
