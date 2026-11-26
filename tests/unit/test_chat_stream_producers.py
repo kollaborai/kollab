@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,10 +12,11 @@ from kollabor.llm.acp_bridge import ACPAdmission, ACPResult, ACPRunner
 from kollabor.llm.acp_orchestrator import ACPOrchestrator
 from kollabor.llm.permissions.attach_bridge import AttachPermissionBridge
 from kollabor.state.chat_stream import ChatStreamService
+from kollabor_agent.queue_processor import QueueProcessor, TaggedInput, batch_request_ids
 from kollabor_events.chat_stream import REPLAY_WINDOW, sequence_problems
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.permissions_models import ConfirmationResponse
-from kollabor_tui.display_tap import DisplayTap
+from kollabor_tui.display_tap import DisplayTap, publish_semantic
 from plugins.hub.models import HubMessage
 
 
@@ -125,6 +127,71 @@ async def test_native_queued_input_streams_one_reply_and_ends_after_its_turn():
     ]
     assert {row["id"] for row in input_rows} == {"web-native-1"}
     assert any(event["type"] == "row.append" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_native_queue_drain_starts_the_admitted_turn_before_reply_events():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    input_id = "web-native-worker-1"
+    await _add(stream, input_id, "hello")
+
+    processor = QueueProcessor.__new__(QueueProcessor)
+    tap = state._event_bus.tap
+    tap_events = tap.subscribe("native-worker")
+    processor.renderer = tap
+    processor.processing_queue = asyncio.Queue()
+    processor.processing_queue.put_nowait(TaggedInput("hello", (input_id,)))
+    processor.is_processing = False
+    processor.current_processing_tokens = 0
+    processor.processing_start_time = 0
+    processor.cancel_processing = False
+    processor.turn_completed = False
+    processor._last_tool_error_sig = None
+    processor._open_voice_turn = None
+    processor.active_origin_context = None
+    processor.active_request_ids = ()
+    processor._after_turn = []
+    processor._turn_token = None
+    processor._queue_handoffs = {}
+    processor._drained_batch_messages = ()
+    processor._drained_handoff_items = ()
+    processor._drained_handoff_started = False
+    processor._active_turn_handoff_attempts = ()
+
+    async def process_batch(messages):
+        request_ids = batch_request_ids(messages)
+        assert request_ids == (input_id,)
+        processor._stamp_turn(None, request_ids)
+        publish_semantic(tap, "token", text="hello back")
+        publish_semantic(tap, "turn_complete", stop_reason="end_turn")
+        processor._stamp_turn(None)
+        processor.turn_completed = True
+
+    await processor._drain_queue(None, process_batch, AsyncMock())
+
+    events = _events(stream, initial)
+    assert sequence_problems(events) == []
+    assert any(
+        item["type"] == "input.state"
+        and item["data"]["id"] == input_id
+        and item["data"]["state"] == "started"
+        for item in events
+    )
+    assert any(
+        item["type"] == "turn.state" and item["data"]["state"] == "ended"
+        for item in events
+    )
+    raw_events = []
+    while not tap_events.empty():
+        raw_events.append(tap_events.get_nowait())
+    start = next(event for event in raw_events if event.get("type") == "turn_start")
+    token = next(event for event in raw_events if event.get("type") == "token")
+    assert start["turn_id"]
+    assert start["request_ids"] == [input_id]
+    assert raw_events.index(start) < raw_events.index(token)
 
 
 @pytest.mark.asyncio

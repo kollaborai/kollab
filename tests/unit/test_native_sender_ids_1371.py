@@ -105,6 +105,28 @@ async def test_native_voice_admission_queues_under_the_sender_request_id(arrives
     assert queued.request_ids == ("client-req-V",)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrives_as", ["device-voice", "livekit-room"])
+async def test_native_voice_admission_mints_an_id_when_the_sender_has_none(arrives_as):
+    service = await _native_service(idle=True)
+    if arrives_as == "device-voice":
+        voice_kwargs = {"voice": {"admission_id": "a1", "epoch": "e1"}}
+    else:
+        origin = issue_voice_admission_context(ROOM_BINDING, "lv-turn-1")
+        voice_kwargs = {"origin_context": origin}
+
+    result = await service.process_user_input("hi", **voice_kwargs)
+
+    generated_id = result["request_id"]
+    assert result["status"] == "queued"
+    assert isinstance(generated_id, str) and generated_id
+    queued = service._enqueue_with_overflow_strategy.await_args.args[0]
+    assert isinstance(queued, QueuedInput)
+    assert queued.request_ids == (generated_id,)
+    saved = service.conversation_logger.log_user_message.await_args
+    assert saved.kwargs.get("message_metadata") == {"request_id": generated_id}
+
+
 class _VoicePlugin:
     """The voice plugin's admit, submitting each turn as it arrives."""
 
