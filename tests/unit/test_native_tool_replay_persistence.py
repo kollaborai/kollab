@@ -128,6 +128,54 @@ async def test_xml_tool_call_and_nonempty_result_project_after_jsonl_resume(tmp_
 
 
 @pytest.mark.asyncio
+async def test_empty_xml_display_text_survives_jsonl_resume(tmp_path):
+    writer = KollaborConversationLogger(tmp_path)
+    parent = await writer.log_user_message("Run an XML-only command")
+    assistant_id = await writer.log_assistant_message(
+        "<terminal>echo raw-tag</terminal>",
+        parent_uuid=parent,
+        tool_calls=[
+            {
+                "id": "xml-only-terminal",
+                "name": "terminal",
+                "input": {"command": "echo raw-tag"},
+            }
+        ],
+        display_content="",
+    )
+    result_entry = _xml_tool_result_entry(
+        ToolExecutionResult(
+            "xml-only-terminal",
+            "terminal",
+            True,
+            output="raw-tag",
+        ),
+        "[terminal] raw-tag",
+    )
+    await writer.log_system_message(
+        "[terminal] raw-tag",
+        parent_uuid=assistant_id,
+        subtype="tool_result",
+        tool_use_id="xml-only-terminal",
+        tool_result=result_entry,
+    )
+
+    assistant_record = next(
+        json.loads(line)
+        for line in writer.session_file.read_text().splitlines()
+        if json.loads(line).get("uuid") == assistant_id
+    )
+    assert assistant_record["display_content"] == ""
+
+    state, _reader, history, _result = await resume(tmp_path, writer.session_id)
+    assert history[1].metadata["display_content"] == ""
+    rows = ChatStreamService(state).subscribe({})["events"][0]["data"]["rows"]
+    assert all(row["kind"] != "reply" for row in rows)
+    assert [row["kind"] for row in rows].count("tool") == 1
+    assert "<terminal>" not in str(rows)
+
+
+@pytest.mark.asyncio
 async def test_legacy_result_uses_explicit_owner_and_id_without_parsing_prose(tmp_path):
     writer = KollaborConversationLogger(tmp_path)
     await writer.log_user_message("Run two turns")

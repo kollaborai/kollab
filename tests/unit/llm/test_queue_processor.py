@@ -1665,6 +1665,12 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(assistant.content, raw)
         self.assertEqual(assistant.metadata.get("display_content"), "Running it.")
         self.assertEqual(
+            self.conversation_logger.log_assistant_message.call_args.kwargs.get(
+                "display_content"
+            ),
+            "Running it.",
+        )
+        self.assertEqual(
             assistant.metadata.get("xml_tool_calls"),
             [
                 {

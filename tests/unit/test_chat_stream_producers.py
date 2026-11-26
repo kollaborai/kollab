@@ -13,7 +13,13 @@ from kollabor.llm.acp_bridge import ACPAdmission, ACPResult, ACPRunner
 from kollabor.llm.acp_orchestrator import ACPOrchestrator
 from kollabor.llm.permissions.attach_bridge import AttachPermissionBridge
 from kollabor.state.chat_stream import ChatStreamService
-from kollabor_agent.queue_processor import QueueProcessor, TaggedInput, batch_request_ids
+from kollabor_agent.queue_processor import (
+    QueueProcessor,
+    TaggedInput,
+    _xml_tool_call_entries,
+    batch_request_ids,
+)
+from kollabor_ai.response_parser import ResponseParser
 from kollabor_events.chat_stream import REPLAY_WINDOW, sequence_problems
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.permissions_models import ConfirmationResponse
@@ -79,6 +85,97 @@ async def _add(stream, input_id, text):
 
 def _publish(state, event_type, **fields):
     state._event_bus.tap.publish({"type": event_type, **fields})
+
+
+def test_repeated_xml_parser_ids_keep_distinct_live_and_replayed_tool_rows():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    parser = ResponseParser()
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor._native_tools_handler = SimpleNamespace(mcp_integration=None)
+    processor.tool_executor = SimpleNamespace(plugin_handlers={})
+    processor.conversation_history = state._llm_service.conversation_history
+    history = processor.conversation_history
+    turn_id = "xml-repeated-turn"
+    calls = []
+
+    for command, result in (
+        ("printf first", "first output"),
+        ("printf second", "second output"),
+    ):
+        raw = f"<terminal>{command}</terminal>"
+        parsed = parser.parse_response(raw)
+        tools = processor._resolve_text_tool_calls(parser.get_all_tools(parsed))
+        assert len(tools) == 1
+        tool = tools[0]
+        calls.append(tool)
+
+        _publish(
+            state,
+            "tool_start",
+            turn_id=turn_id,
+            tool_id=tool["id"],
+            tool_name="terminal",
+            input={"command": command},
+        )
+        _publish(
+            state,
+            "tool_result",
+            turn_id=turn_id,
+            tool_id=tool["id"],
+            tool_name="terminal",
+            input={"command": command},
+            success=True,
+            output=result,
+        )
+        history.extend(
+            [
+                ConversationMessage(
+                    role="assistant",
+                    content=raw,
+                    metadata={
+                        "turn_id": turn_id,
+                        "display_content": "",
+                        "xml_tool_calls": _xml_tool_call_entries(tools),
+                    },
+                ),
+                ConversationMessage(
+                    role="user",
+                    content=f"Tool result: {result}",
+                    metadata={
+                        "tool_output_batch": True,
+                        "xml_tool_results": [
+                            {
+                                "id": tool["id"],
+                                "content": result,
+                                "tool_execution_time": 0.0,
+                            }
+                        ],
+                    },
+                ),
+            ]
+        )
+
+    assert calls[0]["id"] != calls[1]["id"]
+    live_tools = [
+        row
+        for row in stream._rows["conversation-a"].values()
+        if row["kind"] == "tool"
+    ]
+    replay_rows = ChatStreamService(state).subscribe({})["events"][0]["data"]["rows"]
+    replay_tools = [row for row in replay_rows if row["kind"] == "tool"]
+
+    assert len(live_tools) == 2
+    assert len(replay_tools) == 2
+    assert {row["id"] for row in live_tools} == {row["id"] for row in replay_tools}
+    assert {
+        (row["parts"][0]["tool_call_id"], row["parts"][0]["result"])
+        for row in replay_tools
+    } == {
+        (call["id"], result)
+        for call, result in zip(calls, ("first output", "second output"))
+    }
 
 
 def _acp_orchestrator(state, monkeypatch, tmp_path):
