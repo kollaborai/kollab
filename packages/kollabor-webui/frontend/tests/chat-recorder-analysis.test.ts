@@ -252,7 +252,7 @@ describe("chat recorder analysis", () => {
       R: () => "r",
     });
 
-    await expect(flow()).rejects.toThrow(/goal cleanup failed/i);
+    await expect(flow()).rejects.toThrow(/goal reload cleanup failed/i);
     expect(commands).toContain("/goal clear");
   });
 
@@ -266,7 +266,7 @@ describe("chat recorder analysis", () => {
     expect(row).toBeDefined();
     expect(row).toContain("native `/goal`");
     expect(row).toContain("ACP reports unsupported");
-    expect(row).toContain("GET `/sessions/{id}/goal`");
+    expect(row).toContain("GET /sessions/{id}/goal");
     expect(row).toContain("turn.state.origin");
     expect(row).toContain("data-chat-*");
     expect(row).not.toContain("equivalent goal-directed chat turn");
