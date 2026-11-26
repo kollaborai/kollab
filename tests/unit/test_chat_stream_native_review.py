@@ -14,7 +14,6 @@ from kollabor.llm.agent_hud import AgentHudEntry, merge_agent_hud_with_user_mess
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 from kollabor.state.chat_stream import (
-    _NATIVE_PLUGIN_INPUT_HISTORY_LIMIT,
     ChatStreamService,
     register_chat_stream_handlers,
 )
@@ -968,10 +967,20 @@ async def test_native_plugin_retry_survives_other_conversations_lifecycle_churn(
     stream._set_input_state(
         "conversation-a", input_id, "ended", turn_id=turn_id, outcome="completed"
     )
+    recorded = stream.record_event(
+        "input.state",
+        {
+            "id": input_id,
+            "state": "ended",
+            "turn_id": turn_id,
+            "outcome": "completed",
+        },
+    )
+    assert "_native_plugin" not in recorded["data"]
 
-    for index in range(_NATIVE_PLUGIN_INPUT_HISTORY_LIMIT + 1):
+    for index in range(300):
         uid = f"other-conversation-{index}"
-        other_input_id = f"plugin-{index}"
+        other_input_id = input_id if index == 0 else f"plugin-{index}"
         key = (uid, other_input_id)
         stream._native_plugin_inputs.add(key)
         stream._set_input_state(
@@ -988,8 +997,23 @@ async def test_native_plugin_retry_survives_other_conversations_lifecycle_churn(
         "state": "ended",
         "turn_id": turn_id,
     }
-    assert stream._admission_inputs["conversation-a"][input_id]["_native_plugin"] is True
+    snapshot = await _rpc_call(rpc, "state.chat_stream.subscribe", {})
+    snapshot_inputs = next(
+        event["data"]["inputs"]
+        for event in snapshot["events"]
+        if event["type"] == "snapshot"
+    )
+    assert all("_native_plugin" not in item for item in snapshot_inputs)
+    assert (
+        stream._admission_inputs["conversation-a"][input_id]["_native_plugin"]
+        is True
+    )
     assert "_native_plugin" not in stream._inputs["conversation-a"][input_id]
+    assert (
+        stream._admission_inputs["other-conversation-0"][input_id]["turn_id"]
+        == "turn-0"
+    )
+    assert stream._native_plugin_inputs == set()
 
 
 @pytest.mark.asyncio

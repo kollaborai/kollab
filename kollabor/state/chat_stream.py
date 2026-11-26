@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 import uuid
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -32,7 +32,6 @@ from .chat_stream_rows import (
 )
 
 logger = logging.getLogger(__name__)
-_NATIVE_PLUGIN_INPUT_HISTORY_LIMIT = 256
 
 
 def _parse_chat_timestamp(value: Any) -> datetime | None:
@@ -264,12 +263,9 @@ class ChatStreamService:
         self._input_text: dict[tuple[str, str], str] = {}
         self._input_attachments: dict[tuple[str, str], list[dict[str, str]]] = {}
         self._input_goal_reply_ids: dict[tuple[str, str], str | None] = {}
+        # This set tracks queued native inputs only. Once admitted, native
+        # origin is stored alongside the lifecycle record.
         self._native_plugin_inputs: set[tuple[str, str]] = set()
-        # Keep a bounded, conversation-keyed marker for native inputs after
-        # dispatch so send-now retries can consult their recorded lifecycle.
-        self._native_plugin_input_history: OrderedDict[
-            tuple[str, str], None
-        ] = OrderedDict()
         self._goal_reply_owners: dict[
             str, tuple[str, str, tuple[str, str, str], float]
         ] = {}
@@ -746,11 +742,11 @@ class ChatStreamService:
             return {"found": False}
         uid = self._conversation_uid()
         native_key = (uid, input_id)
+        current = self._admission_inputs.get(uid, {}).get(input_id, {})
         if (
-            native_key in self._native_plugin_inputs
-            or native_key in self._native_plugin_input_history
+            current.get("_native_plugin") is True
+            or native_key in self._native_plugin_inputs
         ):
-            current = self._admission_inputs.get(uid, {}).get(input_id, {})
             state = current.get("state")
             if state != "queued":
                 result = {
@@ -883,10 +879,22 @@ class ChatStreamService:
             input_id = data.get("id")
             if isinstance(input_id, str):
                 copied = copy.deepcopy(data)
+                key = (uid, input_id)
+                admitted = self._admission_inputs.setdefault(uid, {})
+                prior = admitted.get(input_id, {})
+                native_plugin = (
+                    prior.get("_native_plugin") is True
+                    or key in self._native_plugin_inputs
+                )
                 self._inputs.setdefault(uid, {})[input_id] = copied
-                self._admission_inputs.setdefault(uid, {})[
-                    input_id
-                ] = copy.deepcopy(copied)
+                admission_data = copy.deepcopy(copied)
+                if native_plugin:
+                    admission_data["_native_plugin"] = True
+                    if copied.get("state") == "queued":
+                        self._native_plugin_inputs.add(key)
+                    else:
+                        self._native_plugin_inputs.discard(key)
+                admitted[input_id] = admission_data
         return self._log(uid).publish(event_type, data)
 
     def attach_display_tap(self) -> None:
@@ -1108,8 +1116,10 @@ class ChatStreamService:
         outcome = None if queued else "completed"
         if queued:
             key = (uid, input_id)
-            self._native_plugin_input_history.pop(key, None)
             self._native_plugin_inputs.add(key)
+            admitted = self._admission_inputs.get(uid, {}).get(input_id)
+            if admitted is not None:
+                admitted["_native_plugin"] = True
         row = self._rows.setdefault(uid, {}).get(input_id)
         if row is not None:
             parts = self._input_parts(display_text)
@@ -2357,6 +2367,8 @@ class ChatStreamService:
                 # a later visit left a stale started admission projection.
                 # Keep its owner/content binding, but return the canonical
                 # terminal lifecycle for subsequent idempotent retries.
+                if admitted.get("_native_plugin") is True:
+                    restored["_native_plugin"] = True
                 admitted_inputs[input_id] = copy.deepcopy(restored)
 
     def _log(self, uid: str | None = None) -> ChatStreamLog:
@@ -3370,27 +3382,20 @@ class ChatStreamService:
         if outcome is not None:
             data["outcome"] = outcome
         self._inputs.setdefault(uid, {})[input_id] = data
-        self._admission_inputs.setdefault(uid, {})[input_id] = copy.deepcopy(data)
         key = (uid, input_id)
-        if state == "queued":
-            if (
-                key in self._native_plugin_inputs
-                or key in self._native_plugin_input_history
-            ):
-                self._native_plugin_input_history.pop(key, None)
+        admitted = self._admission_inputs.setdefault(uid, {})
+        prior = admitted.get(input_id, {})
+        native_plugin = (
+            prior.get("_native_plugin") is True or key in self._native_plugin_inputs
+        )
+        admission_data = copy.deepcopy(data)
+        if native_plugin:
+            admission_data["_native_plugin"] = True
+            if state == "queued":
                 self._native_plugin_inputs.add(key)
-        elif state in {"started", "joined", "ended"} and (
-            key in self._native_plugin_inputs
-            or key in self._native_plugin_input_history
-        ):
-            self._native_plugin_inputs.discard(key)
-            self._native_plugin_input_history[key] = None
-            self._native_plugin_input_history.move_to_end(key)
-            while (
-                len(self._native_plugin_input_history)
-                > _NATIVE_PLUGIN_INPUT_HISTORY_LIMIT
-            ):
-                self._native_plugin_input_history.popitem(last=False)
+            elif state in {"started", "joined", "ended"}:
+                self._native_plugin_inputs.discard(key)
+        admitted[input_id] = admission_data
         self._log(uid).publish("input.state", data)
 
     def _set_turn_state(
