@@ -191,6 +191,12 @@ async def test_real_hub_message_projects_one_row_into_chat_stream():
     assert rows[0]["kind"] == "note"
     assert rows[0]["parts"][0]["type"] == "hub-note"
     assert message.id not in stream._inputs.get("conversation-a", {})
+    persisted_row = llm.conversation_logger.log_system_message.await_args.kwargs[
+        "chat_stream_row"
+    ]
+    assert persisted_row["id"] == message.id
+    assert persisted_row["kind"] == "note"
+    assert persisted_row["parts"] == rows[0]["parts"]
 
 
 @pytest.mark.asyncio
