@@ -583,6 +583,18 @@ describe("LiveChatStore", () => {
     expect(streamChatEvents).toHaveBeenCalledTimes(1);
   });
 
+  it("an outdated chat checks again and goes live once the agent restarts on current code", async () => {
+    const { store, streams, streamChatEvents } = make({ outdatedRetryMs: 0 });
+    streamChatEvents.mockImplementationOnce(() => Promise.reject(new ApiError("older agent", 426, null)));
+    const seen: string[] = [];
+    store.subscribe(() => { if (seen.at(-1) !== store.connection) seen.push(store.connection); });
+    store.start();
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    streams[0].open();
+    expect(store.connection).toBe("live");
+    expect(seen).toEqual(["connecting", "outdated", "live"]);
+  });
+
   it("fails after repeated snapshots followed by drops", async () => {
     const clock = vi.spyOn(performance, "now").mockReturnValue(0);
     const { store, streams } = make({ maxAttempts: 3 });
