@@ -1868,3 +1868,22 @@ def test_authenticated_large_row_pages_parts_and_recovers_oversized_part(
     )
     assert stale_page.status_code == 409
     assert stale_part.status_code == 409
+
+
+def test_an_agent_on_older_code_is_reported_as_needing_a_restart(monkeypatch):
+    """A daemon without the chat-stream methods runs older Kollab code: say so, with 426, not a bare 503."""
+    from kollabor_rpc import RpcMethodNotFound
+
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+
+    async def older_daemon(method, params, *, timeout=None):
+        raise RpcMethodNotFound(f"method not found: {method}")
+
+    session.rpc.call = older_daemon
+    for response in (
+        client.get("/sessions/s1/stream"),
+        client.post("/sessions/s1/inputs", json={"id": "web-a1", "text": "hi", "attachments": []}),
+        client.post("/sessions/s1/inputs/web-a1/send-now", json={}),
+    ):
+        assert response.status_code == 426
+        assert response.json()["detail"] == stream.AGENT_NEEDS_RESTART
