@@ -138,7 +138,9 @@ def test_an_input_that_changes_after_it_ended_is_reported():
     ("outcome", "should_report"),
     [("completed", True), ("cancelled", False)],
 )
-def test_queued_input_can_only_end_without_a_turn_when_cancelled(outcome, should_report):
+def test_queued_input_can_only_end_without_a_turn_when_cancelled(
+    outcome, should_report
+):
     events = [
         {
             "seq": 0,
@@ -177,7 +179,9 @@ def test_queued_input_can_only_end_without_a_turn_when_cancelled(outcome, should
     ]
 
     problems = sequence_problems(events)
-    invalid_completion = any("queued" in problem and "ended" in problem for problem in problems)
+    invalid_completion = any(
+        "queued" in problem and "ended" in problem for problem in problems
+    )
     assert invalid_completion is should_report, problems
 
 
@@ -270,7 +274,9 @@ def test_snapshot_problems_check_cursors_and_entries(data, needle):
 def test_snapshot_next_seq_cannot_precede_snapshot_seq():
     snapshot = _event("snapshot", {**SNAPSHOT, "next_seq": 5}, seq=10)
     problems = sequence_problems([snapshot])
-    assert any("next_seq" in problem and "seq" in problem for problem in problems), problems
+    assert any(
+        "next_seq" in problem and "seq" in problem for problem in problems
+    ), problems
 
 
 def _lifecycle(*states):

@@ -281,7 +281,11 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
         previous_state = seen[-1] if seen else None
         if seen and "ended" not in seen:
             last, state = seen[-1], info["state"]
-            if last == "queued" and state == "ended" and info.get("outcome") != "cancelled":
+            if (
+                last == "queued"
+                and state == "ended"
+                and info.get("outcome") != "cancelled"
+            ):
                 problems.append(
                     f"seq {seq}: input {info['id']} went from queued to ended without starting or joining"
                 )
