@@ -584,6 +584,51 @@ describe("LiveChatStore", () => {
     expect(JSON.stringify(store.getSnapshot())).not.toContain(input.goal_reply_id);
   });
 
+  it("keeps an ambiguous goal admission retryable when its first poll is missing", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-ambiguous",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"9".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let sendAttempts = 0;
+    let pollAttempts = 0;
+    request.mockImplementation(async (path, init) => {
+      if (path.endsWith("/inputs")) {
+        sendAttempts += 1;
+        expect(init?.body).toBe(JSON.stringify(input));
+        if (sendAttempts === 1) throw new Error("connection reset after admission");
+        return new Response(null, { status: 202 });
+      }
+      if (path.endsWith("/goal-replies/poll")) {
+        pollAttempts += 1;
+        expect(init?.body).toBe(JSON.stringify({ goal_reply_id: ownerId }));
+        return pollAttempts === 1
+          ? new Response(JSON.stringify({ status: "missing", message: "goal reply expired or is unavailable" }), { status: 200 })
+          : new Response(JSON.stringify({ status: "complete", success: true, message: "Build is healthy." }), { status: 200 });
+      }
+      return new Response(null, { status: 202 });
+    });
+
+    await expect(store.send(input)).rejects.toThrow("connection reset after admission");
+    await vi.waitFor(() => expect(pollAttempts).toBe(1));
+    expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "pending" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 15));
+    expect(sendAttempts).toBe(1);
+    expect(pollAttempts).toBe(1);
+
+    await store.send(input);
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
+      state: "complete",
+      success: true,
+      message: "Build is healthy.",
+    }));
+    expect(sendAttempts).toBe(2);
+    expect(pollAttempts).toBe(2);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
   it("stops an active goal only through its private owner id", async () => {
     const { store, request, streams } = make();
     const input = {
