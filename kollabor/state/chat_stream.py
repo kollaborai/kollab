@@ -274,6 +274,9 @@ class ChatStreamService:
         # Re-serializing a large row for every streamed token made oversized
         # replies quadratic before the bounded preview could be emitted.
         self._row_wire_sizes: dict[tuple[str, str], int] = {}
+        # A paged row is represented to clients by one placeholder part. Its
+        # original part indexes cannot be used by row.append events.
+        self._row_parts_paged: set[tuple[str, str]] = set()
         self._tool_output_lock = threading.RLock()
         self._tool_output_cache: OrderedDict[
             tuple[str, str, str], tuple[Any, str, str, str, int]
@@ -887,6 +890,7 @@ class ChatStreamService:
                 original_parts = row.get("parts")
                 can_increment_size = isinstance(original_parts, list)
                 row_size = self._row_wire_sizes.get(row_key)
+                row_parts_paged = row_key in self._row_parts_paged
                 if row_size is None:
                     row_size = chat_stream_wire_bytes(row)
                 parts = row.setdefault("parts", [])
@@ -927,8 +931,9 @@ class ChatStreamService:
                     row_size += suffix_json_bytes
                 self._row_wire_sizes[row_key] = row_size
                 oversized_event = chat_stream_wire_bytes(data) > CHAT_STREAM_MAX_ROW_BYTES
-                if row_size > CHAT_STREAM_MAX_ROW_BYTES and (
-                    row.get("status") != "streaming" or oversized_event
+                if row_parts_paged or (
+                    row_size > CHAT_STREAM_MAX_ROW_BYTES
+                    and (row.get("status") != "streaming" or oversized_event)
                 ):
                     raw_row = copy.deepcopy(row)
                     publish_data = self._project_chat_stream_row(uid, raw_row)
@@ -943,12 +948,13 @@ class ChatStreamService:
             self._rows[uid] = {
                 row["id"]: row for row in raw_rows
             }
-            self._remember_row_sizes(uid, raw_rows)
+            projected_rows = self._project_chat_stream_rows(
+                uid, raw_rows, max_bytes=3 * 1024 * 1024
+            )
+            self._remember_row_sizes(uid, raw_rows, projected_rows)
             publish_data = {
                 **data,
-                "rows": self._project_chat_stream_rows(
-                    uid, raw_rows, max_bytes=3 * 1024 * 1024
-                ),
+                "rows": projected_rows,
             }
         elif event_type == "turn.state":
             turn_id = data.get("turn_id")
@@ -967,7 +973,7 @@ class ChatStreamService:
                 return
             raw_row["seq"] = event["seq"]
             self._rows.setdefault(uid, {})[raw_row["id"]] = raw_row
-            self._remember_raw_row(uid, raw_row)
+            self._remember_raw_row(uid, raw_row, publish_data)
 
         return self._log(uid).publish(
             event_type,
@@ -2344,7 +2350,7 @@ class ChatStreamService:
         )
         event = self._log(uid).publish("replace", {"rows": projected_rows})
         self._rows[uid] = {row["id"]: copy.deepcopy(row) for row in replacement_rows}
-        self._remember_row_sizes(uid, replacement_rows)
+        self._remember_row_sizes(uid, replacement_rows, projected_rows)
         return event
 
     def publish_conversation_reset(self) -> Event:
@@ -3107,6 +3113,9 @@ class ChatStreamService:
             max_bytes=row_byte_budget,
             max_rows=REPLAY_WINDOW,
         )
+        with self._log(uid)._lock:
+            for row in snapshot_rows:
+                self._remember_projected_row(uid, row)
         visible_input_ids = {
             row["id"] for row in snapshot_rows if row.get("kind") == "input"
         }
@@ -4129,34 +4138,64 @@ class ChatStreamService:
     def _upsert(self, uid: str, row: dict[str, Any]) -> None:
         raw_row = copy.deepcopy(row)
         log = self._log(uid)
+        projected_row: dict[str, Any]
 
         def store_row(event: Event) -> None:
             raw_row["seq"] = event["seq"]
             self._rows.setdefault(uid, {})[raw_row["id"]] = copy.deepcopy(raw_row)
-            self._remember_raw_row(uid, raw_row)
+            self._remember_raw_row(uid, raw_row, projected_row)
 
         with log._lock:
             with self._tool_output_lock:
                 self._invalidate_tool_output_row(uid, raw_row.get("id"))
+                projected_row = self._project_chat_stream_row(uid, raw_row)
                 log.publish(
                     "row.upsert",
-                    self._project_chat_stream_row(uid, raw_row),
+                    projected_row,
                     on_commit=store_row,
                 )
 
-    def _remember_raw_row(self, uid: str, row: dict[str, Any]) -> None:
+    def _remember_projected_row(self, uid: str, row: dict[str, Any]) -> None:
+        row_id = row.get("id")
+        if not isinstance(row_id, str):
+            return
+        key = (uid, row_id)
+        if isinstance(row.get("chat_stream_parts_preview"), dict):
+            self._row_parts_paged.add(key)
+        else:
+            self._row_parts_paged.discard(key)
+
+    def _remember_raw_row(
+        self,
+        uid: str,
+        row: dict[str, Any],
+        projected_row: dict[str, Any] | None = None,
+    ) -> None:
         row_id = row.get("id")
         if isinstance(row_id, str):
             self._row_wire_sizes[(uid, row_id)] = chat_stream_wire_bytes(row)
+            if projected_row is not None:
+                self._remember_projected_row(uid, projected_row)
 
     def _remember_row_sizes(
-        self, uid: str, rows: list[dict[str, Any]]
+        self,
+        uid: str,
+        rows: list[dict[str, Any]],
+        projected_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         for key in tuple(self._row_wire_sizes):
             if key[0] == uid:
                 self._row_wire_sizes.pop(key, None)
+        for key in tuple(self._row_parts_paged):
+            if key[0] == uid:
+                self._row_parts_paged.discard(key)
+        projected_by_id = {
+            row["id"]: row
+            for row in projected_rows or []
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        }
         for row in rows:
-            self._remember_raw_row(uid, row)
+            self._remember_raw_row(uid, row, projected_by_id.get(row.get("id")))
 
     def _publish_live(self, event: Event) -> None:
         get_service = getattr(self._event_bus, "get_service", None)
