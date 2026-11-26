@@ -222,6 +222,53 @@ describe("chat recorder analysis", () => {
     });
   });
 
+  it("does not clear a different goal that replaces the recorder-owned goal", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    const origin = { kind: "goal", goal_id: "recorder-goal", attempt_id: "recorder-attempt" };
+    const turn = { turn_id: "recorder-turn", state: "running", input_ids: [], origin };
+    const stream = { conversation_uid: "conv-owned", turns: [turn], inputs: [] };
+    const makePersisted = (goalId: string, objective: string, attemptId: string, turnId: string) => ({
+      conversation_uid: "conv-owned",
+      goal: {
+        goal_id: goalId, objective, status: "active",
+        attempt: { attempt_id: attemptId, state: "dispatched", turn_id: turnId },
+      },
+    });
+    const foreignGoal = makePersisted("foreign-goal", "another goal", "foreign-attempt", "foreign-turn");
+    let persisted: any = null;
+    const commands: string[] = [];
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native",
+      command: async (text: string) => {
+        commands.push(text);
+        if (text === "/goal clear") persisted = null;
+        else persisted = makePersisted("recorder-goal", text.slice("/goal ".length), "recorder-attempt", "recorder-turn");
+      },
+      mark: async () => {},
+      readPersistedGoal: async () => persisted,
+      currentStreamState: async () => stream,
+      reloadDuringRun: async (_reply: string, check: any) => {
+        await check.before(turn, stream);
+        persisted = foreignGoal;
+        await check.after(turn, stream, stream);
+      },
+      hasMatchingGoalTurn: () => true,
+      page: { evaluate: async () => true },
+      sleep: async () => {},
+      U: () => "recorder-objective",
+      R: () => "recorder-reply",
+    });
+
+    const failure = await flow().then(() => null, (error: unknown) => error);
+    expect({ commands, persisted, failure }).toEqual({
+      commands: [expect.stringMatching(/^\/goal /)],
+      persisted: foreignGoal,
+      failure: expect.objectContaining({ message: expect.stringMatching(/refus|changed|inconclusive/i) }),
+    });
+  });
+
   it("reports ACP goal reload as unsupported without sending a chat prompt", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const start = source.indexOf('    async "goal-reload"() {');
