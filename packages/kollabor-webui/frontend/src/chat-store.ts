@@ -222,6 +222,9 @@ export class LiveChatStore implements LiveStore {
   private readonly sends = new Map<string, LocalSend>();
   // A private owner capability is associated with its initiating input, never copied into stream state or a row.
   private readonly goalReplyOwners = new Map<string, string>();
+  // An ambiguous admission is still unresolved when its mailbox has no reply yet. This stays private and
+  // lets a manual retry resume polling without treating an early `missing` as a terminal failure.
+  private readonly uncertainGoalAdmissions = new Map<string, string>();
   private readonly goalReplyPolls = new Map<string, { ownerId: string; controller: AbortController }>();
   private goalReplies: Record<string, LocalGoalReply> = {};
   private attempts = 0;
@@ -305,6 +308,7 @@ export class LiveChatStore implements LiveStore {
     for (const poll of this.goalReplyPolls.values()) poll.controller.abort();
     this.goalReplyPolls.clear();
     this.goalReplyOwners.clear();
+    this.uncertainGoalAdmissions.clear();
     this.goalReplies = {};
     clearTimeout(this.timer);
     const wake = this.wake;
@@ -336,6 +340,7 @@ export class LiveChatStore implements LiveStore {
       if (input.goal_reply_id && tracksGoalReply && (status === undefined || status >= 500)) {
         // A dropped response or server error may follow admission. Poll with the same capability while
         // the composer retains this exact input for retry.
+        this.markGoalAdmissionUncertain(input.id, input.goal_reply_id);
         this.startGoalReplyPolling(input.id, input.goal_reply_id);
       } else if (input.goal_reply_id && tracksGoalReply && !this.goalReplyPolls.has(input.id)) {
         this.forgetRejectedGoalReply(input.id, input.goal_reply_id);
@@ -345,13 +350,14 @@ export class LiveChatStore implements LiveStore {
     this.endSend(input.id, localSend, response.ok);
     if (!response.ok) {
       if (input.goal_reply_id && tracksGoalReply && response.status >= 500) {
+        this.markGoalAdmissionUncertain(input.id, input.goal_reply_id);
         this.startGoalReplyPolling(input.id, input.goal_reply_id);
       } else if (input.goal_reply_id && tracksGoalReply && !this.goalReplyPolls.has(input.id)) {
         this.forgetRejectedGoalReply(input.id, input.goal_reply_id);
       }
       throw new Error(`send failed: ${response.status}`);
     }
-    if (input.goal_reply_id && tracksGoalReply) this.startGoalReplyPolling(input.id, input.goal_reply_id);
+    if (input.goal_reply_id && tracksGoalReply) this.markGoalReplyAdmitted(input.id, input.goal_reply_id);
   }
 
   /** Adds the pending row at the end of the rows. A send whose id is already on screen adds nothing. */
@@ -448,11 +454,23 @@ export class LiveChatStore implements LiveStore {
     return null;
   }
 
-  private startGoalReplyPolling(inputId: string, ownerId: string): void {
+  private markGoalAdmissionUncertain(inputId: string, ownerId: string): void {
+    if (this.goalReplyOwners.get(inputId) === ownerId) this.uncertainGoalAdmissions.set(inputId, ownerId);
+  }
+
+  private markGoalReplyAdmitted(inputId: string, ownerId: string): void {
+    if (this.goalReplyOwners.get(inputId) !== ownerId) return;
+    this.uncertainGoalAdmissions.delete(inputId);
+    // A manual resend can resolve an earlier ambiguous admission while its poll is still in flight.
+    // Abort that poll so a stale `missing` cannot race the successful admission response.
+    this.startGoalReplyPolling(inputId, ownerId, true);
+  }
+
+  private startGoalReplyPolling(inputId: string, ownerId: string, restart = false): void {
     if (this.disposed || this.goalReplyOwners.get(inputId) !== ownerId) return;
     if (this.goalReplies[inputId]?.state === "complete" || this.goalReplies[inputId]?.state === "cancelled") return;
     const previous = this.goalReplyPolls.get(inputId);
-    if (previous?.ownerId === ownerId && !previous.controller.signal.aborted) return;
+    if (!restart && previous?.ownerId === ownerId && !previous.controller.signal.aborted) return;
     previous?.controller.abort();
     const controller = new AbortController();
     this.goalReplyPolls.set(inputId, { ownerId, controller });
@@ -467,7 +485,10 @@ export class LiveChatStore implements LiveStore {
   }
 
   private forgetRejectedGoalReply(inputId: string, ownerId: string): void {
+    // An earlier request may have been admitted even when a later manual retry was rejected.
+    if (this.uncertainGoalAdmissions.get(inputId) === ownerId) return;
     if (this.goalReplyOwners.get(inputId) === ownerId) this.goalReplyOwners.delete(inputId);
+    this.uncertainGoalAdmissions.delete(inputId);
     if (this.goalReplies[inputId]?.state !== "pending") return;
     const next = { ...this.goalReplies };
     delete next[inputId];
@@ -499,6 +520,13 @@ export class LiveChatStore implements LiveStore {
             return;
           }
           if (isRecord(result) && result.status === "missing") {
+            if (this.uncertainGoalAdmissions.get(inputId) === ownerId) {
+              // Missing is inconclusive until a retry confirms admission. Stop polling for now and
+              // keep the private owner so the user's manual retry can restart it with the same id.
+              this.goalReplyPolls.delete(inputId);
+              controller.abort();
+              return;
+            }
             this.finishGoalReply(inputId, ownerId, {
               state: "complete",
               success: false,
@@ -525,6 +553,7 @@ export class LiveChatStore implements LiveStore {
   private finishGoalReply(inputId: string, ownerId: string, reply: LocalGoalReply): void {
     if (this.disposed || this.goalReplyOwners.get(inputId) !== ownerId) return;
     this.goalReplyOwners.delete(inputId);
+    this.uncertainGoalAdmissions.delete(inputId);
     const poll = this.goalReplyPolls.get(inputId);
     poll?.controller.abort();
     this.goalReplyPolls.delete(inputId);
@@ -536,6 +565,7 @@ export class LiveChatStore implements LiveStore {
     for (const poll of this.goalReplyPolls.values()) poll.controller.abort();
     this.goalReplyPolls.clear();
     this.goalReplyOwners.clear();
+    this.uncertainGoalAdmissions.clear();
     this.goalReplies = {};
   }
 
