@@ -949,39 +949,47 @@ async def test_plugin_send_now_retry_after_end_keeps_native_identity(tmp_path):
     }
 
 
-def test_native_plugin_lifecycle_history_is_bounded_and_conversation_scoped(tmp_path):
+@pytest.mark.asyncio
+async def test_native_plugin_retry_survives_other_conversations_lifecycle_churn(tmp_path):
     state = _State()
-    _logger, _coordinator, _processor, stream, _rpc = _prepare_triggered_plugin_stream(
+    _logger, coordinator, _processor, stream, rpc = _prepare_triggered_plugin_stream(
         state, tmp_path, max_queue_size=3
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "retry after lifecycle churn")
+    turn_id = "native-turn-retained-with-admission"
+    publish_semantic(
+        state._event_bus.tap,
+        "turn_start",
+        request_id=input_id,
+        request_ids=[input_id],
+        turn_id=turn_id,
+        input_source="native",
+    )
+    stream._set_input_state(
+        "conversation-a", input_id, "ended", turn_id=turn_id, outcome="completed"
     )
 
     for index in range(_NATIVE_PLUGIN_INPUT_HISTORY_LIMIT + 1):
-        uid = f"conversation-{index}"
-        input_id = f"plugin-{index}"
-        key = (uid, input_id)
+        uid = f"other-conversation-{index}"
+        other_input_id = f"plugin-{index}"
+        key = (uid, other_input_id)
         stream._native_plugin_inputs.add(key)
         stream._set_input_state(
-            uid, input_id, "ended", turn_id=f"turn-{index}", outcome="completed"
+            uid, other_input_id, "ended", turn_id=f"turn-{index}", outcome="completed"
         )
 
-    assert (
-        len(stream._native_plugin_input_history)
-        == _NATIVE_PLUGIN_INPUT_HISTORY_LIMIT
-    )
-    assert ("conversation-0", "plugin-0") not in stream._native_plugin_input_history
-    assert (
-        f"conversation-{_NATIVE_PLUGIN_INPUT_HISTORY_LIMIT}",
-        f"plugin-{_NATIVE_PLUGIN_INPUT_HISTORY_LIMIT}",
-    ) in stream._native_plugin_input_history
+    # Native origin must live as long as the admission record so unrelated
+    # conversations cannot evict the retry identity.
+    result = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": input_id})
 
-    for uid in ("conversation-a", "conversation-b"):
-        stream._native_plugin_inputs.add((uid, "same-id"))
-        stream._set_input_state(
-            uid, "same-id", "ended", turn_id=f"turn-{uid}", outcome="completed"
-        )
-
-    assert ("conversation-a", "same-id") in stream._native_plugin_input_history
-    assert ("conversation-b", "same-id") in stream._native_plugin_input_history
+    assert result == {
+        "found": True,
+        "accepted": False,
+        "state": "ended",
+        "turn_id": turn_id,
+    }
+    assert stream._admission_inputs["conversation-a"][input_id]["_native_plugin"] is True
+    assert "_native_plugin" not in stream._inputs["conversation-a"][input_id]
 
 
 @pytest.mark.asyncio
