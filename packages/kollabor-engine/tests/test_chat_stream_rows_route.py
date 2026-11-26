@@ -129,6 +129,50 @@ def test_rows_route_materializes_queue_image_refs_for_authenticated_fetch(monkey
     )
 
 
+def test_rows_route_materializes_preview_identity_on_image_parts(monkeypatch):
+    row = _row("image-preview-1", 1)
+    row["parts"] = [
+        {
+            "type": "image",
+            "url": "https://example.invalid/image.png",
+            "chat_stream_content_preview": {
+                "kind": "chat-stream-content-preview",
+                "row_id": row["id"],
+                "part_index": 0,
+                "field": "part",
+                "output_bytes": 500_000,
+                "output_chars": 500_000,
+                "output_type": "json",
+                "output_revision": "a" * 64,
+                "preview": '{"type":"image"}',
+            },
+            "chat_stream_part_preview": {
+                "kind": "chat-stream-part-preview",
+                "row_id": row["id"],
+                "part_index": 0,
+                "output_bytes": 500_000,
+                "output_chars": 500_000,
+                "output_type": "json",
+                "output_revision": "b" * 64,
+                "preview": "{...}",
+            },
+        }
+    ]
+    client, _session = _install_client(
+        monkeypatch,
+        bypass_auth=True,
+        responses={None: {"rows": [row], "older": None}},
+    )
+
+    response = client.get("/sessions/s1/rows")
+
+    assert response.status_code == 200
+    part = response.json()["rows"][0]["parts"][0]
+    assert part["url"] == "https://example.invalid/image.png"
+    assert part["chat_stream_content_preview"]["session_id"] == "s1"
+    assert part["chat_stream_part_preview"]["session_id"] == "s1"
+
+
 def test_rows_route_materializes_tool_output_preview_without_touching_result(monkeypatch):
     row = _row("tool-row-1", 1)
     row.update({"kind": "tool", "role": "assistant"})

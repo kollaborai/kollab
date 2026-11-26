@@ -109,6 +109,35 @@ def test_marker_shaped_large_result_is_opaque_bounded_and_fetchable():
     assert uncached_chunk["content"] == expected[:128]
 
 
+def test_marker_shaped_result_data_is_not_counted_as_preview_reference():
+    result = {
+        "kind": "chat-stream-tool-output-preview",
+        "row_id": "row-result-preview",
+        "tool_call_id": "call-result-preview",
+        "output_bytes": 1,
+        "output_chars": 1,
+        "output_type": "text",
+        "output_revision": "d" * 64,
+        "preview": "ordinary user-owned result data",
+    }
+    row = _row(result)
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(
+            conversation_manager=None, conversation_history=[]
+        ),
+        get_conversation_uid=lambda: "result-preview-test",
+    )
+    service = ChatStreamService(state)
+
+    service._upsert("result-preview-test", row)
+
+    projected = service._log("result-preview-test")._events[-1]["data"]
+    assert event_problems(_event(projected)) == []
+    assert projected["parts"][0]["result"] == result
+    assert ("result-preview-test", row["id"]) not in service._row_content_unretained
+    assert ("result-preview-test", row["id"]) not in service._row_content_cache_refs
+
+
 def test_event_contract_rejects_invalid_top_level_tool_result_preview():
     row = _row("result")
     row["parts"][0]["chat_stream_result_preview"] = {
