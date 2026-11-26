@@ -7,7 +7,7 @@
  *   CHROME_PATH         optional Chromium executable. Default: playwright-core's bundled build.
  *
  * Stages the chat stream contract (src/chat-stream.ts) on a page: the shape check on every
- * event of the eight fixtures in tests/fixtures/chat-stream/, three probe events, and
+ * event of the ten fixtures in tests/fixtures/chat-stream/, three probe events, and
  * newInputId(). It starts no Kollab process, engine or web server: Vite runs in middleware
  * mode and the page is set with setContent. Saves 1280x800 and 390x844 screenshots.
  */
@@ -32,10 +32,13 @@ const css = (await Promise.all(cssAssets.map((name) => readFile(path.join(assetR
 const fixtureRoot = path.join(frontendRoot, "tests/fixtures/chat-stream");
 const fixtures = [];
 for (const name of (await readdir(fixtureRoot)).filter((file) => file.endsWith(".json")).sort()) {
-  const { description, expect, events } = JSON.parse(await readFile(path.join(fixtureRoot, name), "utf8"));
-  fixtures.push({ name, description, expect, events });
+  const { description, expect, event_expect: eventExpect = {}, events } = JSON.parse(
+    await readFile(path.join(fixtureRoot, name), "utf8"),
+  );
+  // Events listed in event_expect are built to fail the shape check.
+  fixtures.push({ name, description, expect, events, valid: events.length - Object.keys(eventExpect).length });
 }
-assert.equal(fixtures.length, 8, "expected the eight chat stream fixtures");
+assert.equal(fixtures.length, 10, "expected the ten chat stream fixtures");
 
 const vite = await createServer({
   root: frontendRoot,
@@ -54,8 +57,8 @@ try {
   for (const row of fixtureRows) {
     assert.equal(
       row.accepted,
-      row.events.length,
-      `${row.name}: ${row.events.length - row.accepted} event(s) fail the shape check`,
+      row.valid,
+      `${row.name}: ${row.accepted} event(s) pass the shape check, expected ${row.valid}`,
     );
   }
 
@@ -67,6 +70,7 @@ try {
       event: {
         seq: 1,
         conversation_uid: "probe",
+        generation: "daemon-1",
         type: "row.upsert",
         data: {
           id: "probe-row", seq: 1, kind: "input", role: "user", turn_id: null, status: "queued",
@@ -81,6 +85,7 @@ try {
       event: {
         seq: 2,
         conversation_uid: "probe",
+        generation: "daemon-1",
         type: "input.state",
         data: { id: "probe-input", state: "started", turn_id: null },
       },
@@ -92,6 +97,7 @@ try {
       event: {
         seq: 3,
         conversation_uid: "probe",
+        generation: "daemon-1",
         type: "input.state",
         data: { id: "probe-input", state: "queued", turn_id: null },
       },
@@ -181,7 +187,7 @@ try {
   for (const row of fixtureRows) {
     assert.equal(
       await page.locator(`[data-fixture="${row.name}"]`).getAttribute("data-accepted"),
-      String(row.events.length),
+      String(row.valid),
       `${row.name} renders the wrong shape count`,
     );
   }

@@ -466,6 +466,8 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
         problems.append("a stream starts with a snapshot")
     input_rows: set[str] = set()
     rows: set[str] = set()
+    # Input rows shown waiting for, or running in, a turn.
+    waiting: set[str] = set()
     states: dict[str, list[str]] = {}
     turn_of: dict[str, str] = {}
     terminal_info: dict[str, tuple[str | None, str]] = {}
@@ -501,6 +503,8 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 problems.append(
                     f"seq {seq}: input {info['id']} went from {last} to {state}"
                 )
+        if previous_state is None and not snapshot and info["id"] in waiting:
+            previous_state = "queued"
         if not repeated_terminal_snapshot:
             seen.append(info["state"])
         if info["state"] in ("started", "joined") and turn_id in ended_turns:
@@ -551,7 +555,15 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
     def note_rows(new_rows: list[dict[str, Any]]) -> None:
         rows.clear()
         rows.update(row["id"] for row in new_rows)
-        input_rows.update(row["id"] for row in new_rows if row["kind"] == "input")
+        for row in new_rows:
+            note_input_row(row)
+
+    def note_input_row(row: dict[str, Any]) -> None:
+        if row["kind"] != "input":
+            return
+        input_rows.add(row["id"])
+        if row["status"] in ("queued", "started", "joined"):
+            waiting.add(row["id"])
 
     conversation_uid = None
     generation = None
@@ -594,8 +606,7 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
             note_rows(data["rows"])
         elif kind == "row.upsert":
             rows.add(data["id"])
-            if data["kind"] == "input":
-                input_rows.add(data["id"])
+            note_input_row(data)
         elif kind in ("row.append", "row.delete"):
             if data["id"] not in rows:
                 problems.append(f"seq {seq}: {kind} for unknown row {data['id']}")
