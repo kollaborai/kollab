@@ -606,6 +606,8 @@ function ChatStreamToolOutputResult({
   outputChars,
   outputType,
   preview,
+  isError,
+  asked,
 }: {
   sessionId: string;
   rowId: string;
@@ -614,6 +616,8 @@ function ChatStreamToolOutputResult({
   outputChars: number;
   outputType: ChatStreamToolOutputType;
   preview: string;
+  isError?: boolean;
+  asked?: boolean;
 }) {
   const cacheKey = chatStreamToolOutputKey(sessionId, rowId, toolCallId, outputRevision);
   const [content, setContent] = useState<string | undefined>(() => chatStreamToolOutputCache.get(cacheKey));
@@ -656,13 +660,21 @@ function ChatStreamToolOutputResult({
     void load();
   }, [error, load, loaded]);
 
+  const rawContent = loaded ? content ?? "" : preview;
+  const displayedContent = isError && outputType === "text"
+    ? stripErrorPrefix(rawContent)
+    : rawContent;
+
   return (
     <div data-slot="chat-stream-tool-output-preview" className="mt-1 space-y-2">
-      <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
-        {loaded ? "Output:" : "Output preview:"}
+      <p className={cn(
+        "aui-tool-fallback-result-header text-xs font-medium",
+        isError && !asked ? "text-destructive" : "text-muted-foreground",
+      )}>
+        {asked ? "Not Run:" : isError ? "Error:" : loaded ? "Output:" : "Output preview:"}
       </p>
       <pre className="bg-muted/50 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
-        {formatContent(loaded ? content : preview)}
+        {formatContent(displayedContent)}
       </pre>
       {!loaded && loading ? (
         <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
@@ -708,6 +720,8 @@ function ToolFallbackResult({
           outputChars={resultPreview.output_chars}
           outputType={resultPreview.output_type}
           preview={resultPreview.preview}
+          isError={isError}
+          asked={asked}
         />
       </div>
     );

@@ -1,4 +1,4 @@
-import { isChatStreamToolOutputPreviewMarker, type ChatRow, type InputInfo } from "../../chat-stream";
+import { isChatStreamToolOutputPreviewMarker, type ChatRow, type InputInfo } from "../../chat-stream.ts";
 import type { Activity } from "./gem-face";
 
 const TOOL_ACTIVITY: Record<string, Activity> = {
