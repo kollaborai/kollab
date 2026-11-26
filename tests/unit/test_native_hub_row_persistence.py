@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from kollabor.state.chat_stream import ChatStreamService
-from kollabor_events.chat_stream import sequence_problems
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
+from kollabor_events.chat_stream import sequence_problems
 
 
 def _hub_row(row_id, *, kind, created_at, turn_id=None, status="done"):
