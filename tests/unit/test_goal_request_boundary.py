@@ -876,3 +876,21 @@ async def test_private_image_replay_after_daemon_restart_retains_discard_fence(b
         private_goal_reply_id="goal-" + "f" * 32, goal_conversation_uid="conversation-a",
     )
     assert not discarded["accepted"] and "discarded" in discarded["reason"]
+
+
+@pytest.mark.asyncio
+async def test_private_goal_result_is_not_written_to_shared_history(boundary):
+    boundary.service.stage_attachment_request(
+        "conversation-a", "/goal secret-private-preview", [{"ref": "secret-ref"}]
+    )
+    accepted = await boundary.state.send_message(
+        "/goal requests", private_goal_reply=True,
+        private_goal_reply_id="goal-" + "b" * 32,
+        goal_conversation_uid="conversation-a",
+    )
+    assert accepted["accepted"]
+    await finish(boundary)
+    reply = boundary.state._goal_reply_mailbox.poll(accepted["goal_reply_id"], "conversation-a")
+    assert "secret-private-preview" in reply["message"]
+    assert "secret-private-preview" not in repr(boundary.history)
+    assert reply["history_recorded"] is False
