@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -503,6 +504,92 @@ def test_snapshot_and_compaction_read_active_transcript_rows():
     assert any(row["id"] == "hub-message-1" for row in replacement["data"]["rows"])
 
 
+def test_snapshot_orders_live_hub_note_between_transcript_rows(monkeypatch):
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content="before note",
+            timestamp=datetime(2026, 11, 25, 12, 0, 0, tzinfo=timezone.utc),
+            metadata={"request_id": "transcript-before-note"},
+        ),
+        ConversationMessage(
+            role="assistant",
+            content="after note",
+            timestamp=datetime(2026, 11, 25, 12, 0, 2, tzinfo=timezone.utc),
+            metadata={
+                "turn_id": "turn-after-note",
+                "reply_id": "transcript-after-note",
+            },
+        ),
+    ]
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    monkeypatch.setattr(stream, "_timestamp", lambda: "2026-11-25T12:00:01Z")
+
+    _publish(
+        state,
+        "hub_message",
+        message_id="live-hub-note",
+        hub_admission="note",
+        hub_note={
+            "type": "hub-note",
+            "from": "peer",
+            "to": "koordinator",
+            "text": "between transcript messages",
+            "observed": True,
+        },
+    )
+
+    _snapshot, rows = _snapshot_rows(stream)
+
+    assert [row["id"] for row in rows] == [
+        "transcript-before-note",
+        "live-hub-note",
+        "transcript-after-note",
+    ]
+    assert rows[2]["parts"] == [{"type": "text", "text": "after note"}]
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeps_live_hub_note_before_an_active_turn():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    note_id = "live-hub-note-before-turn"
+    _publish(
+        state,
+        "hub_message",
+        message_id=note_id,
+        hub_admission="note",
+        hub_note={
+            "type": "hub-note",
+            "from": "peer",
+            "to": "koordinator",
+            "text": "keep this note",
+            "observed": True,
+        },
+    )
+    await _add(stream, "active-turn-input", "continue")
+    _publish(
+        state,
+        "turn_start",
+        request_id="active-turn-input",
+        turn_id="active-turn",
+    )
+
+    replacement = stream.replace_transcript()
+    replacement_ids = [row["id"] for row in replacement["data"]["rows"]]
+    snapshot = stream.subscribe(
+        {"after": None, "conversation_uid": "conversation-a"}
+    )["events"][0]
+    snapshot_ids = [row["id"] for row in snapshot["data"]["rows"]]
+
+    assert note_id in replacement_ids
+    assert replacement_ids.index(note_id) < replacement_ids.index("active-turn-input")
+    assert note_id in snapshot_ids
+
+
 def test_snapshot_translates_canonical_transcript_images_to_chat_parts():
     state = _State()
     state._llm_service.conversation_history = [
@@ -529,6 +616,51 @@ def test_snapshot_translates_canonical_transcript_images_to_chat_parts():
         {"type": "text", "text": "look"},
         {"type": "image", "url": "https://example.test/image.png"},
     ]
+
+
+def test_snapshot_omits_hidden_voice_transcript_instruction():
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content="hidden voice instruction",
+            metadata={"hidden": True},
+        ),
+        ConversationMessage(
+            role="user",
+            content="visible user message",
+            metadata={"request_id": "visible-user-message"},
+        ),
+    ]
+
+    snapshot, rows = _snapshot_rows(ChatStreamService(state))
+
+    assert [row["id"] for row in rows] == ["visible-user-message"]
+    assert "hidden voice instruction" not in str(snapshot["data"]["rows"])
+
+
+def test_rows_pager_omits_hidden_voice_instruction_from_older_history():
+    state = _State()
+    state._llm_service.conversation_history = [
+        ConversationMessage(
+            role="user",
+            content="hidden voice instruction",
+            metadata={"hidden": True},
+        ),
+        *[
+            ConversationMessage(
+                role="user",
+                content=f"visible message {index}",
+                metadata={"request_id": f"visible-message-{index}"},
+            )
+            for index in range(REPLAY_WINDOW + 1)
+        ],
+    ]
+    stream = ChatStreamService(state)
+
+    page = stream.row_pager().read(before=None, limit=10)
+
+    assert [row["id"] for row in page["rows"]] == ["visible-message-0"]
 
 
 def test_retained_transcript_row_keeps_its_id_when_compaction_changes_its_index():
