@@ -312,6 +312,17 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 )
         elif turn_id:
             turn_of[info["id"]] = turn_id
+        if info["state"] == "ended":
+            bound_turn = turn_of.get(info["id"])
+            if bound_turn is None and info["outcome"] != "cancelled":
+                problems.append(
+                    f"seq {seq}: input {info['id']} ended without a turn"
+                )
+            elif bound_turn is not None and bound_turn not in ended_turns:
+                verb = "completed" if info["outcome"] == "completed" else "ended"
+                problems.append(
+                    f"seq {seq}: input {info['id']} {verb} before its turn {bound_turn} ended"
+                )
 
     def note_turn(seq: Any, turn_id: Any, state: str) -> None:
         if state == "running" and turn_id in ended_turns:
@@ -369,12 +380,6 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 rows.discard(data["id"])
         elif kind == "input.state":
             note_state(seq, data)
-            turn = turn_of.get(data["id"])
-            if data["state"] == "ended" and turn and turn not in ended_turns:
-                verb = "completed" if data["outcome"] == "completed" else "ended"
-                problems.append(
-                    f"seq {seq}: input {data['id']} {verb} before its turn {turn} ended"
-                )
         elif kind == "turn.state":
             note_turn(seq, data["turn_id"], data["state"])
 
