@@ -278,6 +278,7 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
 
     def note_state(seq: Any, info: dict[str, Any]) -> None:
         seen = states.setdefault(info["id"], [])
+        previous_state = seen[-1] if seen else None
         if seen and "ended" not in seen:
             last, state = seen[-1], info["state"]
             if last == "queued" and state == "ended" and info.get("outcome") != "cancelled":
@@ -289,12 +290,17 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                     f"seq {seq}: input {info['id']} went from {last} to {state}"
                 )
         seen.append(info["state"])
-        if info.get("turn_id"):
-            previous = turn_of.setdefault(info["id"], info["turn_id"])
-            if previous != info["turn_id"]:
+        turn_id = info.get("turn_id")
+        if info["id"] in turn_of:
+            previous = turn_of[info["id"]]
+            if previous != turn_id and (
+                previous_state is None or _STAGE[info["state"]] > _STAGE[previous_state]
+            ):
                 problems.append(
-                    f"seq {seq}: input {info['id']} changed turn from {previous} to {info['turn_id']}"
+                    f"seq {seq}: input {info['id']} changed turn from {previous} to {turn_id}"
                 )
+        elif turn_id:
+            turn_of[info["id"]] = turn_id
 
     def note_rows(new_rows: list[dict[str, Any]]) -> None:
         rows.clear()
@@ -324,6 +330,10 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
         last_seq = max(last_seq, seq)
         expected = data["next_seq"] if kind == "snapshot" else last_seq + 1
         if kind == "snapshot":
+            if data["next_seq"] <= seq:
+                problems.append(
+                    f"seq {seq}: snapshot next_seq must follow its event seq"
+                )
             note_rows(data["rows"])
             for turn in data["turns"]:
                 if turn.get("state") == "ended":
