@@ -629,6 +629,91 @@ describe("LiveChatStore", () => {
     expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
   });
 
+  it("reconciles an ambiguous goal admission when the stream later confirms its input", async () => {
+    const { store, request, streams } = make();
+    const input = {
+      id: "web-goal-stream-reconcile",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"7".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let sends = 0;
+    let polls = 0;
+    request.mockImplementation(async (path, init) => {
+      if (path.endsWith("/inputs")) {
+        sends += 1;
+        expect(init?.body).toBe(JSON.stringify(input));
+        throw new Error("connection reset after admission");
+      }
+      if (path.endsWith("/goal-replies/poll")) {
+        polls += 1;
+        expect(init?.body).toBe(JSON.stringify({ goal_reply_id: ownerId }));
+        return polls === 1
+          ? new Response(JSON.stringify({ status: "missing" }), { status: 200 })
+          : new Response(JSON.stringify({ status: "complete", success: true, message: "Recovered." }), { status: 200 });
+      }
+      return new Response(null, { status: 202 });
+    });
+    const stream = await startOpen(store, streams);
+    stream.emit(snapshot(10));
+
+    await expect(store.send(input)).rejects.toThrow("connection reset after admission");
+    await vi.waitFor(() => expect(polls).toBe(1));
+    expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "pending" });
+
+    stream.emit(streamEvent(10, "input.state", { id: input.id, state: "queued", turn_id: null }));
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
+      state: "complete",
+      success: true,
+      message: "Recovered.",
+    }));
+
+    expect(sends).toBe(1);
+    expect(polls).toBe(2);
+    expect(store.getSnapshot().running).toBe(false);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
+  it("bounds unresolved admission polling and lets the user check status without resending", async () => {
+    const { store, request } = make({ maxUnconfirmedGoalPolls: 2, goalReplyPollIntervalMs: 1 });
+    const input = {
+      id: "web-goal-unresolved",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"8".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let sends = 0;
+    let polls = 0;
+    request.mockImplementation(async (path) => {
+      if (path.endsWith("/inputs")) {
+        sends += 1;
+        throw new Error("connection reset after admission");
+      }
+      if (path.endsWith("/goal-replies/poll")) {
+        polls += 1;
+        if (polls <= 2) return new Response(JSON.stringify({ status: "missing" }), { status: 200 });
+        if (polls === 3) return new Response(JSON.stringify({ status: "pending" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "complete", success: true, message: "Found later." }), { status: 200 });
+      }
+      return new Response(null, { status: 202 });
+    });
+
+    await expect(store.send(input)).rejects.toThrow("connection reset after admission");
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "uncertain" }));
+    expect(store.getSnapshot().running).toBe(false);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+
+    store.checkGoalReply(input.id);
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
+      state: "complete",
+      success: true,
+      message: "Found later.",
+    }));
+    expect(sends).toBe(1);
+    expect(polls).toBe(4);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
   it("stops an active goal only through its private owner id", async () => {
     const { store, request, streams } = make();
     const input = {
