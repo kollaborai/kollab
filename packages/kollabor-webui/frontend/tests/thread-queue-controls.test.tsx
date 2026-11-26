@@ -11,6 +11,11 @@ import type { ChatRow, InputInfo } from "../src/chat-stream";
 import { Thread } from "../src/components/assistant-ui/thread";
 import { MediaImageProvider } from "../src/components/media/media-view";
 import { PermissionCancellationProvider } from "../src/permission-cancellation";
+import {
+  PermissionPromptDataUI,
+  PermissionResponseContext,
+  type PermissionResponseHandler,
+} from "../src/components/PermissionTool";
 import type { EngineApi } from "../src/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -46,6 +51,7 @@ function fakeStore(
 ) {
   const snap = { rows, inputs, running, connection: "live" as const, hasEarlier: false, olderStatus: "idle" as const, goalReplies } as ChatSnapshot;
   const store = {
+    get rows() { return snap.rows; },
     subscribe: (_listener: () => void) => () => {},
     getSnapshot: () => snap,
     send: vi.fn(async () => {}),
@@ -73,7 +79,12 @@ const spies = (): Spies => ({
 
 // The thread's messages come from the store's rows. Send and Stop reach the runtime's
 // adapter; the spies stand in for it so the test can see when they are called.
-function SpyRuntime({ store, spies: runtimeSpies, children }: { store: LiveStore; spies: Spies; children: ReactNode }) {
+function SpyRuntime({ store, spies: runtimeSpies, permissionRespond, children }: {
+  store: LiveStore;
+  spies: Spies;
+  permissionRespond?: PermissionResponseHandler;
+  children: ReactNode;
+}) {
   const snap = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const repository = useMemo(() => toRepository(snap.rows), [snap.rows]);
   const runtime = useExternalStoreRuntime({
@@ -86,7 +97,14 @@ function SpyRuntime({ store, spies: runtimeSpies, children }: { store: LiveStore
       runtimeSpies.onCancel();
     },
   });
-  return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>;
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <PermissionResponseContext.Provider value={permissionRespond ?? null}>
+        <PermissionPromptDataUI />
+        {children}
+      </PermissionResponseContext.Provider>
+    </AssistantRuntimeProvider>
+  );
 }
 
 let aui: ReturnType<typeof useAui> | undefined;
@@ -106,6 +124,7 @@ function mount(
   runtimeSpies: Spies,
   permissionApi?: Pick<EngineApi, "getPermissions" | "cancelOwned">,
   mediaApi: EngineApi = unprotectedImageApi,
+  permissionRespond?: PermissionResponseHandler,
 ): HTMLElement {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -118,13 +137,13 @@ function mount(
         <MediaImageProvider api={mediaApi}>
         {permissionApi ? (
           <PermissionCancellationProvider api={permissionApi} sessionId="session-1" store={live}>
-            <SpyRuntime store={live} spies={runtimeSpies}>
+              <SpyRuntime store={live} spies={runtimeSpies} permissionRespond={permissionRespond}>
               <Capture />
               <Thread commands={[]} />
             </SpyRuntime>
           </PermissionCancellationProvider>
         ) : (
-          <SpyRuntime store={live} spies={runtimeSpies}>
+          <SpyRuntime store={live} spies={runtimeSpies} permissionRespond={permissionRespond}>
             <Capture />
             <Thread commands={[]} />
           </SpyRuntime>
@@ -161,6 +180,45 @@ const byLabel = (container: HTMLElement, label: string) =>
   container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
 
 describe("composer send, queue, Stop and Send Now on the chat store", () => {
+  it("renders and answers the actual system/prompt row shape in the thread", async () => {
+    const promptData = {
+      tool_id: "daemon-shell-1",
+      permission_id: "daemon-perm-1",
+      request_id: "daemon-parent-1",
+      source: "acp",
+      parked: false,
+      tool_name: "terminal",
+      tool_type: "shell",
+      risk_level: "medium",
+      command: "pytest -q",
+      acp_options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }],
+    };
+    const promptRow: ChatRow = {
+      id: "prompt-daemon-perm-1",
+      seq: 1,
+      kind: "prompt",
+      role: "system",
+      turn_id: "turn-1",
+      status: "open",
+      parts: [{ type: "prompt", prompt_id: "daemon-perm-1", data: promptData }],
+      created_at: "2026-11-25T00:00:00Z",
+    };
+    const { live } = fakeStore([promptRow], {}, false);
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const container = mount(live, spies(), undefined, unprotectedImageApi, respond);
+
+    expect(container.textContent).toContain("Permission required: terminal");
+    expect(container.textContent).toContain("pytest -q");
+    const allow = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Allow once");
+    await click(allow);
+
+    expect(respond).toHaveBeenCalledWith(
+      "daemon-perm-1",
+      expect.objectContaining(promptData),
+      expect.objectContaining({ tool_id: "daemon-shell-1", permission_id: "daemon-perm-1", decision: "approve", option_id: "allow-once" }),
+    );
+  });
+
   it("loads protected images in a stream row through the authenticated media API", async () => {
     const NativeURL = URL;
     const URLWithObjectUrls = class extends NativeURL {};
@@ -327,6 +385,40 @@ describe("composer send, queue, Stop and Send Now on the chat store", () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
       "Could not stop the pending permission. Try again.",
     );
+  });
+
+  it("shows Stop for the daemon prompt row and cancels its parent request", async () => {
+    const promptData = {
+      tool_id: "daemon-shell-1",
+      permission_id: "daemon-perm-1",
+      request_id: "daemon-parent-1",
+      source: "acp",
+      parked: false,
+      tool_name: "terminal",
+    };
+    const promptRow: ChatRow = {
+      id: "prompt-daemon-perm-1", seq: 1, kind: "prompt", role: "system", turn_id: "turn-1", status: "open",
+      parts: [{ type: "prompt", prompt_id: "daemon-perm-1", data: promptData }],
+      created_at: "2026-11-25T00:00:00Z",
+    };
+    const { live } = fakeStore([promptRow], {}, false);
+    const api = {
+      getPermissions: vi.fn(async () => ({
+        pending_prompts: [{
+          type: "permission_request",
+          tool_id: "daemon-shell-1",
+          permission_id: "daemon-perm-1",
+          details: promptData,
+        }],
+      })),
+      cancelOwned: vi.fn(async () => ({ cancelled: true })),
+    } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
+    const container = mount(live, spies(), api);
+
+    await click(byLabel(container, "Stop generating"));
+
+    expect(api.getPermissions).toHaveBeenCalledWith("session-1");
+    expect(api.cancelOwned).toHaveBeenCalledWith("session-1", "daemon-parent-1");
   });
 
   it("Send Now calls store.sendNow with the queued input's id", async () => {

@@ -1753,6 +1753,34 @@ async def test_permission_prompt_row_carries_full_data_and_resolution():
     assert prompt["status"] == "granted"
     assert prompt["turn_id"] == "19"
     assert sequence_problems([snapshot]) == []
+
+
+def test_parked_permission_event_updates_the_open_prompt_row():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    details = {
+        "tool_id": "tool-permission-parked",
+        "permission_id": "permission-parked",
+        "request_id": "parent-parked",
+        "source": "acp",
+        "parked": False,
+    }
+    _publish(state, "permission_request", details=details)
+    open_prompt = next(row for row in _snapshot_rows(stream)[1] if row["id"] == "prompt-permission-parked")
+    assert open_prompt["status"] == "open"
+    assert open_prompt["parts"][0]["data"]["parked"] is False
+
+    _publish(
+        state,
+        "permission_parked",
+        tool_id="tool-permission-parked",
+        permission_id="permission-parked",
+        request_id="parent-parked",
+    )
+    parked_prompt = next(row for row in _snapshot_rows(stream)[1] if row["id"] == "prompt-permission-parked")
+    assert parked_prompt["status"] == "open"
+    assert parked_prompt["parts"][0]["data"]["parked"] is True
 def test_goal_origin_survives_inputless_turn_replay_and_snapshot():
     state = _State()
     stream = ChatStreamService(state)

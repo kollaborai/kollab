@@ -867,6 +867,8 @@ class ChatStreamService:
             self._on_hub_message(uid, event)
         elif kind == "permission_request":
             self._on_permission_prompt(uid, event)
+        elif kind == "permission_parked":
+            self._on_permission_parked(uid, event)
         elif kind in {
             "permission_granted",
             "permission_denied",
@@ -1402,6 +1404,39 @@ class ChatStreamService:
                     "parts": parts,
                 },
             )
+
+    def _on_permission_parked(self, uid: str, event: dict[str, Any]) -> None:
+        prompt_id = event.get("permission_id") or event.get("tool_id")
+        if not isinstance(prompt_id, str) or not prompt_id:
+            return
+        row_id = f"prompt-{prompt_id}"
+        row = self._rows.setdefault(uid, {}).get(row_id)
+        if row is None:
+            return
+        parts = copy.deepcopy(row.get("parts", []))
+        if not parts or not isinstance(parts[0], dict) or parts[0].get("type") != "prompt":
+            return
+        data = parts[0].get("data")
+        data = copy.deepcopy(data) if isinstance(data, dict) else {}
+        if data.get("permission_id") not in (None, prompt_id):
+            return
+        tool_id = event.get("tool_id")
+        if isinstance(tool_id, str) and data.get("tool_id") not in (None, tool_id):
+            return
+        request_id = event.get("request_id")
+        if isinstance(request_id, str) and data.get("request_id") not in (None, request_id):
+            return
+        data["parked"] = True
+        parts[0]["data"] = data
+        self._upsert(
+            uid,
+            {
+                **row,
+                "turn_id": self._event_turn_id(event) or row.get("turn_id"),
+                "status": "open",
+                "parts": parts,
+            },
+        )
 
     def _join_input(self, uid: str, input_id: str, turn_id: str) -> None:
         self._ensure_input_row(uid, input_id)

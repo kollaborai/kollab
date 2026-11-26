@@ -7,14 +7,19 @@ export function permissionOwner(payload: unknown): PendingPermission | null {
   const args = payload as {
     tool_id?: unknown;
     request_id?: unknown;
+    source?: unknown;
+    parked?: unknown;
     details?: { source?: unknown; parked?: unknown };
   };
   if (typeof args.tool_id !== "string" || !args.tool_id) return null;
+  const details = args.details;
   return {
     toolId: args.tool_id,
     requestId: typeof args.request_id === "string" && args.request_id ? args.request_id : undefined,
-    source: typeof args.details?.source === "string" ? args.details.source : undefined,
-    ...(typeof args.details?.parked === "boolean" ? { parked: args.details.parked } : {}),
+    source: typeof args.source === "string" ? args.source : typeof details?.source === "string" ? details.source : undefined,
+    ...(typeof args.parked === "boolean"
+      ? { parked: args.parked }
+      : typeof details?.parked === "boolean" ? { parked: details.parked } : {}),
   };
 }
 
@@ -24,8 +29,18 @@ export function permissionOwner(payload: unknown): PendingPermission | null {
  */
 export function pendingPermissions(rows: readonly ChatRow[]): PendingPermission[] {
   return rows.flatMap((row) => row.parts.flatMap((part) => {
-    if (part.type !== "tool-call" || part.tool_name !== "request_permission" || part.result !== undefined) return [];
-    const owner = permissionOwner(part.args);
+    let payload: unknown;
+    if (part.type === "tool-call") {
+      if (part.tool_name !== "request_permission" || part.result !== undefined) return [];
+      payload = part.args;
+    } else if (part.type === "prompt") {
+      if (row.kind !== "prompt" || row.role !== "system" || row.status !== "open" ||
+          (typeof part.data === "object" && part.data !== null && "resolution" in part.data)) return [];
+      payload = part.data;
+    } else {
+      return [];
+    }
+    const owner = permissionOwner(payload);
     return owner?.requestId ? [owner] : [];
   }));
 }

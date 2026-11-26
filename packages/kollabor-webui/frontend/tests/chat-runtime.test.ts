@@ -53,6 +53,7 @@ describe("toThreadMessageLike", () => {
       chatRowKind: "reply",
       chatRowStatus: "complete",
       chatTurnId: "turn-1",
+      chatRowRole: "assistant",
     });
   });
 
@@ -111,7 +112,23 @@ describe("toThreadMessageLike", () => {
       chatRowKind: "reply",
       chatRowStatus: "failed",
       chatTurnId: null,
+      chatRowRole: "user",
     });
+  });
+
+  it("keeps structured system rows renderable as system rows", () => {
+    const promptRow: ChatRow = {
+      ...row("prompt-row", [{ type: "prompt", prompt_id: "permission-1", data: { command: "pytest" } }], "system"),
+      kind: "prompt",
+      status: "open",
+    };
+    const message = toThreadMessageLike(promptRow);
+
+    expect(message.role).toBe("assistant");
+    expect(message.content).toEqual([
+      { type: "data-prompt", id: "permission-1", data: { command: "pytest" } },
+    ]);
+    expect(message.metadata?.custom).toMatchObject({ chatRowRole: "system", chatRowKind: "prompt" });
   });
 
   it("gives empty args when the tool-call args are not a plain object", () => {

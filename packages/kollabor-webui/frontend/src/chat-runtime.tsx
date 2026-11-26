@@ -56,12 +56,16 @@ function toPart(part: ChatPart): LikePart {
 
 /** One stored row as the message assistant-ui renders. */
 export function toThreadMessageLike(row: ChatRow, turns: Readonly<Record<string, TurnInfo>> = {}): ThreadMessageLike {
+  // assistant-ui's ThreadSystemMessage only accepts a single text part. Keep
+  // structured system rows renderable by storing them as assistant messages and
+  // routing them back through the system renderer using chatRowRole metadata.
+  const hasStructuredSystemParts = row.role === "system" && row.parts.some((part) => part.type !== "text");
   return {
     id: row.id,
-    role: row.role,
+    role: hasStructuredSystemParts ? "assistant" : row.role,
     createdAt: new Date(row.created_at),
     content: row.parts.map(toPart),
-    metadata: { custom: { chatRowKind: row.kind, chatRowStatus: row.status, chatTurnId: row.turn_id } },
+    metadata: { custom: { chatRowKind: row.kind, chatRowStatus: row.status, chatTurnId: row.turn_id, chatRowRole: row.role } },
     ...(row.role === "assistant" && row.status === "failed"
       ? { status: { type: "incomplete" as const, reason: "error" as const } }
       : {}),
