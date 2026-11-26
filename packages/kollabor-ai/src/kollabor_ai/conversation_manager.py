@@ -1125,6 +1125,22 @@ class ConversationManager:
                             ),
                             "session_id": session_file.stem.replace("session_", ""),
                         }
+                        # Native input IDs are stored with the original user
+                        # message, not in the assistant's display metadata.
+                        # Keep the identifier when rebuilding history so resume
+                        # retains the row's request correlation.
+                        logged_metadata = data.get("message", {}).get("metadata")
+                        request_id = (
+                            logged_metadata.get("request_id")
+                            if isinstance(logged_metadata, dict)
+                            else None
+                        )
+                        if (
+                            msg_type == "user"
+                            and isinstance(request_id, str)
+                            and request_id
+                        ):
+                            message["metadata"]["request_id"] = request_id
                         # The logger stores initial system context as a user
                         # record. Preserve that wire role and recover only its
                         # explicit provenance, never classify by prompt text.

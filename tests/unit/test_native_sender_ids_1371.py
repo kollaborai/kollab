@@ -95,8 +95,11 @@ async def test_native_voice_admission_queues_under_the_sender_request_id(arrives
         origin = issue_voice_admission_context(ROOM_BINDING, "lv-turn-1")
         voice_kwargs = {"origin_context": origin}
 
-    await service.process_user_input("hi", request_id="client-req-V", **voice_kwargs)
+    result = await service.process_user_input(
+        "hi", request_id="client-req-V", **voice_kwargs
+    )
 
+    assert result == {"status": "queued", "request_id": "client-req-V"}
     queued = service._enqueue_with_overflow_strategy.await_args.args[0]
     assert isinstance(queued, QueuedInput)
     assert queued.request_ids == ("client-req-V",)

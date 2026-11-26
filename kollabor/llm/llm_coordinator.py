@@ -3337,7 +3337,7 @@ class LLMService:
             # Dropped, or swept by a Stop: its stream already ended, so it is not
             # reported as queued (#589).
             return {"status": "rejected", "reason": "input_not_queued"}
-        if request_id and not (voice or trusted_origin_context):
+        if request_id:
             return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
 
