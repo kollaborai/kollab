@@ -282,12 +282,18 @@ async def test_live_voice_period_is_reconciled_with_resumed_silent_transcript(
         }
     )["events"]
     row_updates = [
-        event["data"]
+        event
         for event in updates
         if event["type"] == "row.upsert"
         and event["data"].get("kind") == "reply"
     ]
-    assert row_updates[-1]["parts"] == []
+    assert row_updates[-1]["data"]["parts"] == []
+    token_append = next(
+        event
+        for event in updates
+        if event["type"] == "row.append" and event["data"].get("text") == "."
+    )
+    assert token_append["seq"] < row_updates[-1]["seq"]
     snapshot = stream.subscribe({})["events"][0]["data"]["rows"]
     reply_rows = [row for row in snapshot if row["kind"] == "reply"]
     assert len(reply_rows) == 1
