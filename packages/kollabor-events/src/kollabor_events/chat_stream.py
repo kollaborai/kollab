@@ -316,8 +316,16 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
             )
         if info["id"] in turn_of:
             previous = turn_of[info["id"]]
-            if previous != turn_id and (
-                previous_state is None or _STAGE[info["state"]] > _STAGE[previous_state]
+            if (
+                previous != turn_id
+                and previous_state != "ended"
+                and (
+                    _STAGE[info["state"]] > _STAGE[previous_state]
+                    or (
+                        info["state"] != "ended"
+                        and _STAGE[info["state"]] == _STAGE[previous_state]
+                    )
+                )
             ):
                 problems.append(
                     f"seq {seq}: input {info['id']} changed turn from {previous} to {turn_id}"
