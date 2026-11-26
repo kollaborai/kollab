@@ -1298,6 +1298,8 @@ class KollaborConversationLogger:
         thinking_content: Optional[List[str]] = None,
         tool_calls: Optional[List[Dict]] = None,
         provider_reasoning: Optional[Dict[str, Any]] = None,
+        display_content: Optional[str] = None,
+        turn_id: Optional[str] = None,
         display_metadata: Optional[Dict[str, Any]] = None,
         voice_turn_id: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -1313,6 +1315,11 @@ class KollaborConversationLogger:
             tool_calls: Optional list of tool call dicts with id, name, input keys
             provider_reasoning: Provider-native reasoning artifacts, stored
                 verbatim so a resumed session can hand them back to the model
+            display_content: Optional visible text for XML tool replies. An
+                empty string is meaningful: an XML-only assistant response
+                should not replay its raw tool tags as chat text.
+            turn_id: Stable stream identity for the assistant turn, used to
+                reconstruct the same transcript row identities after resume.
             display_metadata: ACP cards, updates and stop reason for replay;
                 excluded from native provider tool-call reconstruction
             voice_turn_id: The voice turn a reply belongs to, so a talk-over
@@ -1385,6 +1392,10 @@ class KollaborConversationLogger:
 
         if provider_reasoning:
             message["provider_reasoning"] = provider_reasoning
+        if display_content is not None:
+            message["display_content"] = display_content
+        if isinstance(turn_id, str) and turn_id:
+            message["turn_id"] = turn_id
         if replay_metadata := _acp_display_metadata(display_metadata):
             message["display_metadata"] = replay_metadata
         if voice_turn_id:

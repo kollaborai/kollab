@@ -128,6 +128,103 @@ def test_compaction_snapshot_and_replace_use_one_stable_public_marker():
     assert repeated_rows[0]["id"] == snapshot_rows[0]["id"]
 
 
+def test_later_compaction_replacement_drops_the_previous_marker():
+    history = [
+        ConversationMessage(
+            role="user",
+            content="Previous Context Summary: first private summary",
+            timestamp="2026-11-25T12:00:00Z",
+            metadata={"context_compaction": True, "compaction_id": "compact-first"},
+        )
+    ]
+    state = _State(history)
+    stream = ChatStreamService(state)
+
+    first = stream.replace_transcript()["data"]["rows"]
+    first_marker = next(row for row in first if row["kind"] == "marker")
+
+    history[:] = [
+        ConversationMessage(
+            role="user",
+            content="Previous Context Summary: second private summary",
+            timestamp="2026-11-25T12:05:00Z",
+            metadata={"context_compaction": True, "compaction_id": "compact-second"},
+        )
+    ]
+    second = stream.replace_transcript()["data"]["rows"]
+    second_markers = [row for row in second if row["kind"] == "marker"]
+
+    assert len(second_markers) == 1
+    assert second_markers[0]["id"] != first_marker["id"]
+    assert second_markers[0]["parts"] == [
+        {"type": "text", "text": "Earlier messages compacted"}
+    ]
+
+
+def test_xml_tool_history_round_trips_nonempty_results_into_a_tool_row():
+    history = [
+        ConversationMessage(
+            role="assistant",
+            content="Running it.\n<terminal>echo fake-tool-ran</terminal>",
+            metadata={
+                "turn_id": "xml-turn-1",
+                "display_content": "Running it.",
+                "xml_tool_calls": [
+                    {
+                        "id": "terminal_1",
+                        "name": "terminal",
+                        "input": {"command": "echo fake-tool-ran"},
+                    }
+                ],
+            },
+        ),
+        ConversationMessage(
+            role="user",
+            content="Tool result: [terminal] fake-tool-ran\nsecond line",
+            metadata={
+                "tool_output_batch": True,
+                "xml_tool_results": [
+                    {
+                        "id": "terminal_1",
+                        "content": "[terminal] fake-tool-ran\nsecond line",
+                        "tool_execution_time": 0.0,
+                    }
+                ],
+            },
+        ),
+    ]
+
+    # The queue producer stores display-only XML calls on the assistant and
+    # nonempty result entries in a hidden batch row. A newly constructed
+    # stream service models projection after history reload.
+    rows = ChatStreamService(_State(history)).subscribe({})["events"][0]["data"]["rows"]
+    tools = [row for row in rows if row["kind"] == "tool"]
+    replies = [row for row in rows if row["kind"] == "reply"]
+
+    assert len(tools) == 1
+    assert tools[0]["parts"] == [
+        {
+            "type": "tool-call",
+            "tool_call_id": "terminal_1",
+            "tool_name": "terminal",
+            "args": {"command": "echo fake-tool-ran"},
+            "result": "[terminal] fake-tool-ran\nsecond line",
+            "is_error": False,
+        }
+    ]
+    assert len(replies) == 1
+    assert replies[0]["parts"] == [{"type": "text", "text": "Running it."}]
+    assert all(
+        not (
+            part.get("type") == "text"
+            and part.get("text", "").startswith("Tool result:")
+        )
+        for row in rows
+        for part in row["parts"]
+    )
+    assert "<terminal>" not in str(rows)
+
+
 def test_native_tool_history_reloads_as_distinct_reply_segments_and_one_call_row():
     uid = "conversation-projection"
     turn_id = "native-turn-1"
