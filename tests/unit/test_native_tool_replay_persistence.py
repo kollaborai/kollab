@@ -167,8 +167,12 @@ async def test_empty_xml_display_text_survives_jsonl_resume(tmp_path):
     )
     assert assistant_record["display_content"] == ""
 
-    state, _reader, history, _result = await resume(tmp_path, writer.session_id)
+    state, _reader, history, result = await resume(tmp_path, writer.session_id)
     assert history[1].metadata["display_content"] == ""
+    assert all(
+        "<terminal>" not in message["content"]
+        for message in result["messages"]
+    )
     rows = ChatStreamService(state).subscribe({})["events"][0]["data"]["rows"]
     assert all(row["kind"] != "reply" for row in rows)
     assert [row["kind"] for row in rows].count("tool") == 1
