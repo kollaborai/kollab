@@ -22,8 +22,8 @@ vi.mock("@/components/media/media-view", () => ({
 }));
 
 import {
+  ChatStreamPartPreview,
   ChatStreamPartsPreview,
-  fetchChatStreamPart,
   fetchChatStreamPartsPage,
 } from "./chat-stream-parts";
 import type { ChatStreamPartPreviewMarker, ChatStreamPartsPreviewMarker } from "./chat-stream";
@@ -89,18 +89,32 @@ describe("chat stream part recovery", () => {
     document.body.replaceChildren();
   });
 
-  it("fetches the exact original structured part through field=part", async () => {
+  it("renders a recovered structured part through the production preview path", async () => {
     const part = { type: "hub-note", from: "peer", to: "", text: "recovered hub note", observed: true };
     const serialized = JSON.stringify(part);
-    const marker = { ...partMarker(), output_chars: Array.from(serialized).length };
+    const marker = {
+      ...partMarker(),
+      output_bytes: new TextEncoder().encode(serialized).length,
+      output_chars: Array.from(serialized).length,
+    };
     mocks.getChatStreamContent.mockResolvedValueOnce(
       contentChunk(marker.row_id, marker.part_index, marker.output_revision, serialized),
     );
 
-    await expect(fetchChatStreamPart(marker)).resolves.toEqual(part);
-    expect(mocks.getChatStreamContent).toHaveBeenCalledWith(
-      "session-1", "row-part", 4, "part", marker.output_revision, { offset: 0, limit: 32768 },
-    );
+    const ui = mount();
+    try {
+      await ui.render(<ChatStreamPartPreview marker={marker} />);
+      await act(async () => {
+        ui.host.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(mocks.getChatStreamContent).toHaveBeenCalledWith(
+        "session-1", "row-part", 4, "part", marker.output_revision, { offset: 0, limit: 32768 },
+      );
+      expect(ui.host.textContent).toContain("recovered hub note");
+      expect(ui.host.textContent).toContain("Hub message fields");
+    } finally {
+      await ui.unmount();
+    }
   });
 
   it("rejects a page from a different row revision before rendering it", async () => {
