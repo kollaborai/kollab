@@ -4352,12 +4352,13 @@ class LocalStateService(StateService):
                     add_message("user", recorded, metadata={"slash_command": recorded}, publish_user_event=False)
                 else:
                     add_message("user", recorded, metadata={"slash_command": recorded})
-                add_message("assistant", output, metadata=metadata)
+                if not private_goal_reply:
+                    add_message("assistant", output, metadata=metadata)
             if private_goal_reply:
                 return {
                     "success": bool(getattr(result, "success", False)),
                     "message": output,
-                    "history_recorded": callable(add_message),
+                    "history_recorded": False,
                 }
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(
