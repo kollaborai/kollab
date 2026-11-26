@@ -1194,7 +1194,7 @@ describe("chat recorder analysis", () => {
     expect(JSON.stringify({ net: rec.net, marks: rec.marks })).not.toContain("private-objective-marker");
   });
 
-  it("masks private goal command and reply rows from frame evidence while retaining tool cards", () => {
+  it("masks private goal command and reply rows from evidence while retaining tool cards", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
     const makeRow = (role: string, text: string, hasToolCard = false) => {
@@ -1217,7 +1217,17 @@ describe("chat recorder analysis", () => {
       makeRow("assistant", "unrelated assistant reply"),
     ];
     let nextFrame: Function | null = null;
-    const window = { fetch: async () => new Response("") };
+    const window = {
+      fetch: async (url: string) => url.endsWith("/history")
+        ? new Response(JSON.stringify({
+          start_index: 0, end_index: 2, total_messages: 2,
+          history: [
+            { role: "user", content: `/goal ${marker} and instructions` },
+            { role: "assistant", content: `goal goal-short created — turn 1 scheduled\nobjective: ${marker}` },
+          ],
+        }))
+        : new Response(""),
+    };
     const document = {
       documentElement: {},
       querySelectorAll: (selector: string) => {
@@ -1248,6 +1258,12 @@ describe("chat recorder analysis", () => {
     expect(rows.slice(0, 2).map((row: any) => row.__styles.visibility)).toEqual(["hidden", "hidden"]);
     expect(JSON.stringify({ frames: rec.frames, users: rec.snapshotUserRows() })).not.toContain(marker);
     expect(JSON.stringify(rec.frames)).toContain("terminal tool call: sleep 10");
+    const historyResponse = await (window.fetch as any)("http://localhost/sessions/target/history");
+    await historyResponse.json();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const historyEntry = rec.net.find((entry: any) => entry.kind === "history" && entry.tail);
+    expect(historyEntry.tail).toEqual(["u:<private goal command>", "a:<private goal reply>"]);
+    expect(JSON.stringify(rec.net)).not.toContain(marker);
   });
 
   it("requires a known approval mode before the prompt flow changes it", () => {
