@@ -830,13 +830,19 @@ export class LiveChatStore implements LiveStore {
       this.reconcileGoalAdmission(event.data.id);
     }
     // A new window or deletion invalidates an in-flight page, which may contain stale rows.
-    // Keep the current cursor so a fresh page can be requested.
-    if (event.type === "snapshot" || event.type === "replace" || event.type === "row.delete") {
+    if (event.type === "snapshot" || event.type === "row.delete") {
       this.epoch += 1;
       this.paging = this.state.olderCursor === null ? "complete" : "idle";
+    } else if (event.type === "replace") {
+      // The replacement event carries rows but no older-page cursor. Keep its
+      // rows visible, discard the previous window's cursor, and resnapshot so
+      // paging uses a cursor for the replacement transcript.
+      this.state = { ...this.state, olderCursor: null };
+      this.paging = "idle";
     }
     this.followSends(event);
     if (event.type !== "snapshot") this.attempts = 0;
+    if (event.type === "replace") this.resync();
     this.publish();
   }
 
