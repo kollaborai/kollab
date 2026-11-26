@@ -16,7 +16,7 @@ function previewText(text: string): string {
  * The chat's queued messages (#1451): each input the daemon queued while a turn runs, read from the chat
  * store. Remove cancels one input. Send Now starts the earliest one in the running turn.
  */
-export function QueuePanel() {
+export function QueuePanel({ canSendNow = true }: { canSendNow?: boolean }) {
   const chat = useChatStore();
   const queued = useMemo(() => queuedInputs(chat.rows, chat.inputs), [chat.rows, chat.inputs]);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -108,7 +108,7 @@ export function QueuePanel() {
             {summary}
           </p>
         </div>
-        {busy ? (
+        {busy && canSendNow ? (
           <Button
             type="button"
             size="sm"

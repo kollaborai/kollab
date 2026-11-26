@@ -1210,7 +1210,7 @@ const VoiceStatus: FC<{ activity: VoiceActivity | null }> = ({ activity }) => {
 const ComposerSlot: FC<{
   voice: VoiceMode | null;
   running: boolean;
-  permissionStop: { cancel: () => Promise<void>; cancelling: boolean } | null;
+  permissionStop: { cancel: () => Promise<void>; cancelling: boolean; error: string | null } | null;
   onBeforeSend: (event: { preventDefault: () => void }) => void;
   onSteer: (event: { preventDefault: () => void }) => void;
   onStop: () => void;
@@ -1310,6 +1310,14 @@ const ComposerSlot: FC<{
         >
           <SquareIcon className="size-3.5 fill-current" />
         </TooltipIconButton>
+      ) : null}
+      {permissionStop?.error ? (
+        <span
+          role="alert"
+          className="absolute right-0 bottom-full mb-1 max-w-64 rounded-md bg-background px-2 py-1 text-left text-xs text-destructive shadow-md"
+        >
+          {permissionStop.error}
+        </span>
       ) : null}
     </div>
   );

@@ -6,9 +6,8 @@ import type { ReactNode } from "react";
 import { ChatStoreProvider, LiveChatStore, useChatStore, WEB_INPUT_PREFIX } from "./chat-store";
 import { useChatRuntime } from "./chat-runtime";
 import { newInputId } from "./chat-stream";
-import { PermissionCancellationContext, type PermissionCancellation } from "./permission-cancellation";
-import { cancelPendingPermission, respondToPermission } from "./permission-respond";
-import { pendingPermissions } from "./utils/permission-cancel";
+import { PermissionCancellationProvider } from "./permission-cancellation";
+import { respondToPermission } from "./permission-respond";
 import { PermissionResponseContext, type PermissionArgs, type PermissionResult } from "./components/PermissionTool";
 import { VoiceModeProvider } from "./voice-mode";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
@@ -199,32 +198,20 @@ function ChatRuntime({ api: engine, sessionId, store, children }: {
 }) {
   const runtime = useChatRuntime(store);
   const chat = useChatStore();
-  const [cancelling, setCancelling] = useState(false);
   const respond = useCallback(
     (toolCallId: string, args: PermissionArgs, result: PermissionResult) =>
       respondToPermission({ api: engine, sessionId, toolCallId, args, answer: result, rows: () => store.rows }),
     [engine, sessionId, store],
   );
-  const cancellation = useMemo<PermissionCancellation>(() => ({
-    cancelling,
-    cancel: async (expected) => {
-      setCancelling(true);
-      try {
-        await cancelPendingPermission({ api: engine, sessionId, expected, current: () => pendingPermissions(store.rows) });
-      } finally {
-        setCancelling(false);
-      }
-    },
-  }), [cancelling, engine, sessionId, store]);
   const sendCommand = useCallback((text: string) => chat.send({ id: newInputId(WEB_INPUT_PREFIX), text }), [chat.send]);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <PermissionResponseContext.Provider value={respond}>
-        <PermissionCancellationContext.Provider value={cancellation}>
+        <PermissionCancellationProvider api={engine} sessionId={sessionId} store={store}>
           <VoiceModeProvider api={engine} sessionId={sessionId} running={chat.running} sendCommand={sendCommand}>
             {children}
           </VoiceModeProvider>
-        </PermissionCancellationContext.Provider>
+        </PermissionCancellationProvider>
       </PermissionResponseContext.Provider>
     </AssistantRuntimeProvider>
   );
@@ -453,7 +440,7 @@ function RuntimeShell({
                 locked={locked}
 
                 harness={Boolean(session.harness)}
-                queuePanel={<WebQueuePanelMount />}
+                queuePanel={<WebQueuePanelMount canSendNow={!Boolean(session.harness)} />}
               />
             ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />

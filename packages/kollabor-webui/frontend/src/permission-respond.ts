@@ -3,9 +3,6 @@ import type { ChatPart, ChatRow } from "./chat-stream.ts";
 import type { PendingPermission } from "./utils/permission-cancel.ts";
 import { cancelPendingPermission as cancelIfStillPending, permissionOwner } from "./utils/permission-cancel.ts";
 
-/** The status an open permission prompt row carries. Any other status is no longer answerable. */
-const OPEN_PROMPT_STATUS = "requires-action";
-
 export type PermissionAnswer = { decision: "approve" | "deny"; scope?: string; option_id?: string };
 
 type ToolCallPart = Extract<ChatPart, { type: "tool-call" }>;
@@ -78,7 +75,7 @@ export async function respondToPermission({
     return undefined;
   };
   const initial = findPrompt();
-  if (!initial || initial.row.status !== OPEN_PROMPT_STATUS) return "stale";
+  if (!initial) return "stale";
   const expected = permissionResponseOwner(initial.part.args);
   const displayed = permissionResponseOwner(args);
   if (!expected || !displayed || !samePermissionResponseOwner(expected, [displayed])) return "stale";
@@ -86,7 +83,7 @@ export async function respondToPermission({
   if (responsesInFlight.has(key)) return "stale";
   const isCurrent = () => {
     const current = findPrompt();
-    if (!current || current.row.id !== initial.row.id || current.row.status !== OPEN_PROMPT_STATUS) return false;
+    if (!current || current.row.id !== initial.row.id) return false;
     const owner = permissionResponseOwner(current.part.args);
     return !!owner && samePermissionResponseOwner(expected, [owner]);
   };

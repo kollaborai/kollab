@@ -47,7 +47,7 @@ test("the agent's todo list is read from the chat store's rows", () => {
 });
 
 test("the queue panel is mounted from the chat store", () => {
-  expect(app).toContain("queuePanel={<WebQueuePanelMount />}");
+  expect(app).toContain("queuePanel={<WebQueuePanelMount canSendNow={!Boolean(session.harness)} />}");
   expect(app).not.toContain("submitBusyWebMessage");
   expect(app).not.toContain("onQueueBusyMessage");
 });

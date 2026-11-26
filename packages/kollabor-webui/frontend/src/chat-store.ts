@@ -320,7 +320,10 @@ export class LiveChatStore implements LiveStore {
       role: "user",
       turn_id: null,
       status: "pending",
-      parts: [{ type: "text", text: input.text }],
+      parts: [
+        { type: "text", text: input.text },
+        ...(input.attachments ?? []).map((attachment) => ({ type: "image" as const, url: attachment.data_url })),
+      ],
       created_at: new Date().toISOString(),
     };
     const localSend = { row, posts: 1, succeeded: false };
