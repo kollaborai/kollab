@@ -321,6 +321,24 @@ class ChatStreamService:
                 self._upsert(uid, updated)
         return {"found": True, "cancelled": cancelled}
 
+    async def admit_queued_batch(self, input_ids, scope, enqueue):
+        """Serialize ownership and queue admission with direct input sends."""
+        async with self._input_lock:
+            keys = [(scope[1], input_id) for input_id in input_ids]
+            if any(
+                self._input_scopes.get(key, scope) != scope
+                or (
+                    key[1] in self._inputs.get(key[0], {})
+                    and key not in self._input_scopes
+                )
+                for key in keys
+            ):
+                raise ValueError("input ID is already owned")
+            receipt = await enqueue()
+            for key in keys:
+                self._input_scopes[key] = scope
+            return receipt
+
     async def bind_queued_input_scopes(
         self, input_ids: list[str], scope: tuple[str, str, str]
     ) -> bool:

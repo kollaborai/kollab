@@ -69,6 +69,7 @@ class _QueueAttachmentRejected(Exception):
     def __repr__(self) -> str:
         return WEB_QUEUE_ATTACHMENT_REJECTED
 
+
 _IMAGE_MIME_ALIASES = {
     "image/png": "image/png",
     "image/jpeg": "image/jpeg",
@@ -596,6 +597,7 @@ def register_web_message_queue_handlers(
     on_change: RpcChangeNotifier | None = None,
     attachment_registry: WebMessageAttachmentRegistry | None = None,
     include_worker_methods: bool = True,
+    admit_batch: Callable[..., Any] | None = None,
 ) -> None:
     """Register JSON-safe queue RPC handlers on an existing ``RpcServer``.
 
@@ -850,7 +852,7 @@ def register_web_message_queue_handlers(
             raise ValueError("image exceeds the attachment size limit")
         try:
             payload = base64.b64decode(encoded, validate=True)
-        except (binascii.Error, ValueError):
+        except binascii.Error, ValueError:
             raise ValueError("invalid image payload") from None
         if not payload:
             raise ValueError("invalid image payload")
@@ -915,9 +917,15 @@ def register_web_message_queue_handlers(
         operation_id = _required_text(params, "operation_id")
         batch_id = _required_text(params, "batch_id")
 
+        try:
+            resolved = await _scope(params)
+        except StaleQueueScopeError:
+            raise QueueRpcAuthorizationError("queue access denied") from None
+
         async def enqueue(queue: WebMessageQueue) -> dict[str, Any]:
             items = _decode_items(params, registry)
-            try:
+
+            async def commit():
                 if any(item.attachment_refs for item in items):
                     if attachment_registry is None:
                         raise ValueError("attachment staging is unavailable")
@@ -926,7 +934,8 @@ def register_web_message_queue_handlers(
                     )
                     if (
                         attachment_scope.binding.scope_id != queue.scope_id
-                        or attachment_scope.binding.queue_incarnation != queue.incarnation
+                        or attachment_scope.binding.queue_incarnation
+                        != queue.incarnation
                     ):
                         raise QueueRpcAuthorizationError("queue access denied")
                     receipt = await queue.enqueue_batch_with_attachments(
@@ -937,14 +946,26 @@ def register_web_message_queue_handlers(
                     )
                 else:
                     receipt = await queue.enqueue_batch(operation_id, batch_id, items)
-            except (CapacityExceeded, AttachmentCapacityExceeded):
+                return receipt
+
+            try:
+                if admit_batch is None:
+                    receipt = await commit()
+                else:
+                    receipt = await admit_batch(resolved, items, commit)
+            except CapacityExceeded, AttachmentCapacityExceeded:
                 # Both queue methods validate capacity before mutating state or
                 # retaining attachment ownership. Other RPC failures stay opaque.
                 raise _QueueCapacityRejected() from None
             await _notify(queue)
             return _receipt_to_wire(receipt)
 
-        return await _with_queue(params, enqueue)
+        async with registry.acquire(
+            resolved.scope_id,
+            principal_id=resolved.principal_id,
+            conversation_uid=resolved.conversation_uid,
+        ) as queue:
+            return await enqueue(queue)
 
     async def _claim_next(params: dict[str, Any]) -> dict[str, Any]:
         operation_id = _required_text(params, "operation_id")
@@ -1089,9 +1110,15 @@ def register_web_message_queue_handlers(
             "state.web_queue.enqueue_batch",
             "state.web_queue.remove_item",
         }
-        handlers = {method: handler for method, handler in handlers.items() if method in allowed or method in {
-            "state.web_queue.stage_attachment",
-            "state.web_queue.open_attachment",
-        }}
+        handlers = {
+            method: handler
+            for method, handler in handlers.items()
+            if method in allowed
+            or method
+            in {
+                "state.web_queue.stage_attachment",
+                "state.web_queue.open_attachment",
+            }
+        }
     for method, handler in handlers.items():
         rpc_server.register(method, handler)

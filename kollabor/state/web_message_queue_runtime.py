@@ -954,6 +954,17 @@ def register_web_message_queue_runtime(
         state_service=state_service,
         resolve_scope=resolver,
     )
+
+    async def admit_batch(resolved, items, enqueue):
+        bus = getattr(state_service, "_event_bus", None)
+        get_service = getattr(bus, "get_service", None)
+        stream = get_service("chat_stream") if callable(get_service) else None
+        admit = getattr(stream, "admit_queued_batch", None)
+        if not callable(admit):
+            return await enqueue()
+        scope = (resolved.scope_id, resolved.conversation_uid, resolved.principal_id)
+        return await admit([item.request_id for item in items], scope, enqueue)
+
     register_web_message_queue_handlers(
         rpc_server,
         registry,
@@ -961,6 +972,7 @@ def register_web_message_queue_runtime(
         on_change=runtime._changes.put_nowait,
         attachment_registry=attachments,
         include_worker_methods=False,
+        admit_batch=admit_batch,
     )
 
     rpc_server.register("state.web_queue.capabilities", runtime.capabilities)
