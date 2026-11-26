@@ -1187,7 +1187,7 @@ def test_chat_parts_route_returns_validated_page_and_materializes_marker_session
     )
 
 
-def test_chat_parts_route_keeps_a_daemon_page_valid_after_marker_materialization(
+def test_chat_parts_route_bounds_materialized_page_and_advances_cursor(
     monkeypatch,
 ):
     client, session = _install_client(monkeypatch, bypass_auth=True)
@@ -1246,7 +1246,73 @@ def test_chat_parts_route_keeps_a_daemon_page_valid_after_marker_materialization
         json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
             "utf-8"
         )
-    ) > stream._PART_PAGE_RPC_BYTES
+    ) <= stream._PART_PAGE_RPC_BYTES
+    assert 0 < len(payload["parts"]) < len(parts)
+    assert payload["next_offset"] == len(payload["parts"])
+    assert payload["done"] is False
+
+
+def test_chat_parts_route_replaces_single_oversized_materialized_part(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    parts = [
+        {
+            "type": "text",
+            "text": "bounded preview",
+            "chat_stream_part_preview": {
+                "kind": "chat-stream-part-preview",
+                "row_id": "row-1",
+                "part_index": 5,
+                "output_bytes": 200_000,
+                "output_chars": 200_000,
+                "output_type": "json",
+                "output_revision": "e" * 64,
+                "preview": "preview",
+            },
+        }
+    ]
+    raw_payload = {
+        "row_id": "row-1",
+        "offset": 5,
+        "next_offset": 6,
+        "total_parts": 6,
+        "output_revision": "d" * 64,
+        "parts": parts,
+        "done": True,
+    }
+    raw_size = len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    parts[0]["text"] += "x" * (stream._PART_PAGE_RPC_BYTES - raw_size)
+    assert len(
+        json.dumps(raw_payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) == stream._PART_PAGE_RPC_BYTES
+    session.rpc.parts_result = raw_payload
+
+    response = client.get(
+        "/sessions/s1/chat-stream/rows/row-1/parts",
+        params={"output_revision": "d" * 64, "offset": 5, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["offset"] == 5
+    assert payload["next_offset"] == 6
+    assert payload["total_parts"] == 6
+    assert payload["done"] is True
+    assert len(payload["parts"]) == 1
+    assert len(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) <= stream._PART_PAGE_RPC_BYTES
+    assert payload["parts"][0]["text"] == (
+        "[Large part. Expand to load full content.]"
+    )
+    assert payload["parts"][0]["chat_stream_part_preview"]["session_id"] == "s1"
 
 
 def test_chat_parts_route_preserves_unresolved_image_slots(monkeypatch):
