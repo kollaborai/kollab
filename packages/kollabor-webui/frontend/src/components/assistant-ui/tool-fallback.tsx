@@ -92,8 +92,13 @@ const CHAT_STREAM_TOOL_OUTPUT_CACHE_LIMIT = 5;
 const pendingChatStreamToolOutputs = new Map<string, Promise<string>>();
 const failedChatStreamToolOutputs = new Set<string>();
 
-function chatStreamToolOutputKey(sessionId: string, rowId: string, toolCallId: string): string {
-  return `${sessionId}\u0000${rowId}\u0000${toolCallId}`;
+function chatStreamToolOutputKey(
+  sessionId: string,
+  rowId: string,
+  toolCallId: string,
+  outputRevision: string,
+): string {
+  return `${sessionId}\u0000${rowId}\u0000${toolCallId}\u0000${outputRevision}`;
 }
 
 function validChunk(chunk: ChatStreamToolOutputChunk): boolean {
@@ -101,6 +106,7 @@ function validChunk(chunk: ChatStreamToolOutputChunk): boolean {
     chunk &&
     typeof chunk.row_id === "string" &&
     typeof chunk.tool_call_id === "string" &&
+    typeof chunk.output_revision === "string" &&
     Number.isSafeInteger(chunk.offset) &&
     Number.isSafeInteger(chunk.next_offset) &&
     Number.isSafeInteger(chunk.total_chars) &&
@@ -119,11 +125,12 @@ export async function fetchChatStreamToolOutput(
   sessionId: string,
   rowId: string,
   toolCallId: string,
+  outputRevision: string,
   outputChars: number,
   outputType: ChatStreamToolOutputType,
   api: Pick<EngineApi, "getChatStreamToolOutput"> = chatStreamToolOutputApi,
 ): Promise<string> {
-  const key = chatStreamToolOutputKey(sessionId, rowId, toolCallId);
+  const key = chatStreamToolOutputKey(sessionId, rowId, toolCallId, outputRevision);
   if (chatStreamToolOutputCache.has(key)) return chatStreamToolOutputCache.get(key)!;
   const pending = pendingChatStreamToolOutputs.get(key);
   if (pending) return pending;
@@ -133,6 +140,9 @@ export async function fetchChatStreamToolOutput(
       if (!Number.isSafeInteger(outputChars) || outputChars < 0) {
         throw new Error("Tool output preview has an invalid character count.");
       }
+      if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+        throw new Error("Tool output preview has an invalid revision.");
+      }
       if (outputType !== "text" && outputType !== "json") {
         throw new Error("Tool output preview has an invalid output type.");
       }
@@ -140,7 +150,7 @@ export async function fetchChatStreamToolOutput(
       let content = "";
       let offset = 0;
       for (;;) {
-        const chunk = await api.getChatStreamToolOutput(sessionId, rowId, toolCallId, {
+        const chunk = await api.getChatStreamToolOutput(sessionId, rowId, toolCallId, outputRevision, {
           offset,
           limit: CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE,
         });
@@ -148,6 +158,7 @@ export async function fetchChatStreamToolOutput(
           !validChunk(chunk) ||
           chunk.row_id !== rowId ||
           chunk.tool_call_id !== toolCallId ||
+          chunk.output_revision !== outputRevision ||
           chunk.offset !== offset ||
           chunk.total_chars !== outputChars ||
           chunk.output_type !== outputType
@@ -565,6 +576,7 @@ function ChatStreamToolOutputResult({
   sessionId,
   rowId,
   toolCallId,
+  outputRevision,
   outputChars,
   outputType,
   preview,
@@ -572,11 +584,12 @@ function ChatStreamToolOutputResult({
   sessionId: string;
   rowId: string;
   toolCallId: string;
+  outputRevision: string;
   outputChars: number;
   outputType: ChatStreamToolOutputType;
   preview: string;
 }) {
-  const cacheKey = chatStreamToolOutputKey(sessionId, rowId, toolCallId);
+  const cacheKey = chatStreamToolOutputKey(sessionId, rowId, toolCallId, outputRevision);
   const [content, setContent] = useState<string | undefined>(() => chatStreamToolOutputCache.get(cacheKey));
   const [loaded, setLoaded] = useState(() => chatStreamToolOutputCache.has(cacheKey));
   const [error, setError] = useState<string | null>(() =>
@@ -596,6 +609,7 @@ function ChatStreamToolOutputResult({
         sessionId,
         rowId,
         toolCallId,
+        outputRevision,
         outputChars,
         outputType,
       );
@@ -606,7 +620,7 @@ function ChatStreamToolOutputResult({
     } finally {
       setLoading(false);
     }
-  }, [loading, outputChars, outputType, rowId, sessionId, toolCallId]);
+  }, [loading, outputChars, outputRevision, outputType, rowId, sessionId, toolCallId]);
 
   // This component mounts inside the collapsible content, so a request begins
   // only after the tool card is expanded.
@@ -680,6 +694,8 @@ function ToolFallbackResult({
     historyOutput.row_id.length > 0 &&
     typeof historyOutput.tool_call_id === "string" &&
     historyOutput.tool_call_id.length > 0 &&
+    typeof historyOutput.output_revision === "string" &&
+    /^[0-9a-f]{64}$/.test(historyOutput.output_revision) &&
     Number.isSafeInteger(historyOutput.output_bytes) &&
     (historyOutput.output_bytes as number) >= 0 &&
     Number.isSafeInteger(historyOutput.output_chars) &&
@@ -690,9 +706,11 @@ function ToolFallbackResult({
     return (
       <div data-slot="tool-fallback-result" className={cn("aui-tool-fallback-result", className)} {...props}>
         <ChatStreamToolOutputResult
+          key={historyOutput.output_revision}
           sessionId={historyOutput.session_id}
           rowId={historyOutput.row_id}
           toolCallId={historyOutput.tool_call_id}
+          outputRevision={historyOutput.output_revision}
           outputChars={historyOutput.output_chars as number}
           outputType={historyOutput.output_type}
           preview={historyOutput.preview}

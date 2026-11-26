@@ -169,10 +169,11 @@ export type HistoryPageOptions = {
 
 export type ChatStreamToolOutputType = "text" | "json";
 
-/** One bounded slice of a stored chat-stream tool result. Offsets are character offsets. */
+/** One bounded slice of a stored chat-stream tool result. Offsets count Unicode code points. */
 export type ChatStreamToolOutputChunk = {
   row_id: string;
   tool_call_id: string;
+  output_revision: string;
   offset: number;
   next_offset: number;
   total_chars: number;
@@ -1367,8 +1368,12 @@ export class EngineApi {
     sessionId: string,
     rowId: string,
     toolCallId: string,
+    outputRevision: string,
     options: { offset: number; limit?: number } = { offset: 0 },
   ) {
+    if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+      throw new RangeError("Tool output revision must be a SHA-256 hex digest.");
+    }
     const offset = options.offset;
     if (!Number.isSafeInteger(offset) || offset < 0) {
       throw new RangeError("Tool output offset must be a non-negative integer.");
@@ -1380,6 +1385,7 @@ export class EngineApi {
     const limit = Math.min(requestedLimit, CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE);
     const query = new URLSearchParams({
       tool_call_id: toolCallId,
+      output_revision: outputRevision,
       offset: String(offset),
       limit: String(limit),
     });
