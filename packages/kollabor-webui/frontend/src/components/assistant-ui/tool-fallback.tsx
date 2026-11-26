@@ -32,7 +32,12 @@ import {
 } from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
 
-import { EngineApi } from "@/api";
+import {
+  CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE,
+  EngineApi,
+  type ChatStreamToolOutputChunk,
+  type ChatStreamToolOutputType,
+} from "@/api";
 
 const ANIMATION_DURATION = 200;
 
@@ -78,6 +83,125 @@ async function fetchHistoryOutput(
     }
   })();
   pendingHistoryOutputs.set(key, load);
+  return load;
+}
+
+const chatStreamToolOutputApi = new EngineApi();
+const chatStreamToolOutputCache = new Map<string, string>();
+const CHAT_STREAM_TOOL_OUTPUT_CACHE_LIMIT = 5;
+const pendingChatStreamToolOutputs = new Map<string, Promise<string>>();
+const failedChatStreamToolOutputs = new Set<string>();
+
+function chatStreamToolOutputKey(
+  sessionId: string,
+  rowId: string,
+  toolCallId: string,
+  outputRevision: string,
+): string {
+  return `${sessionId}\u0000${rowId}\u0000${toolCallId}\u0000${outputRevision}`;
+}
+
+function validChunk(chunk: ChatStreamToolOutputChunk): boolean {
+  return Boolean(
+    chunk &&
+    typeof chunk.row_id === "string" &&
+    typeof chunk.tool_call_id === "string" &&
+    typeof chunk.output_revision === "string" &&
+    Number.isSafeInteger(chunk.offset) &&
+    Number.isSafeInteger(chunk.next_offset) &&
+    Number.isSafeInteger(chunk.total_chars) &&
+    (chunk.output_type === "text" || chunk.output_type === "json") &&
+    typeof chunk.content === "string" &&
+    typeof chunk.done === "boolean",
+  );
+}
+
+function characterCount(value: string): number {
+  return Array.from(value).length;
+}
+
+/** Fetch and join the bounded slices for one exact stream row and tool call. */
+export async function fetchChatStreamToolOutput(
+  sessionId: string,
+  rowId: string,
+  toolCallId: string,
+  outputRevision: string,
+  outputChars: number,
+  outputType: ChatStreamToolOutputType,
+  api: Pick<EngineApi, "getChatStreamToolOutput"> = chatStreamToolOutputApi,
+): Promise<string> {
+  const key = chatStreamToolOutputKey(sessionId, rowId, toolCallId, outputRevision);
+  if (chatStreamToolOutputCache.has(key)) return chatStreamToolOutputCache.get(key)!;
+  const pending = pendingChatStreamToolOutputs.get(key);
+  if (pending) return pending;
+
+  const load = (async () => {
+    try {
+      if (!Number.isSafeInteger(outputChars) || outputChars < 0) {
+        throw new Error("Tool output preview has an invalid character count.");
+      }
+      if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+        throw new Error("Tool output preview has an invalid revision.");
+      }
+      if (outputType !== "text" && outputType !== "json") {
+        throw new Error("Tool output preview has an invalid output type.");
+      }
+
+      let content = "";
+      let offset = 0;
+      for (;;) {
+        const chunk = await api.getChatStreamToolOutput(sessionId, rowId, toolCallId, outputRevision, {
+          offset,
+          limit: CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE,
+        });
+        if (
+          !validChunk(chunk) ||
+          chunk.row_id !== rowId ||
+          chunk.tool_call_id !== toolCallId ||
+          chunk.output_revision !== outputRevision ||
+          chunk.offset !== offset ||
+          chunk.total_chars !== outputChars ||
+          chunk.output_type !== outputType
+        ) {
+          throw new Error("Tool output chunk does not match the requested result.");
+        }
+
+        const chunkChars = characterCount(chunk.content);
+        const nextOffset = offset + chunkChars;
+        const isEmptyFinalChunk =
+          outputChars === 0 && offset === 0 && chunk.done && chunk.content === "";
+        if (
+          chunk.next_offset !== nextOffset ||
+          (!isEmptyFinalChunk && chunk.next_offset <= offset) ||
+          chunkChars > CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE ||
+          chunk.next_offset > outputChars ||
+          chunk.done !== (chunk.next_offset === outputChars)
+        ) {
+          throw new Error("Tool output chunk has an invalid offset range.");
+        }
+
+        content += chunk.content;
+        offset = chunk.next_offset;
+        if (chunk.done) break;
+      }
+
+      if (characterCount(content) !== outputChars) {
+        throw new Error("Tool output ended before all characters were received.");
+      }
+      chatStreamToolOutputCache.set(key, content);
+      if (chatStreamToolOutputCache.size > CHAT_STREAM_TOOL_OUTPUT_CACHE_LIMIT) {
+        chatStreamToolOutputCache.delete(chatStreamToolOutputCache.keys().next().value as string);
+      }
+      failedChatStreamToolOutputs.delete(key);
+      return content;
+    } catch (error) {
+      failedChatStreamToolOutputs.add(key);
+      throw error;
+    } finally {
+      pendingChatStreamToolOutputs.delete(key);
+    }
+  })();
+  pendingChatStreamToolOutputs.set(key, load);
   return load;
 }
 
@@ -448,6 +572,90 @@ function HistoryOutputResult({
   );
 }
 
+function ChatStreamToolOutputResult({
+  sessionId,
+  rowId,
+  toolCallId,
+  outputRevision,
+  outputChars,
+  outputType,
+  preview,
+}: {
+  sessionId: string;
+  rowId: string;
+  toolCallId: string;
+  outputRevision: string;
+  outputChars: number;
+  outputType: ChatStreamToolOutputType;
+  preview: string;
+}) {
+  const cacheKey = chatStreamToolOutputKey(sessionId, rowId, toolCallId, outputRevision);
+  const [content, setContent] = useState<string | undefined>(() => chatStreamToolOutputCache.get(cacheKey));
+  const [loaded, setLoaded] = useState(() => chatStreamToolOutputCache.has(cacheKey));
+  const [error, setError] = useState<string | null>(() =>
+    failedChatStreamToolOutputs.has(cacheKey)
+      ? "Full tool output could not be loaded. Check the connection and retry."
+      : null,
+  );
+  const [loading, setLoading] = useState(false);
+  const requestedRef = useRef(false);
+
+  const load = useCallback(async () => {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const full = await fetchChatStreamToolOutput(
+        sessionId,
+        rowId,
+        toolCallId,
+        outputRevision,
+        outputChars,
+        outputType,
+      );
+      setContent(full);
+      setLoaded(true);
+    } catch {
+      setError("Full tool output could not be loaded. Check the connection and retry.");
+    } finally {
+      setLoading(false);
+    }
+  }, [loading, outputChars, outputRevision, outputType, rowId, sessionId, toolCallId]);
+
+  // This component mounts inside the collapsible content, so a request begins
+  // only after the tool card is expanded.
+  useEffect(() => {
+    if (loaded || error || requestedRef.current) return;
+    requestedRef.current = true;
+    void load();
+  }, [error, load, loaded]);
+
+  return (
+    <div data-slot="chat-stream-tool-output-preview" className="mt-1 space-y-2">
+      <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
+        {loaded ? "Output:" : "Output preview:"}
+      </p>
+      <pre className="bg-muted/50 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
+        {formatContent(loaded ? content : preview)}
+      </pre>
+      {!loaded && loading ? (
+        <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+          <LoaderIcon className="size-3.5 animate-spin" aria-hidden="true" />
+          Loading full output…
+        </p>
+      ) : null}
+      {!loaded && error ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span role="alert" className="text-destructive text-xs">{error}</span>
+          <Button type="button" size="sm" variant="outline" onClick={() => void load()}>
+            Retry
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 
 function ToolFallbackResult({
   result,
@@ -473,6 +681,38 @@ function ToolFallbackResult({
         <HistoryOutputResult
           sessionId={historyOutput.sessionId}
           reference={historyOutput.reference}
+          preview={historyOutput.preview}
+        />
+      </div>
+      );
+  }
+  if (
+    historyOutput?.kind === "chat-stream-tool-output-preview" &&
+    typeof historyOutput.session_id === "string" &&
+    historyOutput.session_id.length > 0 &&
+    typeof historyOutput.row_id === "string" &&
+    historyOutput.row_id.length > 0 &&
+    typeof historyOutput.tool_call_id === "string" &&
+    historyOutput.tool_call_id.length > 0 &&
+    typeof historyOutput.output_revision === "string" &&
+    /^[0-9a-f]{64}$/.test(historyOutput.output_revision) &&
+    Number.isSafeInteger(historyOutput.output_bytes) &&
+    (historyOutput.output_bytes as number) >= 0 &&
+    Number.isSafeInteger(historyOutput.output_chars) &&
+    (historyOutput.output_chars as number) >= 0 &&
+    (historyOutput.output_type === "text" || historyOutput.output_type === "json") &&
+    typeof historyOutput.preview === "string"
+  ) {
+    return (
+      <div data-slot="tool-fallback-result" className={cn("aui-tool-fallback-result", className)} {...props}>
+        <ChatStreamToolOutputResult
+          key={historyOutput.output_revision}
+          sessionId={historyOutput.session_id}
+          rowId={historyOutput.row_id}
+          toolCallId={historyOutput.tool_call_id}
+          outputRevision={historyOutput.output_revision}
+          outputChars={historyOutput.output_chars as number}
+          outputType={historyOutput.output_type}
           preview={historyOutput.preview}
         />
       </div>
