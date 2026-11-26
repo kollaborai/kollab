@@ -7,6 +7,7 @@ from kollabor.state.chat_stream import ChatStreamService
 from kollabor.state.chat_stream_rows import (
     CHAT_STREAM_MAX_ROW_BYTES,
     bounded_chat_stream_row,
+    chat_stream_tool_output_revision,
     chat_stream_wire_bytes,
 )
 from kollabor_events.chat_stream import event_problems
@@ -87,6 +88,63 @@ def test_large_text_reasoning_and_tool_args_use_fetchable_previews():
     assert args_marker["row_id"] == row["id"]
     assert args_marker["field"] == "args"
     assert "args" in tool_part
+
+
+def test_large_scalar_tool_args_are_json_marked_and_hash_json_retrieval():
+    args = "scalar argument 🌵" * 20_000
+    row = _row(
+        [
+            {
+                "type": "tool-call",
+                "tool_call_id": "call-string-args",
+                "tool_name": "read",
+                "args": args,
+                "result": "done",
+            }
+        ]
+    )
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),
+        get_conversation_uid=lambda: "content-preview-test",
+    )
+    service = ChatStreamService(state)
+    service._upsert("content-preview-test", row)
+    projected = service._log("content-preview-test")._events[-1]["data"]
+    marker = projected["parts"][0]["args"]
+    expected = json.dumps(
+        args,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        default=str,
+    )
+
+    assert marker["output_type"] == "json"
+    assert marker["output_revision"] == chat_stream_tool_output_revision(
+        expected, "json"
+    )
+    chunks = []
+    offset = 0
+    while True:
+        chunk = service.get_content(
+            {
+                "row_id": row["id"],
+                "part_index": 0,
+                "field": "args",
+                "output_revision": marker["output_revision"],
+                "offset": offset,
+                "limit": 32_768,
+            }
+        )
+        assert chunk["output_type"] == "json"
+        assert chunk["output_revision"] == marker["output_revision"]
+        chunks.append(chunk["content"])
+        if chunk["done"]:
+            break
+        offset = chunk["next_offset"]
+
+    assert "".join(chunks) == expected
+    assert json.loads("".join(chunks)) == args
 
 
 def test_compact_row_marks_every_truncated_text_part_for_retrieval():
