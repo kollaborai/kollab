@@ -2014,6 +2014,7 @@ class QueueProcessor:
             self._native_stream_inputs[input_id] = {
                 "history_row_uuid": row_uuid if isinstance(row_uuid, str) else None,
                 "content": deepcopy(record.get("content")),
+                "chat_stream_input_count": stream_input_count,
             }
         try:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
@@ -2194,6 +2195,13 @@ class QueueProcessor:
             row_uuid = record.get("history_row_uuid")
             if isinstance(row_uuid, str) and row_uuid and callable(update_metadata):
                 updates = dict(updates_base)
+                input_count = record.get("chat_stream_input_count")
+                if (
+                    isinstance(input_count, int)
+                    and not isinstance(input_count, bool)
+                    and input_count > 0
+                ):
+                    updates["chat_stream_input_count"] = input_count
                 parts = _native_chat_stream_parts(record.get("content"))
                 # Persist remote HTTPS images, which remain addressable after
                 # restart. Managed uploads stay in the bounded image store and

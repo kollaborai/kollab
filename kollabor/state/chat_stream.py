@@ -1659,6 +1659,7 @@ class ChatStreamService:
             input_id = metadata.get("input_id")
             hub_message_id = metadata.get("hub_message_id")
             tool_id = metadata.get("tool_id")
+            explicit_input_row_ids = False
             if kind == "input":
                 if isinstance(hub_message_id, str) and hub_message_id:
                     input_row_ids = [hub_message_id]
@@ -1668,6 +1669,7 @@ class ChatStreamService:
                         for candidate in (input_id,)
                         if isinstance(candidate, str) and candidate
                     ]
+                explicit_input_row_ids = bool(input_row_ids)
                 row_id = input_row_ids[0] if input_row_ids else None
             elif kind == "reply":
                 explicit_reply_id = metadata.get("reply_id")
@@ -1724,11 +1726,29 @@ class ChatStreamService:
                 # A single tracked request does not prove the provider turn
                 # contained a single original item: an untracked item can be
                 # folded into the same history row. Keep legacy combined
-                # images only when the producer persisted that exact count.
+                # images only when the producer persisted that exact count,
+                # or the history shape itself proves a standalone legacy row.
+                input_count = metadata.get("chat_stream_input_count")
+                has_input_count = (
+                    type(input_count) is int and input_count > 0
+                )
                 single_input_proven = (
                     len(input_row_ids) == 1
-                    and type(metadata.get("chat_stream_input_count")) is int
-                    and metadata["chat_stream_input_count"] == 1
+                    and (
+                        (has_input_count and input_count == 1)
+                        or (
+                            not has_input_count
+                            and (
+                                metadata.get("provider") == "acp"
+                                or (
+                                    hub_note is not None
+                                    and metadata.get("hub_admission") == "input"
+                                )
+                                or not explicit_input_row_ids
+                                or "request_ids" not in metadata
+                            )
+                        )
+                    )
                 )
                 for input_row_id in input_row_ids:
                     saved_parts = metadata.get("chat_stream_parts")
@@ -1738,6 +1758,11 @@ class ChatStreamService:
                         input_parts = self._transcript_parts(
                             content_by_id[input_row_id], resolve_image
                         )
+                    elif (
+                        hub_note is not None
+                        and metadata.get("hub_admission") == "input"
+                    ):
+                        input_parts = [copy.deepcopy(hub_note)]
                     elif (original_text := text_by_id.get(input_row_id)) is not None:
                         # When old combined history has no per-input content
                         # map, retain its authenticated text but do not guess
@@ -1755,6 +1780,8 @@ class ChatStreamService:
                     elif single_input_proven:
                         input_parts = parts
                     else:
+                        # The row names one input from a known batch, but no
+                        # per-input text or content map ties these parts to it.
                         input_parts = []
                     rows.append(
                         {

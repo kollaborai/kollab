@@ -59,11 +59,66 @@ SESSION_STAT_KEYS = (
 )
 
 
-def _acp_input_metadata(value: Any) -> Dict[str, Any]:
-    """Restore the ACP identity needed to project a user row after JSONL load."""
-    if not isinstance(value, dict) or value.get("provider") != "acp":
+def _chat_stream_input_metadata(value: Any) -> Dict[str, Any]:
+    """Restore stream identity and structured input metadata after JSONL load."""
+    if not isinstance(value, dict):
         return {}
-    result: Dict[str, Any] = {"provider": "acp"}
+    result: Dict[str, Any] = {}
+
+    input_count = value.get("chat_stream_input_count")
+    if (
+        isinstance(input_count, int)
+        and not isinstance(input_count, bool)
+        and input_count > 0
+    ):
+        result["chat_stream_input_count"] = input_count
+
+    request_ids = value.get("request_ids")
+    if isinstance(request_ids, list):
+        result["request_ids"] = [
+            request_id
+            for request_id in request_ids
+            if isinstance(request_id, str) and request_id
+        ]
+
+    operator_inputs = value.get("operator_inputs")
+    if isinstance(operator_inputs, list):
+        restored_inputs = []
+        for record in operator_inputs:
+            if not isinstance(record, dict) or not all(
+                isinstance(record.get(field), str)
+                for field in ("source", "timestamp", "text")
+            ):
+                continue
+            restored = {
+                field: record[field] for field in ("source", "timestamp", "text")
+            }
+            request_id = record.get("request_id")
+            if isinstance(request_id, str) and request_id:
+                restored["request_id"] = request_id
+            restored_inputs.append(restored)
+        if restored_inputs:
+            result["operator_inputs"] = restored_inputs
+
+    for key in ("hub_message", "hub_message_id", "hub_admission"):
+        item = value.get(key)
+        if key == "hub_message" and item is True:
+            result[key] = True
+        elif key == "hub_message_id" and isinstance(item, str) and item:
+            result[key] = item
+        elif (
+            key == "hub_admission"
+            and isinstance(item, str)
+            and item in {"input", "note"}
+        ):
+            result[key] = item
+    hub_note = value.get("hub_note")
+    if isinstance(hub_note, dict) and hub_note.get("type") == "hub-note":
+        result["hub_note"] = deepcopy(hub_note)
+
+    if value.get("provider") != "acp":
+        return result
+    result["provider"] = "acp"
     for key in (
         "request_id",
         "source",
@@ -1174,7 +1229,7 @@ class ConversationManager:
                             message["metadata"]["request_id"] = request_id
                         if msg_type == "user":
                             message["metadata"].update(
-                                _acp_input_metadata(logged_metadata)
+                                _chat_stream_input_metadata(logged_metadata)
                             )
                             if isinstance(logged_metadata, dict):
                                 outcome = logged_metadata.get("chat_stream_outcome")
