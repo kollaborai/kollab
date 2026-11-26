@@ -1884,6 +1884,18 @@ class ConversationManager:
                             ),
                             "session_id": session_file.stem.replace("session_", ""),
                         }
+                        display_content = data.get("display_content")
+                        if msg_type == "assistant" and isinstance(
+                            display_content, str
+                        ):
+                            # Preserve an explicitly empty string: it means
+                            # this XML-only reply has no visible text, even
+                            # though the provider's stored content keeps tags.
+                            message["metadata"]["display_content"] = display_content
+                        if msg_type == "assistant":
+                            turn_id = data.get("turn_id")
+                            if isinstance(turn_id, str) and turn_id:
+                                message["metadata"]["turn_id"] = turn_id
                         # Native input IDs are stored with the original user
                         # message, not in the assistant's display metadata.
                         # Keep the identifier when rebuilding history so resume

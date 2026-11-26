@@ -112,7 +112,9 @@ def turn_display_texts(messages):
         role, content = message.get("role"), message.get("content")
         metadata = message.get("metadata") or {}
         text = None
-        if isinstance(content, str) and role == "user" and metadata.get("voice"):
+        if role == "assistant" and isinstance(metadata.get("display_content"), str):
+            text = metadata["display_content"]
+        elif isinstance(content, str) and role == "user" and metadata.get("voice"):
             try:
                 from kollabor_voice.voice_context import strip_voice_preamble
             except ImportError:

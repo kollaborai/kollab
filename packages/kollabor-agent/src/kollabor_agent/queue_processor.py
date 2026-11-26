@@ -506,6 +506,59 @@ def _xml_tool_call_entries(all_tools: List[Dict[str, Any]]) -> List[Dict[str, An
     return entries
 
 
+def _unique_xml_tool_call_ids(
+    history: List[Any],
+    tools: List[Dict[str, Any]],
+    reserved_ids: List[str] | None = None,
+) -> List[Dict[str, Any]]:
+    """Give parser-generated XML IDs a session-wide unique display identity.
+
+    The response parser restarts ordinal IDs such as ``terminal_0`` on each
+    model response. Tool events use these IDs while a call is live, and the
+    same IDs are persisted with their assistant/result records, so a collision
+    would merge two cards both live and after reload.
+    """
+    used_ids = {value for value in reserved_ids or [] if isinstance(value, str) and value}
+    for message in history:
+        metadata = (
+            message.get("metadata")
+            if isinstance(message, dict)
+            else getattr(message, "metadata", None)
+        )
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("tool_calls", "xml_tool_calls"):
+            calls = metadata.get(key)
+            if not isinstance(calls, list):
+                continue
+            used_ids.update(
+                call["id"]
+                for call in calls
+                if isinstance(call, dict)
+                and isinstance(call.get("id"), str)
+                and call["id"]
+            )
+
+    unique_tools = []
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            unique_tools.append(tool)
+            continue
+        tool_id = tool.get("id")
+        if not isinstance(tool_id, str) or not tool_id:
+            tool_id = f"xml_{index}"
+        if tool_id in used_ids:
+            base_id = tool_id
+            while True:
+                tool_id = f"{base_id}_{uuid.uuid4().hex}"
+                if tool_id not in used_ids:
+                    break
+            tool = {**tool, "id": tool_id}
+        used_ids.add(tool_id)
+        unique_tools.append(tool)
+    return unique_tools
+
+
 def _voice_turn_id(origin: Any) -> str | None:
     """The LiveKit voice turn an origin context belongs to, if any."""
     if isinstance(origin, dict) and origin.get("source") == "livekit_voice":
@@ -1219,7 +1272,10 @@ class QueueProcessor:
         self.last_progress_at = time.monotonic()
 
     def _resolve_text_tool_calls(
-        self, tools: List[Dict[str, Any]], has_native_tools: bool = False
+        self,
+        tools: List[Dict[str, Any]],
+        has_native_tools: bool = False,
+        reserved_tool_ids: List[str] | None = None,
     ) -> List[Dict[str, Any]]:
         """Send each call written as text (<tool_call>, <functions.NAME>) to
         the tool it names, with the names the native path uses.
@@ -1233,17 +1289,23 @@ class QueueProcessor:
             if echoes:
                 logger.info("Not running %d text-written call(s) beside native calls", len(echoes))
                 tools = [tool for tool in tools if not is_text_written_call(tool)]
-        if not any(tool.get("type") == "mcp_tool" for tool in tools):
-            return tools
-        mcp = getattr(self._native_tools_handler, "mcp_integration", None)
-        mcp_names = set(getattr(mcp, "tool_registry", None) or {})
-        plugin_names = set(getattr(self.tool_executor, "plugin_handlers", None) or {})
-        return [
-            resolve_text_tool_call(
-                tool, mcp_tool_names=mcp_names, plugin_handler_names=plugin_names
+        if any(tool.get("type") == "mcp_tool" for tool in tools):
+            mcp = getattr(self._native_tools_handler, "mcp_integration", None)
+            mcp_names = set(getattr(mcp, "tool_registry", None) or {})
+            plugin_names = set(
+                getattr(self.tool_executor, "plugin_handlers", None) or {}
             )
-            for tool in tools
-        ]
+            tools = [
+                resolve_text_tool_call(
+                    tool,
+                    mcp_tool_names=mcp_names,
+                    plugin_handler_names=plugin_names,
+                )
+                for tool in tools
+            ]
+        return _unique_xml_tool_call_ids(
+            self.conversation_history, tools, reserved_tool_ids
+        )
 
     def _drain_env_block(self) -> str:
         """Drain pending env events and render as an [env: N events] block.
@@ -2917,7 +2979,17 @@ class QueueProcessor:
             parsed_response = self.response_parser.parse_response(response)
             clean_response = parsed_response["content"]
             parsed_tools = self.response_parser.get_all_tools(parsed_response)
-            all_tools = self._resolve_text_tool_calls(parsed_tools, has_native_tools)
+            reserved_tool_ids = [
+                tool_id
+                for tool_call in raw_tool_calls
+                if isinstance((tool_id := getattr(tool_call, "id", None)), str)
+                and tool_id
+            ]
+            all_tools = self._resolve_text_tool_calls(
+                parsed_tools,
+                has_native_tools,
+                reserved_tool_ids=reserved_tool_ids,
+            )
             # Echoes left out of the run still leave the shown text clean.
             hid_text_calls = len(all_tools) < len(parsed_tools)
 
@@ -3209,6 +3281,12 @@ class QueueProcessor:
                     thinking_content=thinking_list,
                     tool_calls=tool_call_entries,
                     provider_reasoning=_last_provider_reasoning(self.api_service),
+                    display_content=(
+                        clean_response
+                        if clean_response != response or all_tools or hid_text_calls
+                        else None
+                    ),
+                    turn_id=self._turn_history_metadata().get("turn_id"),
                     voice_turn_id=self._voice_turn_metadata().get("voice_turn_id"),
                 )
             except Exception as exc:
@@ -3676,6 +3754,7 @@ class QueueProcessor:
                 text,
                 parent_uuid=parent_uuid,
                 model=getattr(self.api_service, "model", None),
+                turn_id=turn.get("turn_id"),
                 voice_turn_id=voice.get("voice_turn_id"),
             )
         except Exception:
