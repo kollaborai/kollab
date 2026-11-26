@@ -91,6 +91,82 @@ def test_large_text_reasoning_and_tool_args_use_fetchable_previews():
     assert tool_part["args"] == {}
 
 
+def test_oversized_permission_args_keep_only_owner_summary_and_exact_revision():
+    uid = "content-preview-test"
+    args = {
+        "tool_id": "tool-large-permission",
+        "permission_id": "permission-large-command",
+        "request_id": "request-large-command",
+        "source": "acp",
+        "parked": False,
+        "tool_name": "terminal",
+        "tool_type": "terminal",
+        "risk_level": "high",
+        "input": {"command": "run " + ("sensitive command argument " * 20_000)},
+        "acp_options": [
+            {"optionId": "allow", "name": "Allow once", "kind": "allow_once"},
+            {"optionId": "deny", "name": "Deny", "kind": "reject_once"},
+        ],
+    }
+    row = _row(
+        [
+            {
+                "type": "tool-call",
+                "tool_call_id": "permission-large-command",
+                "tool_name": "request_permission",
+                "args": args,
+            }
+        ]
+    )
+    row.update(kind="tool", status="running")
+    service = ChatStreamService(
+        SimpleNamespace(
+            _llm_service=SimpleNamespace(
+                conversation_manager=None,
+                conversation_history=[],
+            ),
+            get_conversation_uid=lambda: uid,
+        )
+    )
+
+    service._upsert(uid, row)
+    projected = service._log(uid)._events[-1]["data"]
+    part = projected["parts"][0]
+
+    assert event_problems(_event(projected)) == []
+    assert part["args"] == {
+        "tool_id": args["tool_id"],
+        "permission_id": args["permission_id"],
+        "request_id": args["request_id"],
+        "source": args["source"],
+        "parked": False,
+    }
+    marker = part["chat_stream_args_preview"]
+    assert marker["field"] == "args"
+    assert marker["row_id"] == row["id"]
+
+    chunks = []
+    offset = 0
+    while True:
+        chunk = service.get_content(
+            {
+                "row_id": row["id"],
+                "part_index": 0,
+                "field": "args",
+                "output_revision": marker["output_revision"],
+                "offset": offset,
+                "limit": 32_768,
+            }
+        )
+        assert "error" not in chunk
+        chunks.append(chunk["content"])
+        if chunk["done"]:
+            break
+        offset = chunk["next_offset"]
+
+    assert json.loads("".join(chunks)) == args
+
+
 def test_streaming_text_snapshot_hydrates_before_appends_and_finalizes_atomically():
     state = SimpleNamespace(
         _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),

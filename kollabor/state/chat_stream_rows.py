@@ -232,16 +232,60 @@ def bounded_chat_stream_row(
             return [compact_permission_data(item) for item in value]
         return copy.deepcopy(value)
 
+    permission_owner_fields = (
+        "permission_id",
+        "prompt_id",
+        "request_id",
+        "source",
+        "tool_id",
+    )
+
+    def compact_permission_owner(value: Any) -> dict[str, Any]:
+        """Keep bounded owner identity while the exact args load from content."""
+        if not isinstance(value, dict):
+            return {}
+
+        def fields(source: dict[str, Any]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key in permission_owner_fields:
+                item = source.get(key)
+                if (
+                    isinstance(item, str)
+                    and item
+                    and len(item.encode("utf-8", errors="replace")) <= 512
+                ):
+                    result[key] = item
+            parked = source.get("parked")
+            if isinstance(parked, bool):
+                result["parked"] = parked
+            return result
+
+        summary = fields(value)
+        details = value.get("details")
+        if isinstance(details, dict):
+            nested = fields(details)
+            if nested:
+                summary["details"] = nested
+        return summary
+
     def preview_args(part: dict[str, Any], part_index: int) -> None:
         args = part.get("args")
         marker = part.get("chat_stream_args_preview")
         if isinstance(marker, dict) and marker.get("field") == "args":
-            part["args"] = {}
+            part["args"] = (
+                compact_permission_owner(args)
+                if part.get("tool_name") == "request_permission"
+                else {}
+            )
             return
         if args is None:
             return
         marker, _content = content_preview(part_index, "args", args)
-        part["args"] = {}
+        part["args"] = (
+            compact_permission_owner(args)
+            if part.get("tool_name") == "request_permission"
+            else {}
+        )
         part["chat_stream_args_preview"] = marker
 
     for part_index, part in enumerate(parts):
@@ -309,7 +353,11 @@ def bounded_chat_stream_row(
                         isinstance(existing_args_preview, dict)
                         and existing_args_preview.get("field") == "args"
                     ):
-                        compact["args"] = {}
+                        compact["args"] = (
+                            compact_permission_owner(part.get("args"))
+                            if part.get("tool_name") == "request_permission"
+                            else {}
+                        )
                         compact["chat_stream_args_preview"] = copy.deepcopy(
                             existing_args_preview
                         )
@@ -319,7 +367,11 @@ def bounded_chat_stream_row(
                             chat_stream_wire_bytes(compact["args"])
                             > CHAT_STREAM_PART_INLINE_BYTES
                         ):
-                            compact["args"] = {}
+                            compact["args"] = (
+                                compact_permission_owner(part["args"])
+                                if part.get("tool_name") == "request_permission"
+                                else {}
+                            )
                             compact["chat_stream_args_preview"] = content_preview(
                                 part_index, "args", part["args"]
                             )[0]
