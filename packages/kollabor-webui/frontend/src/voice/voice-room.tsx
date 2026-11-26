@@ -140,6 +140,7 @@ export function useRoomVoiceMode(): VoiceMode | null {
     const on = isActive(room);
     return {
       pending: room.state === "starting" || room.state === "stopping",
+      error: null,
       on,
       toggle: () => void (on ? ctx.controller.stop() : ctx.controller.start(ctx.sessionId, null)),
       activity: null,

@@ -49,7 +49,11 @@ describe("toThreadMessageLike", () => {
 
   it("carries the authoritative stream turn id in custom metadata", () => {
     const message = toThreadMessageLike({ ...row("reply-1", [], "assistant"), turn_id: "turn-1" });
-    expect(message.metadata?.custom).toEqual({ chatRowKind: "reply", chatTurnId: "turn-1" });
+    expect(message.metadata?.custom).toEqual({
+      chatRowKind: "reply",
+      chatRowStatus: "complete",
+      chatTurnId: "turn-1",
+    });
   });
 
   it("maps text and reasoning parts to parts of the same type", () => {
@@ -98,12 +102,16 @@ describe("toThreadMessageLike", () => {
     expect((message.content as { isError?: boolean }[])[0].isError).toBeUndefined();
   });
 
-  it("preserves a failed local input status for the thread", () => {
+  it("preserves a failed local input status in custom metadata", () => {
     const message = toThreadMessageLike({
       ...row("send-failed", [{ type: "text", text: "keep this draft" }], "user"),
       status: "failed",
     });
-    expect(message.status).toEqual({ type: "incomplete", reason: "error" });
+    expect(message.metadata?.custom).toEqual({
+      chatRowKind: "reply",
+      chatRowStatus: "failed",
+      chatTurnId: null,
+    });
   });
 
   it("gives empty args when the tool-call args are not a plain object", () => {

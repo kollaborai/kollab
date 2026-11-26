@@ -23,6 +23,8 @@ export type VoiceActivity = {
 export type VoiceMode = {
   /** A /voice command is in flight; the mic holds still until it settles. */
   pending: boolean;
+  /** A rejected /voice command, shown beside the composer for retry. */
+  error: string | null;
   /** The last /voice on reported success and no later off did. */
   on: boolean;
   toggle: () => void;
@@ -31,6 +33,7 @@ export type VoiceMode = {
 
 const IDLE: VoiceMode = {
   pending: false,
+  error: null,
   on: false,
   toggle: () => undefined,
   activity: null,
@@ -75,6 +78,7 @@ export function VoiceModeProvider({
 }) {
   const [on, setOn] = useState(false);
   const [pending, setPending] = useState<"on" | "off" | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [activity, setActivity] = useState<VoiceActivity | null>(null);
   const sawRun = useRef(false);
 
@@ -103,8 +107,14 @@ export function VoiceModeProvider({
     if (pending || running) return;
     const action = on ? "off" : "on";
     sawRun.current = false;
+    setError(null);
     setPending(action);
-    void sendCommand(`/voice ${action}`);
+    void Promise.resolve()
+      .then(() => sendCommand(`/voice ${action}`))
+      .catch(() => {
+        setPending((current) => current === action ? null : current);
+        setError("Could not change voice mode. Try again.");
+      });
   }, [on, pending, running, sendCommand]);
 
   // The command is a chat turn: once its run has started and ended, the
@@ -165,8 +175,8 @@ export function VoiceModeProvider({
   }, [pending]);
 
   const value = useMemo(
-    () => ({ pending: pending !== null, on, toggle, activity }),
-    [activity, on, pending, toggle],
+    () => ({ pending: pending !== null, error, on, toggle, activity }),
+    [activity, error, on, pending, toggle],
   );
   return (
     <VoiceModeContext.Provider value={value}>

@@ -661,33 +661,50 @@ const Composer: FC<{
   // input. Cmd/Ctrl+Enter also asks for Send Now; the flag is read before the
   // first await, while the submit handler is still running.
   const sendInFlight = useRef(false);
+  // Keep the active draft's exact body and ID through an ambiguous POST
+  // failure. A changed text/attachment fingerprint gets its own ID; confirmed
+  // sends release the cached body so a later intentional duplicate is new.
+  const retryInput = useRef<{ fingerprint: string; input: InputRequest } | null>(null);
   const sendThroughStore = async (wantsSendNow: boolean) => {
     if (sendInFlight.current) return;
     const state = aui.composer.getState();
     const hasContent = state.text.trim().length > 0 || state.attachments.length > 0;
     const action = composerAction({ running: store.running, hasContent });
     if (action !== "send" && action !== "queue") return;
-    const fingerprint = `${state.text}\u0000${state.attachments.map((attachment) => attachment.id).join(",")}`;
+    const fingerprint = JSON.stringify({
+      text: state.text,
+      attachmentIds: state.attachments.map((attachment) => attachment.id),
+    });
     sendInFlight.current = true;
     setBusySubmitError(null);
     try {
-      const attachments = await Promise.all(
-        state.attachments.map(async (attachment) => {
-          if (attachment.content) return attachment;
-          if (attachment.type === "image" && attachment.status.type === "requires-action") {
-            return imageAttachmentAdapter.send(attachment as PendingAttachment);
-          }
-          throw new Error("Attachment is not ready to send");
-        }),
-      );
-      const input: InputRequest = {
-        id: newInputId(WEB_INPUT_PREFIX),
-        text: state.text,
-        attachments: toInputAttachments(attachments),
-      };
+      let input = retryInput.current?.fingerprint === fingerprint
+        ? retryInput.current.input
+        : undefined;
+      if (!input) {
+        const attachments = await Promise.all(
+          state.attachments.map(async (attachment) => {
+            if (attachment.content) return attachment;
+            if (attachment.type === "image" && attachment.status.type === "requires-action") {
+              return imageAttachmentAdapter.send(attachment as PendingAttachment);
+            }
+            throw new Error("Attachment is not ready to send");
+          }),
+        );
+        input = {
+          id: newInputId(WEB_INPUT_PREFIX),
+          text: state.text,
+          attachments: toInputAttachments(attachments),
+        };
+        retryInput.current = { fingerprint, input };
+      }
       await store.send(input);
+      retryInput.current = null;
       const current = aui.composer.getState();
-      const currentFingerprint = `${current.text}\u0000${current.attachments.map((attachment) => attachment.id).join(",")}`;
+      const currentFingerprint = JSON.stringify({
+        text: current.text,
+        attachmentIds: current.attachments.map((attachment) => attachment.id),
+      });
       if (currentFingerprint === fingerprint) await aui.composer.reset();
       if (wantsSendNow && sendsNowAvailable) {
         await store.sendNow(input.id).catch(() => {
@@ -1041,6 +1058,11 @@ const Composer: FC<{
           emptyMessage="No online agents"
           emptyHint="Try @broadcast to reach every agent in this project."
         />
+        {voiceAvailable && terminalVoice.error ? (
+          <p role="alert" className="text-destructive px-2 text-xs">
+            {terminalVoice.error}
+          </p>
+        ) : null}
         {busySubmitError ? (
           <p role="alert" className="text-destructive px-2 text-xs">
             {busySubmitError}
@@ -1309,6 +1331,11 @@ const AssistantMessage: FC = () => {
     ToolGroup,
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
+  const rowId = useAuiState((s) => s.message.id);
+  const turnId = useAuiState((s) => {
+    const value = s.message.metadata.custom.chatTurnId;
+    return typeof value === "string" ? value : undefined;
+  });
 
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
@@ -1320,6 +1347,8 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
+      data-chat-row-id={rowId}
+      data-chat-turn-id={turnId}
       className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
     >
       <div
@@ -1371,7 +1400,17 @@ const AssistantMessage: FC = () => {
               case "reasoning":
                 return <Reasoning {...part} />;
               case "tool-call":
-                return part.toolUI ?? <ToolFallbackComponent {...part} />;
+                return (
+                  <div
+                    className="contents"
+                    data-chat-row-id={rowId}
+                    data-chat-turn-id={turnId}
+                    data-chat-tool-call-id={part.toolCallId}
+                    data-chat-tool-name={part.toolName}
+                  >
+                    {part.toolUI ?? <ToolFallbackComponent {...part} />}
+                  </div>
+                );
               case "data":
                 return part.dataRendererUI;
               case "indicator":
@@ -1551,6 +1590,7 @@ const QueuedMessageNote: FC<{ inputId: string }> = ({ inputId }) => {
 
 const UserMessage: FC = () => {
   const id = useAuiState((s) => s.message.id);
+  const failed = useAuiState((s) => s.message.metadata.custom.chatRowStatus === "failed");
   const queued = useContext(QueuedIdsContext).has(id);
   // A message that was queued keeps the note's row, empty, once it is sent:
   // the rows under it stay where they are.
@@ -1559,6 +1599,7 @@ const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
+      data-chat-row-id={id}
       className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
       data-role="user"
     >
@@ -1568,6 +1609,11 @@ const UserMessage: FC = () => {
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 whitespace-pre-wrap wrap-break-word empty:hidden pointer-fine:text-sm">
           <MessagePrimitive.Parts components={{ Text: UserText }} />
         </div>
+        {failed ? (
+          <p data-slot="aui_user-send-failure" role="alert" className="text-destructive mt-1 text-xs">
+            Send was not confirmed. Retry this draft to avoid a duplicate.
+          </p>
+        ) : null}
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />
         </div>
@@ -1597,4 +1643,3 @@ const UserActionBar: FC = () => {
     </ActionBarPrimitive.Root>
   );
 };
-
