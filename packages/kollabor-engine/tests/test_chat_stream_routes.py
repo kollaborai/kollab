@@ -359,3 +359,32 @@ def test_send_now_route_returns_409_when_input_is_not_queued(monkeypatch):
     response = client.post("/sessions/s1/inputs/web-a1/send-now")
 
     assert response.status_code == 409
+
+
+def test_goal_input_passes_private_capability_to_registered_daemon(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    bus = _LiveBus()
+    captured = []
+    async def admit(params):
+        captured.append(params)
+        return {"accepted": True, "id": params["id"], "state": "queued"}
+    bus.runtime.add_input = admit
+    state = SimpleNamespace(
+        _event_bus=bus,
+        _llm_service=SimpleNamespace(conversation_history=[]),
+        get_conversation_uid=lambda: "conv-1",
+    )
+    daemon_rpc = RpcServer()
+    register_chat_stream_handlers(daemon_rpc, ChatStreamService(state))
+    session.daemon.rpc = _DispatchingRpc(daemon_rpc)
+    capability = "goal-" + "a" * 32
+
+    response = client.post(
+        "/sessions/s1/inputs",
+        json={"id": "web-goal-1", "text": "/goal show", "attachments": [],
+              "goal_reply_id": capability},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"id": "web-goal-1", "state": "queued"}
+    assert captured[0]["goal_reply_id"] == capability
