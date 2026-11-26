@@ -335,12 +335,18 @@ export function streamSnapshot(sessionId, history) {
     role: message.role,
     turn_id: null,
     status: "complete",
-    parts: [{
-      type: "text",
-      text: typeof message.content === "string"
-        ? message.content
-        : message.content.filter((part) => part.type === "text").map((part) => part.text).join(""),
-    }],
+    parts: [
+      {
+        type: "text",
+        text: typeof message.content === "string"
+          ? message.content
+          : message.content.filter((part) => part.type === "text").map((part) => part.text).join(""),
+      },
+      // Saved pictures ride the row as image parts at their media path, as the daemon writes them.
+      ...(message.media ?? [])
+        .filter((media) => media.ref && !media.failed)
+        .map((media) => ({ type: "image", url: `/media/${encodeURIComponent(media.ref)}` })),
+    ],
     created_at: "2026-11-26T00:00:00Z",
   }));
   return {
