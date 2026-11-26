@@ -256,9 +256,10 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
     every input row has a lifecycle under the same id (a row under a
     second id is how a sent message shows twice), an input's state only moves
     forward (queued, then started or joined, then ended), an input ends once
-    and never changes after, and an input bound to a turn ends only after that
-    turn ends, whatever its outcome. With ``complete`` set, every input must
-    also have ended by the last event.
+    and never changes after, an input bound to a turn ends only after that
+    turn ends, whatever its outcome, and a turn that has ended never goes back
+    to running, in a turn.state event or a snapshot alike. With ``complete`` set,
+    every input must also have ended by the last event.
     """
     events = list(events)
     problems: list[str] = []
@@ -310,6 +311,12 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
         elif turn_id:
             turn_of[info["id"]] = turn_id
 
+    def note_turn(seq: Any, turn_id: Any, state: str) -> None:
+        if state == "running" and turn_id in ended_turns:
+            problems.append(f"seq {seq}: turn {turn_id} went from ended to running")
+        if state == "ended":
+            ended_turns.add(turn_id)
+
     def note_rows(new_rows: list[dict[str, Any]]) -> None:
         rows.clear()
         rows.update(row["id"] for row in new_rows)
@@ -344,8 +351,7 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 )
             note_rows(data["rows"])
             for turn in data["turns"]:
-                if turn.get("state") == "ended":
-                    ended_turns.add(turn.get("turn_id"))
+                note_turn(seq, turn["turn_id"], turn["state"])
             for info in data["inputs"]:
                 note_state(seq, info)
         elif kind == "replace":
@@ -369,8 +375,8 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 problems.append(
                     f"seq {seq}: input {data['id']} {verb} before its turn {turn} ended"
                 )
-        elif kind == "turn.state" and data["state"] == "ended":
-            ended_turns.add(data["turn_id"])
+        elif kind == "turn.state":
+            note_turn(seq, data["turn_id"], data["state"])
 
     for row_id in sorted(input_rows - set(states)):
         problems.append(
