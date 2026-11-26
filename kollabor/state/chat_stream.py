@@ -2176,16 +2176,48 @@ class ChatStreamService:
             content = field(message, "content", "")
             image_store = getattr(llm_service, "_image_store", None)
             resolve_image = getattr(image_store, "resolve", None)
+            conversation_logger = getattr(llm_service, "conversation_logger", None)
+            persist_managed_image = None
+            conversations_dir = getattr(conversation_logger, "conversations_dir", None)
+            session_id = getattr(conversation_logger, "session_id", None)
+            if (
+                callable(resolve_image)
+                and conversations_dir is not None
+                and isinstance(session_id, str)
+                and session_id
+            ):
+                def persist_managed_image(media_id: str) -> str | None:
+                    data_url = resolve_image(media_id)
+                    if not isinstance(data_url, str):
+                        return None
+                    try:
+                        from kollabor_engine.media_store import save_managed_upload_media
+
+                        record = save_managed_upload_media(
+                            conversations_dir, session_id, media_id, data_url
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Could not persist managed chat image %s",
+                            media_id,
+                            exc_info=True,
+                        )
+                        return None
+                    return f"/media/{quote(record.ref, safe='')}"
             handoff_request_id = (
                 handoff.get("request_id") if isinstance(handoff, dict) else None
             )
             handoff_image_urls = self._handoff_image_urls(handoff)
             hub_note = self._hub_note_part(metadata.get("hub_note"))
+            saved_parts = metadata.get("chat_stream_parts")
             parts = (
                 [hub_note]
                 if hub_note is not None
                 else self._transcript_parts(
-                    content, resolve_image, handoff_image_urls
+                    saved_parts if isinstance(saved_parts, list) else content,
+                    None if isinstance(saved_parts, list) else resolve_image,
+                    handoff_image_urls,
+                    persist_managed_image,
                 )
             )
             turn_id = self._event_turn_id(metadata)
@@ -2330,13 +2362,14 @@ class ChatStreamService:
                     saved_parts = metadata.get("chat_stream_parts")
                     if isinstance(saved_parts, list):
                         input_parts = self._transcript_parts(
-                            saved_parts, None, input_image_urls
+                            saved_parts, None, input_image_urls, persist_managed_image
                         )
                     elif input_row_id in content_by_id:
                         input_parts = self._transcript_parts(
                             content_by_id[input_row_id],
                             resolve_image,
                             input_image_urls,
+                            persist_managed_image,
                         )
                     elif (
                         hub_note is not None
@@ -2348,7 +2381,10 @@ class ChatStreamService:
                         # map, retain its authenticated text but do not guess
                         # which input owned an image from the combined turn.
                         input_parts = self._transcript_parts(
-                            original_text, resolve_image, input_image_urls
+                            original_text,
+                            resolve_image,
+                            input_image_urls,
+                            persist_managed_image,
                         )
                         if single_input_proven:
                             input_parts.extend(
@@ -2482,9 +2518,16 @@ class ChatStreamService:
         content: Any,
         resolve_image: Callable[[str], str | None] | None,
         durable_image_urls: list[str] | None = None,
+        persist_managed_image: Callable[[str], str | None] | None = None,
     ) -> list[dict[str, Any]]:
         if isinstance(content, str):
-            return [{"type": "text", "text": content}] if content else []
+            parts = [{"type": "text", "text": content}] if content else []
+            parts.extend(
+                {"type": "image", "url": url}
+                for url in durable_image_urls or []
+                if isinstance(url, str) and url and not url.lower().startswith("data:")
+            )
+            return parts
         if not isinstance(content, list):
             return [{"type": "text", "text": str(content)}]
 
@@ -2510,8 +2553,11 @@ class ChatStreamService:
                             url = next(durable_urls)
                         except StopIteration:
                             media_id = source.get("media_id")
-                            if isinstance(media_id, str) and callable(resolve_image):
-                                url = resolve_image(media_id)
+                            if isinstance(media_id, str):
+                                if callable(persist_managed_image):
+                                    url = persist_managed_image(media_id)
+                                if url is None and callable(resolve_image):
+                                    url = resolve_image(media_id)
                 if not isinstance(url, str):
                     url = raw_part.get("image")
                 if isinstance(url, str) and url and not url.lower().startswith("data:"):

@@ -250,6 +250,52 @@ def content_to_text(content: Any) -> str:
     return "\n".join(rendered)
 
 
+def chat_stream_parts(
+    content: Any,
+    *,
+    persist_managed_upload: Callable[[str], Optional[str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build JSON-safe chat-row parts, replacing managed bytes with durable refs.
+
+    Provider file IDs and inline image payloads are deliberately omitted. A
+    managed upload is displayable only when the caller can persist it behind
+    the authenticated media route.
+    """
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    if not isinstance(content, list):
+        return []
+
+    parts: list[dict[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                parts.append({"type": "text", "text": text})
+            continue
+        if item.get("type") not in {"image", "image_url"}:
+            continue
+        source = item.get("source")
+        url = None
+        if isinstance(source, dict):
+            if source.get("kind") == "url":
+                url = source.get("url")
+            elif source.get("kind") == "managed_upload":
+                media_id = source.get("media_id")
+                if isinstance(media_id, str) and callable(persist_managed_upload):
+                    url = persist_managed_upload(media_id)
+        if url is None and item.get("type") == "image_url":
+            image_url = item.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else image_url
+        if url is None:
+            url = item.get("image")
+        if isinstance(url, str) and url.lower().startswith(("https://", "/media/")):
+            parts.append({"type": "image", "url": url})
+    return parts
+
+
 def combine_message_contents(contents: Iterable[MessageContent]) -> MessageContent:
     """Combine queued messages while retaining image parts."""
     values = list(contents)
