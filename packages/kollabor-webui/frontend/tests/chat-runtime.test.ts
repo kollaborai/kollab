@@ -200,7 +200,7 @@ describe("toThreadMessageLike", () => {
 
     expect(message.content[0]).toMatchObject({
       type: "tool-call",
-      result: undefined,
+      result: null,
       providerMetadata: { kollab: { chat_stream_result_preview: marker } },
     });
     expect(messageHasRecoverableChatStreamPreview(undefined, [message.content[0]])).toBe(true);
