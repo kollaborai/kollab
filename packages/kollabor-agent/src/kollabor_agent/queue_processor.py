@@ -1448,12 +1448,14 @@ class QueueProcessor:
             self.renderer, "turn_complete", stop_reason="error", request_ids=ids
         )
 
-    def _end_requests(self, why: str) -> None:
+    async def _end_requests(self, why: str) -> None:
         """A chain stopped short of its turn's completion still ends the requests
         it answers: their streams wait for one, and the next turn would name them."""
         if not self.active_request_ids:
             return
-        self._publish_ended(self.active_request_ids, why)
+        request_ids = self.active_request_ids
+        await self._persist_native_input_outcomes(request_ids, "error")
+        self._publish_ended(request_ids, why)
         self.active_request_ids = ()
         self._stamp_turn(None)
 
@@ -1802,7 +1804,7 @@ class QueueProcessor:
                         )
                         self.message_display_service.display_error_message(why)
                         self.turn_completed = True
-                        self._end_requests(why)
+                        await self._end_requests(why)
                         break
 
                     try:
@@ -1825,7 +1827,7 @@ class QueueProcessor:
                             why = f"Stuck loop detected: same tool error repeated {stuck.count} times. Breaking."
                             self.message_display_service.display_error_message(why)
                             self.turn_completed = True
-                            self._end_requests(why)
+                            await self._end_requests(why)
                             break
 
                     except Exception as e:
@@ -1839,7 +1841,7 @@ class QueueProcessor:
                             f"conversation failed on turn {turn_count}: {e}"
                         )
                         self.turn_completed = True
-                        self._end_requests(self.last_turn_error)
+                        await self._end_requests(self.last_turn_error)
                         break
 
                 # Done, cancelled or cut off by new input: no round of it is left.

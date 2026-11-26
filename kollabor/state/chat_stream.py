@@ -1736,6 +1736,13 @@ class ChatStreamService:
                         input_parts = self._transcript_parts(
                             original_text, resolve_image
                         )
+                        if len(input_row_ids) == 1:
+                            input_parts.extend(
+                                copy.deepcopy(part)
+                                for part in parts
+                                if isinstance(part, dict)
+                                and part.get("type") == "image"
+                            )
                     elif len(input_row_ids) == 1:
                         input_parts = parts
                     else:
