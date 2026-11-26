@@ -197,6 +197,27 @@ def test_a_completed_input_must_wait_for_its_turn():
     assert any("completed before its turn t1 ended" in problem for problem in problems)
 
 
+def test_an_input_cannot_start_after_its_turn_ended():
+    events = [
+        _event("snapshot", {**SNAPSHOT, "next_seq": 1}, seq=0),
+        _event(
+            "turn.state",
+            {"turn_id": "t1", "state": "ended", "input_ids": []},
+            seq=1,
+        ),
+        _event("row.upsert", {**ROW, "id": "i", "seq": 2, "turn_id": "t1"}, seq=2),
+        _event("input.state", {"id": "i", "state": "started", "turn_id": "t1"}, seq=3),
+        _event(
+            "input.state",
+            {"id": "i", "state": "ended", "turn_id": "t1", "outcome": "completed"},
+            seq=4,
+        ),
+    ]
+
+    problems = sequence_problems(events)
+    assert any("started after turn t1 ended" in problem for problem in problems)
+
+
 def test_an_unfinished_stream_may_leave_inputs_open():
     events = json.loads((FIXTURES / "bad-never-ends.json").read_text())["events"]
     assert sequence_problems(events, complete=False) == []
