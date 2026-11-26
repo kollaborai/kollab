@@ -212,7 +212,7 @@ describe("toThreadMessageLike", () => {
     });
   });
 
-  it("preserves an argument preview marker on the tool call", () => {
+  it("preserves an argument preview marker beside the tool call args", () => {
     const marker = {
       kind: "chat-stream-content-preview",
       session_id: "session-1",
@@ -230,11 +230,16 @@ describe("toThreadMessageLike", () => {
         type: "tool-call",
         tool_call_id: "call-1",
         tool_name: "terminal",
-        args: marker,
+        args: {},
+        chat_stream_args_preview: marker,
       }]),
     );
 
-    expect(message.content[0]).toMatchObject({ type: "tool-call", args: marker });
+    expect(message.content[0]).toMatchObject({
+      type: "tool-call",
+      args: {},
+      providerMetadata: { kollab: { chat_stream_args_preview: marker } },
+    });
   });
 
   it("maps a tool-call part to toolCallId, toolName, args, argsText and isError", () => {
