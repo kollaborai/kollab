@@ -98,6 +98,14 @@ type PermissionPromptCardProps = {
   resolved?: boolean;
 };
 
+export type RecoveredPermissionRowContext = {
+  sessionId: string;
+  rowId: string;
+  partIndex: number;
+  rowRevision?: string;
+  partRevision?: string;
+};
+
 function PermissionPromptCard({ partId, args, result, resolved = false }: PermissionPromptCardProps) {
   const payload = args || {};
   // The tool-call row decides the outcome. The daemon writes `result` once it
@@ -375,12 +383,16 @@ function PermissionArgsPreview({
   id,
   marker,
   result,
+  rowContext,
 }: {
   id: string;
   marker: ChatStreamContentPreviewMarker;
   result?: PermissionResult;
+  rowContext?: RecoveredPermissionRowContext;
 }) {
-  if (!isChatStreamContentPreviewMarker(marker) || marker.field !== "args") {
+  if (!isChatStreamContentPreviewMarker(marker) || marker.field !== "args" ||
+      (rowContext && (marker.session_id !== rowContext.sessionId || marker.row_id !== rowContext.rowId ||
+        marker.part_index !== rowContext.partIndex))) {
     return <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
   }
   return (
@@ -397,7 +409,7 @@ function PermissionArgsPreview({
         if (!args) {
           return <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
         }
-        return <LoadedPermissionArgs id={id} marker={marker} args={args} content={content} result={result} />;
+        return <LoadedPermissionArgs id={id} marker={marker} args={args} content={content} result={result} rowContext={rowContext} />;
       }}
     </ChatStreamContentPreview>
   );
@@ -409,41 +421,38 @@ function LoadedPermissionArgs({
   args,
   content,
   result,
+  rowContext,
 }: {
   id: string;
   marker: ChatStreamContentPreviewMarker;
   args: PermissionArgs;
   content: string;
   result?: PermissionResult;
+  rowContext?: RecoveredPermissionRowContext;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(true);
+  const revision = rowContext?.rowRevision ?? rowContext?.partRevision ?? marker.output_revision;
+  const recoveredPrompt = {
+    sessionId: marker.session_id,
+    promptId: id,
+    rowId: marker.row_id,
+    partIndex: marker.part_index,
+    revision,
+    data: args,
+    partType: "tool-call" as const,
+    ...(rowContext?.rowRevision ? { rowRevision: rowContext.rowRevision } : {}),
+    ...(rowContext?.partRevision ? { partRevision: rowContext.partRevision } : {}),
+    contentRevision: marker.output_revision,
+    argsPreview: marker,
+  };
   const register = (isVisible: boolean) => {
-    if (result || !isVisible || !args.tool_id || !args.permission_id) {
-      registerRecoveredPermissionPrompt({
-        sessionId: marker.session_id,
-        promptId: id,
-        rowId: marker.row_id,
-        partIndex: marker.part_index,
-        revision: marker.output_revision,
-        data: args,
-        partType: "tool-call",
-      }, false);
-      return;
-    }
-    registerRecoveredPermissionPrompt({
-      sessionId: marker.session_id,
-      promptId: id,
-      rowId: marker.row_id,
-      partIndex: marker.part_index,
-      revision: marker.output_revision,
-      data: args,
-      partType: "tool-call",
-    }, true);
+    registerRecoveredPermissionPrompt(recoveredPrompt, !result && isVisible && !!args.tool_id && !!args.permission_id);
   };
   useEffect(() => {
     register(detailsOpen);
     return () => register(false);
-  }, [detailsOpen, id, marker.output_revision, marker.part_index, marker.row_id, marker.session_id, result]);
+  }, [detailsOpen, id, marker.output_revision, marker.part_index, marker.row_id, marker.session_id,
+      result, rowContext?.rowRevision, rowContext?.partRevision, rowContext?.sessionId, rowContext?.rowId]);
   return (
     <div className="space-y-2">
       <details open={detailsOpen} onToggle={(event) => {
@@ -454,7 +463,92 @@ function LoadedPermissionArgs({
         <summary className="cursor-pointer text-xs font-medium">Full permission request details</summary>
         <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 text-xs">{content}</pre>
       </details>
-      {detailsOpen ? <PermissionPromptCard partId={id} args={args} result={result} /> : null}
+      <div hidden={!detailsOpen} aria-hidden={!detailsOpen}>
+        <PermissionPromptCard partId={id} args={args} result={result} />
+      </div>
+    </div>
+  );
+}
+
+/** Renders a permission call recovered from a complete part or a paged row. */
+export function RecoveredPermissionToolCall({
+  id,
+  args: rawArgs,
+  argsPreview,
+  result,
+  rowContext,
+}: {
+  id: string;
+  args: unknown;
+  argsPreview?: unknown;
+  result?: unknown;
+  rowContext?: RecoveredPermissionRowContext;
+}) {
+  const args = permissionArgsFromData(rawArgs);
+  const parsedResult = permissionResultFromData(result) ?? (isRecord(result) &&
+    (result.decision === "approve" || result.decision === "deny") ? result as PermissionResult : undefined);
+  if (!rowContext || rowContext.partIndex < 0) {
+    return <p role="alert" className="text-destructive text-xs">The permission request could not be tied to its current row. Refresh before deciding.</p>;
+  }
+  if (argsPreview !== undefined) {
+    if (!isChatStreamContentPreviewMarker(argsPreview) || argsPreview.field !== "args" ||
+        argsPreview.session_id !== rowContext.sessionId || argsPreview.row_id !== rowContext.rowId ||
+        argsPreview.part_index !== rowContext.partIndex) {
+      return <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
+    }
+    return <PermissionArgsPreview id={id} marker={argsPreview} result={parsedResult} rowContext={rowContext} />;
+  }
+  if (!args.tool_id || !args.permission_id) {
+    return <p role="alert" className="text-destructive text-xs">The complete permission request could not be verified. Refresh before deciding.</p>;
+  }
+  return <LoadedRecoveredPermissionToolCall id={id} args={args} result={parsedResult} rowContext={rowContext} />;
+}
+
+function LoadedRecoveredPermissionToolCall({
+  id,
+  args,
+  result,
+  rowContext,
+}: {
+  id: string;
+  args: PermissionArgs;
+  result?: PermissionResult;
+  rowContext: RecoveredPermissionRowContext;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(true);
+  const revision = rowContext.rowRevision ?? rowContext.partRevision;
+  const recoveredPrompt = {
+    sessionId: rowContext.sessionId,
+    promptId: id,
+    rowId: rowContext.rowId,
+    partIndex: rowContext.partIndex,
+    revision: revision ?? "",
+    data: args,
+    partType: "tool-call" as const,
+    ...(rowContext.rowRevision ? { rowRevision: rowContext.rowRevision } : {}),
+    ...(rowContext.partRevision ? { partRevision: rowContext.partRevision } : {}),
+  };
+  const register = (isVisible: boolean) => {
+    registerRecoveredPermissionPrompt(recoveredPrompt, !result && !!revision && isVisible);
+  };
+  useEffect(() => {
+    register(detailsOpen);
+    return () => register(false);
+  }, [detailsOpen, id, rowContext.sessionId, rowContext.rowId, rowContext.partIndex,
+      rowContext.rowRevision, rowContext.partRevision, result]);
+  return (
+    <div className="space-y-2">
+      <details open={detailsOpen} onToggle={(event) => {
+        const open = event.currentTarget.open;
+        setDetailsOpen(open);
+        register(open);
+      }}>
+        <summary className="cursor-pointer text-xs font-medium">Full permission request details</summary>
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 text-xs">{JSON.stringify(args, null, 2)}</pre>
+      </details>
+      <div hidden={!detailsOpen} aria-hidden={!detailsOpen}>
+        <PermissionPromptCard partId={id} args={args} result={result} />
+      </div>
     </div>
   );
 }
@@ -545,8 +639,9 @@ export function RecoveredPermissionPrompt({
   rowContext?: {
     sessionId: string;
     rowId: string;
-    rowRevision: string;
     partIndex: number;
+    rowRevision?: string;
+    partRevision?: string;
   };
 }) {
   const [detailsOpen, setDetailsOpen] = useState(true);
@@ -556,19 +651,24 @@ export function RecoveredPermissionPrompt({
   const register = (isVisible: boolean) => {
     if (!rowContext) return;
     if (isVisible && (!isRecord(data) || data.permission_id !== id || resolved)) return;
+    const revision = rowContext.rowRevision ?? rowContext.partRevision;
+    if (!revision) return;
     registerRecoveredPermissionPrompt({
       sessionId: rowContext.sessionId,
       rowId: rowContext.rowId,
-      revision: rowContext.rowRevision,
+      revision,
       partIndex: rowContext.partIndex,
       promptId: id,
       data,
+      ...(rowContext.rowRevision ? { rowRevision: rowContext.rowRevision } : {}),
+      ...(rowContext.partRevision ? { partRevision: rowContext.partRevision } : {}),
     }, isVisible);
   };
   useEffect(() => {
     register(detailsOpen);
     return () => register(false);
-  }, [detailsOpen, id, rowContext?.partIndex, rowContext?.rowId, rowContext?.rowRevision, rowContext?.sessionId, data]);
+  }, [detailsOpen, id, rowContext?.partIndex, rowContext?.rowId, rowContext?.rowRevision,
+      rowContext?.partRevision, rowContext?.sessionId, data]);
   return (
     <div className="space-y-2">
       <details open={detailsOpen} onToggle={(event) => {

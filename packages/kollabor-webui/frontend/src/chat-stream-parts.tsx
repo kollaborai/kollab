@@ -9,7 +9,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { useAuthenticatedImage } from "@/components/media/media-view";
 import { ToolFallbackResult } from "@/components/assistant-ui/tool-fallback";
-import { RecoveredPermissionPrompt } from "@/components/PermissionTool";
+import {
+  RecoveredPermissionPrompt,
+  RecoveredPermissionToolCall,
+  type RecoveredPermissionRowContext,
+} from "@/components/PermissionTool";
 import {
   ChatStreamContentPreview,
   chatStreamContentIdentity,
@@ -33,12 +37,7 @@ const RecoveredPermissionPromptPart = RecoveredPermissionPrompt as FC<{
   rowContext?: RecoveredChatRowContext;
 }>;
 
-type RecoveredChatRowContext = {
-  sessionId: string;
-  rowId: string;
-  rowRevision: string;
-  partIndex: number;
-};
+type RecoveredChatRowContext = RecoveredPermissionRowContext;
 
 export function chatStreamPartsIdentity(marker: ChatStreamPartsPreviewMarker): string {
   return [marker.session_id, marker.row_id, marker.output_revision].join("\u0000");
@@ -207,6 +206,15 @@ export function RecoveredChatPart({
     const argsPreview = isChatStreamContentPreviewMarker(part.chat_stream_args_preview) && part.chat_stream_args_preview.field === "args"
       ? part.chat_stream_args_preview
       : undefined;
+    if (part.tool_name === "request_permission" && typeof part.tool_call_id === "string") {
+      return <RecoveredPermissionToolCall
+        id={part.tool_call_id}
+        args={part.args}
+        argsPreview={argsPreview}
+        result={part.result}
+        rowContext={rowContext}
+      />;
+    }
     return (
       <details>
         <summary className="cursor-pointer text-xs">Recovered tool {String(part.tool_name ?? "call")}</summary>
@@ -300,6 +308,13 @@ export function ChatStreamPartPreview({
     output_revision: marker.output_revision,
     preview: marker.preview,
   };
+  const recoveredContext: RecoveredChatRowContext = {
+    sessionId: marker.session_id,
+    rowId: marker.row_id,
+    partIndex: marker.part_index,
+    ...(rowContext?.rowRevision ? { rowRevision: rowContext.rowRevision } : {}),
+    partRevision: marker.output_revision,
+  };
   return (
     <ChatStreamContentPreview
       key={chatStreamContentIdentity(contentMarker)}
@@ -307,12 +322,15 @@ export function ChatStreamPartPreview({
       autoLoad={false}
       loadLabel="Expand full part"
     >
-      {(serialized) => {
+      {(serialized, loaded) => {
+        if (!loaded) {
+          return <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{marker.preview}</pre>;
+        }
         try {
           return <RecoveredChatPart
             part={JSON.parse(serialized) as ChatPart}
             sessionId={marker.session_id}
-            rowContext={rowContext}
+            rowContext={recoveredContext}
           />;
         } catch {
           return <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{serialized}</pre>;

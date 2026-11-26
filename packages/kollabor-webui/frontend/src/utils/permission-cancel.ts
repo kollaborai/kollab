@@ -1,11 +1,10 @@
 import type { ChatRow } from "../chat-stream.ts";
 import {
-  isChatStreamContentPreviewMarker,
   isChatStreamPartPreviewMarker,
-  isChatStreamPartsPreviewMarker,
 } from "../chat-stream.ts";
 import {
   permissionPromptPreviewKey,
+  recoveredPermissionPromptIsCurrent,
   type RecoveredPermissionPrompt,
 } from "../permission-preview-state.ts";
 
@@ -75,32 +74,16 @@ export function pendingPermissions(
     }
     return [owner];
   }));
-  const rowsById = new Map(rows.map((row) => [row.id, row]));
   const fromRecovered = recoveredPrompts.flatMap((prompt) => {
-    const row = rowsById.get(prompt.rowId);
     const data = prompt.data;
     if (prompt.partType === "tool-call") {
-      const part = row?.parts[prompt.partIndex];
-      const marker = part?.type === "tool-call" ? part.chat_stream_args_preview : undefined;
-      if (
-        row?.kind !== "tool" || row.role !== "assistant" || part?.type !== "tool-call" ||
-        part.tool_name !== "request_permission" || part.tool_call_id !== prompt.promptId ||
-        part.result !== undefined || !isChatStreamContentPreviewMarker(marker) ||
-        marker.field !== "args" || marker.session_id !== prompt.sessionId ||
-        marker.row_id !== prompt.rowId || marker.part_index !== prompt.partIndex ||
-        marker.output_revision !== prompt.revision || typeof data !== "object" || data === null ||
-        Array.isArray(data) || !("tool_id" in data) || !("permission_id" in data)
-      ) return [];
+      if (!recoveredPermissionPromptIsCurrent(rows, prompt) || typeof data !== "object" || data === null || Array.isArray(data)) return [];
       const owner = permissionOwner(data);
       if (!owner?.requestId || !("permission_id" in data) || typeof data.permission_id !== "string" || !data.permission_id) return [];
       return [{ ...owner, previewKey: permissionPromptPreviewKey(prompt) }];
     }
-    const marker = row?.chat_stream_parts_preview;
     if (
-      row?.kind !== "prompt" || row.role !== "system" || row.status !== "open" ||
-      !isChatStreamPartsPreviewMarker(marker) || marker.session_id !== prompt.sessionId ||
-      marker.row_id !== prompt.rowId || marker.output_revision !== prompt.revision ||
-      prompt.partIndex >= marker.part_count || typeof data !== "object" || data === null ||
+      !recoveredPermissionPromptIsCurrent(rows, prompt) || typeof data !== "object" || data === null ||
       Array.isArray(data) || !("permission_id" in data) || data.permission_id !== prompt.promptId ||
       "resolution" in data
     ) return [];

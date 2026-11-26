@@ -2,7 +2,6 @@ import type { EngineApi } from "./api.ts";
 import {
   isChatStreamContentPreviewMarker,
   isChatStreamPartPreviewMarker,
-  isChatStreamPartsPreviewMarker,
   type ChatPart,
   type ChatRow,
 } from "./chat-stream.ts";
@@ -11,6 +10,7 @@ import { cancelPendingPermission as cancelIfStillPending, permissionOwner } from
 import {
   isPermissionPromptPreviewVisible,
   permissionPromptPreviewKey,
+  recoveredPermissionPromptIsCurrent,
   type RecoveredPermissionPrompt,
 } from "./permission-preview-state.ts";
 
@@ -119,16 +119,10 @@ export async function respondToPermission({
       if (prompt.sessionId !== sessionId || prompt.promptId !== toolCallId) continue;
       const row = currentRows.find((candidate) => candidate.id === prompt.rowId);
       if (prompt.partType === "tool-call") {
-        const part = row?.parts[prompt.partIndex];
-        const marker = part?.type === "tool-call" ? part.chat_stream_args_preview : undefined;
         const data = prompt.data;
         const previewKey = permissionPromptPreviewKey(prompt);
         if (
-          row?.kind !== "tool" || row.role !== "assistant" || part?.type !== "tool-call" ||
-          part.tool_name !== "request_permission" || part.tool_call_id !== toolCallId ||
-          part.result !== undefined || !isChatStreamContentPreviewMarker(marker) ||
-          marker.field !== "args" || marker.session_id !== sessionId || marker.row_id !== prompt.rowId ||
-          marker.part_index !== prompt.partIndex || marker.output_revision !== prompt.revision ||
+          !row || !recoveredPermissionPromptIsCurrent(currentRows, prompt) ||
           !isPermissionPromptPreviewVisible(previewKey) || typeof data !== "object" || data === null ||
           Array.isArray(data) || !permissionResponseOwner(data)
         ) continue;
@@ -137,13 +131,9 @@ export async function respondToPermission({
           part: { payload: data, previewKey },
         };
       }
-      const marker = row?.chat_stream_parts_preview;
       const data = prompt.data;
       if (
-        row?.kind !== "prompt" || row.role !== "system" || row.status !== "open" ||
-        !isChatStreamPartsPreviewMarker(marker) || marker.session_id !== sessionId ||
-        marker.row_id !== prompt.rowId || marker.output_revision !== prompt.revision ||
-        prompt.partIndex >= marker.part_count || typeof data !== "object" || data === null ||
+        !row || !recoveredPermissionPromptIsCurrent(currentRows, prompt) || typeof data !== "object" || data === null ||
         Array.isArray(data) || !("permission_id" in data) || data.permission_id !== toolCallId ||
         "resolution" in data
       ) continue;
