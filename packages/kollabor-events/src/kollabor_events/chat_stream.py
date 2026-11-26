@@ -134,18 +134,28 @@ def _content_preview_problems(
     where: str,
     *,
     row_id: Any,
-    field: str,
+    field: str | None,
 ) -> list[str]:
+    marker_field = marker.get("field") if isinstance(marker, dict) else None
+    valid_fields = {"text", "reasoning", "args", "part"}
+    if field is None:
+        field = (
+            marker_field
+            if isinstance(marker_field, str) and marker_field in valid_fields
+            else "text"
+        )
     problems = _preview_marker_problems(
         marker,
         where,
         kind="chat-stream-content-preview",
         row_id=row_id,
         count_fields=("part_index", "output_bytes", "output_chars"),
-        output_type="json" if field == "args" else "text",
+        output_type="json" if field in {"args", "part"} else "text",
         preview_required=True,
     )
-    if isinstance(marker, dict) and marker.get("field") != field:
+    if not isinstance(marker_field, str) or marker_field not in valid_fields:
+        problems.append(f"{where}: preview marker has an invalid field")
+    if marker_field != field:
         problems.append(f"{where}: preview marker field does not match its part")
     return problems
 
@@ -245,22 +255,17 @@ def _part_problems(part: Any, where: str, *, row_id: Any) -> list[str]:
     ]
     content_preview = part.get("chat_stream_content_preview")
     part_preview = part.get("chat_stream_part_preview")
-    if kind == "text":
-        if content_preview is not None:
-            problems += _content_preview_problems(
-                content_preview, where, row_id=row_id, field="text"
-            )
-        if part_preview is not None:
-            problems += _part_preview_problems(part_preview, where, row_id=row_id)
-    elif kind == "reasoning":
-        if content_preview is not None:
-            problems += _content_preview_problems(
-                content_preview, where, row_id=row_id, field="reasoning"
-            )
-    elif kind == "prompt":
-        if part_preview is not None:
-            problems += _part_preview_problems(part_preview, where, row_id=row_id)
-    elif kind == "tool-call":
+    if content_preview is not None:
+        expected_field = {"text": "text", "reasoning": "reasoning"}.get(kind)
+        problems += _content_preview_problems(
+            content_preview,
+            where,
+            row_id=row_id,
+            field=expected_field,
+        )
+    if part_preview is not None:
+        problems += _part_preview_problems(part_preview, where, row_id=row_id)
+    if kind == "tool-call":
         args_preview = part.get("chat_stream_args_preview")
         if args_preview is not None:
             problems += _content_preview_problems(

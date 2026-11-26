@@ -6,7 +6,14 @@ import { isChatStreamEvent, newInputId } from "../src/chat-stream";
 const dir = new URL("./fixtures/chat-stream/", import.meta.url);
 const cases = readdirSync(dir)
   .filter((name) => name.endsWith(".json"))
-  .map((name) => ({ name, events: JSON.parse(readFileSync(new URL(name, dir), "utf8")).events as unknown[] }));
+  .map((name) => {
+    const fixture = JSON.parse(readFileSync(new URL(name, dir), "utf8"));
+    return {
+      name,
+      events: fixture.events as unknown[],
+      eventExpect: (fixture.event_expect ?? {}) as Record<string, string[]>,
+    };
+  });
 
 const ROW = { id: "r1", seq: 1, kind: "input", role: "user", turn_id: null, status: "queued", parts: [], created_at: "2026-11-25T10:00:00Z" };
 const SNAPSHOT = { rows: [], next_seq: 1, older: null, turns: [], inputs: [] };
@@ -60,11 +67,18 @@ const partsPreview = (rowId = "r1") => ({
 });
 
 describe("chat stream contract", () => {
-  it("reads all eight fixtures", () => {
+  it("reads all ten fixtures", () => {
     expect(cases.map((c) => c.name).sort()).toEqual([
-      "bad-gap.json", "bad-never-ends.json", "bad-regress.json", "bad-reid.json", "bad-seq.json", "compaction.json",
-      "reload-mid-turn.json", "steered-input.json",
+      "bad-gap.json", "bad-never-ends.json", "bad-preview-marker-identity.json", "bad-regress.json", "bad-reid.json", "bad-seq.json", "compaction.json",
+      "preview-markers.json", "reload-mid-turn.json", "steered-input.json",
     ]);
+  });
+
+  it("keeps Python and TypeScript preview-marker fixtures in parity", () => {
+    const valid = cases.find((item) => item.name === "preview-markers.json");
+    const invalid = cases.find((item) => item.name === "bad-preview-marker-identity.json");
+    expect(valid?.events.every(isChatStreamEvent)).toBe(true);
+    expect(invalid?.events.every(isChatStreamEvent)).toBe(false);
   });
 
   it("accepts a row that carries every part type", () => {
@@ -193,9 +207,12 @@ describe("chat stream contract", () => {
     expect(isChatStreamEvent({ seq: 1, conversation_uid: "c", generation: "daemon-1", type: "row.delete", data: { id: "r1" } })).toBe(true);
   });
 
-  it("accepts every fixture event, since the bad fixtures break the sequence rules, not the shapes", () => {
-    for (const { name, events } of cases) {
-      for (const event of events) expect([name, isChatStreamEvent(event)]).toEqual([name, true]);
+  it("matches each fixture's expected event shape validity", () => {
+    for (const { name, events, eventExpect } of cases) {
+      for (const [index, event] of events.entries()) {
+        const shapeIsValid = (eventExpect[String(index)] ?? []).length === 0;
+        expect([name, index, isChatStreamEvent(event)]).toEqual([name, index, shapeIsValid]);
+      }
     }
   });
 
