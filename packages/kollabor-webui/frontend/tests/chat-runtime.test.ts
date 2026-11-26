@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { toMessagePartStatus } from "@assistant-ui/core/internal";
+import { fromThreadMessageLike, toMessagePartStatus } from "@assistant-ui/core/internal";
 import fixture from "./fixtures/chat-stream/bad-gap.json";
 import { applyChatStreamEvent, initialStreamState } from "../src/chat-store";
 import type { ChatRow } from "../src/chat-stream";
@@ -128,6 +128,51 @@ describe("toThreadMessageLike", () => {
       type: "reasoning",
       text: "reasoning prefix",
       providerMetadata: { kollab: { chat_stream_content_preview: marker } },
+    });
+  });
+
+  it("keeps blank text and reasoning previews recoverable through assistant-ui conversion", () => {
+    const textMarker = {
+      kind: "chat-stream-content-preview" as const,
+      session_id: "session-blank",
+      row_id: "row-blank-text",
+      part_index: 0,
+      field: "text" as const,
+      output_bytes: 12_000,
+      output_chars: 12_000,
+      output_type: "text" as const,
+      output_revision: "d".repeat(64),
+      preview: " \n\t ",
+    };
+    const reasoningMarker = {
+      ...textMarker,
+      row_id: "row-blank-reasoning",
+      field: "reasoning" as const,
+      output_revision: "e".repeat(64),
+    };
+    const textMessage = toThreadMessageLike(row("row-blank-text", [{
+      type: "text",
+      text: textMarker.preview,
+      chat_stream_content_preview: textMarker,
+    } as unknown as ChatRow["parts"][number]]));
+    const reasoningMessage = toThreadMessageLike(row("row-blank-reasoning", [{
+      type: "reasoning",
+      text: reasoningMarker.preview,
+      chat_stream_content_preview: reasoningMarker,
+    } as unknown as ChatRow["parts"][number]]));
+
+    const text = fromThreadMessageLike(textMessage, "fallback-text", { type: "complete" });
+    const reasoning = fromThreadMessageLike(reasoningMessage, "fallback-reasoning", { type: "complete" });
+
+    expect(text.content).toHaveLength(1);
+    expect(text.content[0]).toMatchObject({
+      type: "text",
+      providerMetadata: { kollab: { chat_stream_text: textMarker.preview } },
+    });
+    expect(reasoning.content).toHaveLength(1);
+    expect(reasoning.content[0]).toMatchObject({
+      type: "reasoning",
+      providerMetadata: { kollab: { chat_stream_text: reasoningMarker.preview } },
     });
   });
 
