@@ -4292,7 +4292,7 @@ class LocalStateService(StateService):
         create_task = getattr(llm, "create_background_task", None)
         command_coro = self._execute_slash_command(
             text, parser, executor, goal_origin_uid=uid, goal_request_id=request_id,
-            private_goal_reply=private_reply,
+            private_goal_reply=private_reply, request_id=client_request_id,
         )
         try:
             task = (
@@ -4630,7 +4630,10 @@ class LocalStateService(StateService):
                     add_message(
                         "user",
                         recorded,
-                        metadata={"slash_command": recorded},
+                        metadata={
+                            "slash_command": recorded,
+                            **({"request_id": request_id} if request_id else {}),
+                        },
                         publish_user_event=False,
                     )
                 else:
