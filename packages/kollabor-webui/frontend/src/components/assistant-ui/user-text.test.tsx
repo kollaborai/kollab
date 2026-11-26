@@ -63,6 +63,13 @@ describe("UserText render", () => {
     expect(markup).not.toContain("media-thumb");
   });
 
+  it("preserves system-row line breaks in text parts", () => {
+    stateWith(["text"], undefined);
+    const markup = renderToStaticMarkup(<UserText text={"first line\nsecond line"} />);
+    expect(markup).toContain("whitespace-pre-wrap");
+    expect(markup).toContain("first line\nsecond line");
+  });
+
   it("replaces the whole-row placeholder with a paged content control", () => {
     const marker = {
       kind: "chat-stream-parts-preview",
