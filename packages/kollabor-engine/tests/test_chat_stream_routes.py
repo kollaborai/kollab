@@ -1373,7 +1373,13 @@ def test_chat_parts_route_makes_unmarked_oversized_item_retrievable(monkeypatch)
     revision = hashlib.sha256(
         b"json\0" + canonical.encode("utf-8", errors="replace")
     ).hexdigest()
+    assert marker["row_id"] == "row-1"
+    assert marker["part_index"] == 0
+    assert marker["output_bytes"] == len(canonical.encode("utf-8"))
+    assert marker["output_chars"] == len(canonical)
+    assert marker["output_type"] == "json"
     assert marker["output_revision"] == revision
+    assert marker["preview"] == canonical[:1024]
 
     chunk = canonical[: stream._TOOL_OUTPUT_CHUNK_CHARS]
     session.rpc.content_result = {
