@@ -910,8 +910,9 @@ def test_snapshot_restores_queue_handoff_images_from_text_only_history(tmp_path)
 
 
 def test_snapshot_persists_managed_upload_without_handoff_as_authenticated_media(tmp_path):
-    from kollabor_ai.message_content import EphemeralImageStore
     from kollabor_engine.media_store import open_media
+
+    from kollabor_ai.message_content import EphemeralImageStore
 
     state = _State()
     image_store = EphemeralImageStore()
