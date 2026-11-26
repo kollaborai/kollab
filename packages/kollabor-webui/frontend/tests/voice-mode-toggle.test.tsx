@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EngineApi } from "@/api";
+import type { InputInfo } from "@/chat-stream";
+import type { LiveStore } from "@/chat-store";
 import { useVoiceMode, VoiceModeProvider, type VoiceMode } from "@/voice-mode";
 
 // The toggle must not reach the chat runtime. The mock records any call through
@@ -55,15 +57,39 @@ async function settle() {
   });
 }
 
-async function render(api: FakeApi, running: boolean, sendCommand: Send) {
+function fakeInputStore() {
+  let inputs: Record<string, InputInfo> = {};
+  const listeners = new Set<() => void>();
+  const store = {
+    get inputs() { return inputs; },
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  } as Pick<LiveStore, "inputs" | "subscribe">;
+  return {
+    store,
+    set(id: string, state: InputInfo["state"], turnId: string | null) {
+      inputs = { ...inputs, [id]: { id, state, turn_id: turnId } };
+      listeners.forEach((listener) => listener());
+    },
+  };
+}
+
+async function render(api: FakeApi, running: boolean, sendCommand: Send, inputs = fakeInputStore()) {
+  // The extra store prop lets this test fail behaviorally on the old provider, whose props ignored input lifecycle.
+  const props = {
+    api: api as unknown as EngineApi,
+    sessionId: "s1",
+    running,
+    sendCommand,
+    store: inputs.store,
+  } as unknown as Parameters<typeof VoiceModeProvider>[0];
   await act(async () => {
-    root.render(
-      <VoiceModeProvider api={api as unknown as EngineApi} sessionId="s1" running={running} sendCommand={sendCommand}>
-        <Probe />
-      </VoiceModeProvider>,
-    );
+    root.render(createElement(VoiceModeProvider, props, createElement(Probe)));
   });
   await settle();
+  return inputs;
 }
 
 async function toggle() {
@@ -79,7 +105,8 @@ describe("voice mode toggle through props", () => {
 
     await toggle();
 
-    expect(sendCommand.mock.calls).toEqual([["/voice on"]]);
+    expect(sendCommand.mock.calls[0]?.[0]).toBe("/voice on");
+    expect(sendCommand.mock.calls[0]?.[1]).toMatch(/^web-[0-9a-f]{24}$/);
     expect(thread.append).not.toHaveBeenCalled();
   });
 
@@ -94,11 +121,13 @@ describe("voice mode toggle through props", () => {
 
     await render(api, false, sendCommand);
     await toggle();
-    expect(sendCommand.mock.calls).toEqual([["/voice on"]]);
+    expect(sendCommand.mock.calls[0]?.[0]).toBe("/voice on");
+    expect(sendCommand.mock.calls[0]?.[1]).toMatch(/^web-[0-9a-f]{24}$/);
     expect(latest.pending).toBe(true);
 
     await toggle();
-    expect(sendCommand.mock.calls).toEqual([["/voice on"]]);
+    expect(sendCommand.mock.calls[0]?.[0]).toBe("/voice on");
+    expect(sendCommand.mock.calls[0]?.[1]).toMatch(/^web-[0-9a-f]{24}$/);
   });
 
   it("clears pending and reports an error when the voice command is rejected", async () => {
@@ -117,13 +146,18 @@ describe("voice mode toggle through props", () => {
   it("after the run ends, on is set from voice_requested and getHistory is never called", async () => {
     const api = fakeApi({ voice_requested: false });
     const sendCommand = vi.fn();
-    await render(api, false, sendCommand);
+    const inputs = await render(api, false, sendCommand);
     await toggle();
-    expect(sendCommand.mock.calls).toEqual([["/voice on"]]);
+    const inputId = sendCommand.mock.calls[0]?.[1] as string;
+    expect(sendCommand.mock.calls[0]?.[0]).toBe("/voice on");
+    expect(inputId).toMatch(/^web-[0-9a-f]{24}$/);
 
     api.system.voice_requested = true;
-    await render(api, true, sendCommand);
-    await render(api, false, sendCommand);
+    await act(async () => {
+      inputs.set(inputId, "started", "turn-1");
+      inputs.set(inputId, "ended", "turn-1");
+    });
+    await settle();
 
     expect(latest.on).toBe(true);
     expect(latest.pending).toBe(false);
@@ -137,16 +171,42 @@ describe("voice mode toggle through props", () => {
       history: [{ id: "reply", metadata: { slash_command: "/voice on", command_success: true } }],
     });
     const sendCommand = vi.fn();
-    await render(api, false, sendCommand);
+    const inputs = await render(api, false, sendCommand);
     await toggle();
-    expect(sendCommand.mock.calls).toEqual([["/voice on"]]);
+    const inputId = sendCommand.mock.calls[0]?.[1] as string;
+    expect(sendCommand.mock.calls[0]?.[0]).toBe("/voice on");
+    expect(inputId).toMatch(/^web-[0-9a-f]{24}$/);
     expect(latest.pending).toBe(true);
 
-    await render(api, true, sendCommand);
-    await render(api, false, sendCommand);
+    await act(async () => {
+      inputs.set(inputId, "started", "turn-1");
+      inputs.set(inputId, "ended", "turn-1");
+    });
+    await settle();
 
     expect(latest.on).toBe(false);
     expect(latest.pending).toBe(false);
     expect(api.getHistory).not.toHaveBeenCalled();
+  });
+
+  it("confirms a voice command when its input starts and ends before React observes running", async () => {
+    const api = fakeApi({ voice_requested: false });
+    const sendCommand = vi.fn();
+    const inputs = await render(api, false, sendCommand);
+
+    await toggle();
+    const inputId = sendCommand.mock.calls[0]?.[1] as string;
+    api.system.voice_requested = true;
+
+    // The store notifies synchronously for both stream events; React only gets one outer act/render.
+    await act(async () => {
+      inputs.set(inputId, "started", "turn-1");
+      inputs.set(inputId, "ended", "turn-1");
+    });
+    await settle();
+
+    expect(latest.pending).toBe(false);
+    expect(latest.on).toBe(true);
+    expect(api.getSessionState).toHaveBeenCalled();
   });
 });
