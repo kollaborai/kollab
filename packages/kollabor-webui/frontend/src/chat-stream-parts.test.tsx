@@ -30,6 +30,10 @@ import {
 import { canExportChatStreamMarkdown } from "./chat-stream-content";
 import type { EngineApi } from "./api";
 import { ChatStoreProvider, type ChatSnapshot, type LiveStore } from "./chat-store";
+import {
+  PermissionResponseContext,
+  type PermissionResponseHandler,
+} from "./components/PermissionTool";
 import type { ChatRow, ChatStreamPartPreviewMarker, ChatStreamPartsPreviewMarker } from "./chat-stream";
 import {
   PermissionCancellationProvider,
@@ -90,9 +94,49 @@ function contentChunk(rowId: string, partIndex: number, revisionValue: string, c
   };
 }
 
+function argsChunk(rowId: string, partIndex: number, revisionValue: string, content: string) {
+  return {
+    ...contentChunk(rowId, partIndex, revisionValue, content),
+    field: "args",
+  };
+}
+
 function PermissionStopControl() {
   const permission = usePendingPermissionCancellation();
   return permission ? <button type="button" onClick={() => { void permission.cancel(); }}>Stop</button> : null;
+}
+
+function PermissionRecovery({
+  row,
+  sessionId,
+  api,
+  respond,
+  children,
+}: {
+  row: ChatRow;
+  sessionId: string;
+  api: Pick<EngineApi, "getPermissions" | "cancelOwned">;
+  respond: PermissionResponseHandler;
+  children: ReactNode;
+}) {
+  const store = permissionStore([row]);
+  return (
+    <ChatStoreProvider store={store}>
+      <PermissionCancellationProvider api={api} sessionId={sessionId} store={store}>
+        <PermissionResponseContext.Provider value={respond}>
+          <PermissionStopControl />
+          {children}
+        </PermissionResponseContext.Provider>
+      </PermissionCancellationProvider>
+    </ChatStoreProvider>
+  );
+}
+
+async function clickButton(ui: ReturnType<typeof mount>, label: string): Promise<void> {
+  const button = Array.from(ui.host.querySelectorAll("button"))
+    .find((candidate) => candidate.textContent?.trim() === label);
+  if (!button) throw new Error(`No button labeled ${label}`);
+  await act(async () => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
 }
 
 function permissionStore(rows: ChatRow[]): LiveStore {
@@ -372,6 +416,177 @@ describe("chat stream part recovery", () => {
         details!.dispatchEvent(new Event("toggle"));
       });
       expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent === "Stop")).toBe(true);
+    } finally {
+      await ui.unmount();
+    }
+  });
+
+  it("renders and answers a request_permission tool call recovered from a whole-row page", async () => {
+    const marker = { ...partsMarker("row-paged-request-permission"), part_count: 1 };
+    const owner = {
+      tool_id: "paged-tool-1",
+      permission_id: "paged-permission-1",
+      request_id: "paged-request-1",
+      source: "acp",
+      parked: false,
+    };
+    const fullArgs = { ...owner, tool_name: "terminal", command: "pytest -q full authorization details" };
+    const argsContent = JSON.stringify(fullArgs);
+    const argsRevision = "c".repeat(64);
+    const argsPreview = {
+      kind: "chat-stream-content-preview" as const,
+      session_id: marker.session_id,
+      row_id: marker.row_id,
+      part_index: 0,
+      field: "args" as const,
+      output_bytes: new TextEncoder().encode(argsContent).length,
+      output_chars: Array.from(argsContent).length,
+      output_type: "json" as const,
+      output_revision: argsRevision,
+      preview: argsContent.slice(0, 1024),
+    };
+    const toolPart = {
+      type: "tool-call",
+      tool_call_id: "paged-call-1",
+      tool_name: "request_permission",
+      args: owner,
+      chat_stream_args_preview: argsPreview,
+    };
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: marker.part_count,
+      output_revision: marker.output_revision,
+      parts: [toolPart],
+      done: true,
+    });
+    mocks.getChatStreamContent.mockResolvedValueOnce(
+      argsChunk(marker.row_id, 0, argsRevision, argsContent),
+    );
+    const row: ChatRow = {
+      id: marker.row_id,
+      seq: 8,
+      kind: "tool",
+      role: "assistant",
+      turn_id: "turn-paged-permission",
+      status: "requires-action",
+      parts: [{ type: "text", text: "[Large chat row]" }],
+      chat_stream_parts_preview: marker,
+      created_at: "2026-11-25T00:00:00Z",
+    };
+    const pending = {
+      type: "permission_request",
+      tool_id: owner.tool_id,
+      permission_id: owner.permission_id,
+      details: fullArgs,
+    };
+    const permissionApi = {
+      getPermissions: vi.fn(async () => ({ pending_prompts: [pending] })),
+      cancelOwned: vi.fn(async () => ({ cancelled: true })),
+    } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const ui = mount();
+    try {
+      await ui.render(
+        <PermissionRecovery row={row} sessionId={marker.session_id} api={permissionApi} respond={respond}>
+          <ChatStreamPartsPreview marker={marker} />
+        </PermissionRecovery>,
+      );
+      await clickButton(ui, "Load full row");
+      await vi.waitFor(() => expect(ui.host.textContent).toContain("Permission required: terminal"));
+
+      expect(ui.host.textContent).toContain(fullArgs.command);
+      expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent?.trim() === "Stop")).toBe(true);
+      await clickButton(ui, "Allow once");
+      expect(respond).toHaveBeenCalledWith(
+        "paged-call-1",
+        expect.objectContaining(fullArgs),
+        expect.objectContaining({ tool_id: owner.tool_id, permission_id: owner.permission_id, decision: "approve" }),
+      );
+    } finally {
+      await ui.unmount();
+    }
+  });
+
+  it("registers Stop for a request_permission tool call recovered through a per-part preview", async () => {
+    const rowId = "row-part-request-permission";
+    const owner = {
+      tool_id: "part-tool-1",
+      permission_id: "part-permission-1",
+      request_id: "part-request-1",
+      source: "acp",
+      parked: false,
+    };
+    const fullArgs = { ...owner, tool_name: "terminal", command: "pytest -q nested part details" };
+    const argsContent = JSON.stringify(fullArgs);
+    const argsRevision = "d".repeat(64);
+    const argsPreview = {
+      kind: "chat-stream-content-preview" as const,
+      session_id: "session-1",
+      row_id: rowId,
+      part_index: 0,
+      field: "args" as const,
+      output_bytes: new TextEncoder().encode(argsContent).length,
+      output_chars: Array.from(argsContent).length,
+      output_type: "json" as const,
+      output_revision: argsRevision,
+      preview: argsContent,
+    };
+    const toolPart = {
+      type: "tool-call",
+      tool_call_id: "part-call-1",
+      tool_name: "request_permission",
+      args: owner,
+      chat_stream_args_preview: argsPreview,
+    };
+    const serializedPart = JSON.stringify(toolPart);
+    const partPreview: ChatStreamPartPreviewMarker = {
+      ...partMarker(rowId, 0),
+      session_id: "session-1",
+      output_bytes: new TextEncoder().encode(serializedPart).length,
+      output_chars: Array.from(serializedPart).length,
+      output_revision: "f".repeat(64),
+      preview: serializedPart.slice(0, 1024),
+    };
+    mocks.getChatStreamContent
+      .mockResolvedValueOnce(contentChunk(rowId, 0, partPreview.output_revision, serializedPart))
+      .mockResolvedValueOnce(argsChunk(rowId, 0, argsRevision, argsContent));
+    const row: ChatRow = {
+      id: rowId,
+      seq: 9,
+      kind: "tool",
+      role: "assistant",
+      turn_id: "turn-part-permission",
+      status: "requires-action",
+      parts: [{ type: "text", text: "[Large part]", chat_stream_part_preview: partPreview }],
+      created_at: "2026-11-25T00:00:00Z",
+    };
+    const pending = {
+      type: "permission_request",
+      tool_id: owner.tool_id,
+      permission_id: owner.permission_id,
+      details: fullArgs,
+    };
+    const permissionApi = {
+      getPermissions: vi.fn(async () => ({ pending_prompts: [pending] })),
+      cancelOwned: vi.fn(async () => ({ cancelled: true })),
+    } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const ui = mount();
+    try {
+      await ui.render(
+        <PermissionRecovery row={row} sessionId="session-1" api={permissionApi} respond={respond}>
+          <ChatStreamPartPreview marker={partPreview} />
+        </PermissionRecovery>,
+      );
+      await clickButton(ui, "Expand full part");
+      await vi.waitFor(() => expect(ui.host.textContent).toContain("Permission required: terminal"));
+      expect(ui.host.textContent).toContain(fullArgs.command);
+      expect(Array.from(ui.host.querySelectorAll("button")).some((button) => button.textContent?.trim() === "Stop")).toBe(true);
+
+      await clickButton(ui, "Stop");
+      expect(permissionApi.cancelOwned).toHaveBeenCalledWith("session-1", owner.request_id);
     } finally {
       await ui.unmount();
     }

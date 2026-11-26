@@ -295,6 +295,74 @@ describe("permission prompt outcome from the tool-call row", () => {
     expect(pendingPermissions([row], visibleRecoveredPermissionPrompts([row], marker.session_id))).toEqual([]);
   });
 
+  it.each([
+    ["uncertain POST failure", "error", "Couldn't send the decision."],
+    ["answer while the row is still pending", "answered", "Sending decision…"],
+    ["stale response", "stale", "no longer pending"],
+  ] as const)("preserves %s state when loaded details are closed and reopened", async (_label, outcome, statusText) => {
+    streamMocks.getChatStreamContent.mockReset();
+    const args = {
+      tool_id: "tool-persist",
+      permission_id: "permission-persist",
+      request_id: "request-persist",
+      tool_name: "terminal",
+      command: "pytest -q",
+    };
+    const content = JSON.stringify(args);
+    const marker = {
+      kind: "chat-stream-content-preview" as const,
+      session_id: "session-persist",
+      row_id: "row-persist",
+      part_index: 0,
+      field: "args" as const,
+      output_bytes: new TextEncoder().encode(content).length,
+      output_chars: Array.from(content).length,
+      output_type: "json" as const,
+      output_revision: "e".repeat(64),
+      preview: content,
+    };
+    streamMocks.getChatStreamContent.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      part_index: marker.part_index,
+      field: marker.field,
+      output_revision: marker.output_revision,
+      offset: 0,
+      next_offset: marker.output_chars,
+      total_chars: marker.output_chars,
+      output_type: marker.output_type,
+      content,
+      done: true,
+    });
+    const respond = vi.fn<PermissionResponseHandler>(async () => {
+      if (outcome === "error") throw new Error("network outcome unknown");
+      return outcome;
+    });
+    const container = renderPrompt(partProps({
+      toolCallId: "call-persist",
+      args: { tool_id: args.tool_id },
+      providerMetadata: { kollab: { chat_stream_args_preview: marker } },
+    }), respond);
+
+    await vi.waitFor(() => expect(container.textContent).toContain("pytest -q"));
+    await click(container, "Allow once");
+    await vi.waitFor(() => expect(container.textContent).toContain(statusText));
+
+    const details = container.querySelector("details");
+    expect(details).not.toBeNull();
+    await act(async () => {
+      details!.open = false;
+      details!.dispatchEvent(new Event("toggle"));
+    });
+    await act(async () => {
+      details!.open = true;
+      details!.dispatchEvent(new Event("toggle"));
+    });
+
+    expect(container.textContent).toContain(statusText);
+    expect(buttons(container).find((button) => button.textContent?.trim() === "Allow once")?.disabled).toBe(true);
+    expect(respond).toHaveBeenCalledTimes(1);
+  });
+
   it("fails closed when args preview metadata is present but malformed", () => {
     const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
     const container = renderPrompt(partProps({
