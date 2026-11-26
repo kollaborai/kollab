@@ -970,6 +970,7 @@ def register_web_message_queue_runtime(
                 current_rpc_caller_context(),
             )
         has_input = getattr(stream, "has_admitted_input", None)
+        get_input = getattr(stream, "get_admitted_input", None)
         stream_inputs = []
         for item in items:
             try:
@@ -982,7 +983,19 @@ def register_web_message_queue_runtime(
             already_projected = callable(has_input) and has_input(
                 item.request_id, scope
             )
-            if attachment_scope is not None and not already_projected:
+            stored_input = (
+                get_input(item.request_id, scope)
+                if already_projected and callable(get_input)
+                else None
+            )
+            if isinstance(stored_input, dict):
+                stored_text = stored_input.get("text")
+                stored_attachments = stored_input.get("attachments")
+                if isinstance(stored_text, str):
+                    text = stored_text
+                if isinstance(stored_attachments, list):
+                    item_attachments = stored_attachments
+            elif attachment_scope is not None and not already_projected:
                 for ref in item.attachment_refs:
                     staged = await attachment_scope.open_for_admission(
                         item.request_id, ref
