@@ -326,6 +326,12 @@ class TestQueueProcessor(unittest.TestCase):
 
         [reply] = self._assistant_messages()
         self.assertEqual(reply.metadata["turn_id"], "native-turn-9")
+        self.assertEqual(
+            self.conversation_logger.log_assistant_message.await_args.kwargs[
+                "turn_id"
+            ],
+            "native-turn-9",
+        )
 
     def test_native_provider_stop_reason_is_normalized_to_completed(self):
         from kollabor_tui.display_tap import DisplayTap
