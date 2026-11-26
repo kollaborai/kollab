@@ -1711,15 +1711,30 @@ class ChatStreamService:
                     and isinstance(record.get("request_id"), str)
                     and isinstance(record.get("text"), str)
                 }
+                stream_inputs = metadata.get("chat_stream_inputs")
+                content_by_id = {
+                    record["request_id"]: record["content"]
+                    for record in stream_inputs or []
+                    if isinstance(record, dict)
+                    and isinstance(record.get("request_id"), str)
+                    and record.get("request_id")
+                    and "content" in record
+                }
                 input_row_ids = input_row_ids or [row_id]
                 for input_row_id in input_row_ids:
-                    original_text = text_by_id.get(input_row_id)
-                    if original_text is not None:
-                        input_parts = self._transcript_parts(original_text, resolve_image)
-                        input_parts.extend(
-                            copy.deepcopy(part)
-                            for part in parts
-                            if isinstance(part, dict) and part.get("type") == "image"
+                    saved_parts = metadata.get("chat_stream_parts")
+                    if isinstance(saved_parts, list):
+                        input_parts = copy.deepcopy(saved_parts)
+                    elif input_row_id in content_by_id:
+                        input_parts = self._transcript_parts(
+                            content_by_id[input_row_id], resolve_image
+                        )
+                    elif (original_text := text_by_id.get(input_row_id)) is not None:
+                        # When old combined history has no per-input content
+                        # map, retain its authenticated text but do not guess
+                        # which input owned an image from the combined turn.
+                        input_parts = self._transcript_parts(
+                            original_text, resolve_image
                         )
                     elif len(input_row_ids) == 1:
                         input_parts = parts
