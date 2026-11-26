@@ -9,7 +9,10 @@ import {
   PermissionCancellationProvider,
   usePendingPermissionCancellation,
 } from "../src/permission-cancellation.ts";
-import { markPermissionPromptPreviewVisible } from "../src/permission-preview-state.ts";
+import {
+  markPermissionPromptPreviewVisible,
+  registerRecoveredPermissionPrompt,
+} from "../src/permission-preview-state.ts";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -113,6 +116,53 @@ describe("permission cancellation provider", () => {
     expect(container.querySelector("button")).toBeNull();
     act(() => markPermissionPromptPreviewVisible(readyKey, true));
     expect(container.querySelector("button")?.textContent).toBe("Stop");
+  });
+
+  it("exposes Stop for a recovered prompt from the currently visible paged row", async () => {
+    const revision = "c".repeat(64);
+    const marker = {
+      kind: "chat-stream-parts-preview" as const,
+      session_id: "session-1",
+      row_id: "paged-permission-row",
+      part_count: 1,
+      output_bytes: 300_000,
+      output_chars: 280_000,
+      output_type: "json" as const,
+      output_revision: revision,
+    };
+    const row: ChatRow = {
+      id: marker.row_id,
+      seq: 2,
+      kind: "prompt",
+      role: "system",
+      turn_id: null,
+      status: "open",
+      parts: [{ type: "text", text: "[Large chat row]" }],
+      chat_stream_parts_preview: marker,
+      created_at: "2026-11-25T00:00:00Z",
+    };
+    const recovered = {
+      sessionId: marker.session_id,
+      rowId: marker.row_id,
+      revision,
+      partIndex: 0,
+      promptId: promptArgs.permission_id,
+      data: promptArgs,
+    };
+    const api = {
+      getPermissions: vi.fn(async () => ({ pending_prompts: [promptArgs] })),
+      cancelOwned: vi.fn(async () => ({ cancelled: true })),
+    } as unknown as Pick<EngineApi, "getPermissions" | "cancelOwned">;
+    act(() => registerRecoveredPermissionPrompt(recovered, true));
+    const { container } = mount(api, [row]);
+
+    try {
+      expect(container.querySelector("button")?.textContent).toBe("Stop");
+      await act(async () => { container.querySelector("button")?.click(); });
+      expect(api.cancelOwned).toHaveBeenCalledWith("session-1", "parent-1");
+    } finally {
+      act(() => registerRecoveredPermissionPrompt(recovered, false));
+    }
   });
 
   it("does not cancel a pending permission after its session unmounts during lookup", async () => {

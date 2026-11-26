@@ -65,7 +65,7 @@ const pagedPromptRow: ChatRow = {
 const recoveredPagedPrompt = {
   sessionId: pagedPromptMarker.session_id,
   rowId: pagedPromptMarker.row_id,
-  rowRevision: pagedPromptMarker.output_revision,
+  revision: pagedPromptMarker.output_revision,
   promptId: daemonPromptData.permission_id,
   partIndex: 0,
   data: daemonPromptData,

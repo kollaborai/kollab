@@ -28,7 +28,8 @@ import {
   fetchChatStreamPartsPage,
 } from "./chat-stream-parts";
 import { canExportChatStreamMarkdown } from "./chat-stream-content";
-import type { ChatStreamPartPreviewMarker, ChatStreamPartsPreviewMarker } from "./chat-stream";
+import type { ChatRow, ChatStreamPartPreviewMarker, ChatStreamPartsPreviewMarker } from "./chat-stream";
+import { visibleRecoveredPermissionPrompts } from "./permission-preview-state";
 
 const revision = "a".repeat(64);
 function partsMarker(rowId = "row-paged", outputRevision = revision): ChatStreamPartsPreviewMarker {
@@ -205,6 +206,74 @@ describe("chat stream part recovery", () => {
     });
 
     await expect(fetchChatStreamPartsPage(marker, 0)).resolves.toMatchObject({ parts: [prompt] });
+  });
+
+  it("registers a recovered paged permission only while its full details are open", async () => {
+    const marker = { ...partsMarker("row-paged-permission"), part_count: 1 };
+    const data = {
+      permission_id: "paged-permission-1",
+      tool_id: "tool-1",
+      request_id: "request-1",
+      source: "acp",
+      parked: false,
+      tool_name: "terminal",
+    };
+    const prompt = { type: "prompt", prompt_id: data.permission_id, data };
+    mocks.getChatStreamParts.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      offset: 0,
+      next_offset: 1,
+      total_parts: marker.part_count,
+      output_revision: marker.output_revision,
+      parts: [prompt],
+      done: true,
+    });
+    const row: ChatRow = {
+      id: marker.row_id,
+      seq: 1,
+      kind: "prompt",
+      role: "system",
+      turn_id: null,
+      status: "open",
+      parts: [{ type: "text", text: "[Large chat row]" }],
+      chat_stream_parts_preview: marker,
+      created_at: "2026-11-25T00:00:00Z",
+    };
+
+    const ui = mount();
+    try {
+      await ui.render(<ChatStreamPartsPreview marker={marker} />);
+      await act(async () => {
+        ui.host.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      expect(visibleRecoveredPermissionPrompts([row], marker.session_id)).toMatchObject([{
+        sessionId: marker.session_id,
+        rowId: marker.row_id,
+        revision: marker.output_revision,
+        partIndex: 0,
+        promptId: data.permission_id,
+        data,
+      }]);
+
+      const details = ui.host.querySelector("details");
+      expect(details).not.toBeNull();
+      await act(async () => {
+        details!.open = false;
+        details!.dispatchEvent(new Event("toggle"));
+      });
+      expect(visibleRecoveredPermissionPrompts([row], marker.session_id)).toEqual([]);
+
+      await act(async () => {
+        details!.open = true;
+        details!.dispatchEvent(new Event("toggle"));
+      });
+      expect(visibleRecoveredPermissionPrompts([row], marker.session_id)).toHaveLength(1);
+    } finally {
+      await ui.unmount();
+    }
+    expect(visibleRecoveredPermissionPrompts([row], marker.session_id)).toEqual([]);
   });
 
   it("rejects tool result previews whose top-level identity does not match the paged tool call", async () => {
