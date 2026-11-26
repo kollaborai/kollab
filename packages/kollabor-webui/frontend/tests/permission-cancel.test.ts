@@ -31,6 +31,25 @@ test("a permission part with a result is not pending", () => {
   ]), [owner("pending", "turn-pending")]);
 });
 
+test("a result preview completes a permission call while a null optional preview stays pending", () => {
+  const resultPreview = {
+    kind: "chat-stream-tool-output-preview" as const,
+    session_id: "session-1",
+    row_id: "external-result",
+    tool_call_id: "call-external-result",
+    output_bytes: 80_000,
+    output_chars: 80_000,
+    output_type: "text" as const,
+    output_revision: "a".repeat(64),
+    preview: "finished",
+  };
+  assert.deepEqual(pendingPermissions([
+    row("external-result", [{ ...permission("external-result"), chat_stream_result_preview: resultPreview }]),
+    row("null-preview", [{ ...permission("null-preview"), chat_stream_result_preview: null }]),
+    row("null-result", [permission("null-result", null)]),
+  ]), [owner("null-preview", "turn-null-preview")]);
+});
+
 test("live and restored permission args read the top-level turn owner, not nested detail metadata", () => {
   const liveArgs = {
     tool_id: "reused-tool", request_id: "parent-live", permission_id: "owner-live",

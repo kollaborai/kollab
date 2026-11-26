@@ -90,6 +90,17 @@ const inlinePromptMarker = (revision: string) => ({
   output_revision: revision,
   preview: "clipped prompt",
 });
+const permissionResultPreview = {
+  kind: "chat-stream-tool-output-preview" as const,
+  session_id: "session/one",
+  row_id: "row-1",
+  tool_call_id: "call-1",
+  output_bytes: 80_000,
+  output_chars: 80_000,
+  output_type: "text" as const,
+  output_revision: "f".repeat(64),
+  preview: "completed result",
+};
 const inlinePromptRow = (revision: string): ChatRow => ({
   id: "inline-prompt-row",
   seq: 6,
@@ -126,6 +137,75 @@ afterEach(() => {
 });
 
 describe("respondToPermission", () => {
+  it("does not answer a live permission call with an externalized result", async () => {
+    const { api, sent } = engine([{
+      type: "permission_request", tool_id: promptArgs.tool_id, permission_id: promptArgs.permission_id,
+      request_id: promptArgs.request_id, details: promptArgs.details,
+    }]);
+    const completed = {
+      ...openRow(),
+      parts: [{
+        type: "tool-call" as const,
+        tool_call_id: "call-1",
+        tool_name: "request_permission",
+        args: promptArgs,
+        chat_stream_result_preview: permissionResultPreview,
+      }],
+    };
+    const outcome = await respondToPermission({
+      api, sessionId: "session/one", toolCallId: "call-1", args: promptArgs,
+      answer: { decision: "approve" }, rows: () => [completed],
+    });
+    expect(outcome).toBe("stale");
+    expect(sent).toEqual([]);
+  });
+
+  it("keeps a live permission pending when the optional result preview is null", async () => {
+    const { api, sent } = engine([{
+      type: "permission_request", tool_id: promptArgs.tool_id, permission_id: promptArgs.permission_id,
+      request_id: promptArgs.request_id, details: promptArgs.details,
+    }]);
+    const pending = {
+      ...openRow(),
+      parts: [{
+        type: "tool-call" as const,
+        tool_call_id: "call-1",
+        tool_name: "request_permission",
+        args: promptArgs,
+        chat_stream_result_preview: null,
+      }],
+    } as unknown as ChatRow;
+    const outcome = await respondToPermission({
+      api, sessionId: "session/one", toolCallId: "call-1", args: promptArgs,
+      answer: { decision: "approve" }, rows: () => [pending],
+    });
+    expect(outcome).toBe("answered");
+    expect(posts(sent)).toHaveLength(1);
+  });
+
+  it("treats an own null result as completed", async () => {
+    const { api, sent } = engine([{
+      type: "permission_request", tool_id: promptArgs.tool_id, permission_id: promptArgs.permission_id,
+      request_id: promptArgs.request_id, details: promptArgs.details,
+    }]);
+    const completed = {
+      ...openRow(),
+      parts: [{
+        type: "tool-call" as const,
+        tool_call_id: "call-1",
+        tool_name: "request_permission",
+        args: promptArgs,
+        result: null,
+      }],
+    } as unknown as ChatRow;
+    const outcome = await respondToPermission({
+      api, sessionId: "session/one", toolCallId: "call-1", args: promptArgs,
+      answer: { decision: "approve" }, rows: () => [completed],
+    });
+    expect(outcome).toBe("stale");
+    expect(sent).toEqual([]);
+  });
+
   it("answers the daemon-produced system prompt row using its prompt ID and raw details", async () => {
     const daemonEvent = {
       type: "permission_request",

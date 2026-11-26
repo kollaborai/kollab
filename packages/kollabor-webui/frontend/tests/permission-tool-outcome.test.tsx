@@ -122,6 +122,44 @@ async function click(container: HTMLElement, label: string): Promise<void> {
 }
 
 describe("permission prompt outcome from the tool-call row", () => {
+  it("treats an external result preview as resolved and a null optional preview as pending", () => {
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const resultPreview = {
+      kind: "chat-stream-tool-output-preview" as const,
+      session_id: "session-1",
+      row_id: "row-1",
+      tool_call_id: "call-1",
+      output_bytes: 80_000,
+      output_chars: 80_000,
+      output_type: "text" as const,
+      output_revision: "e".repeat(64),
+      preview: "completed",
+    };
+    const completed = renderPrompt(partProps({
+      providerMetadata: { kollab: { chat_stream_result_preview: resultPreview } },
+    }), respond);
+    expect(completed.textContent).toContain("Permission resolved");
+    expect(buttons(completed)).toEqual([]);
+    expect(respond).not.toHaveBeenCalled();
+    act(() => mounted?.root.unmount());
+    mounted?.container.remove();
+    mounted = null;
+
+    const pending = renderPrompt(partProps({
+      providerMetadata: { kollab: { chat_stream_result_preview: null } },
+    }), respond);
+    expect(buttons(pending).map((button) => button.textContent?.trim())).toContain("Allow once");
+  });
+
+  it("treats an own null inline result as resolved", () => {
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const container = renderPrompt(partProps({ result: null as unknown as PartProps["result"] }), respond);
+
+    expect(container.textContent).toContain("Permission resolved");
+    expect(buttons(container)).toEqual([]);
+    expect(respond).not.toHaveBeenCalled();
+  });
+
   it("allow click calls respond with the full decision body and never calls addResult", async () => {
     const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
     const props = partProps();
