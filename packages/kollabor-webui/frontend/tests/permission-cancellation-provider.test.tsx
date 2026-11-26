@@ -26,7 +26,7 @@ const promptRow: ChatRow = {
 
 function fakeStore(): LiveStore {
   const snapshot: ChatSnapshot = {
-    rows: [promptRow], inputs: {}, running: false, connection: "live", hasEarlier: false, olderStatus: "idle",
+    rows: [promptRow], inputs: {}, goalReplies: {}, running: false, connection: "live", hasEarlier: false, olderStatus: "idle",
   };
   return {
     rows: snapshot.rows,

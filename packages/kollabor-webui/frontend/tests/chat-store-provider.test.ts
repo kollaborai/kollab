@@ -28,6 +28,7 @@ const row = (id: string): ChatRow => ({
 const snapshot = (rows: ChatRow[], running = false): ChatSnapshot => ({
   rows,
   inputs: {},
+  goalReplies: {},
   running,
   connection: "live",
   hasEarlier: false,

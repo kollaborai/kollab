@@ -31,6 +31,7 @@ const chatSnapshot = (
 ): ChatSnapshot => ({
   rows,
   inputs,
+  goalReplies: {},
   running,
   connection,
   hasEarlier: false,
