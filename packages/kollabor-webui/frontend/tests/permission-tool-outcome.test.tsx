@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  PermissionPromptData,
   PermissionPrompt,
   PermissionResponseContext,
   type PermissionArgs,
@@ -27,6 +28,29 @@ const ACP_ARGS: PermissionArgs = {
   acp_options: [
     { optionId: "opt-allow", name: "Allow", kind: "allow_once" },
     { optionId: "opt-deny", name: "Deny", kind: "reject_once" },
+  ],
+};
+
+// Matches the data part written by ChatStreamService._on_permission_prompt:
+// raw AttachPermissionBridge details, not a request_permission tool call.
+const DAEMON_PROMPT_DATA: PermissionArgs & {
+  request_id: string;
+  source: string;
+  parked: boolean;
+  resolution?: { type: string; outcome?: string; scope?: string };
+} = {
+  tool_id: "daemon-tool-7",
+  permission_id: "daemon-perm-9",
+  request_id: "daemon-parent-1",
+  source: "acp",
+  parked: false,
+  tool_name: "terminal",
+  tool_type: "shell",
+  risk_level: "high",
+  command: "pytest -q",
+  acp_options: [
+    { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+    { optionId: "reject-once", name: "Deny", kind: "reject_once" },
   ],
 };
 
@@ -147,3 +171,57 @@ describe("permission prompt outcome from the tool-call row", () => {
     expect(buttons(container)).toEqual([]);
   });
 });
+
+describe("permission prompt data from the daemon chat-stream row", () => {
+  it("renders the producer-shaped prompt and answers through the shared responder", async () => {
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const container = renderDataPrompt("daemon-perm-9", DAEMON_PROMPT_DATA, respond);
+
+    expect(container.textContent).toContain("Permission required: terminal");
+    expect(container.textContent).toContain("high risk");
+    expect(container.textContent).toContain("pytest -q");
+    await click(container, "Allow once");
+
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(respond).toHaveBeenCalledWith(
+      "daemon-perm-9",
+      DAEMON_PROMPT_DATA,
+      expect.objectContaining({
+        tool_id: "daemon-tool-7",
+        permission_id: "daemon-perm-9",
+        decision: "approve",
+        option_id: "allow-once",
+      }),
+    );
+  });
+
+  it("renders resolved cancellation without live decision buttons", () => {
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const container = renderDataPrompt("daemon-perm-9", {
+      ...DAEMON_PROMPT_DATA,
+      resolution: { type: "permission_denied", outcome: "cancelled" },
+    }, respond);
+
+    expect(container.textContent).toContain("Cancelled");
+    expect(buttons(container)).toHaveLength(0);
+  });
+});
+
+function renderDataPrompt(
+  id: string,
+  data: unknown,
+  respond: PermissionResponseHandler,
+): HTMLElement {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() => {
+    root.render(
+      <PermissionResponseContext.Provider value={respond}>
+        <PermissionPromptData id={id} data={data} />
+      </PermissionResponseContext.Provider>,
+    );
+  });
+  mounted = { root, container };
+  return container;
+}
