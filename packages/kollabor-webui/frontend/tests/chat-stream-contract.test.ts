@@ -44,6 +44,7 @@ const partPreview = (rowId = "r1") => ({
   part_index: 0,
   output_bytes: 40_000,
   output_chars: 40_000,
+  output_type: "json",
   output_revision: "b".repeat(64),
   preview: "[Large chat part. Expand to load full content.]",
 });
@@ -52,6 +53,9 @@ const partsPreview = (rowId = "r1") => ({
   session_id: "session-1",
   row_id: rowId,
   part_count: 120,
+  output_bytes: 500_000,
+  output_chars: 420_000,
+  output_type: "json",
   output_revision: "c".repeat(64),
 });
 
@@ -80,7 +84,7 @@ describe("chat stream contract", () => {
     }))).toBe(true);
     expect(isChatStreamEvent(upsert({
       ...ROW,
-      parts: [{ type: "image", url: "data:image/png;base64,AAAA", chat_stream_content_preview: contentPreview("part") }],
+      parts: [{ type: "text", text: "[Large part]", chat_stream_part_preview: partPreview() }],
     }))).toBe(true);
   });
 

@@ -132,6 +132,9 @@ describe("toThreadMessageLike", () => {
       session_id: "session-1",
       row_id: "row-large",
       part_count: 120,
+      output_bytes: 500_000,
+      output_chars: 420_000,
+      output_type: "json" as const,
       output_revision: "d".repeat(64),
     };
     const partPreview = {
@@ -141,6 +144,7 @@ describe("toThreadMessageLike", () => {
       part_index: 0,
       output_bytes: 50_000,
       output_chars: 30_000,
+      output_type: "json" as const,
       output_revision: "e".repeat(64),
       preview: "[Large chat part. Expand to load full content.]",
     };
