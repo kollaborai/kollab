@@ -91,6 +91,82 @@ def test_large_text_reasoning_and_tool_args_use_fetchable_previews():
     assert "args" in tool_part
 
 
+def test_streaming_text_snapshot_hydrates_before_appends_and_finalizes_atomically():
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),
+        get_conversation_uid=lambda: "content-preview-test",
+    )
+    service = ChatStreamService(state)
+    text = "streamed snapshot 🌵 " * 20_000
+    row = _row([{"type": "text", "text": text}])
+    row["status"] = "streaming"
+    service._upsert("content-preview-test", row)
+
+    snapshot = service._snapshot("content-preview-test")
+    snapshot_marker = snapshot["rows"][-1]["parts"][0]["chat_stream_content_preview"]
+    hydrated = service.get_content(
+        {
+            "row_id": row["id"],
+            "part_index": 0,
+            "field": "text",
+            "output_revision": snapshot_marker["output_revision"],
+            "offset": 0,
+            "limit": 32,
+        }
+    )
+    assert hydrated["content"] == text[:32]
+
+    appended_text = "later delta"
+    append = service.record_event(
+        "row.append",
+        {"id": row["id"], "part": 0, "text": appended_text},
+    )
+    assert append["type"] == "row.append"
+    still_hydratable = service.get_content(
+        {
+            "row_id": row["id"],
+            "part_index": 0,
+            "field": "text",
+            "output_revision": snapshot_marker["output_revision"],
+            "offset": len(text) - 8,
+            "limit": 32,
+        }
+    )
+    assert still_hydratable["content"] == text[-8:]
+
+    final_text = text + appended_text
+    final_row = {
+        **row,
+        "status": "completed",
+        "parts": [{"type": "text", "text": final_text}],
+    }
+    service._upsert("content-preview-test", final_row)
+    final_event = service._log("content-preview-test")._events[-1]
+    final_marker = final_event["data"]["parts"][0]["chat_stream_content_preview"]
+    assert final_event["data"]["status"] == "completed"
+    assert service.get_content(
+        {
+            "row_id": row["id"],
+            "part_index": 0,
+            "field": "text",
+            "output_revision": snapshot_marker["output_revision"],
+            "offset": 0,
+            "limit": 32,
+        }
+    ) == {"error": "output_changed"}
+    final_chunk = service.get_content(
+        {
+            "row_id": row["id"],
+            "part_index": 0,
+            "field": "text",
+            "output_revision": final_marker["output_revision"],
+            "offset": len(text),
+            "limit": 32,
+        }
+    )
+    assert final_chunk["content"] == appended_text
+
+
 def test_large_scalar_tool_args_are_json_marked_and_hash_json_retrieval():
     args = "scalar argument 🌵" * 20_000
     row = _row(
