@@ -27,6 +27,7 @@ _TOOL_OUTPUT_CHUNK_CHARS = 32 * 1024
 _TOOL_OUTPUT_RPC_BYTES = 256 * 1024
 _PART_PAGE_SIZE = 32
 _PART_PAGE_RPC_BYTES = 256 * 1024
+_DAEMON_CALL_SECONDS = 15.0
 _ROW_FIELDS = frozenset(
     {"id", "seq", "kind", "role", "turn_id", "status", "parts", "created_at"}
 )
@@ -79,9 +80,12 @@ def _get_rpc(session_id: str) -> tuple[Any, Any]:
 
 
 async def _call_daemon(session_id: str, method: str, params: dict[str, Any]) -> Any:
-    _session, rpc = _get_rpc(session_id)
+    session, rpc = _get_rpc(session_id)
+    # An agent on another device answers over the relay: its handle carries a
+    # longer state budget (#880).
+    budget = getattr(session.daemon, "state_timeout", None) or _DAEMON_CALL_SECONDS
     try:
-        return await rpc.call(method, params, timeout=15.0)
+        return await rpc.call(method, params, timeout=budget)
     except RpcMethodNotFound:
         # The daemon predates the chat stream: it keeps running its start-time code until restarted.
         raise HTTPException(status_code=426, detail=AGENT_NEEDS_RESTART) from None
