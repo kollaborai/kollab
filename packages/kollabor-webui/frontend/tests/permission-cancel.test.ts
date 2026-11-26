@@ -50,6 +50,53 @@ test("a result preview completes a permission call while a null optional preview
   ]), [owner("null-preview", "turn-null-preview")]);
 });
 
+test("a recovered live permission becomes stale when its current row has a result preview", () => {
+  const args = { tool_id: "recovered", request_id: "turn-recovered", permission_id: "perm-recovered" };
+  const argsPreview = {
+    kind: "chat-stream-content-preview" as const,
+    session_id: "session-1",
+    row_id: "recovered",
+    part_index: 0,
+    field: "args" as const,
+    output_bytes: 1_000,
+    output_chars: 1_000,
+    output_type: "json" as const,
+    output_revision: "c".repeat(64),
+    preview: "{}",
+  };
+  const recoveredPrompt = {
+    sessionId: argsPreview.session_id,
+    promptId: "call-recovered",
+    rowId: argsPreview.row_id,
+    partIndex: argsPreview.part_index,
+    revision: argsPreview.output_revision,
+    data: args,
+    partType: "tool-call" as const,
+    contentRevision: argsPreview.output_revision,
+    argsPreview,
+  };
+  const part = {
+    type: "tool-call" as const,
+    tool_call_id: recoveredPrompt.promptId,
+    tool_name: "request_permission",
+    args: {},
+    chat_stream_args_preview: argsPreview,
+    chat_stream_result_preview: {
+      kind: "chat-stream-tool-output-preview" as const,
+      session_id: argsPreview.session_id,
+      row_id: argsPreview.row_id,
+      tool_call_id: recoveredPrompt.promptId,
+      output_bytes: 80_000,
+      output_chars: 80_000,
+      output_type: "text" as const,
+      output_revision: "d".repeat(64),
+      preview: "complete",
+    },
+  };
+
+  assert.deepEqual(pendingPermissions([row("recovered", [part])], [recoveredPrompt]), []);
+});
+
 test("live and restored permission args read the top-level turn owner, not nested detail metadata", () => {
   const liveArgs = {
     tool_id: "reused-tool", request_id: "parent-live", permission_id: "owner-live",
