@@ -2196,14 +2196,26 @@ class ChatStreamService:
             key for key in self._reply_after_tool if key[0] != uid
         }
 
-        restored_inputs = self._snapshot_components(uid)[2]
+        transcript_rows = self._transcript_rows(uid)
+        restored_inputs = self._snapshot_components(
+            uid, transcript_rows=transcript_rows
+        )[2]
         self._inputs[uid] = {
             item["id"]: copy.deepcopy(item)
             for item in restored_inputs
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         }
-        for input_id, restored in self._inputs[uid].items():
+        transcript_replies = {
+            row["turn_id"]: row
+            for row in transcript_rows
+            if row.get("kind") == "reply" and row.get("turn_id")
+        }
+        for row in transcript_rows:
+            input_id = row.get("id")
+            if row.get("kind") != "input" or not isinstance(input_id, str):
+                continue
             admitted = admitted_inputs.get(input_id)
+            restored = self._input_lifecycle_from_history(row, transcript_replies)
             if (
                 admitted is not None
                 and admitted.get("state") != "queued"
@@ -2323,48 +2335,9 @@ class ChatStreamService:
             input_id = row.get("id")
             if not isinstance(input_id, str) or input_id in inputs:
                 continue
-            turn_id = row.get("turn_id")
-            reply = history_replies.get(turn_id)
-            persisted_outcome = row.get("status")
-            if persisted_outcome in {"completed", "failed", "cancelled"}:
-                info = {
-                    "id": input_id,
-                    "state": "ended",
-                    "turn_id": turn_id,
-                    "outcome": persisted_outcome,
-                }
-            elif persisted_outcome == "done":
-                info = {
-                    "id": input_id,
-                    "state": "ended",
-                    "turn_id": turn_id,
-                    "outcome": "completed",
-                }
-            elif reply is not None:
-                status = reply.get("status")
-                outcome = (
-                    "cancelled"
-                    if status in {"cancelled", "canceled"}
-                    else "failed"
-                    if status in {"failed", "error"}
-                    else "completed"
-                )
-                info = {
-                    "id": input_id,
-                    "state": "ended",
-                    "turn_id": turn_id,
-                    "outcome": outcome,
-                }
-            else:
-                state_name = row.get("status")
-                if state_name not in {"queued", "started", "joined"}:
-                    state_name = "started" if turn_id else "queued"
-                info = {
-                    "id": input_id,
-                    "state": state_name,
-                    "turn_id": turn_id,
-                }
-            inputs[input_id] = info
+            inputs[input_id] = self._input_lifecycle_from_history(
+                row, history_replies
+            )
         inputs = {
             input_id: info
             for input_id, info in inputs.items()
@@ -2426,6 +2399,49 @@ class ChatStreamService:
             list(inputs.values()),
             state,
         )
+
+    @staticmethod
+    def _input_lifecycle_from_history(
+        row: dict[str, Any], history_replies: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Project one input's lifecycle from its persisted transcript rows."""
+        input_id = row.get("id")
+        turn_id = row.get("turn_id")
+        persisted_outcome = row.get("status")
+        if persisted_outcome in {"completed", "failed", "cancelled"}:
+            return {
+                "id": input_id,
+                "state": "ended",
+                "turn_id": turn_id,
+                "outcome": persisted_outcome,
+            }
+        if persisted_outcome == "done":
+            return {
+                "id": input_id,
+                "state": "ended",
+                "turn_id": turn_id,
+                "outcome": "completed",
+            }
+        reply = history_replies.get(turn_id)
+        if reply is not None:
+            status = reply.get("status")
+            outcome = (
+                "cancelled"
+                if status in {"cancelled", "canceled"}
+                else "failed"
+                if status in {"failed", "error"}
+                else "completed"
+            )
+            return {
+                "id": input_id,
+                "state": "ended",
+                "turn_id": turn_id,
+                "outcome": outcome,
+            }
+        state_name = row.get("status")
+        if state_name not in {"queued", "started", "joined"}:
+            state_name = "started" if turn_id else "queued"
+        return {"id": input_id, "state": state_name, "turn_id": turn_id}
 
     def _snapshot_rows(self, uid: str) -> list[dict[str, Any]]:
         return self._snapshot_components(uid)[0]
