@@ -2643,9 +2643,12 @@ class ChatStreamService:
                             continue
                         if key_name in part:
                             value = part[key_name]
+                            args_preview = part.get("chat_stream_args_preview")
                             value_found = not (
-                                isinstance(value, dict)
-                                and value.get("kind") == "chat-stream-content-preview"
+                                field == "args"
+                                and isinstance(args_preview, dict)
+                                and args_preview.get("kind") == "chat-stream-content-preview"
+                                and args_preview.get("field") == "args"
                             )
                             if value_found:
                                 break

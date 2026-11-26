@@ -84,11 +84,11 @@ def test_large_text_reasoning_and_tool_args_use_fetchable_previews():
         assert marker["field"] == field
         assert len(part["text"]) < 16_384
 
-    args_marker = tool_part["args"]
+    args_marker = tool_part["chat_stream_args_preview"]
     assert args_marker["kind"] == "chat-stream-content-preview"
     assert args_marker["row_id"] == row["id"]
     assert args_marker["field"] == "args"
-    assert "args" in tool_part
+    assert tool_part["args"] == {}
 
 
 def test_streaming_text_snapshot_hydrates_before_appends_and_finalizes_atomically():
@@ -187,7 +187,7 @@ def test_large_scalar_tool_args_are_json_marked_and_hash_json_retrieval():
     service = ChatStreamService(state)
     service._upsert("content-preview-test", row)
     projected = service._log("content-preview-test")._events[-1]["data"]
-    marker = projected["parts"][0]["args"]
+    marker = projected["parts"][0]["chat_stream_args_preview"]
     expected = json.dumps(
         args,
         ensure_ascii=False,
@@ -291,6 +291,58 @@ def test_parts_page_uses_one_snapshot_during_concurrent_append():
         "beforeCHANGED"
     )
 
+
+def test_tool_args_with_preview_like_kind_remain_valid_and_retrievable():
+    args = {
+        "kind": "chat-stream-content-preview",
+        "field": "args",
+        "payload": "ordinary user data " * 20_000,
+    }
+    row = _row(
+        [
+            {
+                "type": "tool-call",
+                "tool_call_id": "call-preview-shaped-args",
+                "tool_name": "read",
+                "args": args,
+            }
+        ]
+    )
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),
+        get_conversation_uid=lambda: "content-preview-test",
+    )
+    service = ChatStreamService(state)
+    service._upsert("content-preview-test", row)
+    projected = service._log("content-preview-test")._events[-1]["data"]
+    part = projected["parts"][0]
+    marker = part["chat_stream_args_preview"]
+    expected = json.dumps(
+        args,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        default=str,
+    )
+
+    assert event_problems(_event(projected)) == []
+    assert part["args"] == {}
+    assert marker["field"] == "args"
+    assert marker["output_revision"] == chat_stream_tool_output_revision(
+        expected, "json"
+    )
+    chunk = service.get_content(
+        {
+            "row_id": row["id"],
+            "part_index": 0,
+            "field": "args",
+            "output_revision": marker["output_revision"],
+            "offset": 0,
+            "limit": 32_768,
+        }
+    )
+    assert "error" not in chunk
+    assert chunk["content"] == expected[:32_768]
 
 def test_compact_row_marks_every_truncated_text_part_for_retrieval():
     parts = [
@@ -441,7 +493,7 @@ def test_chat_content_chunks_round_trip_and_reject_stale_revision():
     markers = [
         projected["parts"][0]["chat_stream_content_preview"],
         projected["parts"][1]["chat_stream_content_preview"],
-        projected["parts"][2]["args"],
+        projected["parts"][2]["chat_stream_args_preview"],
     ]
 
     for marker, field, expected in (

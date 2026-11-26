@@ -187,6 +187,11 @@ def test_rows_route_materializes_text_and_args_content_preview_session_identity(
             "tool_name": "read",
             "args": {
                 "kind": "chat-stream-content-preview",
+                "field": "args",
+                "payload": "ordinary user data",
+            },
+            "chat_stream_args_preview": {
+                "kind": "chat-stream-content-preview",
                 "row_id": "content-row-1",
                 "part_index": 1,
                 "field": "args",
@@ -209,7 +214,12 @@ def test_rows_route_materializes_text_and_args_content_preview_session_identity(
     assert response.status_code == 200
     parts = response.json()["rows"][0]["parts"]
     assert parts[0]["chat_stream_content_preview"]["session_id"] == "s1"
-    assert parts[1]["args"]["session_id"] == "s1"
+    assert parts[1]["args"] == {
+        "kind": "chat-stream-content-preview",
+        "field": "args",
+        "payload": "ordinary user data",
+    }
+    assert parts[1]["chat_stream_args_preview"]["session_id"] == "s1"
 
 
 def test_rows_route_materializes_row_and_part_page_marker_session_identity(monkeypatch):

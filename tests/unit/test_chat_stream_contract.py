@@ -185,6 +185,51 @@ def _event(kind, data, seq=1):
     }
 
 
+def _content_preview(*, field="text", row_id="r1", **overrides):
+    marker = {
+        "kind": "chat-stream-content-preview",
+        "row_id": row_id,
+        "part_index": 0,
+        "field": field,
+        "output_bytes": 40_000,
+        "output_chars": 40_000,
+        "output_type": "json" if field in {"args", "part"} else "text",
+        "output_revision": "a" * 64,
+        "preview": "bounded preview",
+    }
+    marker.update(overrides)
+    return marker
+
+
+def _part_preview(*, row_id="r1", **overrides):
+    marker = {
+        "kind": "chat-stream-part-preview",
+        "row_id": row_id,
+        "part_index": 0,
+        "output_bytes": 40_000,
+        "output_chars": 40_000,
+        "output_type": "json",
+        "output_revision": "b" * 64,
+        "preview": "bounded preview",
+    }
+    marker.update(overrides)
+    return marker
+
+
+def _parts_preview(*, row_id="r1", **overrides):
+    marker = {
+        "kind": "chat-stream-parts-preview",
+        "row_id": row_id,
+        "part_count": 12,
+        "output_bytes": 500_000,
+        "output_chars": 420_000,
+        "output_type": "json",
+        "output_revision": "c" * 64,
+    }
+    marker.update(overrides)
+    return marker
+
+
 def _without(data, key):
     return {k: v for k, v in data.items() if k != key}
 
@@ -193,6 +238,168 @@ def test_a_valid_row_and_snapshot_have_no_problems():
     assert event_problems(_event("row.upsert", ROW)) == []
     assert event_problems(_event("snapshot", SNAPSHOT)) == []
     assert event_problems(_event("snapshot", {**SNAPSHOT, "older": "cursor-1"})) == []
+
+
+def test_daemon_preview_markers_are_valid_before_engine_adds_session_identity():
+    cases = [
+        {
+            **ROW,
+            "parts": [
+                {
+                    "type": "text",
+                    "text": "bounded preview",
+                    "chat_stream_content_preview": _content_preview(),
+                }
+            ],
+        },
+        {
+            **ROW,
+            "parts": [
+                {
+                    "type": "tool-call",
+                    "tool_call_id": "call-1",
+                    "tool_name": "shell",
+                    "args": {},
+                    "chat_stream_args_preview": _content_preview(field="args"),
+                }
+            ],
+        },
+        {
+            **ROW,
+            "parts": [
+                {
+                    "type": "text",
+                    "text": "[Large part.]",
+                    "chat_stream_part_preview": _part_preview(),
+                }
+            ],
+        },
+        {
+            **ROW,
+            "parts": [{"type": "text", "text": "[Large chat row.]"}],
+            "chat_stream_parts_preview": _parts_preview(),
+        },
+    ]
+
+    for row in cases:
+        assert event_problems(_event("row.upsert", row)) == []
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        _content_preview(kind="unknown-preview"),
+        _content_preview(row_id="another-row"),
+        _content_preview(part_index=True),
+        _content_preview(output_bytes=True),
+        _content_preview(output_chars=-1),
+        _content_preview(output_type="json"),
+        _content_preview(output_revision="A" * 64),
+        _content_preview(preview=42),
+        _content_preview(session_id=""),
+    ],
+)
+def test_contract_rejects_invalid_content_preview_metadata(marker):
+    row = {
+        **ROW,
+        "parts": [
+            {
+                "type": "text",
+                "text": "bounded preview",
+                "chat_stream_content_preview": marker,
+            }
+        ],
+    }
+    assert event_problems(_event("row.upsert", row))
+
+
+def test_contract_checks_content_preview_field_and_type_on_tool_args_marker():
+    for marker in (
+        _content_preview(field="text"),
+        _content_preview(field="args", output_type="text"),
+    ):
+        row = {
+            **ROW,
+            "parts": [
+                {
+                    "type": "tool-call",
+                    "tool_call_id": "call-1",
+                    "tool_name": "shell",
+                    "args": {},
+                    "chat_stream_args_preview": marker,
+                }
+            ],
+        }
+        assert event_problems(_event("row.upsert", row))
+
+
+def test_contract_treats_preview_like_tool_args_as_ordinary_data():
+    row = {
+        **ROW,
+        "parts": [
+            {
+                "type": "tool-call",
+                "tool_call_id": "call-1",
+                "tool_name": "shell",
+                "args": {
+                    "kind": "chat-stream-content-preview",
+                    "field": "args",
+                },
+            }
+        ],
+    }
+
+    assert event_problems(_event("row.upsert", row)) == []
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        _part_preview(kind="unknown-preview"),
+        _part_preview(row_id="another-row"),
+        _part_preview(part_index=True),
+        _part_preview(output_bytes=-1),
+        _part_preview(output_chars=True),
+        _part_preview(output_type="text"),
+        _part_preview(output_revision="b" * 63),
+        _part_preview(preview=None),
+        _part_preview(session_id=None),
+    ],
+)
+def test_contract_rejects_invalid_part_preview_metadata(marker):
+    row = {
+        **ROW,
+        "parts": [
+            {
+                "type": "text",
+                "text": "[Large part.]",
+                "chat_stream_part_preview": marker,
+            }
+        ],
+    }
+    assert event_problems(_event("row.upsert", row))
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        _parts_preview(kind="unknown-preview"),
+        _parts_preview(row_id="another-row"),
+        _parts_preview(part_count=True),
+        _parts_preview(output_bytes=-1),
+        _parts_preview(output_chars=True),
+        _parts_preview(output_type="text"),
+        _parts_preview(output_revision="c" * 63),
+        _parts_preview(session_id=""),
+    ],
+)
+def test_contract_rejects_invalid_parts_preview_metadata(marker):
+    row = {
+        **ROW,
+        "parts": [{"type": "text", "text": "[Large chat row.]"}],
+        "chat_stream_parts_preview": marker,
+    }
+    assert event_problems(_event("row.upsert", row))
 
 
 @pytest.mark.parametrize(
