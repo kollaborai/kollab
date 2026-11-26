@@ -579,7 +579,11 @@ async def test_web_queue_batch_publishes_inputs_and_cancel_lifecycle():
     assert queued["error"] is None
 
     admitted = stream.subscribe(
-        {"after": cursor, "conversation_uid": "conversation-a"}
+        {
+            "after": cursor,
+            "conversation_uid": "conversation-a",
+            "generation": initial["generation"],
+        }
     )["events"]
     states = [event["data"] for event in admitted if event["type"] == "input.state"]
     rows = [event["data"] for event in admitted if event["type"] == "row.upsert"]
@@ -606,7 +610,11 @@ async def test_web_queue_batch_publishes_inputs_and_cancel_lifecycle():
     assert cancelled["result"] == {"found": True, "cancelled": True}
     final_cursor = admitted[-1]["seq"]
     terminal = stream.subscribe(
-        {"after": final_cursor, "conversation_uid": "conversation-a"}
+        {
+            "after": final_cursor,
+            "conversation_uid": "conversation-a",
+            "generation": initial["generation"],
+        }
     )["events"]
     terminal_states = [
         event["data"] for event in terminal if event["type"] == "input.state"
@@ -628,6 +636,10 @@ async def test_web_queue_batch_publishes_inputs_and_cancel_lifecycle():
     replay = await _call(server, "state.web_queue.enqueue_batch", batch_params)
     assert replay["error"] is None
     assert stream.subscribe(
-        {"after": terminal[-1]["seq"], "conversation_uid": "conversation-a"}
+        {
+            "after": terminal[-1]["seq"],
+            "conversation_uid": "conversation-a",
+            "generation": initial["generation"],
+        }
     )["events"] == []
     await runtime.close()

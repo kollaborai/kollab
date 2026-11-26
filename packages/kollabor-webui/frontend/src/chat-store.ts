@@ -11,6 +11,7 @@ import {
   type ChatPart,
   type ChatRow,
   type ChatStore,
+  type ChatStreamCursor,
   type ChatStreamEvent,
   type InputInfo,
   type InputRequest,
@@ -34,6 +35,7 @@ export type ApplyOutcome =
 
 export type StreamState = {
   conversationUid: string | null;
+  generation: string | null;
   lastSeq: number | null;
   rows: readonly ChatRow[];
   inputs: Readonly<Record<string, InputInfo>>;
@@ -43,6 +45,7 @@ export type StreamState = {
 
 export const initialStreamState: StreamState = {
   conversationUid: null,
+  generation: null,
   lastSeq: null,
   rows: [],
   inputs: {},
@@ -61,9 +64,9 @@ type LiveEvent = Exclude<ChatStreamEvent, SnapshotEvent>;
 /**
  * Applies one event. The rules run in order and the first match wins.
  *
- * A resync keeps rows, inputs and turns on screen, and clears `conversationUid`
- * and `lastSeq`. So the next connect sends no `after`, and the next snapshot
- * replaces the window. Until that snapshot arrives, live events resync again.
+ * A resync keeps rows, inputs and turns on screen, and clears the stream cursor.
+ * The next connect has no cursor, and the next snapshot replaces the window.
+ * Until that snapshot arrives, live events resync again.
  */
 export function applyChatStreamEvent(
   state: StreamState,
@@ -73,6 +76,7 @@ export function applyChatStreamEvent(
   if (event.type === "snapshot") return { state: fromSnapshot(event), outcome: { kind: "applied" } };
   if (state.lastSeq === null) return resync(state, "event before snapshot");
   if (event.conversation_uid !== state.conversationUid) return resync(state, "conversation changed");
+  if (event.generation !== state.generation) return resync(state, "generation changed");
   if (event.seq === state.lastSeq) return { state, outcome: { kind: "duplicate" } };
   if (event.seq < state.lastSeq) return resync(state, "seq went backwards");
   if (event.seq > state.lastSeq + 1) return resync(state, "seq gap");
@@ -83,7 +87,7 @@ export function applyChatStreamEvent(
 
 function resync(state: StreamState, reason: string): ApplyResult {
   return {
-    state: { ...state, conversationUid: null, lastSeq: null },
+    state: { ...state, conversationUid: null, generation: null, lastSeq: null },
     outcome: { kind: "resync", reason },
   };
 }
@@ -92,6 +96,7 @@ function fromSnapshot(event: SnapshotEvent): StreamState {
   const { data } = event;
   return {
     conversationUid: event.conversation_uid,
+    generation: event.generation,
     lastSeq: data.next_seq - 1,
     rows: [...data.rows],
     inputs: Object.fromEntries(data.inputs.map((input) => [input.id, input] as const)),
@@ -149,8 +154,8 @@ function appendText(state: StreamState, id: string, index: number, text: string)
   };
 }
 
-/** The transport the store uses: the engine's request and its SSE reader. */
-export type ChatTransport = Pick<EngineApi, "request" | "streamSse">;
+/** The transport the store uses: engine requests and the canonical chat stream cursor helper. */
+export type ChatTransport = Pick<EngineApi, "request" | "streamChatEvents">;
 
 /** What the chat renders. A new object is made only when something changed. */
 export type ChatSnapshot = {
@@ -227,6 +232,7 @@ export class LiveChatStore implements LiveStore {
   private wake: (() => void) | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly transport: ChatTransport;
+  private readonly sessionId: string;
   private readonly enc: string;
   private readonly retryBaseMs: number;
   private readonly maxAttempts: number;
@@ -238,6 +244,7 @@ export class LiveChatStore implements LiveStore {
     options: { retryBaseMs?: number; maxAttempts?: number } = {},
   ) {
     this.transport = transport;
+    this.sessionId = sessionId;
     this.enc = encodeURIComponent(sessionId);
     this.retryBaseMs = options.retryBaseMs ?? 500;
     this.maxAttempts = options.maxAttempts ?? 8;
@@ -632,13 +639,20 @@ export class LiveChatStore implements LiveStore {
       const controller = new AbortController();
       let openedAt: number | null = null;
       this.controller = controller;
-      const after = this.state.lastSeq;
-      const path = `/sessions/${this.enc}/stream` + (after === null ? "" : `?after=${after}`);
+      const cursor: ChatStreamCursor | null = this.state.lastSeq === null ||
+        this.state.conversationUid === null || this.state.generation === null
+        ? null
+        : {
+            after: this.state.lastSeq,
+            conversation_uid: this.state.conversationUid,
+            generation: this.state.generation,
+          };
       this.connectionState = "connecting";
       this.publish();
       try {
-        await this.transport.streamSse<ChatStreamEvent>(
-          path,
+        await this.transport.streamChatEvents(
+          this.sessionId,
+          cursor,
           controller.signal,
           (event) => this.onEvent(controller, event),
           () => {
@@ -719,7 +733,7 @@ export class LiveChatStore implements LiveStore {
   /** Keeps rows on screen, forgets the cursor, and ends the connection so the loop reconnects without `after`. */
   private resync(): void {
     this.epoch += 1;
-    this.state = { ...this.state, conversationUid: null, lastSeq: null };
+    this.state = { ...this.state, conversationUid: null, generation: null, lastSeq: null };
     this.controller?.abort();
   }
 

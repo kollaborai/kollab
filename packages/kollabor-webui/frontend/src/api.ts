@@ -1454,6 +1454,7 @@ export class EngineApi {
     signal?: AbortSignal,
     onEvent?: (event: ChatStreamEvent) => void,
     onOpen?: () => void,
+    onMalformedData?: () => void,
   ): Promise<void> {
     const query = new URLSearchParams();
     if (cursor !== null) {
@@ -1468,6 +1469,7 @@ export class EngineApi {
       signal,
       onEvent,
       onOpen,
+      onMalformedData,
     );
   }
 

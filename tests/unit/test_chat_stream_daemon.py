@@ -111,6 +111,7 @@ async def test_socket_actions_admit_cancel_and_send_one_input_by_client_id():
         {
             "after": initial["events"][0]["data"]["next_seq"] - 1,
             "conversation_uid": "conv-1",
+            "generation": initial["events"][0]["generation"],
         },
     )
     assert initial["events"][0]["type"] == "snapshot"
