@@ -576,3 +576,17 @@ def test_a_turn_may_restate_its_state_without_going_back():
         _turn_event("turn.state", ended, seq=6),
     ]
     assert sequence_problems(events) == []
+
+
+@pytest.mark.parametrize("state, turn_id", [("queued", None), ("started", "t1")])
+def test_a_snapshot_cannot_reopen_an_ended_input(state, turn_id):
+    ended = {"id": "web-a1", "state": "ended", "turn_id": None, "outcome": "cancelled"}
+    reopened = {"id": "web-a1", "state": state, "turn_id": turn_id}
+    events = [
+        _event("snapshot", {**SNAPSHOT, "next_seq": 2}, seq=1),
+        _event("row.upsert", {**ROW, "id": "web-a1", "seq": 2}, seq=2),
+        _event("input.state", ended, seq=3),
+        _event("snapshot", {**SNAPSHOT, "next_seq": 5, "inputs": [reopened]}, seq=4),
+    ]
+    problems = sequence_problems(events, complete=False)
+    assert any("changed after it ended" in problem for problem in problems), problems
