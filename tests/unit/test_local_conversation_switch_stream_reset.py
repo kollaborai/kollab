@@ -382,3 +382,36 @@ async def test_resume_reused_uid_preserves_queue_ledger_and_goal_owner(tmp_path)
             pending_task.cancel()
         await asyncio.gather(pending_task, return_exceptions=True)
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_reused_uid_restores_completed_input_over_stale_started_projection(
+    tmp_path,
+):
+    state, _tap = _state_with_saved_session(tmp_path)
+    await state.resume_conversation("saved-session")
+    uid = state.get_conversation_uid()
+    stream = state.chat_stream
+    input_id = "saved-session-input-0"
+
+    # Simulate a later visit that reused the stable request ID and left a
+    # nonterminal lifecycle projection in the daemon cache.
+    stream._set_input_state(uid, input_id, "started", turn_id="later-turn")
+    stream._input_scopes[(uid, input_id)] = ("later-queue", uid, "uid:501")
+    stream._input_text[(uid, input_id)] = "later visit"
+    stream._input_attachments[(uid, input_id)] = []
+    stream._input_goal_reply_ids[(uid, input_id)] = None
+
+    await state.resume_conversation("saved-session")
+
+    snapshot_input = next(
+        item
+        for item in stream._snapshot(uid)["inputs"]
+        if item["id"] == input_id
+    )
+    assert snapshot_input == {
+        "id": input_id,
+        "state": "ended",
+        "turn_id": None,
+        "outcome": "completed",
+    }
