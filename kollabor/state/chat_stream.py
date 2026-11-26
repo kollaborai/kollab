@@ -2114,6 +2114,7 @@ class ChatStreamService:
             if (
                 metadata.get("hidden") is True
                 or metadata.get("stream_context_only") is True
+                or metadata.get("system_initialization") is True
             ):
                 continue
             source_role = role
