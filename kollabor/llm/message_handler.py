@@ -244,6 +244,67 @@ class MessageHandler:
                 hub_admission="note",
             )
 
+    async def _persist_hub_input_row(
+        self,
+        input_id: str,
+        note: dict[str, Any],
+        turn_id: str,
+        status: str,
+    ) -> None:
+        """Persist native Hub input lifecycle beside, never inside, model history."""
+        coord = self._coordinator
+        manager = getattr(coord, "conversation_manager", None)
+        rows = getattr(manager, "chat_stream_rows", None)
+        existing = next(
+            (
+                row
+                for row in rows or []
+                if isinstance(row, dict) and row.get("id") == input_id
+            ),
+            None,
+        )
+        from kollabor_ai.conversation_logger import utc_stamp
+
+        row = {
+            "id": input_id,
+            "seq": existing.get("seq", 0) if isinstance(existing, dict) else 0,
+            "kind": "input",
+            "role": "user",
+            "turn_id": turn_id,
+            "status": status,
+            "parts": [dict(note)],
+            "created_at": (
+                existing.get("created_at")
+                if isinstance(existing, dict)
+                and isinstance(existing.get("created_at"), str)
+                else utc_stamp()
+            ),
+        }
+        record_row = getattr(manager, "record_hub_chat_stream_row", None)
+        if callable(record_row):
+            try:
+                record_row(row)
+            except Exception:
+                logger.debug("Could not update native Hub row in memory", exc_info=True)
+
+        conversation_logger = getattr(coord, "conversation_logger", None)
+        log_system_message = getattr(
+            conversation_logger, "log_system_message", None
+        )
+        if not callable(log_system_message):
+            return
+        try:
+            result = log_system_message(
+                "",
+                parent_uuid=getattr(coord, "current_parent_uuid", None),
+                subtype="hub_chat_stream_row",
+                chat_stream_row=row,
+            )
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("Could not persist native Hub row update", exc_info=True)
+
     async def _report_detached_chain_break(self, reason: str) -> None:
         """Notify a detached agent's parent when the tool loop is abandoned."""
         event_bus = getattr(self._coordinator, "event_bus", None)
@@ -788,6 +849,7 @@ class MessageHandler:
                 turn_tap = None
                 turn_listener = None
                 terminal_seen = False
+                terminal_stop_reason = None
                 terminal_reason = None
                 try:
                     # A message that arrived while busy was buffered as HUD,
@@ -821,6 +883,9 @@ class MessageHandler:
                         for input_id in input_ids:
                             note = hub_notes.get(input_id)
                             if isinstance(note, dict):
+                                await self._persist_hub_input_row(
+                                    input_id, note, turn_id, "started"
+                                )
                                 publish_semantic(
                                     coord.event_bus,
                                     "hub_message",
@@ -855,13 +920,16 @@ class MessageHandler:
                         if callable(add_listener):
 
                             def observe_turn_terminal(event):
-                                nonlocal terminal_seen
+                                nonlocal terminal_seen, terminal_stop_reason
                                 if (
                                     isinstance(event, dict)
                                     and event.get("type") == "turn_complete"
                                     and event.get("turn_id") == turn_id
                                 ):
                                     terminal_seen = True
+                                    reason = event.get("stop_reason")
+                                    if isinstance(reason, str) and reason:
+                                        terminal_stop_reason = reason
 
                             turn_listener = observe_turn_terminal
                             add_listener(turn_listener)
@@ -990,9 +1058,11 @@ class MessageHandler:
                     terminal_reason = terminal_reason or "error"
                     raise
                 finally:
-                    if turn_id is not None and not terminal_seen:
+                    if turn_id is not None:
                         if terminal_reason is None:
-                            if qp.cancel_processing:
+                            if terminal_stop_reason is not None:
+                                terminal_reason = terminal_stop_reason
+                            elif qp.cancel_processing:
                                 terminal_reason = "cancelled"
                             elif qp.turn_completed:
                                 terminal_reason = (
@@ -1002,14 +1072,32 @@ class MessageHandler:
                                 )
                             else:
                                 terminal_reason = "interrupted"
-                        publish_semantic(
-                            coord.event_bus,
-                            "turn_complete",
-                            request_id=input_ids[0],
-                            request_ids=list(input_ids),
-                            turn_id=turn_id,
-                            stop_reason=terminal_reason,
-                        )
+                        if not terminal_seen:
+                            publish_semantic(
+                                coord.event_bus,
+                                "turn_complete",
+                                request_id=input_ids[0],
+                                request_ids=list(input_ids),
+                                turn_id=turn_id,
+                                stop_reason=terminal_reason,
+                            )
+                        if terminal_reason in {
+                            "cancelled",
+                            "canceled",
+                            "interrupted",
+                            "stop",
+                        }:
+                            input_status = "cancelled"
+                        elif terminal_reason in {"error", "failed", "exception"}:
+                            input_status = "failed"
+                        else:
+                            input_status = "completed"
+                        for input_id in input_ids:
+                            note = hub_notes.get(input_id)
+                            if isinstance(note, dict):
+                                await self._persist_hub_input_row(
+                                    input_id, note, turn_id, input_status
+                                )
                     remove_listener = getattr(turn_tap, "remove_listener", None)
                     if turn_listener is not None and callable(remove_listener):
                         remove_listener(turn_listener)

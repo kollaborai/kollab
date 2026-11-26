@@ -21,6 +21,7 @@ from kollabor_ai.conversation_logger import (
 )
 from kollabor_ai.session_naming import generate_branch_name, generate_session_name
 from kollabor_config.file_lock import locked_file
+from kollabor_events.chat_stream import event_problems
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,57 @@ def _acp_input_metadata(value: Any) -> Dict[str, Any]:
     return result
 
 
+def _native_hub_chat_stream_row(value: Any) -> Dict[str, Any] | None:
+    """Validate and copy one display-only native Hub row from persistence."""
+    if not isinstance(value, dict) or value.get("kind") not in {"input", "note"}:
+        return None
+    parts = value.get("parts")
+    if not isinstance(parts, list) or len(parts) != 1 or not isinstance(parts[0], dict):
+        return None
+    source_note = parts[0]
+    if source_note.get("type") != "hub-note":
+        return None
+    note_keys = (
+        "type",
+        "from",
+        "to",
+        "text",
+        "observed",
+        "kind",
+        "thread_id",
+        "reply_to",
+        "is_direct",
+        "presence",
+    )
+    row_keys = (
+        "id",
+        "seq",
+        "kind",
+        "role",
+        "turn_id",
+        "status",
+        "parts",
+        "created_at",
+    )
+    row = {key: deepcopy(value[key]) for key in row_keys if key in value}
+    row.setdefault("seq", 0)
+    row["parts"] = [
+        {key: deepcopy(source_note[key]) for key in note_keys if key in source_note}
+    ]
+    event = {
+        "seq": 0,
+        "conversation_uid": "persisted-native-hub-row",
+        "type": "row.upsert",
+        "data": row,
+    }
+    if event_problems(event):
+        return None
+    expected_role = "user" if row["kind"] == "input" else "system"
+    if row["role"] != expected_role:
+        return None
+    return row
+
+
 def is_system_initialization_record(record: Any) -> bool:
     if not isinstance(record, dict) or record.get("type") != "user":
         return False
@@ -196,6 +248,9 @@ class ConversationManager:
         self.messages: List[Dict[str, Any]] = []
         self.message_index: Dict[str, Dict[str, Any]] = {}  # uuid -> message lookup
         self.context_window: List[Dict[str, Any]] = []
+        # Display-only native Hub rows are persisted beside model history, but
+        # stay outside `messages` and `context_window` sent to providers.
+        self.chat_stream_rows: List[Dict[str, Any]] = []
 
         # Configuration
         self.max_context_tokens = config.get("kollabor.llm.max_context_tokens", 4000)
@@ -237,6 +292,24 @@ class ConversationManager:
     def bind_session_stats(self, session_stats: Dict[str, Any]) -> None:
         """Bind the live LLM statistics mapping used for persistence and restore."""
         self._session_stats = session_stats
+
+    def record_hub_chat_stream_row(self, row: Dict[str, Any]) -> None:
+        """Upsert one structured, display-only native Hub row."""
+        normalized = _native_hub_chat_stream_row(row)
+        if normalized is None:
+            raise ValueError("invalid native Hub chat stream row")
+        row_id = normalized["id"]
+        for index, existing in enumerate(self.chat_stream_rows):
+            if existing.get("id") == row_id:
+                # Keep the first arrival position while replacing lifecycle
+                # fields and status with the latest durable projection.
+                normalized["created_at"] = existing.get(
+                    "created_at", normalized["created_at"]
+                )
+                self.chat_stream_rows[index] = normalized
+                break
+        else:
+            self.chat_stream_rows.append(normalized)
 
     def _ensure_conversation_uid(self) -> str:
         """Durable conversation identity (goal-command spec 6.5).
@@ -568,6 +641,7 @@ class ConversationManager:
             "metadata": self.conversation_metadata,
             "summary": self.get_conversation_summary(),
             "messages": self.messages,
+            "chat_stream_rows": self.chat_stream_rows,
             "session_stats": self._session_stats_snapshot(),
         }
 
@@ -591,6 +665,11 @@ class ConversationManager:
                 data = json.load(f)
 
             self.messages = data.get("messages", [])
+            self.chat_stream_rows = [
+                row
+                for value in data.get("chat_stream_rows", [])
+                if (row := _native_hub_chat_stream_row(value)) is not None
+            ]
 
             # Restore metadata with defaults for required fields
             loaded_metadata = data.get("metadata", {})
@@ -646,6 +725,7 @@ class ConversationManager:
                 "metadata": self.conversation_metadata,
                 "summary": self.get_conversation_summary(),
                 "messages": self.messages,
+                "chat_stream_rows": self.chat_stream_rows,
                 "message_index": self.message_index,
                 "context_window": self.context_window,
                 "current_parent_uuid": self.current_parent_uuid,
@@ -736,6 +816,12 @@ class ConversationManager:
             self.messages = data.get("messages", [])
             self.message_index = data.get("message_index", {})
             self.context_window = data.get("context_window", [])
+            self.chat_stream_rows = data.get("chat_stream_rows", [])
+            self.chat_stream_rows = [
+                row
+                for value in self.chat_stream_rows
+                if (row := _native_hub_chat_stream_row(value)) is not None
+            ]
             self.current_parent_uuid = data.get("current_parent_uuid")
 
             # Restore metadata with defaults for required fields
@@ -980,6 +1066,7 @@ class ConversationManager:
     def _load_from_jsonl(self, session_file: Path) -> Dict[str, Any]:
         """Load session data from JSONL session file."""
         messages: List[Dict[str, Any]] = []
+        chat_stream_rows_by_id: Dict[str, Dict[str, Any]] = {}
         tool_calls_by_message: Dict[str, set[str]] = {}
         result_batches: Dict[str, Dict[str, Any]] = {}
         pending_compaction: Dict[str, Any] = {}  # last-round-wins
@@ -997,6 +1084,26 @@ class ConversationManager:
             "topics": [],
         }
         recognized_record = False
+
+        def restore_native_hub_row(value: Any) -> bool:
+            row = _native_hub_chat_stream_row(value)
+            if row is None:
+                return False
+            row_id = row["id"]
+            existing = chat_stream_rows_by_id.get(row_id)
+            if existing is not None:
+                row["created_at"] = existing["created_at"]
+            # A native wake cannot keep running across a daemon restart. Close
+            # any durable in-flight input so snapshots do not resurrect a
+            # turn that no longer exists. Terminal rows remain untouched.
+            if row["kind"] == "input" and row["status"] in {
+                "queued",
+                "started",
+                "joined",
+            }:
+                row["status"] = "failed"
+            chat_stream_rows_by_id[row_id] = row
+            return True
 
         try:
             with open(session_file, "r") as f:
@@ -1050,6 +1157,11 @@ class ConversationManager:
                         # Keep reading instead of discarding that later tail.
                         messages = saved_messages
                         metadata = saved_metadata
+                        chat_stream_rows_by_id.clear()
+                        saved_chat_rows = data.get("chat_stream_rows", [])
+                        if isinstance(saved_chat_rows, list):
+                            for value in saved_chat_rows:
+                                restore_native_hub_row(value)
                         current_parent_uuid = data.get("current_parent_uuid")
                         session_stats = data.get("session_stats")
                         has_saved_base = True
@@ -1060,6 +1172,11 @@ class ConversationManager:
                         result_batches.clear()
                         recognized_record = True
                         continue
+
+                    # Native Hub rows are display-only structured records.
+                    # Restore them beside model messages, never as messages.
+                    if restore_native_hub_row(data.get("chat_stream_row")):
+                        recognized_record = True
 
                     # Handle conversation logger streaming format
                     msg_type = data.get("type")
@@ -1345,6 +1462,7 @@ class ConversationManager:
                 "metadata": metadata,
                 "message_index": {m["uuid"]: m for m in messages},
                 "context_window": messages,
+                "chat_stream_rows": list(chat_stream_rows_by_id.values()),
                 "current_parent_uuid": current_parent_uuid,
                 "session_stats": session_stats,
                 "_has_streaming_tail": has_streaming_tail,
@@ -1366,6 +1484,7 @@ class ConversationManager:
         self.messages = []
         self.message_index = {}
         self.context_window = []
+        self.chat_stream_rows = []
         self.current_parent_uuid = None
         self.conversation_metadata = {
             "started_at": datetime.now().isoformat(),

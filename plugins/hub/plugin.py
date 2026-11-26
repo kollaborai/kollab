@@ -10599,12 +10599,35 @@ class HubPlugin(BasePlugin):
                         and llm_service.conversation_logger
                     ):
                         try:
+                            from kollabor_ai.conversation_logger import utc_stamp
+
+                            chat_stream_row = {
+                                "id": message.id,
+                                "seq": 0,
+                                "kind": "note",
+                                "role": "system",
+                                "turn_id": None,
+                                "status": "done",
+                                "parts": [dict(hub_note)],
+                                "created_at": utc_stamp(),
+                            }
+                            conversation_manager = getattr(
+                                llm_service, "conversation_manager", None
+                            )
+                            record_row = getattr(
+                                conversation_manager,
+                                "record_hub_chat_stream_row",
+                                None,
+                            )
+                            if callable(record_row):
+                                record_row(chat_stream_row)
                             await llm_service.conversation_logger.log_system_message(
                                 hud_content or formatted,
                                 parent_uuid=getattr(
                                     llm_service, "current_parent_uuid", None
                                 ),
                                 subtype="hub_incoming",
+                                chat_stream_row=chat_stream_row,
                             )
                         except Exception as e:
                             logger.debug(f"incoming message injection failed: {e}")

@@ -1564,6 +1564,7 @@ class KollaborConversationLogger:
         subtype: str = "informational",
         tool_use_id: Optional[str] = None,
         tool_result: Optional[Dict[str, Any]] = None,
+        chat_stream_row: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Log system messages including hook outputs and tool calls."""
         message_uuid = str(uuid4())
@@ -1595,6 +1596,13 @@ class KollaborConversationLogger:
             # Display data travels beside the existing textual log. The
             # parent UUID and toolUseID bind it to its assistant's call.
             message["tool_result"] = tool_result
+        if chat_stream_row is not None:
+            if not isinstance(chat_stream_row, dict):
+                raise TypeError("chat stream row must be an object")
+            # This row is display-only persistence. ConversationManager reads
+            # it into its separate chat_stream_rows collection, never into the
+            # model-facing message history.
+            message["chat_stream_row"] = deepcopy(chat_stream_row)
 
         await self._append_to_jsonl(message)
         return message_uuid

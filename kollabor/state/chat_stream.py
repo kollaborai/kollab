@@ -1542,7 +1542,7 @@ class ChatStreamService:
         if not isinstance(messages, list):
             messages = manager_messages
         if not isinstance(messages, list):
-            return []
+            messages = []
 
         def field(message: Any, name: str, default: Any = None) -> Any:
             if isinstance(message, dict):
@@ -1743,7 +1743,41 @@ class ChatStreamService:
                         "created_at": timestamp,
                     }
                 )
-        return rows
+
+        # Structured native Hub rows survive restart independently of model
+        # history. Keep them in the display transcript only; the manager owns
+        # validation and never places these rows in `messages` or context.
+        manager_rows = getattr(manager, "chat_stream_rows", None)
+        native_rows = []
+        if isinstance(manager_rows, list):
+            for row in manager_rows:
+                if not isinstance(row, dict) or row.get("kind") not in {
+                    "input",
+                    "note",
+                }:
+                    continue
+                parts = row.get("parts")
+                if (
+                    not isinstance(parts, list)
+                    or len(parts) != 1
+                    or not isinstance(parts[0], dict)
+                    or parts[0].get("type") != "hub-note"
+                ):
+                    continue
+                role = "user" if row["kind"] == "input" else "system"
+                if row.get("role") != role:
+                    continue
+                if event_problems(
+                    {
+                        "seq": 0,
+                        "conversation_uid": uid,
+                        "type": "row.upsert",
+                        "data": row,
+                    }
+                ):
+                    continue
+                native_rows.append(row)
+        return merge_chat_stream_rows(rows, native_rows)
 
     @staticmethod
     def _transcript_parts(
