@@ -166,6 +166,50 @@ describe("chat recorder analysis", () => {
     await expect(success()).rejects.toThrow(/rendered.*turn/i);
   });
 
+  it("refuses goal reload when a preexisting goal is active and leaves it untouched", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    const origin = { kind: "goal", goal_id: "preexisting-goal", attempt_id: "preexisting-attempt" };
+    const turn = { turn_id: "preexisting-turn", state: "running", input_ids: [], origin };
+    const stream = { conversation_uid: "conv-existing", turns: [turn], inputs: [] };
+    const preexisting = {
+      conversation_uid: "conv-existing",
+      goal: {
+        goal_id: "preexisting-goal", objective: "a goal owned by the user", status: "active",
+        attempt: { attempt_id: "preexisting-attempt", state: "dispatched", turn_id: "preexisting-turn" },
+      },
+    };
+    let persisted = preexisting;
+    const commands: string[] = [];
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native",
+      command: async (text: string) => {
+        commands.push(text);
+        if (text === "/goal clear") persisted = null;
+      },
+      mark: async () => {},
+      hasMatchingGoalTurn,
+      readPersistedGoal: async () => persisted,
+      currentStreamState: async () => stream,
+      sleep: async () => {},
+      reloadDuringRun: async (_reply: string, check: any) => {
+        await check.before(turn, stream);
+        await check.after(turn, stream, stream);
+      },
+      page: { evaluate: async () => true },
+      U: () => "recorder-objective",
+      R: () => "recorder-reply",
+    });
+
+    const failure = await flow().then(() => null, (error: unknown) => error);
+    expect({ commands, persisted, failure }).toEqual({
+      commands: [],
+      persisted: preexisting,
+      failure: expect.objectContaining({ message: expect.stringMatching(/active goal/i) }),
+    });
+  });
+
   it("reports ACP goal reload as unsupported without sending a chat prompt", async () => {
     const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
     const start = source.indexOf('    async "goal-reload"() {');
