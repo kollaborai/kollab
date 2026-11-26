@@ -19,6 +19,9 @@ import {
   type PermissionArgs,
   type PermissionResponseHandler,
 } from "../src/components/PermissionTool";
+import type { ChatRow } from "../src/chat-stream.ts";
+import { pendingPermissions } from "../src/utils/permission-cancel.ts";
+import { visibleRecoveredPermissionPrompts } from "../src/permission-preview-state.ts";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -179,6 +182,117 @@ describe("permission prompt outcome from the tool-call row", () => {
 
     expect(container.textContent).toContain("Denied");
     expect(buttons(container)).toEqual([]);
+  });
+
+  it("loads full externalized request_permission args before showing actions and Stop ownership", async () => {
+    streamMocks.getChatStreamContent.mockReset();
+    const ownerSummary = {
+      tool_id: "daemon-tool-args",
+      request_id: "daemon-parent-args",
+      permission_id: "daemon-perm-args",
+      source: "acp",
+      parked: false,
+    };
+    const fullArgs = {
+      ...ownerSummary,
+      tool_name: "terminal",
+      tool_type: "shell",
+      command: `pytest -q ${"critical/path/authorization/".repeat(400)}`,
+      acp_options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+    };
+    const content = JSON.stringify(fullArgs);
+    const marker = {
+      kind: "chat-stream-content-preview" as const,
+      session_id: "session-args",
+      row_id: "row-args",
+      part_index: 0,
+      field: "args" as const,
+      output_bytes: new TextEncoder().encode(content).length,
+      output_chars: Array.from(content).length,
+      output_type: "json" as const,
+      output_revision: "a".repeat(64),
+      preview: content.slice(0, 1024),
+    };
+    streamMocks.getChatStreamContent.mockResolvedValueOnce({
+      row_id: marker.row_id,
+      part_index: marker.part_index,
+      field: marker.field,
+      output_revision: marker.output_revision,
+      offset: 0,
+      next_offset: marker.output_chars,
+      total_chars: marker.output_chars,
+      output_type: marker.output_type,
+      content,
+      done: true,
+    });
+    const row: ChatRow = {
+      id: marker.row_id,
+      seq: 9,
+      kind: "tool",
+      role: "assistant",
+      turn_id: "turn-args",
+      status: "requires-action",
+      parts: [{
+        type: "tool-call",
+        tool_call_id: "call-args",
+        tool_name: "request_permission",
+        args: ownerSummary,
+        chat_stream_args_preview: marker,
+      }],
+      created_at: "2026-11-25T00:00:00Z",
+    };
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const props = partProps({
+      toolCallId: "call-args",
+      args: ownerSummary,
+      providerMetadata: { kollab: { chat_stream_args_preview: marker } },
+    });
+    const container = renderPrompt(props, respond);
+
+    expect(buttons(container).some((button) => button.textContent?.includes("Allow"))).toBe(false);
+    expect(pendingPermissions([row], visibleRecoveredPermissionPrompts([row], marker.session_id))).toEqual([]);
+    expect(streamMocks.getChatStreamContent).toHaveBeenCalledWith(
+      marker.session_id,
+      marker.row_id,
+      marker.part_index,
+      "args",
+      marker.output_revision,
+      { offset: 0, limit: 32768 },
+    );
+
+    await vi.waitFor(() => expect(container.textContent).toContain("critical/path/authorization/"));
+    expect(container.querySelector("details[open]")?.textContent).toContain(fullArgs.command);
+    expect(visibleRecoveredPermissionPrompts([row], marker.session_id)).toMatchObject([{
+      sessionId: marker.session_id,
+      rowId: marker.row_id,
+      revision: marker.output_revision,
+      partIndex: marker.part_index,
+      promptId: "call-args",
+      partType: "tool-call",
+      data: fullArgs,
+    }]);
+    expect(pendingPermissions([row], visibleRecoveredPermissionPrompts([row], marker.session_id))).toEqual([{
+      toolId: ownerSummary.tool_id,
+      requestId: ownerSummary.request_id,
+      source: ownerSummary.source,
+      parked: false,
+      previewKey: `session-args\u0000call-args\u0000${marker.output_revision}`,
+    }]);
+    await click(container, "Allow");
+    expect(respond).toHaveBeenCalledWith(
+      "call-args",
+      expect.objectContaining(fullArgs),
+      expect.objectContaining({ tool_id: ownerSummary.tool_id, permission_id: ownerSummary.permission_id }),
+    );
+
+    const details = container.querySelector("details");
+    expect(details).not.toBeNull();
+    await act(async () => {
+      details!.open = false;
+      details!.dispatchEvent(new Event("toggle"));
+    });
+    expect(visibleRecoveredPermissionPrompts([row], marker.session_id)).toEqual([]);
+    expect(pendingPermissions([row], visibleRecoveredPermissionPrompts([row], marker.session_id))).toEqual([]);
   });
 });
 
