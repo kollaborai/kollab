@@ -41,6 +41,35 @@ const daemonPromptRow: ChatRow = {
   parts: [{ type: "prompt", prompt_id: "daemon-perm-1", data: daemonPromptData }],
   created_at: "2026-11-25T00:00:00Z",
 };
+const pagedPromptMarker = {
+  kind: "chat-stream-parts-preview" as const,
+  session_id: "session/one",
+  row_id: "paged-prompt-row",
+  part_count: 1,
+  output_bytes: 300_000,
+  output_chars: 300_000,
+  output_type: "json" as const,
+  output_revision: "a".repeat(64),
+};
+const pagedPromptRow: ChatRow = {
+  id: pagedPromptMarker.row_id,
+  seq: 5,
+  kind: "prompt",
+  role: "system",
+  turn_id: null,
+  status: "open",
+  parts: [{ type: "text", text: "[Large chat row]" }],
+  chat_stream_parts_preview: pagedPromptMarker,
+  created_at: "2026-11-25T00:00:00Z",
+};
+const recoveredPagedPrompt = {
+  sessionId: pagedPromptMarker.session_id,
+  rowId: pagedPromptMarker.row_id,
+  rowRevision: pagedPromptMarker.output_revision,
+  promptId: daemonPromptData.permission_id,
+  partIndex: 0,
+  data: daemonPromptData,
+};
 
 type Sent = { method: string; url: string; body: unknown };
 
@@ -119,6 +148,103 @@ describe("respondToPermission", () => {
     });
     expect(outcome).toBe("stale");
     expect(sent).toEqual([]);
+  });
+
+  it("answers a verified permission prompt recovered from a paged row", async () => {
+    const daemonEvent = {
+      type: "permission_request",
+      tool_id: daemonPromptData.tool_id,
+      permission_id: daemonPromptData.permission_id,
+      details: daemonPromptData,
+    };
+    const { api, sent } = engine([daemonEvent]);
+    const outcome = await respondToPermission({
+      api,
+      sessionId: "session/one",
+      toolCallId: daemonPromptData.permission_id,
+      args: daemonPromptData,
+      answer: { decision: "approve" },
+      rows: () => [pagedPromptRow],
+      recoveredPrompts: () => [recoveredPagedPrompt],
+    } as Parameters<typeof respondToPermission>[0]);
+
+    expect(outcome).toBe("answered");
+    expect(posts(sent)).toEqual([{
+      method: "POST",
+      url: `${BASE}/sessions/session%2Fone/permission`,
+      body: {
+        tool_id: daemonPromptData.tool_id,
+        permission_id: daemonPromptData.permission_id,
+        decision: "approve",
+        scope: "once",
+      },
+    }]);
+  });
+
+  it("does not answer after the recovered row revision changes during lookup", async () => {
+    const daemonEvent = {
+      type: "permission_request",
+      tool_id: daemonPromptData.tool_id,
+      permission_id: daemonPromptData.permission_id,
+      details: daemonPromptData,
+    };
+    const { api, sent } = engine([daemonEvent]);
+    let rows: ChatRow[] = [pagedPromptRow];
+    const getPermissions = api.getPermissions.bind(api);
+    vi.spyOn(api, "getPermissions").mockImplementation(async (sessionId) => {
+      const result = await getPermissions(sessionId);
+      rows = [{
+        ...pagedPromptRow,
+        chat_stream_parts_preview: {
+          ...pagedPromptMarker,
+          output_revision: "b".repeat(64),
+        },
+      }];
+      return result;
+    });
+    const outcome = await respondToPermission({
+      api,
+      sessionId: "session/one",
+      toolCallId: daemonPromptData.permission_id,
+      args: daemonPromptData,
+      answer: { decision: "approve" },
+      rows: () => rows,
+      recoveredPrompts: () => [recoveredPagedPrompt],
+    } as Parameters<typeof respondToPermission>[0]);
+
+    expect(outcome).toBe("stale");
+    expect(api.getPermissions).toHaveBeenCalledOnce();
+    expect(posts(sent)).toEqual([]);
+  });
+
+  it("does not answer a recovered prompt after its details are closed", async () => {
+    const daemonEvent = {
+      type: "permission_request",
+      tool_id: daemonPromptData.tool_id,
+      permission_id: daemonPromptData.permission_id,
+      details: daemonPromptData,
+    };
+    const { api, sent } = engine([daemonEvent]);
+    let recovered = [recoveredPagedPrompt];
+    const getPermissions = api.getPermissions.bind(api);
+    vi.spyOn(api, "getPermissions").mockImplementation(async (sessionId) => {
+      const result = await getPermissions(sessionId);
+      recovered = [];
+      return result;
+    });
+    const outcome = await respondToPermission({
+      api,
+      sessionId: "session/one",
+      toolCallId: daemonPromptData.permission_id,
+      args: daemonPromptData,
+      answer: { decision: "approve" },
+      rows: () => [pagedPromptRow],
+      recoveredPrompts: () => recovered,
+    } as Parameters<typeof respondToPermission>[0]);
+
+    expect(outcome).toBe("stale");
+    expect(api.getPermissions).toHaveBeenCalledOnce();
+    expect(posts(sent)).toEqual([]);
   });
 
   it("posts the full body to /sessions/{id}/permission and returns 'answered' on success", async () => {
@@ -219,6 +345,36 @@ describe("cancelPendingPermission", () => {
       { method: "GET", url: `${BASE}/sessions/session%2Fone/permissions`, body: undefined },
       { method: "POST", url: `${BASE}/sessions/session%2Fone/cancel-owned`, body: { request_id: "daemon-parent-1" } },
     ]);
+  });
+
+  it("compares a recovered prompt's preview key only against the current row, not daemon owner", async () => {
+    const daemonEvent = {
+      type: "permission_request",
+      tool_id: daemonPromptData.tool_id,
+      permission_id: daemonPromptData.permission_id,
+      details: daemonPromptData,
+    };
+    const { api, sent } = engine([daemonEvent]);
+    const recoveredOwner = {
+      toolId: daemonPromptData.tool_id,
+      requestId: daemonPromptData.request_id,
+      source: "acp",
+      parked: false,
+      previewKey: "session/one\u0000daemon-perm-1\u0000" + "a".repeat(64),
+    };
+    const cancelled = await cancelPendingPermission({
+      api,
+      sessionId: "session/one",
+      expected: [recoveredOwner],
+      current: () => [recoveredOwner],
+    });
+
+    expect(cancelled).toBe(true);
+    expect(posts(sent)).toEqual([{
+      method: "POST",
+      url: `${BASE}/sessions/session%2Fone/cancel-owned`,
+      body: { request_id: daemonPromptData.request_id },
+    }]);
   });
 
   it("sends the same request as runtime.tsx 1401-1435 and never calls onStale", async () => {
