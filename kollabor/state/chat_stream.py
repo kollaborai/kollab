@@ -3474,8 +3474,6 @@ class ChatStreamService:
             turn_id
             for turn_id, turn in turns.items()
             if turn.get("state") == "running"
-            and isinstance(turn.get("origin"), dict)
-            and turn["origin"].get("kind") == "goal"
             and turn_id not in turn_ids
         )
         retained_turn_ids = set(turn_ids)

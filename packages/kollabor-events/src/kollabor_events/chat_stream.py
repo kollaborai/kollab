@@ -265,20 +265,34 @@ def _part_problems(part: Any, where: str, *, row_id: Any) -> list[str]:
         )
     if part_preview is not None:
         problems += _part_preview_problems(part_preview, where, row_id=row_id)
-    if kind == "tool-call":
-        args_preview = part.get("chat_stream_args_preview")
-        if args_preview is not None:
-            problems += _content_preview_problems(
-                args_preview, f"{where} args", row_id=row_id, field="args"
+    args_preview = part.get("chat_stream_args_preview")
+    if args_preview is not None:
+        if kind != "tool-call":
+            problems.append(
+                f"{where}: args preview is only valid on a tool-call part"
             )
-        result_preview = part.get("chat_stream_result_preview")
-        if result_preview is not None:
-            problems += _tool_output_preview_problems(
-                result_preview,
-                f"{where} result",
-                row_id=row_id,
-                tool_call_id=part.get("tool_call_id"),
+        problems += _content_preview_problems(
+            args_preview, f"{where} args", row_id=row_id, field="args"
+        )
+    result_preview = part.get("chat_stream_result_preview")
+    if result_preview is not None:
+        if kind != "tool-call":
+            problems.append(
+                f"{where}: result preview is only valid on a tool-call part"
             )
+            marker_tool_call_id = (
+                result_preview.get("tool_call_id")
+                if isinstance(result_preview, dict)
+                else None
+            )
+        else:
+            marker_tool_call_id = part.get("tool_call_id")
+        problems += _tool_output_preview_problems(
+            result_preview,
+            f"{where} result",
+            row_id=row_id,
+            tool_call_id=marker_tool_call_id,
+        )
     return problems
 
 
