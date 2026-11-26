@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 from typing import Any
@@ -297,6 +298,83 @@ def _materialize_row_images(rows: Any, session_id: str) -> None:
                     {"type": "text", "text": "[Image attachment unavailable.]"}
                 )
         row["parts"] = parts
+
+
+def _chat_parts_page_size(payload: dict[str, Any]) -> int:
+    return len(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+
+
+def _oversized_chat_part_placeholder(
+    part: Any,
+    *,
+    original_part: Any,
+    row_id: str,
+    part_index: int,
+    session_id: str,
+) -> dict[str, Any]:
+    if isinstance(part, dict):
+        marker = part.get("chat_stream_part_preview")
+        if not isinstance(marker, dict):
+            try:
+                content = json.dumps(
+                    original_part,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    default=str,
+                    separators=(",", ":"),
+                )
+            except (OverflowError, TypeError, ValueError):
+                content = json.dumps(
+                    str(original_part),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+            marker = {
+                "kind": "chat-stream-part-preview",
+                "row_id": row_id,
+                "part_index": part_index,
+                "output_bytes": len(content.encode("utf-8", errors="replace")),
+                "output_chars": len(content),
+                "output_type": "json",
+                "output_revision": hashlib.sha256(
+                    b"json\0" + content.encode("utf-8", errors="replace")
+                ).hexdigest(),
+                "preview": content[:1024],
+                "session_id": session_id,
+            }
+        bounded_marker = {
+            key: value
+            for key, value in marker.items()
+            if key
+            in {
+                "kind",
+                "row_id",
+                "part_index",
+                "output_bytes",
+                "output_chars",
+                "output_type",
+                "output_revision",
+                "preview",
+                "session_id",
+            }
+        }
+        preview = bounded_marker.get("preview")
+        if isinstance(preview, str):
+            bounded_marker["preview"] = preview[:1024]
+        return {
+            "type": "text",
+            "text": "[Large part. Expand to load full content.]",
+            "chat_stream_part_preview": bounded_marker,
+        }
+    raise HTTPException(
+        status_code=502,
+        detail="The local daemon returned an invalid oversized chat parts item.",
+    )
 
 
 def _materialize_event_images(event: dict[str, Any], session_id: str) -> None:
@@ -629,14 +707,7 @@ async def chat_stream_parts(
         "parts": parts,
         "done": done,
     }
-    if (
-        len(
-            json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
-        )
-        > _PART_PAGE_RPC_BYTES
-    ):
+    if _chat_parts_page_size(payload) > _PART_PAGE_RPC_BYTES:
         raise HTTPException(
             status_code=502,
             detail="The local daemon returned an oversized chat parts page.",
@@ -644,6 +715,32 @@ async def chat_stream_parts(
     materialized_parts = {"parts": copy.deepcopy(parts)}
     _materialize_row_images([materialized_parts], session_id)
     payload["parts"] = materialized_parts["parts"]
+    while (
+        _chat_parts_page_size(payload) > _PART_PAGE_RPC_BYTES
+        and len(payload["parts"]) > 1
+    ):
+        payload["parts"].pop()
+        payload["next_offset"] = offset + len(payload["parts"])
+        payload["done"] = payload["next_offset"] >= total_parts
+    if _chat_parts_page_size(payload) > _PART_PAGE_RPC_BYTES and payload["parts"]:
+        payload["parts"][0] = _oversized_chat_part_placeholder(
+            payload["parts"][0],
+            original_part=parts[0],
+            row_id=row_id,
+            part_index=offset,
+            session_id=session_id,
+        )
+        payload["next_offset"] = offset + 1
+        payload["done"] = payload["next_offset"] >= total_parts
+        if _chat_parts_page_size(payload) > _PART_PAGE_RPC_BYTES:
+            marker = payload["parts"][0].get("chat_stream_part_preview")
+            if isinstance(marker, dict):
+                marker["preview"] = ""
+    if _chat_parts_page_size(payload) > _PART_PAGE_RPC_BYTES:
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon returned an oversized chat parts item.",
+        )
     return payload
 
 
