@@ -13,7 +13,7 @@ import asyncio
 import unittest
 from datetime import datetime
 from typing import Any, Dict, List
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from kollabor_events.data_models import ConversationMessage
 from plugins.context_compaction_plugin import ContextCompactionPlugin
@@ -376,6 +376,17 @@ class TestAutoDetectThreshold(unittest.TestCase):
         # "gemini-3.1-pro-preview" (len 22, 1,048,576) wins over
         # "gemini-3.1-pro" (len 14, 1,000,000)
         self.assertEqual(plugin._resolve_context_window(), 1_048_576)
+
+    def test_invalid_model_window_falls_back_to_provider_default(self) -> None:
+        plugin = _make_auto_plugin()
+        _wire_profile(plugin, "custom-model-v1", "custom")
+        registry = {
+            "models": {"custom-model": {"context_window": float("inf")}},
+            "provider_defaults": {"custom": {"context_window": 200_000}},
+        }
+
+        with patch("plugins.context_compaction_plugin._MODEL_REGISTRY", registry):
+            self.assertEqual(plugin._resolve_context_window(), 200_000)
 
     def test_glm_model(self) -> None:
         plugin = _make_auto_plugin(compaction_ratio=0.75)
