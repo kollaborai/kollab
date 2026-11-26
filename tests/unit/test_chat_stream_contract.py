@@ -897,6 +897,20 @@ def test_an_input_that_was_never_queued_may_end_without_a_turn(outcome):
     assert sequence_problems(events) == []
 
 
+@pytest.mark.parametrize("status", ["queued", "started", "joined"])
+def test_an_input_shown_waiting_cannot_complete_without_a_turn(status):
+    row = {**ROW, "id": "i", "seq": 1, "turn_id": None, "status": status}
+    info = {"id": "i", "state": "ended", "turn_id": None, "outcome": "completed"}
+    events = [
+        _event("snapshot", SNAPSHOT, seq=0),
+        _event("row.upsert", row, seq=1),
+        _event("input.state", info, seq=2),
+    ]
+
+    problems = sequence_problems(events)
+    assert any("ended without a turn" in problem for problem in problems), problems
+
+
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
 def test_snapshot_can_repeat_an_unchanged_ended_input(outcome):
     info = {"id": "i", "state": "ended", "turn_id": "t", "outcome": outcome}
