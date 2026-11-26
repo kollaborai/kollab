@@ -13,6 +13,7 @@ from kollabor_agent.queue_processor import QueueProcessor, TaggedInput
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_events import EventBus
+from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import DisplayTap
 
 
@@ -59,9 +60,12 @@ def _native_processor(history, conversation_logger, stop_reason):
         assert user_message_provided is True
         if stop_reason == "cancelled":
             processor._cancel_processing = True
-        else:
+            processor.turn_completed = True
+        elif stop_reason == "error":
             processor.last_turn_error = "provider failed"
-        processor.turn_completed = True
+            processor.turn_completed = True
+        else:
+            processor.turn_completed = stop_reason == "end_turn"
         return current_parent_uuid
 
     processor._execute_llm_turn = execute_turn
@@ -191,6 +195,7 @@ async def test_native_batch_keeps_each_image_on_its_original_input_after_resume(
     )
     live_rows = _input_rows(live_stream, "conversation-live")
     assert [row["id"] for row in live_rows] == list(request_ids)
+    assert [row["status"] for row in live_rows] == ["completed", "completed"]
     assert [part["type"] for part in live_rows[0]["parts"]].count("image") == 1
     assert not any(part["type"] == "image" for part in live_rows[1]["parts"])
 
@@ -199,5 +204,84 @@ async def test_native_batch_keeps_each_image_on_its_original_input_after_resume(
     )
     resumed_rows = _input_rows(resumed_stream, resumed_uid)
     assert [row["id"] for row in resumed_rows] == list(request_ids)
+    assert [row["status"] for row in resumed_rows] == ["completed", "completed"]
     assert [part["type"] for part in resumed_rows[0]["parts"]].count("image") == 1
     assert not any(part["type"] == "image" for part in resumed_rows[1]["parts"])
+
+
+def test_single_input_operator_text_keeps_its_unambiguous_image():
+    input_id = "web-single-image"
+    history = [
+        ConversationMessage(
+            role="user",
+            content=[
+                {"type": "text", "text": "describe this"},
+                {
+                    "type": "image",
+                    "source": {
+                        "kind": "url",
+                        "url": "https://example.test/single.png",
+                    },
+                },
+            ],
+            metadata={
+                "request_id": input_id,
+                "operator_inputs": [
+                    {
+                        "source": "webui",
+                        "timestamp": "2026-11-25T12:00:00Z",
+                        "text": "describe this",
+                        "request_id": input_id,
+                    }
+                ],
+            },
+        )
+    ]
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_history=history),
+        _event_bus=None,
+        get_conversation_uid=lambda: "conversation-single-image",
+        chat_stream_snapshot=lambda: {"rows": [], "turns": [], "inputs": []},
+    )
+
+    rows = _input_rows(ChatStreamService(state), "conversation-single-image")
+
+    assert [row["id"] for row in rows] == [input_id]
+    assert rows[0]["parts"] == [
+        {"type": "text", "text": "describe this"},
+        {"type": "image", "url": "https://example.test/single.png"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_ending_a_continuing_native_turn_persists_failure(tmp_path):
+    conversation_logger = KollaborConversationLogger(tmp_path / "conversations")
+    request_id = "web-watchdog-ending"
+    row_uuid = await conversation_logger.log_user_message(
+        "keep going", message_metadata={"request_id": request_id}
+    )
+    processor = _native_processor([], conversation_logger, "continuing")
+    processor.active_request_ids = (request_id,)
+    await processor.process_message_batch(
+        [
+            TaggedInput(
+                "keep going",
+                (request_id,),
+                history_row_uuid=row_uuid,
+            )
+        ],
+        "parent-watchdog",
+    )
+    assert processor.turn_completed is False
+
+    end_requests_result = processor._end_requests("watchdog stopped the turn")
+    if asyncio.iscoroutine(end_requests_result):
+        await end_requests_result
+
+    resumed_stream, resumed_uid = await _resume_chat_stream(
+        tmp_path, conversation_logger.session_id
+    )
+    rows = _input_rows(resumed_stream, resumed_uid)
+
+    assert [row["id"] for row in rows] == [request_id]
+    assert rows[0]["status"] == "failed"

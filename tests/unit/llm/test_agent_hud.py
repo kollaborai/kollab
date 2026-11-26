@@ -123,11 +123,17 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
         class FakeQueueProcessor:
             def __init__(self):
                 self.messages = None
+                self.stream_inputs = None
 
             async def process_message_batch(
-                self, messages, current_parent_uuid, request_ids=None
+                self,
+                messages,
+                current_parent_uuid,
+                request_ids=None,
+                stream_inputs=None,
             ):
                 self.messages = messages
+                self.stream_inputs = stream_inputs
                 return "next-parent"
 
         service = LLMService.__new__(LLMService)
@@ -149,6 +155,7 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(service.current_parent_uuid, "next-parent")
+        self.assertEqual(service._queue_processor.stream_inputs, ())
         self.assertEqual(
             service._queue_processor.messages,
             [
