@@ -3227,6 +3227,11 @@ class LocalStateService(StateService):
         if uses_acp:
             await self._restore_conversation_acp(acp)
         snapshot = await self.get_conversation()
+        self._publish_chat_stream_reset()
+        return snapshot
+
+    def _publish_chat_stream_reset(self) -> None:
+        """Tell connected clients to fetch a snapshot after the conversation changes."""
         chat_stream = getattr(self, "chat_stream", None)
         publish_reset = getattr(chat_stream, "publish_conversation_reset", None)
         conversation_uid = self.get_conversation_uid()
@@ -3236,7 +3241,6 @@ class LocalStateService(StateService):
             and conversation_uid
         ):
             publish_reset()
-        return snapshot
 
     # === MCP writes (phase 4.5 step 7) ===
 
@@ -5092,6 +5096,8 @@ class LocalStateService(StateService):
                 restore_object_state(api_service, api_state)
                 raise ValueError(f"failed to restore ACP conversation: {e}") from e
 
+        self._publish_chat_stream_reset()
+
         header = f"--- Branched from {session_id} at message {branch_index} ---"
         success_message = f"[ok] Created branch: {new_session_id}. Continue below."
         return {
@@ -5259,6 +5265,8 @@ class LocalStateService(StateService):
             # Read the original harness binding, but open/save the continued
             # session only after all native conversation owners have its new ID.
             await self._restore_conversation_acp(acp, session_id)
+
+        self._publish_chat_stream_reset()
 
         header = f"--- Resumed: {session_id[:20]}... as {new_session_id} ---"
         success_message = f"[ok] Resumed: {new_session_id}. Continue below."
