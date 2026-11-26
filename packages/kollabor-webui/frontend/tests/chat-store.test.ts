@@ -1272,6 +1272,55 @@ describe("LiveChatStore", () => {
     expect(store.olderStatus).toBe("idle");
   });
 
+  it("resnapshots a truncated replacement without blanking the current rows, then pages its older history", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    const visibleBeforeCompaction = row("before-compaction", "Still visible during refresh");
+    first.emit(snapshot(2, [visibleBeforeCompaction]));
+    const visibleCounts: number[] = [];
+    const unsubscribe = store.subscribe(() => visibleCounts.push(store.rows.length));
+
+    // The event carries only the 2,000-row replay window. A fresh snapshot is
+    // needed to learn its older-page cursor for the 2,400-row transcript.
+    const replacementWindow = Array.from({ length: 2000 }, (_, index) =>
+      row(`row-${index + 400}`, `Row ${index + 400}`),
+    );
+    first.emit(streamEvent(2, "replace", { rows: replacementWindow }));
+
+    expect(first.signal.aborted).toBe(true);
+    expect(store.rows).toEqual([visibleBeforeCompaction]);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+    expect(store.rows).toEqual([visibleBeforeCompaction]);
+
+    streams[1].open();
+    streams[1].emit(snapshot(3, replacementWindow, { older: "cursor:400" }));
+    expect(store.rows).toEqual(replacementWindow);
+    expect(store.hasEarlier).toBe(true);
+
+    for (let start = 350; start >= 0; start -= 50) {
+      const rows = Array.from({ length: 50 }, (_, index) =>
+        row(`row-${start + index}`, `Row ${start + index}`),
+      );
+      request.mockResolvedValueOnce(new Response(JSON.stringify({
+        rows,
+        older: start > 0 ? `cursor:${start}` : null,
+      }), { status: 200 }));
+      await store.loadOlder();
+    }
+
+    expect(request).toHaveBeenCalledTimes(8);
+    expect(request).toHaveBeenNthCalledWith(1, "/sessions/s1/rows?before=cursor%3A400&limit=50");
+    expect(store.rows.map((item) => item.id)).toEqual(
+      Array.from({ length: 2400 }, (_, index) => `row-${index}`),
+    );
+    expect(store.hasEarlier).toBe(false);
+    expect(visibleCounts).not.toContain(0);
+    expect(visibleCounts).toContain(1);
+    expect(visibleCounts).toContain(2000);
+    unsubscribe();
+  });
+
   it("a snapshot with no older cursor has no earlier page: hasEarlier is false, paging is complete, and loadOlder sends nothing", async () => {
     const { store, streams, request } = make();
     const first = await startOpen(store, streams);
