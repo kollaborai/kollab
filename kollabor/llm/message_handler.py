@@ -678,12 +678,12 @@ class MessageHandler:
                 content = msg.get("content", "")
                 display_text = _plugin_display_text(content)
                 plugin_input_id = None
+                message_metadata = {}
 
                 # Add to conversation history
                 if add_to_history:
                     from kollabor_events.data_models import ConversationMessage
 
-                    message_metadata = {}
                     if role == "user" and display_messages and display_text.strip():
                         # This is the plugin's authored, displayable string,
                         # captured before any model-only context is merged.
@@ -691,13 +691,17 @@ class MessageHandler:
                         # so content_to_text image placeholders cannot become
                         # chat input text.
                         plugin_input_id = f"plugin-{uuid.uuid4().hex}"
-                        message_metadata["input_id"] = plugin_input_id
-                        message_metadata["chat_stream_display_text"] = display_text
                         if trigger_llm and message_index == last_user_index:
-                            message_metadata["chat_stream_trigger_llm"] = True
-                            message_metadata["status"] = "queued"
-                            message_metadata["request_id"] = plugin_input_id
+                            # Keep this correlation marker private until the
+                            # native queue accepts the TaggedInput. A snapshot
+                            # must not advertise queued controls for work that
+                            # is still waiting on logger/display awaits.
+                            message_metadata["chat_stream_pending_input_id"] = (
+                                plugin_input_id
+                            )
                         else:
+                            message_metadata["input_id"] = plugin_input_id
+                            message_metadata["chat_stream_display_text"] = display_text
                             message_metadata["chat_stream_outcome"] = "completed"
                     coord._add_conversation_message(
                         ConversationMessage(
@@ -779,6 +783,7 @@ class MessageHandler:
                             (last_user_input_id,),
                             history_row_uuid=last_user_history_row_uuid,
                             stream_display_content=last_user_display_text,
+                            stream_origin="plugin",
                         )
                         if isinstance(last_user_input_id, str) and last_user_input_id
                         else last_user_message
