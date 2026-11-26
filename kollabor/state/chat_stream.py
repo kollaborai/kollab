@@ -854,24 +854,38 @@ class ChatStreamService:
         )
         row_id = self._tool_row_id(uid, turn_id, tool_id, history_key)
         name = event.get("tool_name")
-        name = name if isinstance(name, str) and name else "Tool"
+        name = name if isinstance(name, str) and name else None
         metadata = event.get("metadata")
         acp_data = metadata.get("acp") if isinstance(metadata, dict) else None
         acp_data = acp_data if isinstance(acp_data, dict) else {}
         raw_input = acp_data.get("rawInput")
-        args = (
-            raw_input
-            if raw_input is not None
-            else event.get("input", {})
+        existing_row = self._rows.get(uid, {}).get(row_id)
+        existing_parts = existing_row.get("parts") if isinstance(existing_row, dict) else None
+        existing_part = (
+            existing_parts[0]
+            if isinstance(existing_parts, list)
+            and existing_parts
+            and isinstance(existing_parts[0], dict)
+            and existing_parts[0].get("type") == "tool-call"
+            and existing_parts[0].get("tool_call_id") == tool_id
+            else None
         )
-        part: dict[str, Any] = {
-            "type": "tool-call",
-            "tool_call_id": tool_id,
-            "tool_name": name,
-            "args": args,
-        }
+        part: dict[str, Any] = copy.deepcopy(existing_part) if existing_part else {}
+        part.update({"type": "tool-call", "tool_call_id": tool_id})
+        if name is not None:
+            part["tool_name"] = name
+        elif not isinstance(part.get("tool_name"), str) or not part["tool_name"]:
+            part["tool_name"] = "Tool"
+        if raw_input is not None:
+            part["args"] = copy.deepcopy(raw_input)
+        elif event.get("input") is not None:
+            part["args"] = copy.deepcopy(event["input"])
+        elif "args" not in part:
+            part["args"] = {}
         if event.get("type") == "tool_start":
             status = "running"
+            part.pop("result", None)
+            part.pop("is_error", None)
         else:
             status = "completed" if event.get("success") is True else "failed"
             result = acp_data.get("rawOutput")
@@ -1472,6 +1486,8 @@ class ChatStreamService:
                 continue
             metadata = field(message, "metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
+            if metadata.get("stream_context_only") is True:
+                continue
             source_role = role
             role = (
                 source_role

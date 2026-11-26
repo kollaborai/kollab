@@ -10,6 +10,7 @@ import inspect
 import logging
 import re
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, YES_SOURCES
@@ -589,6 +590,9 @@ class MessageHandler:
                 # (#357).
                 qp._stop_hook_active = False
                 qp._stop_hook_continuations = 0
+                hub_input_id = data.get("hub_message_id") or data.get("request_id")
+                if not isinstance(data.get("hub_note"), dict):
+                    hub_input_id = None
                 # Wall-clock checkpoints only — never kill a working chain.
                 # Force-completing on a timer orphaned the last turn's tool
                 # results (they were in history but the LLM never got called
@@ -620,6 +624,7 @@ class MessageHandler:
                     metadata = {
                         "agent_hud": True,
                         "agent_hud_sources": ["hub"],
+                        "stream_context_only": True,
                         **hud_metadata,
                     }
                     if isinstance(hub_note, dict):
@@ -637,8 +642,36 @@ class MessageHandler:
                             metadata=metadata,
                         ),
                         parent_uuid=coord.current_parent_uuid,
+                        publish_user_event=False,
                     )
                     coord.publish_cursor(hud_uuid, turn_serial)
+                turn_context = None
+                turn_context_token = None
+                if isinstance(hub_input_id, str) and hub_input_id:
+                    from kollabor_tui.display_tap import publish_semantic
+                    from kollabor_tui.turn_context import current_turn
+
+                    turn_id = f"native-{uuid.uuid4().hex}"
+                    input_ids = [hub_input_id]
+                    qp.active_request_ids = tuple(input_ids)
+                    turn_context = current_turn
+                    turn_context_token = current_turn.set(
+                        {
+                            **current_turn.get(),
+                            "request_id": hub_input_id,
+                            "request_ids": input_ids,
+                            "turn_id": turn_id,
+                            "input_source": "hub",
+                        }
+                    )
+                    publish_semantic(
+                        coord.renderer,
+                        "turn_start",
+                        request_id=hub_input_id,
+                        request_ids=input_ids,
+                        turn_id=turn_id,
+                        input_source="hub",
+                    )
                 try:
                     try:
                         await coord._continue_conversation()
@@ -717,6 +750,8 @@ class MessageHandler:
                             qp.turn_completed = True
                             break
                 finally:
+                    if turn_context is not None and turn_context_token is not None:
+                        turn_context.reset(turn_context_token)
                     qp.is_processing = False  # ends the chain (note_chain_end)
                     # User messages arrive via process_user_input(), which
                     # enqueues them to processing_queue but SKIPS creating

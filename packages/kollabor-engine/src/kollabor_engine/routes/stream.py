@@ -267,12 +267,13 @@ async def chat_stream(
                         after=None,
                         conversation_uid=event_uid,
                     )
+                    refreshed = False
                     for current in snapshot:
                         current_uid = current.get("conversation_uid")
                         current_seq = current.get("seq")
                         if (
                             current.get("type") != "snapshot"
-                            or current_uid != event_uid
+                            or not isinstance(current_uid, str)
                             or not isinstance(current_seq, int)
                             or isinstance(current_seq, bool)
                         ):
@@ -280,6 +281,10 @@ async def chat_stream(
                         last_seq = _cursor_after(current)
                         last_uid = current_uid
                         yield _sse_event(current)
+                        refreshed = True
+                        break
+                    if not refreshed or event_uid != last_uid:
+                        continue
                 if seq <= last_seq:
                     continue
                 if last_seq >= 0 and seq > last_seq + 1:
