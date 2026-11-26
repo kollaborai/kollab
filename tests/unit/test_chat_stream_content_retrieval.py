@@ -349,7 +349,7 @@ def test_chat_content_chunks_round_trip_and_reject_stale_revision():
     markers = [
         projected["parts"][0]["chat_stream_content_preview"],
         projected["parts"][1]["chat_stream_content_preview"],
-        projected["parts"][2]["args"],
+        projected["parts"][2]["chat_stream_args_preview"],
     ]
 
     for marker, field, expected in (
