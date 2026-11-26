@@ -265,7 +265,7 @@ describe("chat stream part recovery", () => {
     });
 
     await expect(fetchChatStreamPartsPage(marker, 0)).resolves.toMatchObject({
-      parts: [{ result: undefined, chat_stream_result_preview: outputPreview }],
+      parts: [{ type: "tool-call", chat_stream_result_preview: outputPreview }],
     });
   });
 

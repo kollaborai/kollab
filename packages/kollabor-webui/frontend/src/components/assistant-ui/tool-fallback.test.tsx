@@ -79,11 +79,11 @@ function fetchChatStreamToolOutput() {
 }
 
 /** The card the thread renders for a paged tool output: closed, it mounts nothing. */
-function cardMarkup(open: boolean, result: unknown) {
+function cardMarkup(open: boolean, result: unknown, resultPreview?: ReturnType<typeof chatStreamPreviewResult>) {
   return renderToStaticMarkup(
     <ToolFallbackRoot open={open}>
       <ToolFallbackContent>
-        <ToolFallbackResult result={result} />
+        <ToolFallbackResult result={result} resultPreview={resultPreview} />
       </ToolFallbackContent>
     </ToolFallbackRoot>,
   );
@@ -411,13 +411,22 @@ describe("expanding a chat stream tool output preview", () => {
   });
 
   it("renders the preview without exposing the marker as generic tool output", () => {
-    const markup = cardMarkup(true, chatStreamPreviewResult("stream-session", "first lines of output"));
+    const markup = cardMarkup(true, undefined, chatStreamPreviewResult("stream-session", "first lines of output"));
 
     expect(markup).toContain("Output preview:");
     expect(markup).toContain("first lines of output");
     expect(markup).not.toContain("&quot;kind&quot;: &quot;chat-stream-tool-output-preview&quot;");
     expect(markup).not.toContain("output_bytes");
     expect(markup).not.toContain("tool_call_id");
+    expect(mocks.getChatStreamToolOutput).not.toHaveBeenCalled();
+  });
+
+  it("leaves marker-shaped nested result data opaque", () => {
+    const markerShapedUserResult = chatStreamPreviewResult("user-data", "application payload");
+    const markup = cardMarkup(true, markerShapedUserResult);
+
+    expect(markup).toContain("application payload");
+    expect(markup).toContain("chat-stream-tool-output-preview");
     expect(mocks.getChatStreamToolOutput).not.toHaveBeenCalled();
   });
 
@@ -445,7 +454,7 @@ describe("expanding a chat stream tool output preview", () => {
       2, "stream-chunks", "row-1", "tool-call-1", "a".repeat(64), { offset: 5, limit: 32768 },
     );
 
-    const markup = cardMarkup(true, chatStreamPreviewResult("stream-chunks", "first lines of output"));
+    const markup = cardMarkup(true, undefined, chatStreamPreviewResult("stream-chunks", "first lines of output"));
     expect(markup).toContain("Output:");
     expect(markup).toContain("firstend");
     expect(markup).not.toContain("Output preview:");
@@ -576,10 +585,10 @@ describe("expanding a chat stream tool output preview", () => {
 
     try {
       await act(async () => {
-        root.render(<ToolFallbackResult result={chatStreamPreviewResult("stream-card", "old preview", oldRevision, 11)} />);
+        root.render(<ToolFallbackResult resultPreview={chatStreamPreviewResult("stream-card", "old preview", oldRevision, 11)} />);
       });
       await act(async () => {
-        root.render(<ToolFallbackResult result={chatStreamPreviewResult("stream-card", "new preview", newRevision, 13)} />);
+        root.render(<ToolFallbackResult resultPreview={chatStreamPreviewResult("stream-card", "new preview", newRevision, 13)} />);
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       expect(rootElement.textContent).toContain("current value");
