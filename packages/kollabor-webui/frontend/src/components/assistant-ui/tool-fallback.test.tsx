@@ -200,16 +200,16 @@ describe("expanding a chat stream tool output preview", () => {
         next_offset: 8, total_chars: 8, output_type: "text", content: "end", done: true,
       });
 
-    await expect(fetchOutput("stream-session", "row-1", "tool-call-1", 8, "text"))
+    await expect(fetchOutput("stream-chunks", "row-1", "tool-call-1", 8, "text"))
       .resolves.toBe("firstend");
     expect(mocks.getChatStreamToolOutput).toHaveBeenNthCalledWith(
-      1, "stream-session", "row-1", "tool-call-1", { offset: 0, limit: 32768 },
+      1, "stream-chunks", "row-1", "tool-call-1", { offset: 0, limit: 32768 },
     );
     expect(mocks.getChatStreamToolOutput).toHaveBeenNthCalledWith(
-      2, "stream-session", "row-1", "tool-call-1", { offset: 5, limit: 32768 },
+      2, "stream-chunks", "row-1", "tool-call-1", { offset: 5, limit: 32768 },
     );
 
-    const markup = cardMarkup(true, chatStreamPreviewResult("stream-session", "first lines of output"));
+    const markup = cardMarkup(true, chatStreamPreviewResult("stream-chunks", "first lines of output"));
     expect(markup).toContain("Output:");
     expect(markup).toContain("firstend");
     expect(markup).not.toContain("Output preview:");
@@ -223,7 +223,7 @@ describe("expanding a chat stream tool output preview", () => {
       row_id: "another-row", tool_call_id: "tool-call-1", offset: 0,
       next_offset: 4, total_chars: 4, output_type: "text", content: "nope", done: true,
     });
-    await expect(fetchOutput("stream-session", "row-1", "tool-call-1", 4, "text"))
+    await expect(fetchOutput("stream-wrong-row", "row-1", "tool-call-1", 4, "text"))
       .rejects.toThrow();
   });
 
@@ -235,7 +235,7 @@ describe("expanding a chat stream tool output preview", () => {
       row_id: "row-1", tool_call_id: "tool-call-1", offset: 0,
       next_offset: 0, total_chars: 4, output_type: "text", content: "", done: false,
     });
-    await expect(fetchOutput("stream-session", "row-1", "tool-call-1", 4, "text"))
+    await expect(fetchOutput("stream-no-progress", "row-1", "tool-call-1", 4, "text"))
       .rejects.toThrow();
   });
 });
