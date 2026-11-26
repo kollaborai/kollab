@@ -117,6 +117,10 @@ def _chat_stream_input_metadata(value: Any) -> Dict[str, Any]:
     if isinstance(hub_note, dict) and hub_note.get("type") == "hub-note":
         result["hub_note"] = deepcopy(hub_note)
 
+    handoff = _validated_queue_handoff_metadata(value.get("queue_handoff"))
+    if handoff:
+        result["queue_handoff"] = handoff
+
     if value.get("provider") != "acp":
         return result
     result["provider"] = "acp"
@@ -180,6 +184,75 @@ def _chat_stream_input_metadata(value: Any) -> Dict[str, Any]:
                 note[key] = item
         result["hub_note"] = note
     return result
+
+
+def _validated_queue_handoff_metadata(value: Any) -> Dict[str, Any]:
+    """Keep only bounded display metadata needed to restore queued images."""
+    if not isinstance(value, dict):
+        return {}
+    version = value.get("version")
+    conversation_uid = value.get("conversation_uid")
+    revision = value.get("conversation_revision")
+    request_id = value.get("request_id")
+    force_send = value.get("force_send", False)
+    source_refs = value.get("source_attachment_refs")
+    media_refs = value.get("media_refs")
+    if (
+        type(version) is not int
+        or version != 1
+        or not isinstance(conversation_uid, str)
+        or not conversation_uid
+        or len(conversation_uid) > 256
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+        or not isinstance(request_id, str)
+        or not request_id
+        or len(request_id) > 256
+        or not isinstance(force_send, bool)
+        or not isinstance(source_refs, list)
+        or len(source_refs) > 20
+        or not all(
+            isinstance(ref, str) and ref and len(ref) <= 128 for ref in source_refs
+        )
+        or len(set(source_refs)) != len(source_refs)
+        or not isinstance(media_refs, list)
+        or len(media_refs) > 20
+    ):
+        return {}
+
+    allowed_sources = set(source_refs)
+    clean_media_refs = []
+    seen_sources: set[str] = set()
+    seen_refs: set[str] = set()
+    for media in media_refs:
+        if not isinstance(media, dict):
+            return {}
+        source_ref = media.get("source_ref")
+        media_ref = media.get("ref")
+        if (
+            not isinstance(source_ref, str)
+            or source_ref not in allowed_sources
+            or source_ref in seen_sources
+            or not isinstance(media_ref, str)
+            or not media_ref
+            or len(media_ref) > 128
+            or media_ref in seen_refs
+        ):
+            return {}
+        clean_media_refs.append({"source_ref": source_ref, "ref": media_ref})
+        seen_sources.add(source_ref)
+        seen_refs.add(media_ref)
+
+    return {
+        "version": 1,
+        "conversation_uid": conversation_uid,
+        "conversation_revision": revision,
+        "request_id": request_id,
+        "force_send": force_send,
+        "source_attachment_refs": list(source_refs),
+        "media_refs": clean_media_refs,
+    }
 
 
 def _native_hub_chat_stream_row(value: Any) -> Dict[str, Any] | None:

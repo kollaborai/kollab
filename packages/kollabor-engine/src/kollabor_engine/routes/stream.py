@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 from typing import Any
@@ -402,6 +403,8 @@ async def chat_stream(
                 event = _event_payload(frame)
                 if event is None:
                     continue
+                event = copy.deepcopy(event)
+                _materialize_event_images(event, session_id)
                 seq = event["seq"]
                 event_uid = event["conversation_uid"]
                 event_generation = event["generation"]
