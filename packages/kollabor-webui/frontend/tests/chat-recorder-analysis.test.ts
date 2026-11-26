@@ -1220,7 +1220,12 @@ describe("chat recorder analysis", () => {
     const window = { fetch: async () => new Response("") };
     const document = {
       documentElement: {},
-      querySelectorAll: (selector: string) => selector === '[data-chat-tool-call-id]' ? [] : rows,
+      querySelectorAll: (selector: string) => {
+        if (selector === '[data-role="user"]') return rows.filter((row: any) => row.dataset.role === "user");
+        if (selector === '[data-role="assistant"]') return rows.filter((row: any) => row.dataset.role === "assistant");
+        if (selector === '[data-role="user"], [data-role="assistant"]' || selector === "[data-role]") return rows;
+        return [];
+      },
       querySelector: () => null,
     };
     class FakeMutationObserver { observe() {} }
