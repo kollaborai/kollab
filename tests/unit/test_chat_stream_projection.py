@@ -214,7 +214,15 @@ def test_xml_tool_history_round_trips_nonempty_results_into_a_tool_row():
     ]
     assert len(replies) == 1
     assert replies[0]["parts"] == [{"type": "text", "text": "Running it."}]
-    assert "fake-tool-ran" not in str(rows)
+    assert all(
+        not (
+            part.get("type") == "text"
+            and part.get("text", "").startswith("Tool result:")
+        )
+        for row in rows
+        for part in row["parts"]
+    )
+    assert "<terminal>" not in str(rows)
 
 
 def test_native_tool_history_reloads_as_distinct_reply_segments_and_one_call_row():
