@@ -217,6 +217,27 @@ describe("expanding a chat stream tool output preview", () => {
     expect(markup).not.toContain("Output preview:");
   });
 
+  it("counts chunk offsets in Unicode characters", async () => {
+    const fetchOutput = fetchChatStreamToolOutput();
+    expect(fetchOutput).toBeTypeOf("function");
+    if (!fetchOutput) return;
+    mocks.getChatStreamToolOutput
+      .mockResolvedValueOnce({
+        row_id: "row-1", tool_call_id: "tool-call-1", offset: 0,
+        next_offset: 2, total_chars: 3, output_type: "text", content: "🙂a", done: false,
+      })
+      .mockResolvedValueOnce({
+        row_id: "row-1", tool_call_id: "tool-call-1", offset: 2,
+        next_offset: 3, total_chars: 3, output_type: "text", content: "é", done: true,
+      });
+
+    await expect(fetchOutput("stream-unicode", "row-1", "tool-call-1", 3, "text"))
+      .resolves.toBe("🙂aé");
+    expect(mocks.getChatStreamToolOutput).toHaveBeenNthCalledWith(
+      2, "stream-unicode", "row-1", "tool-call-1", { offset: 2, limit: 32768 },
+    );
+  });
+
   it("rejects a chunk that belongs to a different row", async () => {
     const fetchOutput = fetchChatStreamToolOutput();
     expect(fetchOutput).toBeTypeOf("function");
