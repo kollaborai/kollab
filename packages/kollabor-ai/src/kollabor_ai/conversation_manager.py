@@ -59,6 +59,37 @@ SESSION_STAT_KEYS = (
 )
 
 
+def _acp_input_metadata(value: Any) -> Dict[str, Any]:
+    """Restore the ACP identity needed to project a user row after JSONL load."""
+    if not isinstance(value, dict) or value.get("provider") != "acp":
+        return {}
+    result: Dict[str, Any] = {"provider": "acp"}
+    for key in (
+        "request_id",
+        "source",
+        "thread_id",
+        "acp_turn_key",
+        "dispatch_epoch",
+    ):
+        item = value.get(key)
+        if isinstance(item, str) and item:
+            result[key] = item
+    turn_id = value.get("turn_id")
+    if isinstance(turn_id, int) and not isinstance(turn_id, bool) and turn_id > 0:
+        result["turn_id"] = turn_id
+    dispatch_order = value.get("dispatch_order")
+    if (
+        isinstance(dispatch_order, int)
+        and not isinstance(dispatch_order, bool)
+        and dispatch_order > 0
+    ):
+        result["dispatch_order"] = dispatch_order
+    outcome = value.get("chat_stream_outcome")
+    if isinstance(outcome, str) and outcome in {"completed", "failed", "cancelled"}:
+        result["chat_stream_outcome"] = outcome
+    return result
+
+
 def is_system_initialization_record(record: Any) -> bool:
     if not isinstance(record, dict) or record.get("type") != "user":
         return False
@@ -1141,6 +1172,10 @@ class ConversationManager:
                             and request_id
                         ):
                             message["metadata"]["request_id"] = request_id
+                        if msg_type == "user":
+                            message["metadata"].update(
+                                _acp_input_metadata(logged_metadata)
+                            )
                         # The logger stores initial system context as a user
                         # record. Preserve that wire role and recover only its
                         # explicit provenance, never classify by prompt text.

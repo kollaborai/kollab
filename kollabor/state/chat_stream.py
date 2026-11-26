@@ -1202,7 +1202,15 @@ class ChatStreamService:
                 continue
             turn_id = row.get("turn_id")
             reply = history_replies.get(turn_id)
-            if reply is not None:
+            persisted_outcome = row.get("status")
+            if persisted_outcome in {"completed", "failed", "cancelled"}:
+                info = {
+                    "id": input_id,
+                    "state": "ended",
+                    "turn_id": turn_id,
+                    "outcome": persisted_outcome,
+                }
+            elif reply is not None:
                 status = reply.get("status")
                 outcome = (
                     "cancelled"
@@ -1261,11 +1269,18 @@ class ChatStreamService:
                 if item.get("turn_id") == turn_id and item["id"] not in input_ids
             )
             reply = history_replies.get(turn_id)
-            turn_state = current.get("state") or (
+            persisted_terminal_input = any(
+                item.get("turn_id") == turn_id and item.get("state") == "ended"
+                for item in inputs.values()
+            )
+            turn_state = (
                 "ended"
-                if reply is not None
-                and reply.get("status") not in {"streaming", "running"}
-                else "running"
+                if persisted_terminal_input
+                or (
+                    reply is not None
+                    and reply.get("status") not in {"streaming", "running"}
+                )
+                else current.get("state") or "running"
             )
             turns[turn_id] = {
                 "turn_id": turn_id,
@@ -1425,6 +1440,13 @@ class ChatStreamService:
             row_id = row_id or f"transcript-{uuid.uuid5(uuid.NAMESPACE_URL, fallback_identity).hex}"
             row_status = metadata.get("status")
             stop_reason = metadata.get("stop_reason")
+            chat_stream_outcome = metadata.get("chat_stream_outcome")
+            if kind == "input" and chat_stream_outcome in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                row_status = chat_stream_outcome
             if kind == "reply" and stop_reason is not None and not row_status:
                 row_status = (
                     "done"

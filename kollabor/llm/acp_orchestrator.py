@@ -1726,6 +1726,14 @@ class ACPOrchestrator:
             # later binding or history operation fails or is cancelled.
             settled_usage = self._settle_turn_usage(result)
             await self._await_user_history(turn_key)
+            await self._persist_chat_stream_outcome(
+                admission,
+                "completed" if result.stop_reason == "end_turn" else (
+                    "cancelled"
+                    if str(result.stop_reason).lower() in {"cancelled", "canceled", "interrupted", "stop"}
+                    else "failed"
+                ),
+            )
             self._save_binding()
             await self._record_result(result, turn_key)
         except BaseException as exc:
@@ -1770,6 +1778,10 @@ class ACPOrchestrator:
                 if isinstance(exc, asyncio.CancelledError)
                 or (isinstance(exc, ACPError) and str(exc) == "ACP turn cancelled")
                 else "error"
+            )
+            await self._persist_chat_stream_outcome(
+                admission,
+                "cancelled" if stop_reason == "cancelled" else "failed",
             )
             end_frame = {
                 "type": "turn_end", "generation": generation,
@@ -2303,6 +2315,80 @@ class ACPOrchestrator:
                 ):
                     metadata.update(updates)
         return True
+
+    async def _persist_chat_stream_outcome(
+        self, admission: ACPAdmission, outcome: str
+    ) -> bool:
+        """Persist an admitted ACP input's explicit terminal result on its row."""
+        if outcome not in {"completed", "failed", "cancelled"}:
+            raise ValueError("invalid chat stream outcome")
+        identity = (admission.request_id, admission.turn_id, admission.history_key)
+        row_uuid = self._dispatch_history_row_uuids.get(identity)
+        task = self._dispatch_history_tasks.get(identity)
+        if task is not None:
+            try:
+                task_row_uuid = await task
+            except Exception as exc:
+                logger.warning(
+                    "ACP chat stream outcome could not await its user row (%s)",
+                    type(exc).__name__,
+                )
+                task_row_uuid = None
+            if isinstance(task_row_uuid, str) and task_row_uuid:
+                row_uuid = task_row_uuid
+                self._dispatch_history_row_uuids[identity] = row_uuid
+
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        logger_service = getattr(llm, "conversation_logger", None)
+        update_metadata = getattr(logger_service, "update_user_message_metadata", None)
+        expected = {
+            "provider": "acp",
+            "request_id": admission.request_id,
+            "turn_id": admission.turn_id,
+            "acp_turn_key": admission.history_key,
+        }
+        persisted = False
+        if row_uuid and callable(update_metadata):
+            try:
+                persisted = await update_metadata(
+                    row_uuid,
+                    expected_metadata=expected,
+                    updates={"chat_stream_outcome": outcome},
+                ) is True
+            except Exception as exc:
+                logger.warning(
+                    "ACP chat stream outcome persistence failed (%s)",
+                    type(exc).__name__,
+                )
+
+        # Keep the live transcript aligned with JSONL. This also supports
+        # embedded ACP contexts without a logger while preserving the exact
+        # request/turn/history identity when IDs are reused.
+        for message in getattr(
+            getattr(llm, "conversation_manager", None), "messages", None
+        ) or ():
+            metadata = message.get("metadata") if isinstance(message, dict) else None
+            if all(
+                isinstance(metadata, dict)
+                and metadata.get(key) == value
+                for key, value in expected.items()
+            ):
+                metadata["chat_stream_outcome"] = outcome
+        history = getattr(llm, "conversation_history", None)
+        if isinstance(history, list):
+            for message in history:
+                metadata = getattr(message, "metadata", None)
+                if all(
+                    isinstance(metadata, dict)
+                    and metadata.get(key) == value
+                    for key, value in expected.items()
+                ):
+                    metadata["chat_stream_outcome"] = outcome
+        if not persisted and row_uuid and callable(update_metadata):
+            logger.warning(
+                "ACP chat stream outcome did not match its exact user history row"
+            )
+        return persisted
 
 
     def advertised_command(self, name: str) -> str | None:
