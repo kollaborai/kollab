@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import fixture from "./fixtures/chat-stream/bad-gap.json";
 import { applyChatStreamEvent, initialStreamState } from "../src/chat-store";
 import type { ChatRow } from "../src/chat-stream";
+import { messageHasRecoverableChatStreamPreview } from "../src/chat-stream-content";
 import {
   WEB_INPUT_PREFIX,
   buildAdapter,
@@ -157,6 +158,7 @@ describe("toThreadMessageLike", () => {
       args: {},
       providerMetadata: { kollab: { chat_stream_args_preview: marker } },
     });
+    expect(messageHasRecoverableChatStreamPreview(undefined, [toolPart])).toBe(true);
 
     const opaqueMessage = toThreadMessageLike(row("row-opaque", [{
       type: "tool-call",
@@ -169,6 +171,7 @@ describe("toThreadMessageLike", () => {
     expect(opaqueMessage.content[0]).toMatchObject({
       argsText: JSON.stringify(markerShapedUserArgs),
     });
+    expect(messageHasRecoverableChatStreamPreview(undefined, [opaqueMessage.content[0]])).toBe(false);
   });
 
   it("carries a row-parts page marker in message metadata and part recovery in provider metadata", () => {
