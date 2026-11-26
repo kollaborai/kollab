@@ -167,6 +167,22 @@ export type HistoryPageOptions = {
   toolOutput?: "preview" | "full";
 };
 
+export type ChatStreamToolOutputType = "text" | "json";
+
+/** One bounded slice of a stored chat-stream tool result. Offsets are character offsets. */
+export type ChatStreamToolOutputChunk = {
+  row_id: string;
+  tool_call_id: string;
+  offset: number;
+  next_offset: number;
+  total_chars: number;
+  output_type: ChatStreamToolOutputType;
+  content: string;
+  done: boolean;
+};
+
+export const CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE = 32_768;
+
 export function historyContentToText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -1344,6 +1360,31 @@ export class EngineApi {
     const query = new URLSearchParams({ ref: reference });
     return this.json<{ session_id: string; content: unknown }>(
       `/sessions/${encodeURIComponent(sessionId)}/history/output?${query}`,
+    );
+  }
+
+  getChatStreamToolOutput(
+    sessionId: string,
+    rowId: string,
+    toolCallId: string,
+    options: { offset: number; limit?: number } = { offset: 0 },
+  ) {
+    const offset = options.offset;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RangeError("Tool output offset must be a non-negative integer.");
+    }
+    const requestedLimit = options.limit ?? CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+      throw new RangeError("Tool output limit must be a positive integer.");
+    }
+    const limit = Math.min(requestedLimit, CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE);
+    const query = new URLSearchParams({
+      tool_call_id: toolCallId,
+      offset: String(offset),
+      limit: String(limit),
+    });
+    return this.json<ChatStreamToolOutputChunk>(
+      `/sessions/${encodeURIComponent(sessionId)}/chat-stream/rows/${encodeURIComponent(rowId)}/tool-output?${query}`,
     );
   }
 
