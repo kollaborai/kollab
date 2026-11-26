@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 
 from kollabor.state.chat_stream import ChatStreamService
@@ -145,6 +146,74 @@ def test_large_scalar_tool_args_are_json_marked_and_hash_json_retrieval():
 
     assert "".join(chunks) == expected
     assert json.loads("".join(chunks)) == args
+
+
+def test_parts_page_uses_one_snapshot_during_concurrent_append():
+    row = _row(
+        [
+            {"type": "text", "text": "before"},
+            {"type": "image", "url": "data:image/png;base64," + "A" * 300_000},
+        ]
+    )
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(conversation_manager=None, conversation_history=[]),
+        get_conversation_uid=lambda: "content-preview-test",
+    )
+    service = ChatStreamService(state)
+    service._upsert("content-preview-test", row)
+    projected = service._log("content-preview-test")._events[-1]["data"]
+    marker = projected["chat_stream_parts_preview"]
+
+    revision_ready = threading.Event()
+    append_done = threading.Event()
+    original_cache = service._cached_stream_content
+    paused = False
+
+    def pause_after_revision(uid, row_id, part_index, field, value):
+        nonlocal paused
+        result = original_cache(uid, row_id, part_index, field, value)
+        if field == "parts" and not paused:
+            paused = True
+            revision_ready.set()
+            append_done.wait(timeout=0.5)
+        return result
+
+    service._cached_stream_content = pause_after_revision
+    response = {}
+
+    def read_page():
+        response.update(
+            service.get_parts(
+                {
+                    "row_id": row["id"],
+                    "output_revision": marker["output_revision"],
+                    "offset": 0,
+                    "limit": 1,
+                }
+            )
+        )
+
+    def append_text():
+        assert revision_ready.wait(timeout=3)
+        service.record_event(
+            "row.append", {"id": row["id"], "part": 0, "text": "CHANGED"}
+        )
+        append_done.set()
+
+    reader = threading.Thread(target=read_page)
+    writer = threading.Thread(target=append_text)
+    reader.start()
+    writer.start()
+    reader.join(timeout=5)
+    writer.join(timeout=5)
+
+    assert not reader.is_alive()
+    assert not writer.is_alive()
+    assert response["output_revision"] == marker["output_revision"]
+    assert response["parts"][0]["text"] == "before"
+    assert service._rows["content-preview-test"][row["id"]]["parts"][0]["text"] == (
+        "beforeCHANGED"
+    )
 
 
 def test_compact_row_marks_every_truncated_text_part_for_retrieval():
