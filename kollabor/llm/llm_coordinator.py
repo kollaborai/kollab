@@ -317,8 +317,10 @@ class LLMService:
                 for field in (
                     "request_id",
                     "request_ids",
+                    "input_id",
                     "turn_id",
                     "operator_inputs",
+                    "chat_stream_trigger_llm",
                 ):
                     value = metadata.get(field)
                     if value is not None:

@@ -13,6 +13,8 @@ from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 from kollabor.state.chat_stream import ChatStreamService
 from kollabor_agent.queue_processor import QueueProcessor, TaggedInput, batch_request_ids
+from kollabor_ai.conversation_logger import KollaborConversationLogger
+from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_ai.message_content import combine_message_contents
 from kollabor_events.chat_stream import sequence_problems
 from kollabor_events.data_models import ConversationMessage
@@ -97,6 +99,15 @@ def _processor(state: _State) -> QueueProcessor:
     )
     processor.cancellation_message_shown = False
     return processor
+
+
+def _manager_config(conversations_dir):
+    return SimpleNamespace(
+        _conversations_dir=conversations_dir,
+        get=lambda key, default=None: (
+            True if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
 
 
 def _events(stream: ChatStreamService, initial: dict):
@@ -365,26 +376,12 @@ async def test_plugin_add_message_projects_its_displayable_user_text_live():
 
     result = await MessageHandler(coordinator).handle_add_message(
         {
-            "messages": [
-                {"role": "user", "content": "plugin message"},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "plugin caption"},
-                        {
-                            "type": "image",
-                            "source": {
-                                "kind": "url",
-                                "url": "https://example.invalid/photo.png",
-                            },
-                        },
-                    ],
-                },
-            ],
+            "messages": [{"role": "user", "content": "plugin message"}],
             "options": {
                 "show_loading": False,
                 "log_messages": False,
                 "display_messages": True,
+                "trigger_llm": False,
             },
         },
         None,
@@ -394,21 +391,127 @@ async def test_plugin_add_message_projects_its_displayable_user_text_live():
     rows = _row_events(events, "input")
     assert result["success"] is True
     latest_rows = {row["id"]: row for row in rows}
-    assert len(latest_rows) == 2
+    assert len(latest_rows) == 1
     text_by_id = {
         row_id: [part.get("text") for part in row["parts"] if part["type"] == "text"]
         for row_id, row in latest_rows.items()
     }
-    assert sorted(tuple(texts) for texts in text_by_id.values()) == [
-        ("plugin caption",),
-        ("plugin message",),
-    ]
+    assert list(text_by_id.values()) == [["plugin message"]]
+    input_states = {
+        event["data"]["id"]: event["data"]
+        for event in events
+        if event["type"] == "input.state"
+    }
+    assert set(input_states) == set(latest_rows)
     assert all(
-        "[image" not in part.get("text", "")
-        for row in latest_rows.values()
-        for part in row["parts"]
+        info == {
+            "id": input_id,
+            "state": "ended",
+            "turn_id": None,
+            "outcome": "completed",
+        }
+        for input_id, info in input_states.items()
     )
-    assert sequence_problems(events, complete=False) == []
+    assert not any(event["type"] == "turn.state" for event in events)
+    assert sequence_problems(events) == []
+
+
+@pytest.mark.asyncio
+async def test_plugin_multipart_input_identity_and_text_survive_snapshot_reload(tmp_path):
+    state = _State()
+    conversation_dir = tmp_path / "conversations"
+    logger = KollaborConversationLogger(conversation_dir)
+    manager = ConversationManager(_manager_config(conversation_dir), logger)
+    manager.conversation_metadata["conversation_uid"] = "conversation-a"
+    state._llm_service.conversation_manager = manager
+    state._llm_service.conversation_logger = logger
+
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({})["events"][0]
+    coordinator = state._llm_service
+    coordinator._acp_owns_chat = lambda: False
+    coordinator._add_conversation_message = coordinator.add
+    coordinator.current_parent_uuid = "plugin-parent"
+    coordinator.message_display_service = SimpleNamespace(
+        show_loading=lambda *_args: None,
+        hide_loading=lambda: None,
+        message_coordinator=SimpleNamespace(display_message_sequence=lambda *_args: None),
+    )
+    coordinator.session_stats = {"messages": 0}
+
+    await MessageHandler(coordinator).handle_add_message(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "first"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "kind": "url",
+                                "url": "https://example.invalid/photo.png",
+                            },
+                        },
+                        {"type": "text", "text": "second"},
+                    ],
+                }
+            ],
+            "options": {
+                "show_loading": False,
+                "log_messages": False,
+                "display_messages": True,
+                "trigger_llm": False,
+            },
+        },
+        None,
+    )
+
+    live_events = _events(stream, initial)
+    live_rows = {row["id"]: row for row in _row_events(live_events, "input")}
+    assert len(live_rows) == 1
+    live_row_id, live_row = next(iter(live_rows.items()))
+    assert [part.get("text") for part in live_row["parts"]] == ["first\nsecond"]
+    assert "[image" not in str(live_row["parts"])
+    assert sequence_problems(live_events, complete=False) == []
+
+    same_process_snapshot = stream.subscribe({})["events"][0]["data"]
+    same_process_rows = [
+        row for row in same_process_snapshot["rows"] if row["kind"] == "input"
+    ]
+    assert len(same_process_rows) == 1
+    assert same_process_rows[0]["id"] == live_row_id
+
+    saved_snapshot = manager.snapshots_dir / f"{manager.current_session_id}_snapshot.json"
+    assert saved_snapshot.exists()
+    resumed_manager = ConversationManager(_manager_config(conversation_dir), logger)
+    assert resumed_manager.load_conversation(saved_snapshot)
+    resumed_state = SimpleNamespace(
+        _event_bus=state._event_bus,
+        _llm_service=SimpleNamespace(
+            conversation_history=None,
+            conversation_manager=resumed_manager,
+            conversation_logger=logger,
+        ),
+        get_conversation_uid=lambda: "conversation-a",
+    )
+    resumed_stream = ChatStreamService(resumed_state)
+    resumed_snapshot = resumed_stream.subscribe({})["events"][0]["data"]
+    resumed_rows = [row for row in resumed_snapshot["rows"] if row["kind"] == "input"]
+    assert len(resumed_rows) == 1
+    assert resumed_rows[0]["id"] == live_row_id
+    assert resumed_rows[0]["parts"] == [{"type": "text", "text": "first\nsecond"}]
+    message = state._llm_service.conversation_history[0]
+    assert message.metadata["input_id"] == live_row_id
+    assert resumed_snapshot["inputs"] == [
+        {
+            "id": live_row_id,
+            "state": "ended",
+            "turn_id": None,
+            "outcome": "completed",
+        }
+    ]
 
 
 def test_unmarked_idless_user_payload_still_hides_model_hud_and_image_tokens():

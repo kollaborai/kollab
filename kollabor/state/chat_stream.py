@@ -989,21 +989,59 @@ class ChatStreamService:
         # model payload containing HUD context or image placeholders.
         display_text = event.get("display_text")
         if isinstance(display_text, str) and display_text.strip():
-            self._on_user_message_input(
-                uid,
-                {
-                    **event,
-                    "request_id": "",
-                    "request_ids": [],
-                    "operator_inputs": [],
-                    "text": display_text,
-                    "_authored_text": True,
-                },
-            )
+            input_id = event.get("input_id")
+            if not isinstance(input_id, str) or not input_id:
+                input_id = self._transcript_input_id(uid, display_text)
+            if not isinstance(input_id, str) or not input_id:
+                input_id = f"daemon-{uuid.uuid4().hex}"
+            self._on_plugin_user_message(uid, event, input_id, display_text)
             return
         # Without a request ID or authenticated operator text, this event's
         # text is only the model payload. It may contain HUD context or image
         # placeholders and is not safe to project as authored input.
+
+    def _on_plugin_user_message(
+        self,
+        uid: str,
+        event: dict[str, Any],
+        input_id: str,
+        display_text: str,
+    ) -> None:
+        """Project an explicitly displayable plugin message without inventing a turn."""
+        self._ensure_input_row(uid, input_id, text=display_text)
+        prior = self._inputs.setdefault(uid, {}).get(input_id, {})
+        if prior.get("state") == "ended":
+            return
+
+        queued = event.get("chat_stream_trigger_llm") is True
+        state = "queued" if queued else "ended"
+        outcome = None if queued else "completed"
+        row = self._rows.setdefault(uid, {}).get(input_id)
+        if row is not None:
+            parts = self._input_parts(display_text)
+            row_status = "queued" if queued else "completed"
+            if (
+                row.get("turn_id") is not None
+                or row.get("status") != row_status
+                or row.get("parts") != parts
+            ):
+                self._upsert(
+                    uid,
+                    {
+                        **row,
+                        "turn_id": None,
+                        "status": row_status,
+                        "parts": parts,
+                    },
+                )
+        if prior.get("state") != state or prior.get("turn_id") is not None:
+            self._set_input_state(
+                uid,
+                input_id,
+                state,
+                turn_id=None,
+                outcome=outcome,
+            )
 
     def _on_user_message_input(self, uid: str, event: dict[str, Any]) -> None:
         text = event.get("text")
@@ -2708,9 +2746,12 @@ class ChatStreamService:
             )
             raw_content = field(message, "content", "")
             projected = voice_display[index]
+            plugin_display_text = metadata.get("chat_stream_display_text")
             content = (
                 projected
                 if source_role == "assistant" and projected is not None
+                else plugin_display_text
+                if source_role == "user" and isinstance(plugin_display_text, str)
                 else metadata.get("display_content", raw_content)
             )
             image_store = getattr(llm_service, "_image_store", None)
