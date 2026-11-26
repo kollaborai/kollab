@@ -718,13 +718,40 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         reply_id = params.get("reply_id")
         mailbox = getattr(state_service, "_goal_reply_mailbox", None)
         if not isinstance(reply_id, str) or not re.fullmatch(r"goal-[0-9a-f]{32}", reply_id) or mailbox is None:
+            stream = getattr(state_service, "chat_stream", None)
+            if not isinstance(reply_id, str) or not re.fullmatch(r"goal-[0-9a-f]{32}", reply_id):
+                return {"status": "missing", "message": "goal reply expired or is unavailable"}
+            poll_ordered = getattr(stream, "poll_goal_reply", None)
+            if callable(poll_ordered):
+                ordered = await poll_ordered(reply_id)
+                if ordered is not None:
+                    return ordered
             return {"status": "missing", "message": "goal reply expired or is unavailable"}
+        stream = getattr(state_service, "chat_stream", None)
+        authorize = getattr(stream, "authorize_goal_reply", None)
+        if callable(authorize):
+            authorized = await authorize(reply_id)
+            if authorized is False:
+                return {"status": "missing", "message": "goal reply expired or is unavailable"}
+            if authorized is True:
+                poll_ordered = getattr(stream, "poll_goal_reply", None)
+                ordered = await poll_ordered(reply_id) if callable(poll_ordered) else None
+                if ordered is not None:
+                    return ordered
         return mailbox.poll(reply_id, state_service.get_conversation_uid())
 
     async def _cancel_goal_reply(params: dict[str, Any]) -> dict[str, Any]:
-        from .goal_replies import GoalReplyMailbox
-
         reply_id = params.get("reply_id")
+        stream = getattr(state_service, "chat_stream", None)
+        cancel_ordered = getattr(stream, "cancel_goal_reply", None)
+        if callable(cancel_ordered):
+            ordered = await cancel_ordered(reply_id)
+            if ordered is not None:
+                return ordered
+        from .goal_replies import GOAL_REPLY_PATTERN, GoalReplyMailbox
+
+        if not isinstance(reply_id, str) or GOAL_REPLY_PATTERN.fullmatch(reply_id) is None:
+            return {"cancelled": False, "reason": "goal reply is unavailable"}
         mailbox = getattr(state_service, "_goal_reply_mailbox", None)
         if mailbox is None:
             mailbox = state_service._goal_reply_mailbox = GoalReplyMailbox()

@@ -494,6 +494,7 @@ class WebMessageQueueRuntime:
         input_id = params.get("id")
         text = params.get("text")
         attachments = params.get("attachments", [])
+        goal_reply_id = params.get("goal_reply_id")
         if (
             not isinstance(input_id, str)
             or not input_id
@@ -505,6 +506,17 @@ class WebMessageQueueRuntime:
         if not text.strip() and not attachments:
             return {"accepted": False, "reason": "empty_input"}
 
+        from .goal_replies import GOAL_REPLY_PATTERN, is_goal_input
+
+        if is_goal_input(text):
+            if (
+                not isinstance(goal_reply_id, str)
+                or GOAL_REPLY_PATTERN.fullmatch(goal_reply_id) is None
+            ):
+                return {"accepted": False, "reason": "invalid_goal_reply"}
+        elif goal_reply_id is not None:
+            return {"accepted": False, "reason": "invalid_goal_reply"}
+
         identity = await self._current_identity()
         if identity is None:
             return {"accepted": False, "reason": "conversation_unavailable"}
@@ -512,9 +524,12 @@ class WebMessageQueueRuntime:
         binding = await self._resolve_trusted_scope(scoped_params)
         caller = current_rpc_caller_context()
         assert isinstance(caller, RpcCallerContext)
-        payload = json.dumps(
-            {"text": text}, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
+        envelope = {"text": text}
+        if goal_reply_id is not None:
+            envelope["goal_reply_id"] = goal_reply_id
+        payload = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
 
         async with self.registry.acquire(
             binding.scope_id,
@@ -536,7 +551,7 @@ class WebMessageQueueRuntime:
                     existing_payload = json.loads(existing.payload.decode("utf-8"))
                 except UnicodeDecodeError, json.JSONDecodeError:
                     existing_payload = None
-                if existing_payload != {"text": text} or len(
+                if existing_payload != envelope or len(
                     existing.attachment_refs
                 ) != len(attachments):
                     return {"accepted": False, "reason": "input_id_conflict"}
@@ -616,6 +631,9 @@ class WebMessageQueueRuntime:
             return {"found": False, "cancelled": False}
         identity = await self._current_identity()
         if identity is None:
+            return {"found": False, "cancelled": False}
+        expected_uid = params.get("expected_conversation_uid")
+        if expected_uid is not None and expected_uid != identity.uid:
             return {"found": False, "cancelled": False}
         scoped_params = {"expected_conversation_uid": identity.uid}
         binding = await self._resolve_trusted_scope(scoped_params)

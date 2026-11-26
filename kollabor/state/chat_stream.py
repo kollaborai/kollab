@@ -6,6 +6,7 @@ import asyncio
 import copy
 import logging
 import threading
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -205,6 +206,10 @@ class ChatStreamService:
         self._input_scopes: dict[tuple[str, str], tuple[str, str, str]] = {}
         self._input_text: dict[tuple[str, str], str] = {}
         self._input_attachments: dict[tuple[str, str], list[dict[str, str]]] = {}
+        self._input_goal_reply_ids: dict[tuple[str, str], str | None] = {}
+        self._goal_reply_owners: dict[
+            str, tuple[str, str, tuple[str, str, str], float]
+        ] = {}
         self._input_lock = asyncio.Lock()
         self._turn_inputs: dict[tuple[str, str], list[str]] = {}
         self._input_turns: dict[tuple[str, str], str] = {}
@@ -236,7 +241,10 @@ class ChatStreamService:
 
     async def _add_input(self, params: dict[str, Any]) -> dict[str, Any]:
         self.attach_display_tap()
-        input_id, text, attachments = self._validate_input(params)
+        try:
+            input_id, text, attachments, goal_reply_id = self._validate_input(params)
+        except ValueError:
+            return {"error": "input was not admitted"}
         uid = self._conversation_uid()
         runtime = self._queue_runtime()
         scope = await runtime.input_scope(uid)
@@ -249,13 +257,30 @@ class ChatStreamService:
             previous_attachments = self._input_attachments.get(
                 (uid, input_id), attachments
             )
-            if previous_text != text or previous_attachments != attachments:
+            previous_goal_reply_id = self._input_goal_reply_ids.get(
+                (uid, input_id)
+            )
+            if (
+                previous_text != text
+                or previous_attachments != attachments
+                or previous_goal_reply_id != goal_reply_id
+            ):
                 return {"error": "input id is already bound to different content"}
             return {"id": input_id, "state": known["state"]}
+        self._prune_goal_reply_owners()
+        if goal_reply_id is not None:
+            existing_goal_owner = self._goal_reply_owners.get(goal_reply_id)
+            if existing_goal_owner is not None:
+                old_uid, old_input_id, old_scope, _created = existing_goal_owner
+                if (old_uid, old_input_id, old_scope) != (uid, input_id, scope):
+                    return {"error": "input was not admitted"}
+            elif len(self._goal_reply_owners) >= 256:
+                return {"error": "input was not admitted"}
 
-        result = await runtime.add_input(
-            {"id": input_id, "text": text, "attachments": attachments}
-        )
+        runtime_params = {"id": input_id, "text": text, "attachments": attachments}
+        if goal_reply_id is not None:
+            runtime_params["goal_reply_id"] = goal_reply_id
+        result = await runtime.add_input(runtime_params)
         if not isinstance(result, dict) or result.get("accepted") is not True:
             reason = result.get("reason") if isinstance(result, dict) else None
             return {
@@ -276,6 +301,14 @@ class ChatStreamService:
         self._input_scopes[(uid, input_id)] = scope
         self._input_text[(uid, input_id)] = text
         self._input_attachments[(uid, input_id)] = copy.deepcopy(attachments)
+        self._input_goal_reply_ids[(uid, input_id)] = goal_reply_id
+        if goal_reply_id is not None:
+            self._goal_reply_owners[goal_reply_id] = (
+                uid,
+                input_id,
+                scope,
+                time.monotonic(),
+            )
         self._set_input_state(
             uid,
             input_id,
@@ -295,15 +328,171 @@ class ChatStreamService:
         self._upsert(uid, row)
         return {"id": input_id, "state": state}
 
-    async def cancel_queued_input(self, params: dict[str, Any]) -> dict[str, Any]:
+    def begin_ordered_command(
+        self, input_id: str, conversation_uid: str, queue_scope_id: str
+    ) -> str | None:
+        """Publish neutral command progress for one claimed queue input."""
+        if (
+            not isinstance(input_id, str)
+            or not input_id
+            or conversation_uid != self._conversation_uid()
+        ):
+            return None
+        owner = self._input_scopes.get((conversation_uid, input_id))
+        current = self._inputs.get(conversation_uid, {}).get(input_id, {})
+        if (
+            owner is None
+            or owner[0] != queue_scope_id
+            or current.get("state") != "queued"
+        ):
+            return None
+        turn_id = f"command-{uuid.uuid4().hex}"
+        self._input_turns[(conversation_uid, input_id)] = turn_id
+        self._add_turn_input(conversation_uid, turn_id, input_id)
+        self._set_input_state(conversation_uid, input_id, "started", turn_id=turn_id)
+        row = self._rows.get(conversation_uid, {}).get(input_id)
+        if row is not None:
+            self._upsert(
+                conversation_uid,
+                {**row, "turn_id": turn_id, "status": "started"},
+            )
+        self._set_turn_state(conversation_uid, turn_id, "running", input_id=input_id)
+        self._active_turns[conversation_uid] = turn_id
+        return turn_id
+
+    def finish_ordered_command(
+        self,
+        input_id: str,
+        conversation_uid: str,
+        turn_id: str,
+        outcome: str,
+    ) -> None:
+        """End one ordered slash-command lifecycle without exposing its result."""
+        if outcome not in {"completed", "failed", "cancelled"}:
+            outcome = "failed"
+        current = self._inputs.get(conversation_uid, {}).get(input_id, {})
+        if current.get("state") == "ended":
+            return
+        if current.get("turn_id") not in (None, turn_id):
+            return
+        self._set_turn_state(conversation_uid, turn_id, "ended", input_id=input_id)
+        self._set_input_state(
+            conversation_uid,
+            input_id,
+            "ended",
+            turn_id=turn_id,
+            outcome=outcome,
+        )
+        row = self._rows.get(conversation_uid, {}).get(input_id)
+        if row is not None:
+            self._upsert(
+                conversation_uid,
+                {**row, "turn_id": turn_id, "status": outcome},
+            )
+        if self._active_turns.get(conversation_uid) == turn_id:
+            self._active_turns.pop(conversation_uid, None)
+        reply_id = self._input_goal_reply_ids.get((conversation_uid, input_id))
+        if reply_id is not None:
+            owner = self._goal_reply_owners.get(reply_id)
+            if owner is not None:
+                self._goal_reply_owners[reply_id] = (*owner[:3], time.monotonic())
+
+    async def authorize_goal_reply(self, reply_id: str) -> bool | None:
+        """Check a queued goal capability against its authenticated input scope.
+
+        ``None`` means the capability belongs to the older non-queue transport,
+        whose authorization remains the unguessable reply capability itself.
+        """
+        self._prune_goal_reply_owners()
+        owner = self._goal_reply_owners.get(reply_id)
+        if owner is None:
+            return None
+        uid, _input_id, expected_scope, _created = owner
+        if uid != self._conversation_uid():
+            return False
+        try:
+            actual_scope = await self._queue_runtime().input_scope(uid)
+        except Exception:
+            return False
+        return actual_scope == expected_scope
+
+    async def poll_goal_reply(self, reply_id: str) -> dict[str, Any] | None:
+        """Poll an ordered goal reply after checking its queue owner scope."""
+        self._prune_goal_reply_owners()
+        owner = self._goal_reply_owners.get(reply_id)
+        if owner is None:
+            return None
+        if await self.authorize_goal_reply(reply_id) is not True:
+            return {"status": "missing", "message": "goal reply expired or is unavailable"}
+        uid, input_id, _scope, _created = owner
+        mailbox = getattr(self._state_service, "_goal_reply_mailbox", None)
+        if mailbox is not None:
+            result = mailbox.poll(reply_id, uid)
+            if result.get("status") != "missing":
+                return result
+        current = self._inputs.get(uid, {}).get(input_id, {})
+        if current.get("state") in {"queued", "started", "joined"}:
+            return {"status": "pending"}
+        outcome = current.get("outcome")
+        message = (
+            "Goal command cancelled before execution."
+            if outcome == "cancelled"
+            else "Goal command could not be completed."
+        )
+        return {"status": "complete", "success": False, "message": message}
+
+    async def cancel_goal_reply(self, reply_id: str) -> dict[str, Any] | None:
+        """Cancel one owner-bound queued command or its private running task."""
+        self._prune_goal_reply_owners()
+        owner = self._goal_reply_owners.get(reply_id)
+        if owner is None:
+            return None
+        if await self.authorize_goal_reply(reply_id) is not True:
+            return {"cancelled": False, "reason": "goal reply is unavailable"}
+        uid, input_id, _scope, _created = owner
+        removed = await self.cancel_queued_input(
+            {"id": input_id}, expected_conversation_uid=uid
+        )
+        if removed.get("cancelled") is True:
+            return removed
+        mailbox = getattr(self._state_service, "_goal_reply_mailbox", None)
+        if mailbox is None:
+            from .goal_replies import GoalReplyMailbox
+
+            mailbox = self._state_service._goal_reply_mailbox = GoalReplyMailbox()
+        return mailbox.cancel(reply_id)
+
+    def _prune_goal_reply_owners(self) -> None:
+        now = time.monotonic()
+        self._goal_reply_owners = {
+            reply_id: owner
+            for reply_id, owner in self._goal_reply_owners.items()
+            if (
+                self._inputs.get(owner[0], {}).get(owner[1], {}).get("state")
+                != "ended"
+                or now - owner[3] < 600.0
+            )
+        }
+
+    async def cancel_queued_input(
+        self,
+        params: dict[str, Any],
+        *,
+        expected_conversation_uid: str | None = None,
+    ) -> dict[str, Any]:
         input_id = params.get("id")
         if not isinstance(input_id, str) or not input_id:
             return {"found": False, "cancelled": False}
         uid = self._conversation_uid()
+        if expected_conversation_uid is not None and expected_conversation_uid != uid:
+            return {"found": False, "cancelled": False}
         existing = self._inputs.setdefault(uid, {}).get(input_id)
         if existing is not None and existing.get("state") != "queued":
             return {"found": True, "cancelled": False}
-        result = await self._queue_runtime().cancel_queued_input({"id": input_id})
+        runtime_params = {"id": input_id}
+        if expected_conversation_uid is not None:
+            runtime_params["expected_conversation_uid"] = expected_conversation_uid
+        result = await self._queue_runtime().cancel_queued_input(runtime_params)
         if not isinstance(result, dict) or result.get("found") is not True:
             return {"found": False, "cancelled": False}
         cancelled = result.get("cancelled") is True
@@ -320,6 +509,14 @@ class ChatStreamService:
             if row is not None:
                 updated = {**row, "status": "cancelled"}
                 self._upsert(uid, updated)
+            reply_id = self._input_goal_reply_ids.get((uid, input_id))
+            if reply_id is not None:
+                owner = self._goal_reply_owners.get(reply_id)
+                if owner is not None:
+                    self._goal_reply_owners[reply_id] = (
+                        *owner[:3],
+                        time.monotonic(),
+                    )
         return {"found": True, "cancelled": cancelled}
 
     async def admit_queued_batch(self, input_ids, scope, enqueue):
@@ -1718,7 +1915,9 @@ class ChatStreamService:
         return uid
 
     @staticmethod
-    def _validate_input(params: Any) -> tuple[str, str, list[dict[str, Any]]]:
+    def _validate_input(
+        params: Any,
+    ) -> tuple[str, str, list[dict[str, Any]], str | None]:
         if not isinstance(params, dict):
             raise ValueError("input must be an object")
         input_id, text, attachments = (
@@ -1726,6 +1925,7 @@ class ChatStreamService:
             params.get("text"),
             params.get("attachments", []),
         )
+        goal_reply_id = params.get("goal_reply_id")
         if not isinstance(input_id, str) or not input_id or len(input_id) > 256:
             raise ValueError("input id is required")
         if not isinstance(text, str):
@@ -1744,7 +1944,17 @@ class ChatStreamService:
             )
         if not text.strip() and not copied:
             raise ValueError("input text or an attachment is required")
-        return input_id, text, copied
+        from kollabor.state.goal_replies import GOAL_REPLY_PATTERN, is_goal_input
+
+        if is_goal_input(text):
+            if (
+                not isinstance(goal_reply_id, str)
+                or GOAL_REPLY_PATTERN.fullmatch(goal_reply_id) is None
+            ):
+                raise ValueError("goal input needs a private reply capability")
+        elif goal_reply_id is not None:
+            raise ValueError("private goal reply capability is only valid for goal input")
+        return input_id, text, copied, goal_reply_id
 
     @staticmethod
     def _input_parts(

@@ -38,6 +38,15 @@ class InputRequest(BaseModel):
     id: StrictStr = Field(min_length=1, max_length=256)
     text: StrictStr
     attachments: list[InputAttachment] = Field(default_factory=list, max_length=20)
+    goal_reply_id: StrictStr | None = Field(
+        default=None, pattern=r"^goal-[0-9a-f]{32}$"
+    )
+
+
+class GoalReplyPollRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    goal_reply_id: StrictStr = Field(pattern=r"^goal-[0-9a-f]{32}$")
 
 
 def _get_session(session_id: str) -> Any:
@@ -325,6 +334,11 @@ async def add_input(session_id: str, body: InputRequest):
             "id": body.id,
             "text": body.text,
             "attachments": [attachment.model_dump() for attachment in body.attachments],
+            **(
+                {"goal_reply_id": body.goal_reply_id}
+                if body.goal_reply_id is not None
+                else {}
+            ),
         },
     )
     if isinstance(result, dict) and result.get("error") == (
@@ -334,6 +348,8 @@ async def add_input(session_id: str, body: InputRequest):
             status_code=409,
             detail="This input ID is already bound to different content.",
         )
+    if isinstance(result, dict) and result.get("error") == "input was not admitted":
+        raise HTTPException(status_code=422, detail="The input was not admitted.")
     if (
         not isinstance(result, dict)
         or result.get("id") != body.id
@@ -343,6 +359,41 @@ async def add_input(session_id: str, body: InputRequest):
             status_code=502, detail="The local daemon returned an invalid input result."
         )
     return {"id": body.id, "state": result["state"]}
+
+
+@router.post("/{session_id}/goal-replies/poll")
+async def poll_goal_reply(session_id: str, body: GoalReplyPollRequest):
+    session = _get_session(session_id)
+    poll = getattr(session, "poll_goal_reply", None)
+    if not callable(poll):
+        raise HTTPException(status_code=503, detail="Goal replies are unavailable.")
+    result = await poll(body.goal_reply_id)
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="The local daemon returned an invalid goal reply.")
+    status = result.get("status")
+    if status == "pending":
+        return {"status": "pending"}
+    if status == "missing":
+        return {"status": "missing", "message": "goal reply expired or is unavailable"}
+    if (
+        status != "complete"
+        or not isinstance(result.get("success"), bool)
+        or not isinstance(result.get("message"), str)
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon returned an invalid goal reply.",
+        )
+    reply = {
+        "status": "complete",
+        "success": result["success"],
+        "message": result["message"],
+    }
+    for field in ("goal_id", "goal_request_id", "request_id"):
+        value = result.get(field)
+        if isinstance(value, str):
+            reply[field] = value
+    return reply
 
 
 @router.post("/{session_id}/inputs/{input_id}/cancel")

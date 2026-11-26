@@ -669,7 +669,10 @@ class WebMessageQueue:
             decoded = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return ""
-        if not isinstance(decoded, dict) or set(decoded) != {"text"}:
+        if not isinstance(decoded, dict) or set(decoded) not in (
+            {"text"},
+            {"text", "goal_reply_id"},
+        ):
             return ""
         text = decoded.get("text")
         if not isinstance(text, str):

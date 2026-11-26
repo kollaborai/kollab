@@ -315,6 +315,18 @@ class LLMService:
                 "user_message",
                 role="user",
                 text=content_to_text(content),
+                **(
+                    {"request_id": message.metadata["request_id"]}
+                    if isinstance(message.metadata, dict)
+                    and isinstance(message.metadata.get("request_id"), str)
+                    else {}
+                ),
+                **(
+                    {"turn_id": message.metadata["turn_id"]}
+                    if isinstance(message.metadata, dict)
+                    and isinstance(message.metadata.get("turn_id"), str)
+                    else {}
+                ),
             )
 
         return cast(str, message_uuid)

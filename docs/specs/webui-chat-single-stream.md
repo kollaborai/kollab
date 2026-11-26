@@ -72,7 +72,30 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 
 A client connects without `after` and gets a `snapshot`. It reconnects with the last `seq` it applied and gets every later event. It gets a new `snapshot` instead when that `seq` is older than the daemon keeps (default: the current turn and the last 2,000 events) or when `conversation_uid` changed. Older rows load through `GET /sessions/{id}/rows?before=<cursor>&limit=<n>`, which answers `{rows, older}` in the same row shape, oldest first; `older` is the next older cursor or `null`, and a `409` means the cursor belongs to another conversation, so the client resyncs. The legacy `/history` route keeps its old envelope until cutover.
 
-**Sending.** `POST /sessions/{id}/inputs {id, text, attachments}` answers `202 {id, state}`. The reply arrives on the stream, for the sender as for every other client. `POST /sessions/{id}/inputs/{input_id}/cancel` cancels a queued input. `/assistant`, the `synced` point and the `history_updated` refetch are removed at cutover.
+**Sending.** `POST /sessions/{id}/inputs {id, text, attachments}` answers `202 {id, state}`. The reply arrives on the stream, for the sender as for every other client. A retry with the same input id and same content returns its current state; changing any bound content is `409`. `POST /sessions/{id}/inputs/{input_id}/cancel` cancels a queued input. `/assistant`, the `synced` point and the `history_updated` refetch are removed at cutover.
+
+An input whose authored text is `/goal` or `/goals` is an ordered daemon command. The client creates a fresh private reply capability for each input as `goal-` followed by 128 cryptographically random bits in lowercase hexadecimal, and sends `goal_reply_id` with that input:
+
+```json
+POST /sessions/{id}/inputs
+{"id":"input-…","text":"/goal inspect the release","attachments":[],"goal_reply_id":"goal-<32 lowercase hex digits>"}
+
+202 {"id":"input-…","state":"queued"}
+```
+
+The capability is part of the input's idempotency binding. Resending the same input id, content and capability returns the existing state; changing the capability conflicts. The daemon routes the claimed input through the existing slash-command parser and executor in queue order. Ordinary slash commands use their existing shared command output. `/goal` runs without provider admission and ends with the same neutral `input.state` and `turn.state` lifecycle as an ordered input. Its result is held in a request-private reply mailbox, never in the shared event stream or shared conversation history; only the user's authored command may be recorded there. The input row, stream events, queue preview and poll response never contain the capability.
+
+The queue and reply mailbox are daemon-memory state. This retry guarantee applies while the daemon remains running; after a daemon restart, unresolved queue and reply state may be lost. A `missing` poll after restart therefore leaves the outcome uncertain, and the client must not automatically resubmit that command. The user can inspect `/goal show` or `/goal requests` before deciding whether to submit a new input with a new capability.
+
+The owner polls without waiting on the daemon RPC connection:
+
+```json
+POST /sessions/{id}/goal-replies/poll {"goal_reply_id":"goal-<32 lowercase hex digits>"}
+{"status":"pending"}
+{"status":"complete","success":true,"message":"…","goal_id":"…"}
+```
+
+Expired or unavailable capabilities return `{"status":"missing","message":"goal reply expired or is unavailable"}`. Polling is bound to the authenticated queue principal and the conversation that admitted the input. Cancellation uses the existing owner-specific route, with the capability as the request identity: `POST /sessions/{id}/cancel-owned {"request_id":"goal-<32 lowercase hex digits>"}`. It removes a still-queued input or cancels only its private command task; a cancellation that races with dispatch leaves a tombstone so the command cannot start later. The shared stream reports only neutral lifecycle state. Non-goal inputs carry no `goal_reply_id`; a goal input without one is refused.
 
 `POST /sessions/{id}/inputs/{input_id}/send-now` sends only the selected queued input, even when it shares a queue batch; siblings remain queued in their original order. It answers `202` when accepted. A retry after that input has started, joined, or ended with a turn answers `200` with its recorded state and turn id; an unknown input answers `404`, and an input that cannot be sent and has not moved answers `409`.
 
@@ -96,6 +119,9 @@ AG-UI (MIT) defines the same ideas (`MESSAGES_SNAPSHOT`, `STATE_SNAPSHOT` and ru
 - If a hub note arrives mid-turn, then it is a `note` row of its own and no user row changes.
 - If two inputs reach the model in one step, then they are still two rows.
 - If the person stops a turn, then the turn and every input that joined it end `cancelled`, and queued inputs stay queued (`webui-daemon-queue.md`).
+- If an ordered input is `/goal`, then the input id and high-entropy reply capability are bound together, the existing command executor runs it once in queue order, and only that capability's owner can poll or cancel its private result.
+- If an ordered `/goal` is retried after a lost admission response, then the same input id, text, attachments and capability return the existing queue state and do not execute the command twice; a different capability for that id is a conflict.
+- If a private goal is queued or running, then shared stream events expose only the input id and neutral lifecycle states. Neither the capability nor the command result appears in shared stream events or shared history.
 
 ## Failure modes
 
@@ -106,6 +132,8 @@ AG-UI (MIT) defines the same ideas (`MESSAGES_SNAPSHOT`, `STATE_SNAPSHOT` and ru
 5. A harness crashes or a turn never ends: the daemon ends the turn `failed`, and every input that joined it `failed`, so no client stays in the working state.
 6. A snapshot is too large: it carries only the latest window; older rows come from `GET /sessions/{id}/rows?before=`.
 7. Two clients pick the same id for different text: the second POST is refused with 409. Ids carry a per-client prefix, so only a bug can cause this.
+8. A queued `/goal` has no valid private capability, or the same input id is retried with a different capability: admission is refused (the conflicting retry is `409`) before command execution.
+9. A different authenticated queue owner polls or cancels an ordered goal capability: it receives the same unavailable result as an expired capability, with no private reply disclosed.
 
 ## Decisions
 

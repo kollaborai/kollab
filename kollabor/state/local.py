@@ -546,6 +546,192 @@ class LocalStateService(StateService):
             return {"status": "rejected", "reason": "invalid_queue_capability"}
         if queue_handoff.force_send and batch_lease is None:
             return {"status": "rejected", "reason": "invalid_queue_batch"}
+        command_custody_id = (
+            f"ordered-command-{queue_handoff.request_id}"
+            if len(queue_handoff.request_id) <= 240
+            else "command-"
+            + hashlib.sha256(queue_handoff.request_id.encode("utf-8")).hexdigest()
+        )
+        if queue_handoff.force_send:
+            authored = content_to_text(message).strip()
+            if authored.startswith(("/", "@")):
+                return {"status": "rejected", "reason": "force_send_command_unsupported"}
+
+        # Queue slash commands use the same command parser and executor as the
+        # ordinary message path. The private /goal capability travels only in
+        # this trusted object and never enters the message or history metadata.
+        from .goal_replies import is_goal_input
+
+        if isinstance(message, list):
+            authored_text = "\n".join(
+                part["text"]
+                for part in message
+                if isinstance(part, dict)
+                and str(part.get("type") or "").strip().lower() == "text"
+                and isinstance(part.get("text"), str)
+            ).strip()
+        else:
+            authored_text = message if isinstance(message, str) else content_to_text(message)
+            authored_text = authored_text.strip()
+        has_images = contains_image_content(message)
+        if is_goal_input(authored_text) and queue_handoff.goal_reply_id is None:
+            return {"status": "rejected", "reason": "private_goal_reply_required"}
+        if queue_handoff.goal_reply_id is not None:
+            if not is_goal_input(authored_text) or queue_handoff.force_send:
+                return {"status": "rejected", "reason": "invalid_goal_reply"}
+            if (
+                queue_handoff.conversation_uid != self.get_conversation_uid()
+                or queue_handoff.queue_scope_id is None
+            ):
+                return {"status": "rejected", "reason": "stale_conversation"}
+            result = self._try_goal_command(
+                authored_text,
+                message,
+                client_request_id=queue_handoff.request_id,
+                private_reply=True,
+                reply_id=queue_handoff.goal_reply_id,
+                expected_uid=queue_handoff.conversation_uid,
+                return_task=True,
+            )
+            if not isinstance(result, dict):
+                return {"status": "rejected", "reason": "goal_command_unavailable"}
+            if result.get("_queue_cancelled") is True:
+                turn_id = self.chat_stream.begin_ordered_command(
+                    queue_handoff.request_id,
+                    queue_handoff.conversation_uid,
+                    queue_handoff.queue_scope_id,
+                )
+                if turn_id is not None:
+                    self.chat_stream.finish_ordered_command(
+                        queue_handoff.request_id,
+                        queue_handoff.conversation_uid,
+                        turn_id,
+                        "cancelled",
+                    )
+                queue_handoff.provider_custody_id = command_custody_id
+                queue_handoff.recording_status = "recorded"
+                return {"status": "accepted", "request_id": queue_handoff.request_id}
+            if result.get("accepted") is not True:
+                return {"status": "rejected", "reason": "goal_command_not_accepted"}
+            task = result.get("_private_task")
+            if not isinstance(task, asyncio.Task):
+                return {"status": "rejected", "reason": "goal_command_unavailable"}
+            turn_id = self.chat_stream.begin_ordered_command(
+                queue_handoff.request_id,
+                queue_handoff.conversation_uid,
+                queue_handoff.queue_scope_id,
+            )
+            if turn_id is None:
+                task.cancel()
+                queue_handoff.provider_custody_id = command_custody_id
+                if queue_handoff.images:
+                    queue_handoff.recording_status = "recorded"
+                return {"status": "accepted", "request_id": queue_handoff.request_id}
+            queue_handoff.provider_custody_id = command_custody_id
+            # Waiting for the private command preserves input order. asyncio.wait
+            # does not propagate worker cancellation into the command; the owner
+            # cancellation path cancels the mailbox task directly.
+            await asyncio.wait({task})
+            if task.cancelled():
+                outcome = "cancelled"
+            else:
+                try:
+                    command_result = task.result()
+                except Exception:
+                    command_result = {"success": False}
+                outcome = (
+                    "completed"
+                    if isinstance(command_result, dict)
+                    and command_result.get("success") is True
+                    else "failed"
+                )
+            self.chat_stream.finish_ordered_command(
+                queue_handoff.request_id,
+                queue_handoff.conversation_uid,
+                turn_id,
+                outcome,
+            )
+            if queue_handoff.images:
+                # _try_goal_command promotes and binds these bytes to the
+                # daemon-owned GoalStore before it starts the command task.
+                queue_handoff.recording_status = "recorded"
+            return {"status": "accepted", "request_id": queue_handoff.request_id}
+
+        parser = executor = None
+        if not has_images and authored_text.startswith("/"):
+            event_bus = getattr(self, "_event_bus", None)
+            if event_bus is not None:
+                try:
+                    parser = event_bus.get_service("slash_parser")
+                    executor = event_bus.get_service("command_executor")
+                except Exception:
+                    parser = executor = None
+        if (
+            parser is not None
+            and executor is not None
+            and callable(getattr(parser, "is_slash_command", None))
+            and parser.is_slash_command(authored_text)
+        ):
+            if (
+                queue_handoff.conversation_uid != self.get_conversation_uid()
+                or queue_handoff.queue_scope_id is None
+            ):
+                return {"status": "rejected", "reason": "stale_conversation"}
+            turn_id = self.chat_stream.begin_ordered_command(
+                queue_handoff.request_id,
+                queue_handoff.conversation_uid,
+                queue_handoff.queue_scope_id,
+            )
+            if turn_id is None:
+                return {"status": "rejected", "reason": "command_input_unavailable"}
+            llm = self._llm_service
+            create_task = getattr(llm, "create_background_task", None)
+            command_coro = self._execute_slash_command(
+                authored_text,
+                parser,
+                executor,
+                request_id=queue_handoff.request_id,
+                turn_id=turn_id,
+                expected_conversation_uid=queue_handoff.conversation_uid,
+            )
+            try:
+                task = (
+                    create_task(command_coro, name="web_queue_slash_command")
+                    if callable(create_task)
+                    else asyncio.get_running_loop().create_task(command_coro)
+                )
+            except Exception:
+                command_coro.close()
+                self.chat_stream.finish_ordered_command(
+                    queue_handoff.request_id,
+                    queue_handoff.conversation_uid,
+                    turn_id,
+                    "failed",
+                )
+                return {"status": "rejected", "reason": "command_start_failed"}
+            queue_handoff.provider_custody_id = command_custody_id
+            await asyncio.wait({task})
+            if task.cancelled():
+                outcome = "cancelled"
+            else:
+                try:
+                    command_result = task.result()
+                except Exception:
+                    command_result = {"success": False}
+                outcome = (
+                    "completed"
+                    if isinstance(command_result, dict)
+                    and command_result.get("success") is True
+                    else "failed"
+                )
+            self.chat_stream.finish_ordered_command(
+                queue_handoff.request_id,
+                queue_handoff.conversation_uid,
+                turn_id,
+                outcome,
+            )
+            return {"status": "accepted", "request_id": queue_handoff.request_id}
+
         submit = getattr(self._llm_service, "submit_queued_human_input", None)
         if not callable(submit):
             return {"status": "rejected", "reason": "queue_admission_unavailable"}
@@ -3862,7 +4048,7 @@ class LocalStateService(StateService):
     def _try_goal_command(
         self, text: str, message, *, client_request_id: str | None = None,
         private_reply: bool = False, reply_id: str | None = None,
-        expected_uid: str | None = None,
+        expected_uid: str | None = None, return_task: bool = False,
     ) -> dict[str, Any] | None:
         """Route /goal input ahead of the is_processing gate.
 
@@ -3934,6 +4120,58 @@ class LocalStateService(StateService):
                         "request_id": request, "goal_request_id": request,
                         "goal_id": goal, "message": notice}
 
+            def queue_replay_result(saved: dict[str, Any]) -> dict[str, Any]:
+                replay = replay_result(saved)
+                if not return_task or not private_reply:
+                    return replay
+                from kollabor.state.goal_replies import GoalReplyCancelled, GoalReplyMailbox
+
+                mailbox = getattr(self, "_goal_reply_mailbox", None)
+                if mailbox is None:
+                    mailbox = self._goal_reply_mailbox = GoalReplyMailbox()
+                try:
+                    prepared_id = mailbox.prepare(reply_id)
+                except GoalReplyCancelled:
+                    return {"accepted": False, "_queue_cancelled": True}
+                except (ValueError, RuntimeError):
+                    return {"accepted": False, "reason": "Goal reply is unavailable; retry with a new request."}
+
+                async def completed_replay() -> dict[str, Any]:
+                    message_text = replay.get("message") or replay.get("reason")
+                    result = {
+                        "success": replay.get("accepted") is True
+                        and bool(saved.get("goal_id")),
+                        "message": message_text
+                        if isinstance(message_text, str)
+                        else "Goal submission is unavailable.",
+                        "history_recorded": False,
+                    }
+                    for field in ("goal_id", "goal_request_id", "request_id"):
+                        value = replay.get(field)
+                        if isinstance(value, str):
+                            result[field] = value
+                    return result
+
+                command_coro = completed_replay()
+                create_task = getattr(llm, "create_background_task", None)
+                try:
+                    task = (
+                        create_task(command_coro, name="rpc_goal_replay")
+                        if callable(create_task)
+                        else asyncio.get_running_loop().create_task(command_coro)
+                    )
+                    mailbox.register(uid, task, prepared_id)
+                except Exception:
+                    if "task" in locals():
+                        task.cancel()
+                    else:
+                        command_coro.close()
+                    return {"accepted": False, "reason": "Goal reply is unavailable; retry with a new request."}
+                replay["accepted"] = True
+                replay["goal_reply_id"] = prepared_id
+                replay["_private_task"] = task
+                return replay
+
             # A retry owns a response-local receipt, not the original command's
             # mailbox. Check it before reserving the supplied reply id, which
             # can still belong to the in-flight original request.
@@ -3947,7 +4185,7 @@ class LocalStateService(StateService):
                     key, fingerprint = submission_identity(client_request_id, text, message)
                     existing = svc.attachment_submission(key, uid, fingerprint)
                     if existing is not None:
-                        return replay_result(existing)
+                        return queue_replay_result(existing)
                 except GoalSubmissionConflict:
                     return {
                         "accepted": False,
@@ -3969,7 +4207,13 @@ class LocalStateService(StateService):
             try:
                 reply_id = mailbox.prepare(reply_id)
             except GoalReplyCancelled:
-                return {"accepted": False, "reason": "Goal command was cancelled before admission."}
+                cancelled = {
+                    "accepted": False,
+                    "reason": "Goal command was cancelled before admission.",
+                }
+                if return_task:
+                    cancelled["_queue_cancelled"] = True
+                return cancelled
             except (ValueError, RuntimeError):
                 return {"accepted": False, "reason": "Goal reply is unavailable; retry with a new request."}
 
@@ -3985,7 +4229,7 @@ class LocalStateService(StateService):
                 else:
                     saved = svc.stage_attachment_submission(key, uid, fingerprint, text, refs)
                     if not saved["created"]:
-                        return replay_result(saved)
+                        return queue_replay_result(saved)
                     request_id = saved["request_id"]
             except GoalSubmissionConflict:
                 return {
@@ -4057,6 +4301,8 @@ class LocalStateService(StateService):
             accepted["goal_request_id"] = request_id
         if private_reply:
             accepted["goal_reply_id"] = reply_id
+        if return_task:
+            accepted["_private_task"] = task
         return accepted
 
     async def _execute_hub_message(
@@ -4255,13 +4501,20 @@ class LocalStateService(StateService):
     async def _execute_slash_command(
         self, text: str, parser: Any, executor: Any, *,
         goal_origin_uid: str | None = None, goal_request_id: str | None = None,
-        private_goal_reply: bool = False,
+        private_goal_reply: bool = False, request_id: str | None = None,
+        turn_id: str | None = None,
+        expected_conversation_uid: str | None = None,
     ) -> dict[str, Any] | None:
         """Run a parsed slash command and publish its result as a web turn."""
         from kollabor_tui.display_tap import publish_semantic
 
         result = None
         try:
+            if (
+                expected_conversation_uid is not None
+                and self.get_conversation_uid() != expected_conversation_uid
+            ):
+                return {"success": False, "message": "Conversation changed."}
             if goal_origin_uid is not None and self.get_conversation_uid() != goal_origin_uid:
                 raise RuntimeError("conversation changed")
             command = parser.parse_command(text)
@@ -4269,6 +4522,11 @@ class LocalStateService(StateService):
                 raise ValueError(f"Could not parse slash command: {text}")
             if goal_origin_uid is None:
                 result, output = await self._run_web_slash_command(command, executor)
+                if (
+                    expected_conversation_uid is not None
+                    and self.get_conversation_uid() != expected_conversation_uid
+                ):
+                    return {"success": False, "message": "Conversation changed."}
             else:
                 from kollabor_events.models import CommandResult, EventType, SlashCommand
                 from kollabor_tui.altview.stack_manager import AltViewUnavailable, unavailable_attempts
@@ -4345,13 +4603,28 @@ class LocalStateService(StateService):
             metadata = {
                 "slash_command": recorded,
                 "command_success": bool(getattr(result, "success", False)),
+                **({"request_id": request_id} if request_id else {}),
+                **({"turn_id": turn_id} if turn_id else {}),
             }
             add_message = getattr(self._llm_service, "_add_conversation_message", None)
             if callable(add_message):
                 if private_goal_reply:
-                    add_message("user", recorded, metadata={"slash_command": recorded}, publish_user_event=False)
+                    add_message(
+                        "user",
+                        recorded,
+                        metadata={"slash_command": recorded},
+                        publish_user_event=False,
+                    )
                 else:
-                    add_message("user", recorded, metadata={"slash_command": recorded})
+                    add_message(
+                        "user",
+                        recorded,
+                        metadata={
+                            "slash_command": recorded,
+                            **({"request_id": request_id} if request_id else {}),
+                            **({"turn_id": turn_id} if turn_id else {}),
+                        },
+                    )
                 if not private_goal_reply:
                     add_message("assistant", output, metadata=metadata)
             if private_goal_reply:
@@ -4360,7 +4633,13 @@ class LocalStateService(StateService):
                     "message": output,
                     "history_recorded": False,
                 }
-            publish_semantic(self._event_bus, "token", text=output)
+            publish_semantic(
+                self._event_bus,
+                "token",
+                text=output,
+                **({"request_id": request_id} if request_id else {}),
+                **({"turn_id": turn_id} if turn_id else {}),
+            )
             publish_semantic(
                 self._event_bus,
                 "turn_complete",
@@ -4368,8 +4647,16 @@ class LocalStateService(StateService):
                 output_tokens=0,
                 tool_calls=0,
                 stop_reason="end_turn",
+                **({"request_id": request_id} if request_id else {}),
+                **({"turn_id": turn_id} if turn_id else {}),
             )
+            return {"success": bool(getattr(result, "success", False)), "message": output}
         except Exception as exc:
+            if (
+                expected_conversation_uid is not None
+                and self.get_conversation_uid() != expected_conversation_uid
+            ):
+                return {"success": False, "message": "Conversation changed."}
             if goal_origin_uid is not None:
                 logger.warning("goal command execution failed (%s)", type(exc).__name__)
                 if self.get_conversation_uid() != goal_origin_uid:
@@ -4396,7 +4683,10 @@ class LocalStateService(StateService):
                 output_tokens=0,
                 tool_calls=0,
                 stop_reason="error",
+                **({"request_id": request_id} if request_id else {}),
+                **({"turn_id": turn_id} if turn_id else {}),
             )
+            return {"success": False, "message": message}
 
     async def cancel_current_request(self, voice_turn_id: str | None = None) -> dict[str, Any]:
         """Cancel the currently processing LLM request.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -32,6 +33,7 @@ class QueueHandoffContext:
     queue_incarnation: str | None = None
     batch_id: str | None = None
     claim_id: str | None = None
+    goal_reply_id: str | None = field(default=None, repr=False)
     side_effects_started: bool = False
     provider_admission_started: bool = False
     history_row_uuid: str | None = None
@@ -58,6 +60,11 @@ class QueueHandoffContext:
             raise ValueError("queue attachment list is invalid")
         if not isinstance(self.force_send, bool):
             raise ValueError("queue force-send flag is invalid")
+        if self.goal_reply_id is not None and (
+            not isinstance(self.goal_reply_id, str)
+            or re.fullmatch(r"goal-[0-9a-f]{32}", self.goal_reply_id) is None
+        ):
+            raise ValueError("queue goal reply capability is invalid")
         if self.force_send and any(
             not isinstance(value, str) or not value
             for value in (
