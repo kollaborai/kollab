@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MediaThumb, MediaImageProvider, useAuthenticatedImage } from "@/components/media/media-view";
+import { MediaThumb, MediaImageProvider, MessageImage, storedMediaRef, useAuthenticatedImage } from "@/components/media/media-view";
 import type { EngineApi } from "@/api";
 
 const stubApi = {
@@ -82,5 +82,27 @@ describe("MediaThumb empty-ref guard", () => {
     expect(request).toHaveBeenCalledWith(path);
     expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:authenticated-image");
     expect(container.querySelector("img")?.getAttribute("src")).not.toBe(path);
+  });
+});
+
+
+describe("message images from the chat stream (#1451)", () => {
+  it("reads the stored ref from a /media path and nothing else", () => {
+    expect(storedMediaRef("/media/abc%2Fdef.png")).toBe("abc/def.png");
+    expect(storedMediaRef("/media/")).toBeNull();
+    expect(storedMediaRef("https://example.com/media/x.png")).toBeNull();
+    expect(storedMediaRef("/attachments/x.png")).toBeNull();
+  });
+
+  it("shows a stored picture as a thumbnail that opens the viewer", () => {
+    const stored = render(
+      createElement(MediaImageProvider, { api: stubApi }, createElement(MessageImage, { image: "/media/r1.png" })),
+    );
+    expect(stored).toContain('aria-label="Open image"');
+    const other = render(
+      createElement(MediaImageProvider, { api: stubApi }, createElement(MessageImage, { image: "/attachments/x.png" })),
+    );
+    expect(other).toContain('alt="Message image"');
+    expect(other).not.toContain("Open image");
   });
 });
