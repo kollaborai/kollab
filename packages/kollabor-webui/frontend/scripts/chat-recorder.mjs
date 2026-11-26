@@ -124,6 +124,7 @@ function installRecorder(cfg) {
     measuredTurns: restore?.measuredTurns ?? [],
     goalTurn: restore?.goalTurn ?? null,
     goalMode: restore?.goalMode ?? false,
+    goalReplyId: null,
     goalCardsObserved: restore?.goalCardsObserved ?? false,
     pendingToolCalls: restore?.pendingToolCalls ?? [],
     measuring: restore?.measuring ?? false,
@@ -137,6 +138,40 @@ function installRecorder(cfg) {
     streamReady: false,
   });
   const now = () => Math.round(performance.timeOrigin + performance.now() - cfg.wall0);
+  rec.goalEvidenceKind = (role, text) => {
+    if (!rec.goalMode) return null;
+    const content = String(text ?? "").trim();
+    if (role === "user" && /^\/(?:goal|goals)(?:\s+|$)/i.test(content)) return "command";
+    if (role === "assistant" && /^goal [A-Za-z0-9_-]+ created\b[\s\S]*\bobjective\s*:/i.test(content)) return "reply";
+    return null;
+  };
+  rec.maskPrivateGoalRows = () => {
+    if (!rec.goalMode || typeof document === "undefined" || !document.querySelectorAll) return;
+    for (const el of document.querySelectorAll('[data-role="user"], [data-role="assistant"]')) {
+      const kind = rec.goalEvidenceKind(el.dataset.role, el.textContent);
+      if (!kind || (kind === "reply" && el.querySelector?.('[data-chat-tool-call-id], [data-slot="tool-group-root"], [data-slot="tool-fallback-root"]'))) continue;
+      if (el.dataset.recorderPrivateGoal === kind) continue;
+      el.dataset.recorderPrivateGoal = kind;
+      el.style?.setProperty("visibility", "hidden", "important");
+    }
+  };
+  rec.watchPrivateGoalRows = () => {
+    if (!rec.goalMode || typeof document === "undefined" || !document.querySelectorAll) return;
+    rec.maskPrivateGoalRows();
+    if (rec.goalPrivateMaskObserver || typeof MutationObserver !== "function") return;
+    rec.goalPrivateMaskObserver = new MutationObserver(() => rec.maskPrivateGoalRows());
+    try {
+      rec.goalPrivateMaskObserver.observe(document.documentElement ?? document, {
+        childList: true, characterData: true, subtree: true,
+      });
+    } catch { rec.goalPrivateMaskObserver = null; }
+  };
+  const historyText = (value) => {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return value.map((part) => typeof part?.text === "string" ? part.text : "").join("\n");
+    if (value && typeof value === "object" && typeof value.text === "string") return value.text;
+    return String(value ?? "");
+  };
   rec.refreshMeasured = () => {
     for (const input of rec.streamInputs) {
       if (rec.measuredInputs.includes(input.id) && input.turn_id && !rec.measuredTurns.includes(input.turn_id)) {
@@ -177,7 +212,9 @@ function installRecorder(cfg) {
       rec.pendingToolCalls = [];
       rec.goalTurn = null;
       rec.goalMode = name === "PAGE START GOAL";
+      rec.goalReplyId = null;
       rec.goalCardsObserved = false;
+      if (rec.goalMode) rec.watchPrivateGoalRows();
     }
     rec.marks.push({ t: now(), name });
   };
@@ -212,7 +249,10 @@ function installRecorder(cfg) {
     if (!data) return;
     if (data === "[DONE]") return void rec.net.push({ id, kind, t: now(), ev: "[DONE]" });
     let event;
-    try { event = JSON.parse(data); } catch { return void rec.net.push({ id, kind, t: now(), raw: data.slice(0, 80) }); }
+    try { event = JSON.parse(data); } catch {
+      if (kind !== "message" || !rec.goalMode) rec.net.push({ id, kind, t: now(), raw: data.slice(0, 80) });
+      return;
+    }
     const type = event.type ?? "?";
     if (kind === "events") {
       if (type === "token" || type === "thinking") { tokens += 1; return; }
@@ -220,7 +260,10 @@ function installRecorder(cfg) {
       if (tokens) { entry.tokensBefore = tokens; tokens = 0; }
       if (event.request_id) entry.rq = event.request_id;
       if (event.request_ids) entry.rqs = event.request_ids;
-      for (const key of ["stop_reason", "message", "input_source", "queued", "tool_name", "status", "action"]) {
+      const summaryKeys = type === "goal.state_changed"
+        ? ["input_source", "queued", "tool_name", "status", "action"]
+        : ["stop_reason", "message", "input_source", "queued", "tool_name", "status", "action"];
+      for (const key of summaryKeys) {
         if (event[key] !== undefined) entry[key] = brief(event[key], 60);
       }
       if (type === "goal.state_changed") {
@@ -228,9 +271,10 @@ function installRecorder(cfg) {
         entry.goal_conversation_uid = event.conversation_uid;
         entry.goal_status = event.status;
         entry.goal_kind = event.kind;
-        entry.goal_objective = brief(event.objective, 120);
       }
-      if (type === "user_message") entry.text = brief(event.content ?? event.text ?? event.message, 50);
+      if (type === "user_message") {
+        entry.text = rec.goalMode ? "<goal command>" : brief(event.content ?? event.text ?? event.message, 50);
+      }
       return void rec.net.push(entry);
     }
     if (kind === "stream") {
@@ -291,39 +335,49 @@ function installRecorder(cfg) {
     }
     if (/-delta$|^part-|^tool-call-|^result$/.test(type)) return;
     rec.net.push({ id, kind, t: now(), ev: type, ...(event.finishReason ? { finishReason: event.finishReason } : {}),
-      ...(event.error ? { error: brief(event.error, 80) } : {}) });
+      ...(event.error && (kind !== "message" || !rec.goalMode) ? { error: brief(event.error, 80) } : {}) });
   };
   window.fetch = async (input, init) => {
     let parsed;
     try { parsed = new URL(String(input instanceof Request ? input.url : input), location.href); } catch { return realFetch(input, init); }
-    const match = /\/sessions\/[^/]+\/(events|history|stream|inputs)(?:\/|$)/.exec(parsed.pathname);
+    const match = /\/sessions\/[^/]+\/(events|history|stream|inputs|message)(?:\/|$)/.exec(parsed.pathname);
     if (!match) return realFetch(input, init);
     const sessionSuffix = cfg.sessionStreamSuffix.replace(/\/stream$/, `/${match[1]}`);
-    if (["stream", "events"].includes(match[1]) && !parsed.pathname.endsWith(sessionSuffix)) {
+    const selectedSessionRequest = parsed.pathname.endsWith(sessionSuffix);
+    if (["stream", "events", "message"].includes(match[1]) && !selectedSessionRequest) {
       return realFetch(input, init);
     }
     const id = ++seq;
     const kind = match[1];
     const entry = { id, kind, t: now(), req: `${init?.method ?? "GET"} ${parsed.pathname.replace(/^.*\/sessions\/[^/]+/, "")}${parsed.search.slice(0, 40)}` };
-    if (kind === "inputs" && init?.body) {
+    if (["inputs", "message"].includes(kind) && init?.body) {
       try {
         const body = JSON.parse(String(init.body));
-        entry.input = body.id;
-        entry.text = brief(body.text, 50);
-        entry.attachments = Array.isArray(body.attachments) ? body.attachments.length : 0;
+        if (selectedSessionRequest && rec.goalMode && typeof body.goal_reply_id === "string" && body.goal_reply_id) {
+          rec.goalReplyId = body.goal_reply_id;
+        }
+        if (kind === "inputs") {
+          entry.input = body.id;
+          const goalCommand = typeof body.text === "string" && /^\/goal(?:\s|$)/.test(body.text);
+          entry.text = goalCommand || (rec.goalMode && body.goal_reply_id) ? "<goal command>" : brief(body.text, 50);
+          entry.attachments = Array.isArray(body.attachments) ? body.attachments.length : 0;
+        }
       } catch { /* not JSON */ }
     }
     rec.net.push(entry);
     let response;
     try { response = await realFetch(input, init); } catch (error) {
-      rec.net.push({ id, kind, t: now(), fetchError: String(error) });
+      rec.net.push({ id, kind, t: now(), fetchError: kind === "message" && rec.goalMode ? "private goal request failed" : String(error) });
       throw error;
     }
     rec.net.push({ id, kind, t: now(), status: response.status });
     if (kind === "history") {
       response.clone().json().then((page) => rec.net.push({
         id, kind, t: now(), page: `${page.start_index}..${page.end_index}/${page.total_messages}${page.stale ? " STALE" : ""}`,
-        tail: (page.history ?? []).slice(-4).map((row) => `${row.role?.[0]}:${brief(row.content, 26)}`),
+        tail: (page.history ?? []).slice(-4).map((row) => {
+          const privateKind = rec.goalEvidenceKind(row.role, historyText(row.content));
+          return `${row.role?.[0]}:${privateKind ? `<private goal ${privateKind}>` : brief(row.content, 26)}`;
+        }),
       })).catch(() => undefined);
       return response;
     }
@@ -354,7 +408,7 @@ function installRecorder(cfg) {
         } catch (error) {
           if (closed) return;
           closed = true;
-          rec.net.push({ id, kind, t: now(), streamError: String(error) });
+          rec.net.push({ id, kind, t: now(), streamError: kind === "message" && rec.goalMode ? "private goal stream failed" : String(error) });
           controller.error(error);
         }
       },
@@ -379,7 +433,10 @@ function installRecorder(cfg) {
   let nodeSeq = 0;
   const nodeId = (el) => (el.__recNode ??= ++nodeSeq);
   rec.snapshotStreamUserRows = () => JSON.parse(JSON.stringify(rec.streamRows.filter((row) => row.role === "user")));
-  rec.snapshotUserRows = () => [...document.querySelectorAll('[data-role="user"]')].map((el) => ({ id: nodeId(el), text: el.textContent ?? "" }));
+  rec.snapshotUserRows = () => [...document.querySelectorAll('[data-role="user"]')].map((el) => {
+    const privateKind = rec.goalEvidenceKind(el.dataset.role, el.textContent);
+    return { id: nodeId(el), text: privateKind ? `<private goal ${privateKind}>` : el.textContent ?? "" };
+  });
   const hash = (text) => { let h = 2166136261; for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
   let viewport = null;
   const findViewport = (row) => {
@@ -403,6 +460,7 @@ function installRecorder(cfg) {
   let last = "";
   const sample = () => {
     try {
+      rec.maskPrivateGoalRows();
       const all = document.querySelectorAll("[data-role]");
       const rows = [];
       const texts = [];
@@ -416,15 +474,17 @@ function installRecorder(cfg) {
       for (let i = 0; i < all.length; i++) {
         const el = all[i];
         const role = el.dataset.role;
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+        const rawText = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+        const privateKind = rec.goalEvidenceKind(role, rawText);
+        const text = privateKind ? `<private goal ${privateKind}>` : rawText;
         if (role === "user") {
           let own = false;
-          cfg.user.forEach((marker, index) => { if (text.includes(marker)) { users[index] += 1; own = true; } });
+          cfg.user.forEach((marker, index) => { if (rawText.includes(marker)) { users[index] += 1; own = true; } });
           if (own) sent = true;
         }
         if (role === "assistant") {
           if (sent) toolsDrawn += Number(/(\d+) tool calls?/.exec(text)?.[1] ?? (text.includes("Run · ") ? 1 : 0));
-          cfg.reply.forEach((marker, index) => { replies[index] += text.split(marker).length - 1; });
+          if (privateKind !== "reply") cfg.reply.forEach((marker, index) => { replies[index] += rawText.split(marker).length - 1; });
         }
         if (i >= all.length - 14) {
           const opacity = Number(getComputedStyle(el).opacity);
@@ -442,7 +502,11 @@ function installRecorder(cfg) {
         st: viewport ? Math.round(viewport.scrollTop) : -1,
         pick: document.querySelectorAll('[class*="branch-picker-root"]').length,
         err: errors.length,
-        errText: errors.map((el) => (el.textContent ?? "").trim().slice(0, 70)).join(" | "),
+        errText: errors.map((el) => {
+          const row = el.closest?.("[data-role]");
+          const privateKind = row && rec.goalEvidenceKind(row.dataset.role, row.textContent);
+          return privateKind ? `<private goal ${privateKind}>` : (el.textContent ?? "").trim().slice(0, 70);
+        }).join(" | "),
         run: document.querySelector('[aria-label="Stop generating"]') ? 1 : 0,
       };
       if (rec.anchorEl) frame.anc = rec.anchorEl.isConnected ? Math.round(rec.anchorEl.getBoundingClientRect().top) : null;
@@ -453,6 +517,7 @@ function installRecorder(cfg) {
     }
     requestAnimationFrame(sample);
   };
+  if (rec.goalMode) rec.watchPrivateGoalRows();
   requestAnimationFrame(sample);
 }
 
@@ -881,26 +946,86 @@ async function record(flow, session, browser, target) {
       if (existingGoal?.goal) {
         throw new Error("goal-reload requires a session with no active goal; refusing to replace or clear it");
       }
+      const initialStream = await currentStreamState();
+      const initialConversationUid = existingGoal?.conversation_uid ?? initialStream?.conversation_uid;
+      if (!initialConversationUid ||
+          (existingGoal?.conversation_uid && initialStream?.conversation_uid &&
+           existingGoal.conversation_uid !== initialStream.conversation_uid)) {
+        throw new Error("goal-reload could not establish one conversation identity; refusing to create or clear a goal");
+      }
       const goalMarker = `[chat-recorder-${Date.now()}-${Math.random().toString(36).slice(2)}]`;
       const goalObjective = `${goalMarker} ${U(1)}: Use your terminal tool to run ` + "`sleep 10`" + `, then complete this goal with a concise report containing exactly ${R(1)}.`;
       let ownedGoal = null;
+      let privateGoalReplyId = null;
+      let creationReceipt = null;
+      const clearPrivateGoalReply = async () => {
+        privateGoalReplyId = null;
+        try {
+          await page.evaluate(() => {
+            if (window.__rec) window.__rec.goalReplyId = null;
+          });
+        } catch { /* page teardown also releases the in-memory capability */ }
+      };
       const matchesOwnedGoal = (persisted) => {
         const goal = persisted?.goal;
         if (!ownedGoal || !goal || persisted.conversation_uid !== ownedGoal.conversation_uid ||
             goal.goal_id !== ownedGoal.goal_id) return false;
-        const attempt = goal.attempt ?? {};
-        if (ownedGoal.attempt_id && attempt.attempt_id !== ownedGoal.attempt_id) return false;
-        if (ownedGoal.turn_id && attempt.turn_id !== ownedGoal.turn_id) return false;
         return true;
       };
-      const readCreationReceipt = () => page.evaluate((marker) => {
-        const event = window.__rec.net.find((entry) => entry.ev === "goal.state_changed" &&
-          entry.goal_kind === "created" && entry.goal_objective?.startsWith(marker));
-        return event ? {
-          goal_id: event.goal_id,
-          conversation_uid: event.goal_conversation_uid,
-        } : null;
-      }, goalMarker);
+      const readCreationReceipt = async () => {
+        if (creationReceipt) return creationReceipt;
+        if (!privateGoalReplyId) {
+          try {
+            privateGoalReplyId = await page.evaluate(() => {
+              const replyId = window.__rec?.goalReplyId;
+              if (window.__rec) window.__rec.goalReplyId = null;
+              return typeof replyId === "string" && replyId ? replyId : null;
+            });
+          } catch { return null; }
+        }
+        if (!privateGoalReplyId) return null;
+
+        let reply;
+        try {
+          reply = await apiJson(`/sessions/${session}/goal-replies/poll`, {
+            method: "POST",
+            body: JSON.stringify({ goal_reply_id: privateGoalReplyId }),
+          });
+        } catch {
+          await clearPrivateGoalReply();
+          throw new Error("goal reload could not read its private creation receipt; refusing to clear an unidentified goal");
+        }
+        if (reply?.status === "pending") return null;
+        await clearPrivateGoalReply();
+        if (reply?.status !== "complete" || reply.success !== true || typeof reply.message !== "string") {
+          throw new Error("goal reload could not confirm its private creation receipt; refusing to clear an unidentified goal");
+        }
+
+        const [header, ...lines] = reply.message.split(/\r?\n/);
+        const created = /^goal ([A-Za-z0-9_-]+) created(?:\s|$)/.exec(header ?? "");
+        const objectiveLine = lines.find((line) => line.startsWith("objective: "));
+        const replyConversationUid = typeof reply.conversation_uid === "string"
+          ? reply.conversation_uid
+          : initialConversationUid;
+        if (!created || objectiveLine?.slice("objective: ".length) !== goalObjective ||
+            replyConversationUid !== initialConversationUid) {
+          throw new Error("goal reload could not match its private creation receipt; refusing to clear an unidentified goal");
+        }
+        creationReceipt = { goal_id: created[1], conversation_uid: replyConversationUid };
+        return creationReceipt;
+      };
+      const bindReceiptToPersistedGoal = (persisted, receipt) => {
+        if (!persisted?.goal || !receipt) return receipt;
+        if (persisted.conversation_uid !== initialConversationUid ||
+            receipt.conversation_uid !== initialConversationUid ||
+            !persisted.goal.goal_id?.startsWith(receipt.goal_id)) {
+          throw new Error("goal reload could not claim the active goal; refusing to clear a goal not created by this run");
+        }
+        if (typeof persisted.goal.objective === "string" && persisted.goal.objective !== goalObjective) {
+          throw new Error("goal reload could not claim the active goal; refusing to clear a goal not created by this run");
+        }
+        return creationReceipt;
+      };
       const captureAttemptIdentity = (persisted) => {
         if (!matchesOwnedGoal(persisted)) return false;
         const attempt = persisted.goal.attempt ?? {};
@@ -921,18 +1046,15 @@ async function record(flow, session, browser, target) {
         const createDeadline = Date.now() + 45000;
         let created = await readPersistedGoal();
         let receipt = await readCreationReceipt();
+        receipt = bindReceiptToPersistedGoal(created, receipt);
         while (!created?.goal || !created.goal.goal_id || !created.conversation_uid || !receipt) {
-          if (created?.goal && receipt &&
-              (receipt.conversation_uid !== created.conversation_uid ||
-               !created.goal.goal_id.startsWith(receipt.goal_id ?? ""))) {
-            throw new Error("goal reload could not claim the active goal; refusing to clear a goal not created by this run");
-          }
           if (Date.now() >= createDeadline) {
-            throw new Error("goal reload could not confirm its goal-created event and persisted goal identity");
+            throw new Error("goal reload could not confirm its private creation receipt and persisted goal identity");
           }
           await sleep(250);
           created = await readPersistedGoal();
           receipt = await readCreationReceipt();
+          receipt = bindReceiptToPersistedGoal(created, receipt);
         }
         if (receipt.conversation_uid !== created.conversation_uid ||
             !receipt.goal_id || !created.goal.goal_id.startsWith(receipt.goal_id)) {
@@ -953,7 +1075,14 @@ async function record(flow, session, browser, target) {
               throw new Error("goal reload proof inconclusive: persisted goal and running stream turn do not match before reload");
             }
             await mark(`GOAL VERIFIED ${turn.turn_id}`);
-            await mark(`GOAL BEFORE ${JSON.stringify({ persisted: expectedGoal, turn, conversation_uid: stream.conversation_uid })}`);
+            const goalIdentity = {
+              conversation_uid: expectedGoal.conversation_uid,
+              goal_id: expectedGoal.goal.goal_id,
+              status: expectedGoal.goal.status,
+              attempt_id: expectedGoal.goal.attempt?.attempt_id ?? null,
+              turn_id: expectedGoal.goal.attempt?.turn_id ?? null,
+            };
+            await mark(`GOAL BEFORE ${JSON.stringify({ persisted: goalIdentity, turn, conversation_uid: stream.conversation_uid })}`);
           },
           after: async (turn, snapshot, stream) => {
             const restored = await readPersistedGoal();
@@ -967,7 +1096,14 @@ async function record(flow, session, browser, target) {
               throw new Error("goal reload proof inconclusive: persisted goal or running turn changed during reload");
             }
             const reloadedTurn = snapshot.turns.find((item) => item.turn_id === turn.turn_id);
-            await mark(`GOAL AFTER ${JSON.stringify({ persisted: restored, turn: reloadedTurn, conversation_uid: snapshot.conversation_uid })}`);
+            const goalIdentity = {
+              conversation_uid: restored.conversation_uid,
+              goal_id: restored.goal.goal_id,
+              status: restored.goal.status,
+              attempt_id: restored.goal.attempt?.attempt_id ?? null,
+              turn_id: restored.goal.attempt?.turn_id ?? null,
+            };
+            await mark(`GOAL AFTER ${JSON.stringify({ persisted: goalIdentity, turn: reloadedTurn, conversation_uid: snapshot.conversation_uid })}`);
           },
         });
         const observed = typeof page !== "undefined" && await page.evaluate(() =>
@@ -979,6 +1115,8 @@ async function record(flow, session, browser, target) {
         throw error;
       } finally {
         try {
+          await clearPrivateGoalReply();
+          creationReceipt = null;
           let persisted = await readPersistedGoal();
           if (persisted?.goal && !matchesOwnedGoal(persisted)) {
             throw new Error("persisted goal identity changed; refusing to clear a goal not created by this run");
