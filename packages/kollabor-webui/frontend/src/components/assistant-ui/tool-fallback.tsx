@@ -341,11 +341,8 @@ export const toolErrorLine = (result: unknown): string => {
   const textBlock = content.find((value) =>
     typeof asRecord(asRecord(value)?.content)?.text === "string",
   );
-  const raw =
-    typeof result === "string" ? result :
-      record?.kind === "chat-stream-tool-output-preview" && typeof record.preview === "string"
-        ? record.preview :
-      record?.error || asRecord(asRecord(textBlock)?.content)?.text || record?.output;
+  const raw = typeof result === "string" ? result :
+    record?.error || asRecord(asRecord(textBlock)?.content)?.text || record?.output;
   const text = typeof raw === "string" ? stripErrorPrefix(raw).trim() : "";
   return text.split(/\r?\n/, 1)[0] || "Tool call failed";
 };
@@ -1133,7 +1130,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   const hasResult = result !== undefined || resultPreview !== undefined;
   const failed = (isError === true || cardStatus === "failed") && hasResult;
   const errorLine = failed
-    ? toolErrorLine(result !== undefined ? result : resultPreview)
+    ? toolErrorLine(resultPreview?.preview ?? result)
     : undefined;
   const asked = askedForOk(errorLine);
 

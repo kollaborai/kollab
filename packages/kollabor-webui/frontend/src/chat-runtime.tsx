@@ -16,6 +16,7 @@ import {
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import {
   CHAT_STREAM_PERMISSION_PROMPT_PREVIEW_KIND,
+  isChatStreamToolOutputPreviewMarker,
   newInputId,
   type ChatPart,
   type ChatRow,
@@ -56,23 +57,29 @@ function toPart(part: ChatPart): LikePart {
           ? { providerMetadata: { kollab: { chat_stream_content_preview: part.chat_stream_content_preview } } }
           : {}),
       };
-    case "tool-call":
+    case "tool-call": {
+      const resultPreview = isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview) &&
+          part.chat_stream_result_preview.tool_call_id === part.tool_call_id
+        ? part.chat_stream_result_preview
+        : undefined;
       return {
         type: "tool-call",
         toolCallId: part.tool_call_id,
         toolName: part.tool_name,
         args: isRecord(part.args) ? (part.args as ReadonlyJSONObject) : {},
         argsText: JSON.stringify(part.args ?? {}),
-        result: part.result,
+        // assistant-ui treats a tool call without a result as unfinished.
+        // A valid external result marker is the stored result's replacement.
+        result: part.result !== undefined ? part.result : resultPreview ? null : undefined,
         isError: part.is_error ?? undefined,
-          ...(part.chat_stream_args_preview
-          || part.chat_stream_result_preview
+        ...(part.chat_stream_args_preview || resultPreview
           ? { providerMetadata: { kollab: {
               ...(part.chat_stream_args_preview ? { chat_stream_args_preview: part.chat_stream_args_preview } : {}),
-              ...(part.chat_stream_result_preview ? { chat_stream_result_preview: part.chat_stream_result_preview } : {}),
+              ...(resultPreview ? { chat_stream_result_preview: resultPreview } : {}),
             } } }
           : {}),
       };
+    }
     case "image":
       return { type: "image", image: part.url };
     case "prompt":

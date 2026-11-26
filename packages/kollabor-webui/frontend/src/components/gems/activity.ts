@@ -1,4 +1,4 @@
-import type { ChatRow, InputInfo } from "../../chat-stream";
+import { isChatStreamToolOutputPreviewMarker, type ChatRow, type InputInfo } from "../../chat-stream";
 import type { Activity } from "./gem-face";
 
 const TOOL_ACTIVITY: Record<string, Activity> = {
@@ -112,7 +112,9 @@ export function threadActivityOf(
   if (last?.role !== "assistant") return "thinking";
   const part = last.parts.at(-1);
   // A tool call with no result yet is still running; one with a result is read by the model next.
-  if (part?.type === "tool-call" && part.result === undefined) {
+  if (part?.type === "tool-call" && part.result === undefined &&
+      !(isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview) &&
+        part.chat_stream_result_preview.tool_call_id === part.tool_call_id)) {
     return toolActivity(part.tool_name, harnessKind(part.result));
   }
   if (part?.type === "text" && part.text) return "speaking";
