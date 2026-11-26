@@ -43,7 +43,11 @@ def _native_history(turns: int):
     for index in range(turns):
         turn_id = f"native-{index}"
         entries = (
-            ("user", f"question-{index}", {"request_id": f"web-{index}", "turn_id": turn_id}),
+            (
+                "user",
+                f"question-{index}",
+                {"request_id": f"web-{index}", "turn_id": turn_id},
+            ),
             (
                 "assistant",
                 f"step-{index}",
@@ -73,7 +77,9 @@ def _native_history(turns: int):
     return messages
 
 
-def test_snapshot_turn_history_scans_are_linear_and_transcript_is_projected_once(monkeypatch):
+def test_snapshot_turn_history_scans_are_linear_and_transcript_is_projected_once(
+    monkeypatch,
+):
     history = _native_history(80)
     stream = ChatStreamService(_State(history))
 
@@ -101,7 +107,9 @@ def test_snapshot_turn_history_scans_are_linear_and_transcript_is_projected_once
     events = stream.subscribe({"after": None, "conversation_uid": None})["events"]
 
     assert events[0]["type"] == "snapshot"
-    assert turn_id_calls <= 3 * len(history), (
-        f"expected linear turn-history lookups, got {turn_id_calls} scans for {len(history)} messages"
-    )
-    assert transcript_passes == 1, f"snapshot projected transcript {transcript_passes} times"
+    assert turn_id_calls <= 3 * len(
+        history
+    ), f"turn-history lookup count was not linear: {turn_id_calls} for {len(history)} messages"
+    assert (
+        transcript_passes == 1
+    ), f"snapshot projected transcript {transcript_passes} times"
