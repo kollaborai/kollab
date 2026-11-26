@@ -89,6 +89,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Recover the exact streamed prefix when assistant-ui needs a nonblank sentinel part. */
+export function chatStreamTextFromMetadata(
+  providerMetadata: unknown,
+  fallbackText: string,
+): string {
+  if (!isRecord(providerMetadata) || !isRecord(providerMetadata.kollab)) return fallbackText;
+  const streamedText = providerMetadata.kollab.chat_stream_text;
+  return typeof streamedText === "string" ? streamedText : fallbackText;
+}
+
 function isRecoverableMarker(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return value.kind === "chat-stream-content-preview" ||

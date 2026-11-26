@@ -15,6 +15,7 @@ import {
   ChatStreamStreamingContent,
   chatStreamContentIdentity,
   chatStreamContentPreviewFromMetadata,
+  chatStreamTextFromMetadata,
   chatStreamPartPreviewFromMetadata,
   chatStreamPartsPreviewFromCustom,
   canExportChatStreamMarkdown,
@@ -1472,7 +1473,7 @@ const AssistantMessage: FC = () => {
                 return preview && rowStatus === "streaming" ? (
                   <ChatStreamStreamingContent
                     marker={preview}
-                    text={part.text}
+                    text={chatStreamTextFromMetadata(part.providerMetadata, part.text)}
                   >
                     {renderText}
                   </ChatStreamStreamingContent>
@@ -1492,7 +1493,7 @@ const AssistantMessage: FC = () => {
                 return preview && rowStatus === "streaming" ? (
                   <ChatStreamStreamingContent
                     marker={preview}
-                    text={part.text}
+                    text={chatStreamTextFromMetadata(part.providerMetadata, part.text)}
                   >
                     {renderReasoning}
                   </ChatStreamStreamingContent>
@@ -1633,7 +1634,7 @@ export const UserText: FC<{ text?: string; providerMetadata?: unknown }> = ({ te
     return (
       <ChatStreamStreamingContent
         marker={preview}
-        text={text ?? ""}
+        text={chatStreamTextFromMetadata(providerMetadata, text ?? "")}
       >
         {(fullText) => <UserTextBody text={fullText} />}
       </ChatStreamStreamingContent>

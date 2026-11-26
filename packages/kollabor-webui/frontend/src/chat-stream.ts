@@ -209,7 +209,8 @@ const has = (record: Record<string, unknown>, key: string): boolean => Object.pr
 const optional = (record: Record<string, unknown>, key: string, check: (value: unknown) => boolean): boolean =>
   record[key] === undefined || record[key] === null || check(record[key]);
 
-// Each ChatPart variant, the same rules as `_part_problems` on the Python side.
+// Validate the engine-materialized ChatPart shape: Python `_part_problems` rules
+// plus the engine-added `session_id` on each preview marker.
 const isPart = (value: unknown): boolean => {
   if (!isRecord(value)) return false;
   switch (value.type) {
@@ -242,7 +243,8 @@ const isPart = (value: unknown): boolean => {
   }
 };
 
-// Every ChatRow field, the same rules as `_row_problems` on the Python side.
+// Validate the engine-materialized ChatRow shape: Python `_row_problems` rules
+// plus the engine-added `session_id` on each preview marker.
 const isRow = (value: unknown): boolean =>
   isRecord(value) && isId(value.id) && isCount(value.seq) && KINDS.has(value.kind as string) &&
   ROLES.has(value.role as string) && (value.turn_id === null || isId(value.turn_id)) &&
@@ -275,7 +277,10 @@ const isInputInfo = (value: unknown): boolean => {
   return value.outcome === undefined || value.outcome === null; // only an ended input has an outcome
 };
 
-/** Shape check for one event, the same rules as `event_problems` on the Python side. */
+/**
+ * Shape check for one engine-materialized event: Python `event_problems` rules
+ * plus the engine-added `session_id` on every preview marker.
+ */
 export function isChatStreamEvent(value: unknown): value is ChatStreamEvent {
   if (!isRecord(value) || !isCount(value.seq)) return false;
   if (!isId(value.conversation_uid) || !isId(value.generation) || !EVENT_TYPES.has(value.type as string) || !isRecord(value.data)) return false;

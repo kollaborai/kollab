@@ -30,6 +30,7 @@ import type { ChatSnapshot, LiveStore } from "./chat-store";
 export const WEB_INPUT_PREFIX = "web";
 
 type LikePart = Exclude<ThreadMessageLike["content"], string>[number];
+const EMPTY_RECOVERABLE_PREVIEW_TEXT = "\u200b";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -38,25 +39,41 @@ const isTextPart = (part: { readonly type: string }): part is TextMessagePart =>
 
 function toPart(part: ChatPart): LikePart {
   switch (part.type) {
-    case "text":
+    case "text": {
+      const hasPreview = Boolean(part.chat_stream_content_preview || part.chat_stream_part_preview);
+      const text = hasPreview && part.text.trim() === ""
+        ? EMPTY_RECOVERABLE_PREVIEW_TEXT
+        : part.text;
       return {
         type: "text",
-        text: part.text,
-        ...(part.chat_stream_content_preview || part.chat_stream_part_preview
+        text,
+        ...(hasPreview
           ? { providerMetadata: { kollab: {
+              ...(text !== part.text ? { chat_stream_text: part.text } : {}),
               ...(part.chat_stream_content_preview ? { chat_stream_content_preview: part.chat_stream_content_preview } : {}),
               ...(part.chat_stream_part_preview ? { chat_stream_part_preview: part.chat_stream_part_preview } : {}),
             } } }
           : {}),
       };
-    case "reasoning":
+    }
+    case "reasoning": {
+      const hasPreview = Boolean(part.chat_stream_content_preview);
+      const text = hasPreview && part.text.trim() === ""
+        ? EMPTY_RECOVERABLE_PREVIEW_TEXT
+        : part.text;
       return {
         type: "reasoning",
-        text: part.text,
-        ...(part.chat_stream_content_preview
-          ? { providerMetadata: { kollab: { chat_stream_content_preview: part.chat_stream_content_preview } } }
+        text,
+        ...(hasPreview
+          ? { providerMetadata: { kollab: {
+              ...(text !== part.text ? { chat_stream_text: part.text } : {}),
+              ...(part.chat_stream_content_preview
+                ? { chat_stream_content_preview: part.chat_stream_content_preview }
+                : {}),
+            } } }
           : {}),
       };
+    }
     case "tool-call": {
       const resultPreview = isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview) &&
           part.chat_stream_result_preview.tool_call_id === part.tool_call_id
