@@ -177,6 +177,99 @@ describe("chat recorder analysis", () => {
     expect(sent).toBe(false);
   });
 
+  it("clears an unfinished native goal when reload proof fails", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    const origin = { kind: "goal", goal_id: "goal-full", attempt_id: "attempt-full" };
+    const turn = { turn_id: "turn-full", state: "running", input_ids: [], origin };
+    const stream = { conversation_uid: "conv-full", turns: [turn], inputs: [] };
+    const persisted = {
+      conversation_uid: "conv-full",
+      goal: {
+        goal_id: "goal-full",
+        status: "active",
+        attempt: { attempt_id: "attempt-full", state: "dispatched", turn_id: "turn-full" },
+      },
+    };
+    const commands: string[] = [];
+    let cleared = false;
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      activeRuntime: "native",
+      command: async (text: string) => {
+        commands.push(text);
+        if (text === "/goal clear") cleared = true;
+      },
+      mark: async () => {},
+      hasMatchingGoalTurn: () => false,
+      readPersistedGoal: async () => cleared ? null : persisted,
+      currentStreamState: async () => stream,
+      reloadDuringRun: async (_reply: string, check: any) => {
+        await check.before(turn, stream);
+      },
+      sleep: async () => {},
+      U: () => "u",
+      R: () => "r",
+    });
+
+    await expect(flow()).rejects.toThrow(/before reload/i);
+    expect(commands[1]).toBe("/goal clear");
+    expect(commands).toHaveLength(2);
+  });
+
+  it("reports a cleanup timeout when an unfinished goal remains active", async () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const start = source.indexOf('    async "goal-reload"() {');
+    const body = source.slice(start, source.indexOf("    // Inject a real hub", start));
+    const origin = { kind: "goal", goal_id: "goal-full", attempt_id: "attempt-full" };
+    const turn = { turn_id: "turn-full", state: "running", input_ids: [], origin };
+    const stream = { conversation_uid: "conv-full", turns: [turn], inputs: [] };
+    const persisted = {
+      conversation_uid: "conv-full",
+      goal: {
+        goal_id: "goal-full",
+        status: "active",
+        attempt: { attempt_id: "attempt-full", state: "dispatched", turn_id: "turn-full" },
+      },
+    };
+    let clock = 0;
+    const commands: string[] = [];
+    const flow = runInNewContext(`({${body}})["goal-reload"]`, {
+      Date: { now: () => clock },
+      activeRuntime: "native",
+      command: async (text: string) => { commands.push(text); },
+      mark: async () => {},
+      hasMatchingGoalTurn: () => false,
+      readPersistedGoal: async () => persisted,
+      currentStreamState: async () => stream,
+      reloadDuringRun: async (_reply: string, check: any) => {
+        await check.before(turn, stream);
+      },
+      sleep: async (ms: number) => { clock += ms; },
+      U: () => "u",
+      R: () => "r",
+    });
+
+    await expect(flow()).rejects.toThrow(/goal cleanup failed/i);
+    expect(commands).toContain("/goal clear");
+  });
+
+  it("documents native-only goal reload evidence and the ACP limitation", () => {
+    const docs = readFileSync(
+      new URL("../../../../docs/quality/webui-browser-coverage.md", import.meta.url),
+      "utf8",
+    );
+    const row = docs.split("\n").find((line) => line.startsWith("| `goal-reload` |"));
+
+    expect(row).toBeDefined();
+    expect(row).toContain("native `/goal`");
+    expect(row).toContain("ACP reports unsupported");
+    expect(row).toContain("GET `/sessions/{id}/goal`");
+    expect(row).toContain("turn.state.origin");
+    expect(row).toContain("data-chat-*");
+    expect(row).not.toContain("equivalent goal-directed chat turn");
+  });
+
   it("requires the reloaded snapshot to retain the active turn and its running inputs", () => {
     const expectedTurn = { turn_id: "turn-1", input_ids: ["input-1"] };
     expect(hasRunningTurnWithInputs({
@@ -479,6 +572,69 @@ describe("chat recorder analysis", () => {
     expect(sample).toMatchObject({ toolsStarted: 2, toolsDrawn: 2, duplicateTools: 1 });
     expect(analyzeChatFrames([frame({ ...sample })], ready).defects.dupTools).toBe(1);
     expect(restored.goalToolSample([])).toMatchObject({ toolsStarted: 2, toolsDrawn: 0, duplicateTools: 0 });
+  });
+
+  it("counts goal tool cards even when their row is unpaired or has no turn attribute", () => {
+    const source = readFileSync(new URL("../scripts/chat-recorder.mjs", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function installRecorder(cfg)"), source.indexOf("// ---------------------------------------------------------------- one flow"));
+    const cards = [
+      { dataset: { chatRowId: "r1", chatToolCallId: "call-1" } },
+      { dataset: { chatTurnId: "goal-turn", chatRowId: "paged-row", chatToolCallId: "call-1" } },
+    ];
+    let sampledSelector = "";
+    const assistant = {
+      dataset: { role: "assistant" },
+      textContent: "Run · shell",
+      parentElement: null,
+      isConnected: true,
+    };
+    const document = {
+      querySelectorAll(selector: string) {
+        if (selector === "[data-role]") return [assistant];
+        if (selector.includes("data-chat-tool-call-id")) {
+          sampledSelector = selector;
+          const requirements = [
+            ["data-chat-tool-call-id", "chatToolCallId"],
+            ["data-chat-row-id", "chatRowId"],
+            ["data-chat-turn-id", "chatTurnId"],
+          ] as const;
+          const required = requirements.filter(([attribute]) => selector.includes(`[${attribute}]`));
+          return cards.filter((card) => required.every(([, key]) => Boolean(card.dataset[key])));
+        }
+        return [];
+      },
+      querySelector: () => null,
+    };
+    const callbacks: Array<() => void> = [];
+    const window = { fetch: async () => new Response() };
+    const install = runInNewContext(`(${body})`, {
+      window,
+      document,
+      Request,
+      Response,
+      ReadableStream,
+      TextDecoder,
+      URL,
+      performance: { timeOrigin: 0, now: () => 2 },
+      getComputedStyle: () => ({ opacity: "1", overflowY: "visible" }),
+      requestAnimationFrame: (callback: () => void) => { callbacks.push(callback); },
+      location: { href: "http://localhost/" },
+      sessionStorage: { getItem: () => null, removeItem: () => {} },
+    });
+    install({ wall0: 2, sessionStreamSuffix: "/sessions/target/stream", user: [], reply: [] });
+    const rec = (window as any).__rec;
+    rec.mark("PAGE START GOAL");
+    rec.noteToolRow({
+      id: "r1",
+      turn_id: "goal-turn",
+      parts: [{ type: "tool-call", tool_call_id: "call-1" }],
+    });
+    rec.verifyGoalTurn("goal-turn");
+    callbacks.shift()?.();
+
+    expect(sampledSelector).toBe("[data-chat-tool-call-id]");
+    expect(rec.sampleError).toBeUndefined();
+    expect(rec.frames.at(-1)).toMatchObject({ toolsStarted: 1, toolsDrawn: 2, duplicateTools: 1 });
   });
 
   it("counts a tool call once across row IDs and reload", () => {
