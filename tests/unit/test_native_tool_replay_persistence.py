@@ -15,6 +15,10 @@ from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.conversation_logger import KollaborConversationLogger, utc_stamp
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_events import EventBus
+from kollabor_events.data_models import ConversationMessage
+from kollabor_tui.display_tap import DisplayTap
+from kollabor_agent.queue_processor import QueueProcessor, _xml_tool_call_entries
+from kollabor_ai.response_parser import ResponseParser
 
 
 def manager(directory):
@@ -177,6 +181,126 @@ async def test_empty_xml_display_text_survives_jsonl_resume(tmp_path):
     assert all(row["kind"] != "reply" for row in rows)
     assert [row["kind"] for row in rows].count("tool") == 1
     assert "<terminal>" not in str(rows)
+
+
+@pytest.mark.asyncio
+async def test_xml_tool_row_identity_survives_jsonl_resume(tmp_path):
+    writer = KollaborConversationLogger(tmp_path)
+    parent = await writer.log_user_message("Run two XML commands")
+    turn_id = "xml-row-identity-turn"
+    history = []
+    parser = ResponseParser()
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor._native_tools_handler = SimpleNamespace(mcp_integration=None)
+    processor.tool_executor = SimpleNamespace(plugin_handlers={})
+    processor.conversation_history = history
+
+    tap = DisplayTap()
+    tap.conversation_source = lambda: "conversation-a"
+    event_bus = EventBus()
+    event_bus.register_service("display_tap", tap)
+    live_state = SimpleNamespace(
+        _event_bus=event_bus,
+        _llm_service=SimpleNamespace(
+            conversation_manager=None, conversation_history=history
+        ),
+        get_conversation_uid=lambda: "conversation-a",
+        chat_stream_snapshot=lambda: {"rows": [], "turns": [], "inputs": []},
+    )
+    live_stream = ChatStreamService(live_state)
+    live_stream.attach_display_tap()
+
+    for command, output in (
+        ("printf first", "first output"),
+        ("printf second", "second output"),
+    ):
+        raw = f"<terminal>{command}</terminal>"
+        parsed = parser.parse_response(raw)
+        tools = processor._resolve_text_tool_calls(parser.get_all_tools(parsed))
+        assert len(tools) == 1
+        tool = tools[0]
+        call = _xml_tool_call_entries(tools)[0]
+
+        tap.publish(
+            {
+                "type": "tool_start",
+                "conversation_uid": "conversation-a",
+                "turn_id": turn_id,
+                "tool_id": tool["id"],
+                "tool_name": "terminal",
+                "input": {"command": command},
+            }
+        )
+        tap.publish(
+            {
+                "type": "tool_result",
+                "conversation_uid": "conversation-a",
+                "turn_id": turn_id,
+                "tool_id": tool["id"],
+                "tool_name": "terminal",
+                "input": {"command": command},
+                "success": True,
+                "output": output,
+            }
+        )
+        assistant_id = await writer.log_assistant_message(
+            raw,
+            parent_uuid=parent,
+            tool_calls=[call],
+            display_content="",
+            turn_id=turn_id,
+        )
+        await writer.log_system_message(
+            output,
+            parent_uuid=assistant_id,
+            subtype="tool_result",
+            tool_use_id=tool["id"],
+            tool_result={"id": tool["id"], "content": output},
+        )
+        history.extend(
+            [
+                ConversationMessage(
+                    role="assistant",
+                    content=raw,
+                    metadata={
+                        "turn_id": turn_id,
+                        "display_content": "",
+                        "xml_tool_calls": [call],
+                    },
+                ),
+                ConversationMessage(
+                    role="user",
+                    content=output,
+                    metadata={
+                        "tool_output_batch": True,
+                        "xml_tool_results": [
+                            {"id": tool["id"], "content": output}
+                        ],
+                    },
+                ),
+            ]
+        )
+        parent = assistant_id
+
+    live_ids = {
+        row["id"]
+        for row in live_stream._rows["conversation-a"].values()
+        if row["kind"] == "tool"
+    }
+    state, _reader, resumed_history, _result = await resume(
+        tmp_path, writer.session_id
+    )
+    assert [
+        message.metadata.get("turn_id")
+        for message in resumed_history
+        if message.role == "assistant"
+    ] == [turn_id, turn_id]
+    replay_rows = ChatStreamService(state).subscribe({})["events"][0]["data"][
+        "rows"
+    ]
+    replay_ids = {row["id"] for row in replay_rows if row["kind"] == "tool"}
+    assert len(live_ids) == len(replay_ids) == 2
+    assert live_ids == replay_ids
 
 
 @pytest.mark.asyncio
