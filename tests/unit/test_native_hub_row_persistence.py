@@ -686,6 +686,102 @@ def test_repeated_compaction_rows_are_filtered_sequentially_after_restart(tmp_pa
     assert summary["metadata"]["compaction_retained_position_map"] == {"0": 0}
 
 
+def test_hub_row_after_staged_compaction_replays_through_later_compaction_and_branch(
+    tmp_path,
+):
+    conversations = tmp_path / "conversations"
+    config = SimpleNamespace(
+        _conversations_dir=conversations,
+        get=lambda _key, default=None: default,
+    )
+    logger = KollaborConversationLogger(conversations)
+    manager = ConversationManager(config, logger)
+    manager.save_conversations = False
+    manager.conversation_metadata["conversation_uid"] = "staged-row-replay"
+    manager.add_message("system", "base system prompt")
+    for index in range(20):
+        role = "user" if index % 2 == 0 else "assistant"
+        manager.add_message(role, f"pre-compaction message {index}")
+    manager.messages[0]["timestamp"] = None
+    for message in manager.messages[1:]:
+        message["timestamp"] = "2026-11-25T11:00:00Z"
+    manager._update_context_window()
+    assert manager.save_session(logger.session_id)
+
+    late_row = _hub_row(
+        "hub-row-during-staged-compaction",
+        kind="note",
+        created_at="2026-11-25T12:00:11Z",
+        history_index=21,
+    )
+    late_row["_history_row_revision"] = 1
+    records = [
+        {
+            "type": "context_compaction",
+            "uuid": "compact-one-record",
+            "timestamp": "2026-11-25T12:00:10Z",
+            "compaction_round": 1,
+            "compaction_snapshot_count": 21,
+            "compaction_retained_positions": [0, 20],
+            "compaction_retained_position_map": {"0": 0, "20": 2},
+            "compaction_output_count": 3,
+            "compaction_id": "compact-one-staged",
+            "compaction_snapshot_row_revision": 0,
+            "content": "first staged summary",
+        },
+        {
+            "type": "system",
+            "subtype": "hub_incoming",
+            "uuid": "hub-row-record-during-stage",
+            "timestamp": "2026-11-25T12:00:11Z",
+            "chat_stream_row": late_row,
+        },
+        {
+            "type": "context_compaction",
+            "uuid": "compact-two-record",
+            "timestamp": "2026-11-25T12:00:12Z",
+            # Simulate a new daemon whose in-memory round starts over.
+            "compaction_round": 1,
+            "compaction_snapshot_count": 3,
+            "compaction_retained_positions": [0, 2],
+            "compaction_retained_position_map": {"0": 0, "2": 1},
+            "compaction_output_count": 2,
+            "compaction_id": "compact-two-staged",
+            "compaction_source_id": "compact-one-staged",
+            "compaction_snapshot_row_revision": 1,
+            "content": "second staged summary",
+        },
+        {
+            "type": "assistant",
+            "uuid": "post-compaction-assistant",
+            "timestamp": "2026-11-25T12:00:13Z",
+            "message": {"role": "assistant", "content": "after compaction"},
+        },
+    ]
+    with logger.session_file.open("a") as session:
+        for record in records:
+            session.write(json.dumps(record) + "\n")
+
+    resumed = ConversationManager(config)
+    assert resumed.load_session(logger.session_id)
+    row = next(
+        row
+        for row in resumed.chat_stream_rows
+        if row["id"] == "hub-row-during-staged-compaction"
+    )
+    assert row["_history_index"] == 2
+    assert row["_history_compaction_id"] == "compact-two-staged"
+
+    through_row = resumed.branch_session(logger.session_id, 2)
+    assert through_row["success"] is True
+    assert [row["id"] for row in resumed.chat_stream_rows] == [
+        "hub-row-during-staged-compaction"
+    ]
+    before_row = resumed.branch_session(logger.session_id, 1)
+    assert before_row["success"] is True
+    assert resumed.chat_stream_rows == []
+
+
 def test_compacted_hub_rows_filter_from_saved_base_without_stream_tail(tmp_path):
     conversations = tmp_path / "conversations"
     config = SimpleNamespace(

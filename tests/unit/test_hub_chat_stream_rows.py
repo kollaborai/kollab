@@ -10,6 +10,7 @@ import pytest
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.state.chat_stream import ChatStreamLog, ChatStreamService
 from kollabor_agent.runtime import AgentRuntime
+from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_events.chat_stream import sequence_problems
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.models import HubMessage, MessageScope
@@ -161,10 +162,28 @@ async def test_native_hub_admission_stays_a_note_until_a_turn_starts():
 
 
 @pytest.mark.asyncio
-async def test_real_hub_message_projects_one_row_into_chat_stream():
+async def test_real_hub_message_projects_one_row_into_chat_stream(tmp_path):
     tap = DisplayTap()
     tap.conversation_source = lambda: "conversation-a"
     llm = _LLM()
+    llm.conversation_manager = ConversationManager(
+        SimpleNamespace(
+            _conversations_dir=tmp_path / "conversations",
+            get=lambda _key, default=None: default,
+        )
+    )
+    llm.conversation_history = [
+        {
+            "uuid": "compaction-summary",
+            "role": "user",
+            "content": "compacted history",
+            "metadata": {
+                "context_compaction": True,
+                "compaction_id": "hub-producer-coordinate",
+            },
+        },
+        {"uuid": "compacted-tail", "role": "assistant", "content": "tail", "metadata": {}},
+    ]
     plugin = _plugin(llm=llm, tap=tap)
     plugin._display_tap = tap
     state = SimpleNamespace(
@@ -197,6 +216,9 @@ async def test_real_hub_message_projects_one_row_into_chat_stream():
     assert persisted_row["id"] == message.id
     assert persisted_row["kind"] == "note"
     assert persisted_row["parts"] == rows[0]["parts"]
+    assert persisted_row["_history_index"] == 2
+    assert persisted_row["_history_compaction_id"] == "hub-producer-coordinate"
+    assert persisted_row["_history_row_revision"] == 1
 
 
 @pytest.mark.asyncio
