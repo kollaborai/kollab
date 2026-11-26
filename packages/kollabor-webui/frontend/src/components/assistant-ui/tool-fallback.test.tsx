@@ -306,6 +306,32 @@ describe("expanding a chat stream tool output preview", () => {
     expect(mocks.getChatStreamToolOutput).toHaveBeenCalledTimes(2);
   });
 
+  it("rejects a mixed revision if the tool result changes between chunks", async () => {
+    const fetchOutput = fetchChatStreamToolOutput();
+    expect(fetchOutput).toBeTypeOf("function");
+    if (!fetchOutput) return;
+    const requestedRevision = "1".repeat(64);
+    const updatedRevision = "2".repeat(64);
+    mocks.getChatStreamToolOutput
+      .mockResolvedValueOnce({
+        row_id: "row-1", tool_call_id: "tool-call-1", output_revision: requestedRevision,
+        offset: 0, next_offset: 5, total_chars: 8, output_type: "text", content: "first", done: false,
+      })
+      .mockResolvedValueOnce({
+        row_id: "row-1", tool_call_id: "tool-call-1", output_revision: updatedRevision,
+        offset: 5, next_offset: 8, total_chars: 8, output_type: "text", content: "end", done: true,
+      });
+
+    await expect(fetchOutput("stream-mixed", "row-1", "tool-call-1", requestedRevision, 8, "text"))
+      .rejects.toThrow("Tool output chunk does not match the requested result.");
+    expect(mocks.getChatStreamToolOutput).toHaveBeenNthCalledWith(
+      1, "stream-mixed", "row-1", "tool-call-1", requestedRevision, { offset: 0, limit: 32768 },
+    );
+    expect(mocks.getChatStreamToolOutput).toHaveBeenNthCalledWith(
+      2, "stream-mixed", "row-1", "tool-call-1", requestedRevision, { offset: 5, limit: 32768 },
+    );
+  });
+
   it("remounts the result card when the same tool row gets a new revision", async () => {
     const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>");
     const rootElement = dom.window.document.getElementById("root");
