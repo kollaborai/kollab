@@ -273,13 +273,25 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
     rows: set[str] = set()
     states: dict[str, list[str]] = {}
     turn_of: dict[str, str] = {}
+    terminal_info: dict[str, tuple[str | None, str]] = {}
     ended_turns: set[str] = set()
     last_seq = -1
     expected: int | None = None
 
-    def note_state(seq: Any, info: dict[str, Any]) -> None:
+    def note_state(
+        seq: Any, info: dict[str, Any], *, snapshot: bool = False
+    ) -> None:
         seen = states.setdefault(info["id"], [])
-        if "ended" in seen:
+        turn_id = info.get("turn_id")
+        terminal = (turn_id, info.get("outcome"))
+        repeated_terminal_snapshot = (
+            snapshot
+            and info["state"] == "ended"
+            and bool(seen)
+            and seen[-1] == "ended"
+            and terminal_info.get(info["id"]) == terminal
+        )
+        if "ended" in seen and not repeated_terminal_snapshot:
             problems.append(f"seq {seq}: input {info['id']} changed after it ended")
         previous_state = seen[-1] if seen else None
         if seen and "ended" not in seen:
@@ -296,8 +308,8 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
                 problems.append(
                     f"seq {seq}: input {info['id']} went from {last} to {state}"
                 )
-        seen.append(info["state"])
-        turn_id = info.get("turn_id")
+        if not repeated_terminal_snapshot:
+            seen.append(info["state"])
         if info["state"] in ("started", "joined") and turn_id in ended_turns:
             problems.append(
                 f"seq {seq}: input {info['id']} {info['state']} after turn {turn_id} ended"
@@ -313,6 +325,7 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
         elif turn_id:
             turn_of[info["id"]] = turn_id
         if info["state"] == "ended":
+            terminal_info.setdefault(info["id"], terminal)
             bound_turn = turn_of.get(info["id"])
             if bound_turn is None and info["outcome"] != "cancelled":
                 problems.append(
@@ -366,7 +379,7 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
             for turn in data["turns"]:
                 note_turn(seq, turn["turn_id"], turn["state"])
             for info in data["inputs"]:
-                note_state(seq, info)
+                note_state(seq, info, snapshot=True)
         elif kind == "replace":
             note_rows(data["rows"])
         elif kind == "row.upsert":
