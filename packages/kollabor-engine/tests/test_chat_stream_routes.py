@@ -1355,6 +1355,11 @@ def test_chat_parts_route_makes_unmarked_oversized_item_retrievable(monkeypatch)
     payload = response.json()
     assert payload["next_offset"] == 1
     assert payload["done"] is True
+    assert len(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) <= stream._PART_PAGE_RPC_BYTES
     marker = payload["parts"][0]["chat_stream_part_preview"]
     assert marker["kind"] == "chat-stream-part-preview"
     assert marker["session_id"] == "s1"
