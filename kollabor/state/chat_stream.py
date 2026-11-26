@@ -280,6 +280,12 @@ class ChatStreamService:
         # Large marker contents that were not retained cannot serve the
         # previous revision after an append; publish a fresh bounded upsert.
         self._row_content_unretained: set[tuple[str, str]] = set()
+        # References are kept only while the referenced values remain in the
+        # byte-bounded LRUs. Eviction can then mark the owning projected row
+        # unretained without retaining a second unbounded index of old rows.
+        self._row_content_cache_refs: dict[
+            tuple[str, str], set[tuple[Any, ...]]
+        ] = {}
         self._tool_output_lock = threading.RLock()
         self._tool_output_cache: OrderedDict[
             tuple[str, str, str], tuple[Any, str, str, str, int]
@@ -2880,11 +2886,15 @@ class ChatStreamService:
                 if key[0] == uid and key[1] == row_id:
                     entry = self._tool_output_cache.pop(key)
                     self._tool_output_cache_bytes -= entry[4]
+                    self._forget_projected_cache_ref(
+                        "output", key, entry[3]
+                    )
             for key in tuple(self._content_cache):
                 if key[0] == uid and key[1] == row_id:
                     entry = self._content_cache.pop(key)
                     self._content_cache_bytes -= entry[4]
                     self._content_cache_latest.pop(key[:4], None)
+                    self._forget_projected_cache_ref("content", key)
 
     def _clear_tool_output_cache(self, uid: str) -> None:
         """Drop cached output projections when a transcript is replaced."""
@@ -2900,6 +2910,36 @@ class ChatStreamService:
             for key in tuple(self._content_cache_latest):
                 if key[0] == uid:
                     self._content_cache_latest.pop(key, None)
+            for key in tuple(self._row_content_cache_refs):
+                if key[0] == uid:
+                    self._row_content_cache_refs.pop(key, None)
+
+    def _forget_projected_cache_ref(
+        self,
+        cache_kind: str,
+        cache_key: tuple[Any, ...],
+        revision: str | None = None,
+    ) -> None:
+        """Mark a row stale when a currently published value leaves the LRU."""
+        if (
+            len(cache_key) < 2
+            or not isinstance(cache_key[0], str)
+            or not isinstance(cache_key[1], str)
+        ):
+            return
+        row_key = (cache_key[0], cache_key[1])
+        refs = self._row_content_cache_refs.get(row_key)
+        if refs is None:
+            return
+        ref = (cache_kind, *cache_key)
+        if cache_kind == "output":
+            ref = (*ref, revision)
+        if ref not in refs:
+            return
+        refs.discard(ref)
+        if not refs:
+            self._row_content_cache_refs.pop(row_key, None)
+        self._row_content_unretained.add(row_key)
 
     def _cached_tool_output(
         self,
@@ -2925,6 +2965,7 @@ class ChatStreamService:
             if cached is not None:
                 self._tool_output_cache_bytes -= cached[4]
                 del self._tool_output_cache[key]
+                self._forget_projected_cache_ref("output", key, cached[3])
 
             content, output_type = self._tool_output_text(result)
             revision = chat_stream_tool_output_revision(content, output_type)
@@ -2944,6 +2985,9 @@ class ChatStreamService:
                 ):
                     _old_key, old_entry = self._tool_output_cache.popitem(last=False)
                     self._tool_output_cache_bytes -= old_entry[4]
+                    self._forget_projected_cache_ref(
+                        "output", _old_key, old_entry[3]
+                    )
             return content, output_type, revision
 
     def _project_chat_stream_row(
@@ -3040,6 +3084,7 @@ class ChatStreamService:
                     ):
                         _old_key, old_entry = self._content_cache.popitem(last=False)
                         self._content_cache_bytes -= old_entry[4]
+                        self._forget_projected_cache_ref("content", _old_key)
                         old_base_key = _old_key[:4]
                         if self._content_cache_latest.get(old_base_key) == _old_key[4]:
                             self._content_cache_latest.pop(old_base_key, None)
@@ -4170,17 +4215,41 @@ class ChatStreamService:
             self._row_parts_paged.add(key)
         else:
             self._row_parts_paged.discard(key)
-        if self._projected_content_unretained(uid, row):
-            self._row_content_unretained.add(key)
-        else:
-            self._row_content_unretained.discard(key)
+        content_keys, output_refs = self._projected_content_cache_refs(uid, row)
+        retained_refs: set[tuple[Any, ...]] = set()
+        unretained = False
+        with self._tool_output_lock:
+            for content_key in content_keys:
+                if content_key in self._content_cache:
+                    retained_refs.add(("content", *content_key))
+                else:
+                    unretained = True
+            for output_key, revision in output_refs:
+                cached = self._tool_output_cache.get(output_key)
+                if cached is not None and cached[3] == revision:
+                    retained_refs.add(("output", *output_key, revision))
+                else:
+                    unretained = True
+            if retained_refs:
+                self._row_content_cache_refs[key] = retained_refs
+            else:
+                self._row_content_cache_refs.pop(key, None)
+            if unretained:
+                self._row_content_unretained.add(key)
+            else:
+                self._row_content_unretained.discard(key)
 
-    def _projected_content_unretained(self, uid: str, row: dict[str, Any]) -> bool:
+    def _projected_content_cache_refs(
+        self, uid: str, row: dict[str, Any]
+    ) -> tuple[
+        list[tuple[str, str, int, str, str]],
+        list[tuple[tuple[str, str, str], str]],
+    ]:
         row_id = row.get("id")
         if not isinstance(row_id, str):
-            return False
+            return [], []
         content_keys: list[tuple[str, str, int, str, str]] = []
-        output_keys: list[tuple[str, str, str]] = []
+        output_refs: list[tuple[tuple[str, str, str], str]] = []
         parts_marker = row.get("chat_stream_parts_preview")
         if isinstance(parts_marker, dict):
             revision = parts_marker.get("output_revision")
@@ -4215,13 +4284,13 @@ class ChatStreamService:
                     # Compatibility with the pre-migration projected shape.
                     result_marker = result if result.get("kind") == "chat-stream-tool-output-preview" else None
                 if isinstance(result_marker, dict):
-                    tool_call_id = result_marker.get("tool_call_id", part.get("tool_call_id"))
-                    if isinstance(tool_call_id, str):
-                        output_keys.append((uid, row_id, tool_call_id))
-        with self._tool_output_lock:
-            return any(key not in self._content_cache for key in content_keys) or any(
-                key not in self._tool_output_cache for key in output_keys
-            )
+                    tool_call_id = result_marker.get(
+                        "tool_call_id", part.get("tool_call_id")
+                    )
+                    revision = result_marker.get("output_revision")
+                    if isinstance(tool_call_id, str) and isinstance(revision, str):
+                        output_refs.append(((uid, row_id, tool_call_id), revision))
+        return content_keys, output_refs
 
     def _remember_raw_row(
         self,
@@ -4250,6 +4319,9 @@ class ChatStreamService:
         for key in tuple(self._row_content_unretained):
             if key[0] == uid:
                 self._row_content_unretained.discard(key)
+        for key in tuple(self._row_content_cache_refs):
+            if key[0] == uid:
+                self._row_content_cache_refs.pop(key, None)
         projected_by_id = {
             row["id"]: row
             for row in projected_rows or []
