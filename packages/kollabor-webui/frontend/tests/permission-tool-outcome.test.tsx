@@ -294,6 +294,16 @@ describe("permission prompt outcome from the tool-call row", () => {
     expect(visibleRecoveredPermissionPrompts([row], marker.session_id)).toEqual([]);
     expect(pendingPermissions([row], visibleRecoveredPermissionPrompts([row], marker.session_id))).toEqual([]);
   });
+
+  it("fails closed when args preview metadata is present but malformed", () => {
+    const respond = vi.fn<PermissionResponseHandler>(async () => "answered");
+    const container = renderPrompt(partProps({
+      providerMetadata: { kollab: { chat_stream_args_preview: { kind: "wrong-marker" } } },
+    }), respond);
+
+    expect(container.textContent).toContain("could not be verified");
+    expect(buttons(container)).toEqual([]);
+  });
 });
 
 describe("permission prompt data from the daemon chat-stream row", () => {
