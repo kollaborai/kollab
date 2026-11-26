@@ -10,9 +10,11 @@ import {
   ToolFallbackResult,
   ToolFallbackRoot,
   fetchHistoryOutput,
+  toolErrorLine,
 } from "./tool-fallback";
 import * as toolFallback from "./tool-fallback";
 import {
+  ChatStreamStreamingContent,
   ChatStreamContentPreview,
   fetchChatStreamContent,
   type ChatStreamContentPreviewMarker,
@@ -158,6 +160,90 @@ describe("expanding a tool loads its full output", () => {
     expect(recovered).toContain("Output:");
     expect(recovered).toContain("output after retry");
     expect(recovered).not.toContain(errorMessage);
+  });
+});
+
+describe("collapsed failed tool previews", () => {
+  it("shows the first useful line from a bounded output marker", () => {
+    expect(toolErrorLine(chatStreamPreviewResult(
+      "session-error-preview",
+      "Error: permission denied while reading file\nremaining stack details",
+    ))).toBe("permission denied while reading file");
+  });
+});
+
+describe("live streamed text previews", () => {
+  it("hydrates a joining snapshot, keeps later deltas visible, and loads the final revision", async () => {
+    const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>");
+    const rootElement = dom.window.document.getElementById("root");
+    if (!rootElement) throw new Error("test root element is missing");
+    vi.stubGlobal("window", dom.window);
+    vi.stubGlobal("document", dom.window.document);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const root = createRoot(rootElement);
+    const snapshotText = `snapshot body ${"older content ".repeat(100)}`;
+    const tail = "delta arrived after snapshot";
+    const finalText = snapshotText + tail;
+    const snapshotMarker: ChatStreamContentPreviewMarker = {
+      kind: "chat-stream-content-preview",
+      row_id: "row-dom-live",
+      session_id: "session-dom-live",
+      part_index: 0,
+      field: "text",
+      output_type: "text",
+      output_revision: "c".repeat(64),
+      output_chars: Array.from(snapshotText).length,
+      output_bytes: new TextEncoder().encode(snapshotText).length,
+      preview: snapshotText.slice(0, 1024),
+    };
+    const finalMarker: ChatStreamContentPreviewMarker = {
+      ...snapshotMarker,
+      output_revision: "d".repeat(64),
+      output_chars: Array.from(finalText).length,
+      output_bytes: new TextEncoder().encode(finalText).length,
+    };
+    mocks.getChatStreamContent
+      .mockResolvedValueOnce({
+        row_id: snapshotMarker.row_id, part_index: 0, field: "text",
+        output_revision: snapshotMarker.output_revision, offset: 0,
+        next_offset: snapshotMarker.output_chars, total_chars: snapshotMarker.output_chars,
+        output_type: "text", content: snapshotText, done: true,
+      })
+      .mockResolvedValueOnce({
+        row_id: finalMarker.row_id, part_index: 0, field: "text",
+        output_revision: finalMarker.output_revision, offset: 0,
+        next_offset: finalMarker.output_chars, total_chars: finalMarker.output_chars,
+        output_type: "text", content: finalText, done: true,
+      });
+
+    const render = (marker: ChatStreamContentPreviewMarker, text: string) => (
+      <ChatStreamStreamingContent marker={marker} text={text}>
+        {(content) => <span data-testid="streamed-text">{content}</span>}
+      </ChatStreamStreamingContent>
+    );
+    try {
+      await act(async () => {
+        root.render(render(snapshotMarker, snapshotMarker.preview));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(rootElement.textContent).toContain(snapshotText);
+
+      await act(async () => {
+        root.render(render(snapshotMarker, snapshotMarker.preview + tail));
+      });
+      expect(rootElement.textContent).toContain(finalText);
+
+      await act(async () => {
+        root.render(render(finalMarker, finalMarker.preview));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(rootElement.textContent).toContain(finalText);
+      expect(mocks.getChatStreamContent).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+      dom.window.close();
+    }
   });
 });
 
