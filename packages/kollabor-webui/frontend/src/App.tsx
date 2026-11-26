@@ -990,7 +990,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // The open chat's agent against the engine: older code gets a line above the chat (#968).
   const activeAgent = activeSession ? liveAgentOf(activeSession, liveAgents) : undefined;
   const chatOutdated = Boolean(activeSession && outdatedChats.has(activeSession.session_id));
-  const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents, chatOutdated });
+  const versionNotice = agentVersionNotice({
+    engineVersion,
+    agent: activeAgent,
+    restartAgents,
+    chatOutdated,
+    chatName: activeSession?.identity || activeSession?.agent || "",
+  });
   const agentIsCurrent = Boolean(activeAgent && engineVersion && activeAgent.version === engineVersion);
   const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
   const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
