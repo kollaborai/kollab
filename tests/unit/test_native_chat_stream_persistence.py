@@ -207,6 +207,109 @@ async def test_native_batch_keeps_each_image_on_its_original_input_after_resume(
     assert [row["status"] for row in resumed_rows] == ["completed", "completed"]
     assert [part["type"] for part in resumed_rows[0]["parts"]].count("image") == 1
     assert not any(part["type"] == "image" for part in resumed_rows[1]["parts"])
+    restored_inputs = [
+        message
+        for message in resumed_stream._state_service._llm_service.conversation_history
+        if message.metadata.get("request_id") in request_ids
+    ]
+    assert [message.metadata["chat_stream_input_count"] for message in restored_inputs] == [
+        2,
+        2,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_historical_untracked_user_row_keeps_its_text_after_resume(tmp_path):
+    conversation_logger = KollaborConversationLogger(tmp_path / "conversations")
+    await conversation_logger.log_user_message("hello from old history")
+
+    resumed_stream, resumed_uid = await _resume_chat_stream(
+        tmp_path, conversation_logger.session_id
+    )
+    rows = _input_rows(resumed_stream, resumed_uid)
+
+    assert len(rows) == 1
+    assert rows[0]["parts"] == [
+        {"type": "text", "text": "hello from old history"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_acp_stream_input_count_and_text_survive_resume(tmp_path):
+    conversation_logger = KollaborConversationLogger(tmp_path / "conversations")
+    request_id = "acp-resume-input"
+    await conversation_logger.log_user_message(
+        "inspect this change",
+        message_metadata={
+            "provider": "acp",
+            "request_id": request_id,
+            "source": "cli",
+            "thread_id": "acp-thread",
+            "turn_id": 21,
+            "chat_stream_input_count": 1,
+        },
+    )
+
+    resumed_stream, resumed_uid = await _resume_chat_stream(
+        tmp_path, conversation_logger.session_id
+    )
+    rows = _input_rows(resumed_stream, resumed_uid)
+    restored = next(
+        message
+        for message in resumed_stream._state_service._llm_service.conversation_history
+        if message.metadata.get("request_id") == request_id
+    )
+
+    assert restored.metadata["chat_stream_input_count"] == 1
+    assert [row["id"] for row in rows] == [request_id]
+    assert rows[0]["parts"] == [
+        {"type": "text", "text": "inspect this change"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_structured_hub_input_metadata_and_note_survive_resume(tmp_path):
+    conversation_logger = KollaborConversationLogger(tmp_path / "conversations")
+    request_id = "hub-resume-input"
+    note = {
+        "type": "hub-note",
+        "from": "peer",
+        "to": "koordinator",
+        "text": "Please inspect this change.",
+        "observed": False,
+        "is_direct": True,
+    }
+    await conversation_logger.log_user_message(
+        note["text"],
+        message_metadata={
+            "provider": "acp",
+            "request_id": request_id,
+            "source": "hub_message",
+            "thread_id": "hub-thread",
+            "turn_id": 22,
+            "chat_stream_input_count": 1,
+            "hub_message": True,
+            "hub_message_id": request_id,
+            "hub_admission": "input",
+            "hub_note": note,
+        },
+    )
+
+    resumed_stream, resumed_uid = await _resume_chat_stream(
+        tmp_path, conversation_logger.session_id
+    )
+    rows = _input_rows(resumed_stream, resumed_uid)
+    restored = next(
+        message
+        for message in resumed_stream._state_service._llm_service.conversation_history
+        if message.metadata.get("request_id") == request_id
+    )
+
+    assert restored.metadata["chat_stream_input_count"] == 1
+    assert restored.metadata["hub_admission"] == "input"
+    assert restored.metadata["hub_note"] == note
+    assert [row["id"] for row in rows] == [request_id]
+    assert rows[0]["parts"] == [note]
 
 
 def test_single_input_operator_text_keeps_its_unambiguous_image():
