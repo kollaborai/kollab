@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from kollabor.llm.llm_coordinator import LLMService
-from kollabor.state.chat_stream import ChatStreamLog
+from kollabor.state.chat_stream import ChatStreamLog, ChatStreamService
 from kollabor_agent.runtime import AgentRuntime
 from kollabor_events.chat_stream import sequence_problems
 from kollabor_tui.display_tap import DisplayTap
@@ -157,6 +157,38 @@ async def test_native_turn_start_is_an_input_row_under_the_hub_message_id():
     events = _hub_events(tap)
     assert len(events) == 1
     _assert_valid_stream(events, row_kind="input", message_id=message.id)
+
+
+@pytest.mark.asyncio
+async def test_real_hub_message_projects_one_row_into_chat_stream():
+    tap = DisplayTap()
+    tap.conversation_source = lambda: "conversation-a"
+    llm = _LLM()
+    plugin = _plugin(llm=llm, tap=tap)
+    plugin._display_tap = tap
+    state = SimpleNamespace(
+        _event_bus=plugin.event_bus,
+        _llm_service=llm,
+        get_conversation_uid=lambda: "conversation-a",
+        chat_stream_snapshot=lambda: {"rows": [], "turns": [], "inputs": []},
+    )
+    stream = ChatStreamService(state)
+    stream.subscribe({"after": None, "conversation_uid": None})
+    message = HubMessage(
+        id="one-live-hub-row",
+        from_agent="peer-id",
+        from_identity="peer",
+        to="koordinator",
+        scope=MessageScope.DIRECT.value,
+        content="Please inspect the current change.",
+    )
+
+    await plugin._on_message_received(message)
+
+    rows = list(stream._rows["conversation-a"].values())
+    assert [row["id"] for row in rows] == [message.id]
+    assert rows[0]["kind"] == "input"
+    assert rows[0]["parts"][0]["type"] == "hub-note"
 
 
 @pytest.mark.asyncio
