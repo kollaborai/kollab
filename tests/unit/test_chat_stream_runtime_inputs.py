@@ -524,30 +524,27 @@ async def test_web_queue_batch_publishes_inputs_and_cancel_lifecycle():
     )
     assert staged["error"] is None
     first_id, second_id = ids["request_ids"]
-    queued = await _call(
-        server,
-        "state.web_queue.enqueue_batch",
-        {
-            **binding,
-            "operation_id": ids["operation_ids"][0],
-            "batch_id": ids["batch_id"],
-            "items": [
-                {
-                    "request_id": first_id,
-                    "payload_b64": base64.b64encode(
-                        json.dumps({"text": "first queued"}).encode()
-                    ).decode("ascii"),
-                },
-                {
-                    "request_id": second_id,
-                    "payload_b64": base64.b64encode(
-                        json.dumps({"text": "second queued"}).encode()
-                    ).decode("ascii"),
-                    "attachment_refs": [staged["result"]["ref"]],
-                },
-            ],
-        },
-    )
+    batch_params = {
+        **binding,
+        "operation_id": ids["operation_ids"][0],
+        "batch_id": ids["batch_id"],
+        "items": [
+            {
+                "request_id": first_id,
+                "payload_b64": base64.b64encode(
+                    json.dumps({"text": "first queued"}).encode()
+                ).decode("ascii"),
+            },
+            {
+                "request_id": second_id,
+                "payload_b64": base64.b64encode(
+                    json.dumps({"text": "second queued"}).encode()
+                ).decode("ascii"),
+                "attachment_refs": [staged["result"]["ref"]],
+            },
+        ],
+    }
+    queued = await _call(server, "state.web_queue.enqueue_batch", batch_params)
     assert queued["error"] is None
 
     admitted = stream.subscribe(
@@ -596,4 +593,10 @@ async def test_web_queue_batch_publishes_inputs_and_cancel_lifecycle():
     ]
     assert terminal_rows[0]["id"] == second_id
     assert terminal_rows[0]["status"] == "cancelled"
+
+    replay = await _call(server, "state.web_queue.enqueue_batch", batch_params)
+    assert replay["error"] is None
+    assert stream.subscribe(
+        {"after": terminal[-1]["seq"], "conversation_uid": "conversation-a"}
+    )["events"] == []
     await runtime.close()

@@ -963,7 +963,46 @@ def register_web_message_queue_runtime(
         if not callable(admit):
             return await enqueue()
         scope = (resolved.scope_id, resolved.conversation_uid, resolved.principal_id)
-        return await admit([item.request_id for item in items], scope, enqueue)
+        attachment_scope = None
+        if any(item.attachment_refs for item in items):
+            attachment_scope = await attachments.bind_scope(
+                {"expected_conversation_uid": resolved.conversation_uid},
+                current_rpc_caller_context(),
+            )
+        has_input = getattr(stream, "has_admitted_input", None)
+        stream_inputs = []
+        for item in items:
+            try:
+                payload = json.loads(item.payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+            text = payload.get("text") if isinstance(payload, dict) else None
+            text = text if isinstance(text, str) else ""
+            item_attachments = []
+            already_projected = callable(has_input) and has_input(
+                item.request_id, scope
+            )
+            if attachment_scope is not None and not already_projected:
+                for ref in item.attachment_refs:
+                    staged = await attachment_scope.open_for_admission(
+                        item.request_id, ref
+                    )
+                    encoded = base64.b64encode(staged.data).decode("ascii")
+                    item_attachments.append(
+                        {
+                            "name": staged.filename,
+                            "content_type": staged.mime,
+                            "data_url": f"data:{staged.mime};base64,{encoded}",
+                        }
+                    )
+            stream_inputs.append(
+                {
+                    "id": item.request_id,
+                    "text": text,
+                    "attachments": item_attachments,
+                }
+            )
+        return await admit(stream_inputs, scope, enqueue)
 
     register_web_message_queue_handlers(
         rpc_server,
