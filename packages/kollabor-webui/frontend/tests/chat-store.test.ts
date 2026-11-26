@@ -582,6 +582,34 @@ describe("LiveChatStore", () => {
     });
   });
 
+  it("exposes owner-scoped Stop while goal input admission is still in flight", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-admission",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"f".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let resolveAdmission!: (response: Response) => void;
+    request.mockImplementation(async (path) => {
+      if (path.endsWith("/inputs")) return new Promise<Response>((resolve) => { resolveAdmission = resolve; });
+      if (path.endsWith("/cancel-owned")) return new Response(JSON.stringify({ ok: true, cancelled: true }), { status: 200 });
+      return new Response(null, { status: 202 });
+    });
+
+    const sending = store.send(input);
+    await vi.waitFor(() => expect(resolveAdmission).toBeDefined());
+    expect(store.getSnapshot().running).toBe(true);
+    await store.stop();
+    resolveAdmission(new Response(null, { status: 202 }));
+    await sending;
+
+    expect(request).toHaveBeenCalledWith("/sessions/s1/cancel-owned", {
+      method: "POST",
+      body: JSON.stringify({ request_id: ownerId }),
+    });
+  });
+
   it("aborts private goal polling on disposal and ignores a late reply", async () => {
     const { store, request } = make();
     const input = {
