@@ -213,6 +213,8 @@ class ChatStreamService:
         self._reply_rows: dict[tuple[str, str], str] = {}
         self._reply_text: dict[tuple[str, str], str] = {}
         self._reply_segment_offsets: dict[tuple[str, str], int] = {}
+        self._reply_after_tool: set[tuple[str, str]] = set()
+        self._reply_row_ids: dict[tuple[str, str], list[str]] = {}
         self._turn_errors: dict[tuple[str, str], str] = {}
         self._display_tap: Any = None
         self._display_tap_listener: Any = None
@@ -549,8 +551,12 @@ class ChatStreamService:
             turn_id = self._active_turns.get(uid)
         if turn_id is None:
             return
+        key = (uid, turn_id)
+        if key in self._reply_after_tool:
+            self._reply_after_tool.discard(key)
+            self._new_reply_row(uid, turn_id)
+            self._reply_segment_offsets[key] = 0
         if event.get("type") == "response":
-            key = (uid, turn_id)
             offset = self._reply_segment_offsets.get(key, 0)
             prefix = self._reply_text.get(key, "")[:offset]
             self._upsert_reply(uid, turn_id, prefix + text, status="streaming")
@@ -590,6 +596,11 @@ class ChatStreamService:
         else:
             outcome = "completed"
         self._upsert_reply(uid, turn_id, self._reply_text.get(key, ""), status=outcome)
+        for row_id in self._reply_row_ids.get(key, [])[:-1]:
+            row = self._rows.get(uid, {}).get(row_id)
+            if row is not None:
+                self._upsert(uid, {**row, "status": outcome})
+        self._reply_after_tool.discard(key)
         self._set_turn_state(uid, turn_id, "ended")
         for input_id in input_ids:
             prior = self._inputs.setdefault(uid, {}).get(input_id, {})
@@ -687,6 +698,10 @@ class ChatStreamService:
         if not isinstance(tool_id, str) or not tool_id:
             tool_id = uuid.uuid4().hex
         turn_id = self._event_turn_id(event) or self._active_turns.get(uid)
+        if event.get("type") == "tool_start" and turn_id is not None:
+            key = (uid, turn_id)
+            if key in self._reply_rows:
+                self._reply_after_tool.add(key)
         row_id = (
             f"tool-{uuid.uuid5(uuid.NAMESPACE_URL, f'{turn_id or ""}:{tool_id}').hex}"
         )
@@ -834,8 +849,15 @@ class ChatStreamService:
             values.append(input_id)
 
     def _new_reply_row(self, uid: str, turn_id: str) -> str:
-        row_id = f"reply-{uuid.uuid5(uuid.NAMESPACE_URL, turn_id).hex}"
-        self._reply_rows[(uid, turn_id)] = row_id
+        key = (uid, turn_id)
+        row_ids = self._reply_row_ids.setdefault(key, [])
+        namespace = uuid.uuid5(uuid.NAMESPACE_URL, turn_id)
+        row_uuid = (
+            namespace if not row_ids else uuid.uuid5(namespace, str(len(row_ids)))
+        )
+        row_id = f"reply-{row_uuid.hex}"
+        row_ids.append(row_id)
+        self._reply_rows[key] = row_id
         self._reply_text[(uid, turn_id)] = ""
         self._upsert(
             uid,
