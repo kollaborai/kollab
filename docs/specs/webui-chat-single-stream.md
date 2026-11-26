@@ -62,7 +62,7 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 
 **Persisted goal read.** Authenticated `GET /sessions/{id}/goal` reads the session daemon, including when the engine is remote. It returns `{conversation_uid, goal}` for the daemon's current conversation. `goal` is null when that conversation has no unfinished goal; otherwise it is `{goal_id, status, attempt}` with the full persisted goal ID. `attempt` is null when there is no unfinished attempt, otherwise `{attempt_id, state, turn_id}` contains the full persisted attempt ID and its bound stream turn ID or null before admission. The latest unfinished attempt is selected by continuation sequence. This point-in-time read contains no objective, paths, or other goal content. An unavailable daemon, goal store, or conversation identity is an error, not an absent goal; an unknown session is 404. The normal engine bearer authorization applies. Clients compare conversation and full IDs with the stream and must handle state changing between reads; a terminal turn during reload does not prove a running-turn reload.
 
-**Stream.** `GET /sessions/{id}/stream?after=<seq>` (SSE). Every event is `{seq, conversation_uid, type, data}`, with `seq` strictly increasing per conversation:
+**Stream.** `GET /sessions/{id}/stream?after=<seq>&conversation_uid=<uid>&generation=<generation>` (SSE). Every event is `{seq, conversation_uid, generation, type, data}`, with `seq` strictly increasing within one conversation generation. A generation is a fresh opaque token for a daemon-owned conversation log; it changes when the daemon process recreates that log, even when the persisted `conversation_uid` stays the same:
 
 | type | data |
 |---|---|
@@ -74,7 +74,7 @@ Owning files: admission and the transcript in `kollabor/llm/llm_coordinator.py` 
 | `input.state` | `{id, state, turn_id, outcome}` |
 | `turn.state` | `{turn_id, state, input_ids, origin?}` |
 
-A client connects without `after` and gets a `snapshot`. It reconnects with the last `seq` it applied and gets every later event. It gets a new `snapshot` instead when that `seq` is older than the daemon keeps (default: the current turn and the last 2,000 events) or when `conversation_uid` changed. Older rows load through `GET /sessions/{id}/rows?before=<cursor>&limit=<n>`, which answers `{rows, older}` in the same row shape, oldest first; `older` is the next older cursor or `null`, and a `409` means the cursor belongs to another conversation, so the client resyncs. The legacy `/history` route keeps its old envelope until cutover.
+A client connects without a cursor and gets a `snapshot`. A replay cursor is the full tuple `{after, conversation_uid, generation}` from the last event it applied; for a `snapshot`, `after` is `data.next_seq - 1`. With a complete matching cursor, it gets every later event. It gets a new `snapshot` instead when the cursor is missing either identity field, the conversation UID or daemon generation changed, or `after` is older than the daemon keeps (default: the current turn and the last 2,000 events). In particular, an older caller that sends `after` alone receives a snapshot. The engine relays the daemon's generation unchanged, so an engine reconnect can replay from the same daemon log; after a daemon restart, the changed generation forces a snapshot before sequence numbers can be reused. Older rows load through `GET /sessions/{id}/rows?before=<cursor>&limit=<n>`, which answers `{rows, older}` in the same row shape, oldest first; `older` is the next older cursor or `null`, and a `409` means the cursor belongs to another conversation, so the client resyncs. The legacy `/history` route keeps its old envelope until cutover.
 
 **Sending.** `POST /sessions/{id}/inputs {id, text, attachments}` answers `202 {id, state}`. The reply arrives on the stream, for the sender as for every other client. A retry with the same input id and same content returns its current state; changing any bound content is `409`. `POST /sessions/{id}/inputs/{input_id}/cancel` cancels a queued input. `/assistant`, the `synced` point and the `history_updated` refetch are removed at cutover.
 
@@ -130,8 +130,8 @@ AG-UI (MIT) defines the same ideas (`MESSAGES_SNAPSHOT`, `STATE_SNAPSHOT` and ru
 ## Failure modes
 
 1. A `seq` gap (an event lost on the way): the client drops its state and reconnects without `after`, receiving a `snapshot`.
-2. The daemon restarts: `conversation_uid` or the event window no longer matches, so the next connect gets a `snapshot`, and the page keeps its scroll by row id.
-3. The engine restarts: clients reconnect with `after`. The daemon, not the engine, owns the events, so nothing is lost.
+2. The daemon restarts: the new log has a different `generation`, so an old cursor gets a `snapshot` even if `conversation_uid` and `seq` match; the page keeps its scroll by row id.
+3. The engine restarts: clients reconnect with `{after, conversation_uid, generation}`. The daemon, not the engine, owns the events and generation, so replay continues while that daemon log remains alive.
 4. A resend of a known id (a POST retried after a timeout): answered with the input's current state, with no second row.
 5. A harness crashes or a turn never ends: the daemon ends the turn `failed`, and every input that joined it `failed`, so no client stays in the working state.
 6. A snapshot is too large: it carries only the latest window; older rows come from `GET /sessions/{id}/rows?before=`.

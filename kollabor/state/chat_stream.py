@@ -45,6 +45,9 @@ class ChatStreamLog:
         if isinstance(replay_window, bool) or replay_window < 1:
             raise ValueError("replay_window must be a positive integer")
         self.conversation_uid = conversation_uid
+        # Sequence numbers are process-local. A fresh random generation keeps
+        # cursors from an earlier daemon incarnation from matching this log.
+        self.generation = uuid.uuid4().hex
         self._snapshot_provider = snapshot_provider
         self._replay_window = replay_window
         self._on_event = on_event
@@ -66,7 +69,13 @@ class ChatStreamLog:
         with self._lock:
             return self._last_replace_seq
 
-    def publish(self, event_type: str, data: dict[str, Any]) -> Event:
+    def publish(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        *,
+        on_commit: Callable[[Event], Any] | None = None,
+    ) -> Event:
         """Validate, sequence, retain and publish one conversation event."""
         if event_type not in EVENT_TYPES or event_type == "snapshot":
             raise ValueError(f"unsupported logged chat event type {event_type!r}")
@@ -84,6 +93,7 @@ class ChatStreamLog:
                     lambda _event: None,
                     seq=seq,
                     conversation_uid=self.conversation_uid,
+                    generation=self.generation,
                     event_type=event_type,
                     data=payload,
                 )
@@ -91,6 +101,7 @@ class ChatStreamLog:
                 event = {
                     "seq": seq,
                     "conversation_uid": self.conversation_uid,
+                    "generation": self.generation,
                     "type": event_type,
                     "data": payload,
                 }
@@ -99,6 +110,8 @@ class ChatStreamLog:
                     raise ValueError("; ".join(problems))
 
             self._record_locked(event)
+            if on_commit is not None:
+                on_commit(copy.deepcopy(event))
             # Serialize live delivery with sequence assignment. Otherwise a
             # later producer thread can publish seq N+1 before this event.
             if self._on_event is not None:
@@ -113,6 +126,7 @@ class ChatStreamLog:
         *,
         after: int | None = None,
         conversation_uid: str | None = None,
+        generation: str | None = None,
     ) -> list[Event]:
         """Return missed events, or one fresh snapshot when replay is unsafe."""
         with self._lock:
@@ -122,6 +136,7 @@ class ChatStreamLog:
                 or not isinstance(after, int)
                 or after < 0
                 or after > self._last_seq
+                or generation != self.generation
                 or (
                     conversation_uid is not None
                     and conversation_uid != self.conversation_uid
@@ -151,6 +166,7 @@ class ChatStreamLog:
             # carries the shared log cursor to use for subsequent events.
             "seq": 0,
             "conversation_uid": self.conversation_uid,
+            "generation": self.generation,
             "type": "snapshot",
             "data": {
                 "rows": rows,
@@ -237,10 +253,12 @@ class ChatStreamService:
         self.attach_display_tap()
         after = params.get("after")
         conversation_uid = params.get("conversation_uid")
+        generation = params.get("generation")
         return {
             "events": self._log().read(
                 after=after,
                 conversation_uid=conversation_uid,
+                generation=generation,
             )
         }
 
@@ -2064,17 +2082,28 @@ class ChatStreamService:
         }
         if origin is not None:
             data["origin"] = copy.deepcopy(origin)
+        log = self._log(uid)
         problems = event_problems(
-            {"seq": 1, "conversation_uid": uid, "type": "turn.state", "data": data}
+            {
+                "seq": 1,
+                "conversation_uid": uid,
+                "generation": log.generation,
+                "type": "turn.state",
+                "data": data,
+            }
         )
         if problems:
             raise ValueError("; ".join(problems))
         self._turns[uid][turn_id] = copy.deepcopy(data)
-        self._log(uid).publish("turn.state", data)
+        log.publish("turn.state", data)
 
     def _upsert(self, uid: str, row: dict[str, Any]) -> None:
-        event = self._log(uid).publish("row.upsert", row)
-        self._rows.setdefault(uid, {})[row["id"]] = copy.deepcopy(event["data"])
+        def store_row(event: Event) -> None:
+            self._rows.setdefault(uid, {})[event["data"]["id"]] = copy.deepcopy(
+                event["data"]
+            )
+
+        self._log(uid).publish("row.upsert", row, on_commit=store_row)
 
     def _publish_live(self, event: Event) -> None:
         get_service = getattr(self._event_bus, "get_service", None)

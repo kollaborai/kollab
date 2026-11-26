@@ -63,9 +63,13 @@ class _State:
 
 def _events(stream, first):
     cursor = first["data"]["next_seq"] - 1
-    replay = stream.subscribe({"after": cursor, "conversation_uid": "conversation-a"})[
-        "events"
-    ]
+    replay = stream.subscribe(
+        {
+            "after": cursor,
+            "conversation_uid": "conversation-a",
+            "generation": first["generation"],
+        }
+    )["events"]
     return [first, *replay]
 
 
@@ -87,6 +91,39 @@ def _acp_orchestrator(state, monkeypatch, tmp_path):
 def _snapshot_rows(stream):
     snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
     return snapshot, snapshot["data"]["rows"]
+
+
+def test_row_is_visible_in_a_snapshot_taken_during_live_publish():
+    state = _State()
+    stream = ChatStreamService(state)
+    during_publish = {}
+
+    def snapshot_during_publish(event):
+        during_publish["event"] = event
+        during_publish["snapshot"] = stream.subscribe(
+            {"after": None, "conversation_uid": None}
+        )["events"][0]
+
+    stream._publish_live = snapshot_during_publish
+    stream._upsert(
+        "conversation-a",
+        {
+            "id": "input-racing-snapshot",
+            "seq": 0,
+            "kind": "input",
+            "role": "user",
+            "turn_id": None,
+            "status": "queued",
+            "parts": [{"type": "text", "text": "hello"}],
+            "created_at": "2026-11-25T12:00:00Z",
+        },
+    )
+
+    snapshot = during_publish["snapshot"]
+    assert snapshot["data"]["next_seq"] == during_publish["event"]["seq"] + 1
+    assert [row["id"] for row in snapshot["data"]["rows"]] == [
+        "input-racing-snapshot"
+    ]
 
 
 @pytest.mark.asyncio
@@ -331,9 +368,13 @@ async def test_reload_mid_turn_replays_terminal_events_from_the_snapshot_cursor(
         turn_id="native-2",
         stop_reason="end_turn",
     )
-    missed = stream.subscribe({"after": cursor, "conversation_uid": "conversation-a"})[
-        "events"
-    ]
+    missed = stream.subscribe(
+        {
+            "after": cursor,
+            "conversation_uid": "conversation-a",
+            "generation": snapshot["generation"],
+        }
+    )["events"]
 
     assert sequence_problems([snapshot, *missed]) == []
 
@@ -1341,11 +1382,11 @@ def test_snapshot_cursor_is_atomic_with_goal_turn_transition(transition):
     release = threading.Event()
     snapshot_done = threading.Event()
     snapshots = []
-    def paused_publish(kind, data):
+    def paused_publish(kind, data, *, on_commit=None):
         if kind == "turn.state":
             entered.set()
             assert release.wait(2)
-        return publish(kind, data)
+        return publish(kind, data, on_commit=on_commit)
     log.publish = paused_publish
     def produce():
         if transition == "start":

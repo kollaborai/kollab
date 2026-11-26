@@ -47,7 +47,7 @@ def test_events_have_one_strict_sequence_and_replay_after_cursor():
         log.publish("row.delete", {"id": f"row-{index}"}) for index in range(1, 4)
     ]
 
-    replay = log.read(after=1, conversation_uid="conv-1")
+    replay = log.read(after=1, conversation_uid="conv-1", generation=log.generation)
 
     assert [event["seq"] for event in events] == [1, 2, 3]
     assert [event["seq"] for event in replay] == [2, 3]
@@ -58,7 +58,7 @@ def test_a_gap_outside_the_replay_window_gets_a_fresh_snapshot():
     for index in range(4):
         log.publish("row.delete", {"id": f"row-{index}"})
 
-    result = log.read(after=0, conversation_uid="conv-1")
+    result = log.read(after=0, conversation_uid="conv-1", generation=log.generation)
 
     assert len(result) == 1
     assert result[0]["type"] == "snapshot"
@@ -69,7 +69,7 @@ def test_a_new_conversation_uid_gets_a_fresh_snapshot():
     log = ChatStreamLog("conv-2", snapshot_provider=_snapshot)
     log.publish("row.delete", {"id": "old-row"})
 
-    result = log.read(after=1, conversation_uid="conv-1")
+    result = log.read(after=1, conversation_uid="conv-1", generation=log.generation)
 
     assert len(result) == 1
     assert result[0]["type"] == "snapshot"
@@ -93,7 +93,7 @@ def test_the_current_turn_stays_replayable_past_the_regular_window():
     for index in range(5):
         log.publish("row.delete", {"id": f"row-{index}"})
 
-    replay = log.read(after=0, conversation_uid="conv-1")
+    replay = log.read(after=0, conversation_uid="conv-1", generation=log.generation)
 
     assert [event["seq"] for event in replay] == [1, 2, 3, 4, 5, 6]
     assert all(event["type"] != "snapshot" for event in replay)
@@ -102,7 +102,7 @@ def test_the_current_turn_stays_replayable_past_the_regular_window():
         "turn.state",
         {"turn_id": "turn-1", "state": "ended", "input_ids": ["input-1"]},
     )
-    assert log.read(after=0, conversation_uid="conv-1")[0]["type"] == "snapshot"
+    assert log.read(after=0, conversation_uid="conv-1", generation=log.generation)[0]["type"] == "snapshot"
 
 
 def test_join_keeps_the_running_turn_replayable_past_the_window():
@@ -119,9 +119,47 @@ def test_join_keeps_the_running_turn_replayable_past_the_window():
     log.publish("row.delete", {"id": "after-join"})
     log.publish("row.delete", {"id": "later"})
 
-    replay = log.read(after=cursor, conversation_uid="conv-1")
+    replay = log.read(after=cursor, conversation_uid="conv-1", generation=log.generation)
 
     assert [event["seq"] for event in replay] == [3, 4, 5, 6]
+
+
+def test_daemon_restart_changes_generation_and_old_cursor_gets_snapshot():
+    previous_daemon = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+    previous_event = previous_daemon.publish("row.delete", {"id": "old-row"})
+
+    restarted_daemon = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+    restarted_daemon.publish("row.delete", {"id": "new-row"})
+
+    assert restarted_daemon.generation != previous_event["generation"]
+    replay = restarted_daemon.read(
+        after=previous_event["seq"],
+        conversation_uid="conv-1",
+        generation=previous_event["generation"],
+    )
+
+    assert len(replay) == 1
+    assert replay[0]["type"] == "snapshot"
+    assert replay[0]["generation"] == restarted_daemon.generation
+    assert replay[0]["data"]["next_seq"] == 2
+
+
+def test_cursor_without_generation_gets_snapshot_even_with_matching_uid():
+    log = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+    log.publish("row.delete", {"id": "existing"})
+
+    result = log.read(after=1, conversation_uid="conv-1")
+
+    assert result[0]["type"] == "snapshot"
+
+
+def test_cursor_without_conversation_uid_gets_snapshot():
+    log = ChatStreamLog("conv-1", snapshot_provider=_snapshot)
+    log.publish("row.delete", {"id": "existing"})
+
+    result = log.read(after=1)
+
+    assert result[0]["type"] == "snapshot"
 
 
 def test_live_publish_callbacks_preserve_the_log_sequence_across_threads():

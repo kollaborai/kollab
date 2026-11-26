@@ -122,11 +122,22 @@ def test_event_problems_names_the_broken_field(event, needle):
     assert any(needle in problem for problem in event_problems(event))
 
 
+def test_event_requires_generation_to_make_sequence_numbers_restart_safe():
+    event = {
+        "seq": 1,
+        "conversation_uid": "c",
+        "type": "row.delete",
+        "data": {"id": "a"},
+    }
+    assert any("generation" in problem for problem in event_problems(event))
+
+
 def test_an_input_that_changes_after_it_ended_is_reported():
     base = json.loads((FIXTURES / "steered-input.json").read_text())["events"]
     late = {
         "seq": 99,
         "conversation_uid": "conv-1",
+        "generation": base[0]["generation"],
         "type": "input.state",
         "data": {"id": "web-a1", "state": "queued", "turn_id": None},
     }
@@ -165,7 +176,13 @@ SNAPSHOT = {"rows": [], "next_seq": 1, "older": None, "turns": [], "inputs": []}
 
 
 def _event(kind, data, seq=1):
-    return {"seq": seq, "conversation_uid": "c", "type": kind, "data": data}
+    return {
+        "seq": seq,
+        "conversation_uid": "c",
+        "generation": "daemon-1",
+        "type": kind,
+        "data": data,
+    }
 
 
 def _without(data, key):
@@ -418,6 +435,7 @@ def test_sequence_rejects_events_from_another_conversation():
         {
             "seq": 1,
             "conversation_uid": "a",
+            "generation": "daemon-1",
             "type": "snapshot",
             "data": {
                 "rows": [],
@@ -427,7 +445,13 @@ def test_sequence_rejects_events_from_another_conversation():
                 "inputs": [],
             },
         },
-        {"seq": 2, "conversation_uid": "b", "type": "replace", "data": {"rows": []}},
+        {
+            "seq": 2,
+            "conversation_uid": "b",
+            "generation": "daemon-1",
+            "type": "replace",
+            "data": {"rows": []},
+        },
     ]
     assert any("conversation" in problem for problem in sequence_problems(events))
 

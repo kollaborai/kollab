@@ -45,6 +45,7 @@ class Row(TypedDict):
 class Event(TypedDict):
     seq: int
     conversation_uid: str
+    generation: str
     type: str
     data: dict[str, Any]
 
@@ -180,6 +181,8 @@ def event_problems(event: Any) -> list[str]:
         problems.append(f"{where}: seq must be a non-negative integer")
     if not _is_id(event.get("conversation_uid")):
         problems.append(f"{where}: conversation_uid missing")
+    if not _is_id(event.get("generation")):
+        problems.append(f"{where}: generation missing")
     kind, data = event.get("type"), event.get("data")
     if not _one_of(kind, EVENT_TYPES):
         return problems + [f"{where}: unknown event type {kind!r}"]
@@ -303,6 +306,7 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
         input_rows.update(row["id"] for row in new_rows if row["kind"] == "input")
 
     conversation_uid = None
+    generation = None
     for event in events:
         shape = event_problems(event)
         if shape:
@@ -316,6 +320,10 @@ def sequence_problems(events: Iterable[Any], *, complete: bool = True) -> list[s
             conversation_uid = event["conversation_uid"]
         elif event["conversation_uid"] != conversation_uid:
             problems.append(f"seq {seq}: conversation uid changed within stream")
+        if generation is None:
+            generation = event["generation"]
+        elif event["generation"] != generation:
+            problems.append(f"seq {seq}: daemon generation changed within stream")
         if seq <= last_seq:
             problems.append(f"seq {seq}: seq must increase (previous {last_seq})")
         elif expected is not None and seq != expected:

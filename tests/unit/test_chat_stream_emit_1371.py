@@ -12,6 +12,7 @@ def test_a_queued_input_state_reaches_the_sink():
         sink.append,
         seq=2,
         conversation_uid="conv-1",
+        generation="daemon-1",
         event_type="input.state",
         data={"id": "web-a1", "state": "queued", "turn_id": None},
     )
@@ -20,6 +21,7 @@ def test_a_queued_input_state_reaches_the_sink():
         {
             "seq": 2,
             "conversation_uid": "conv-1",
+            "generation": "daemon-1",
             "type": "input.state",
             "data": {"id": "web-a1", "state": "queued", "turn_id": None},
         }
@@ -34,6 +36,7 @@ def test_a_started_input_without_turn_id_raises_and_is_not_sent():
             sink.append,
             seq=3,
             conversation_uid="conv-1",
+            generation="daemon-1",
             event_type="input.state",
             data={"id": "web-a1", "state": "started", "turn_id": None},
         )
@@ -49,6 +52,7 @@ def test_a_non_lifecycle_type_raises_and_is_not_sent():
             sink.append,
             seq=4,
             conversation_uid="conv-1",
+            generation="daemon-1",
             event_type="row.delete",
             data={"id": "r1"},
         )
@@ -63,6 +67,7 @@ def test_a_turn_state_passes():
         sink.append,
         seq=5,
         conversation_uid="conv-1",
+        generation="daemon-1",
         event_type="turn.state",
         data={"turn_id": "t1", "state": "running", "input_ids": ["web-a1"]},
     )
@@ -71,6 +76,7 @@ def test_a_turn_state_passes():
         {
             "seq": 5,
             "conversation_uid": "conv-1",
+            "generation": "daemon-1",
             "type": "turn.state",
             "data": {"turn_id": "t1", "state": "running", "input_ids": ["web-a1"]},
         }
@@ -85,6 +91,7 @@ def test_later_edits_to_the_callers_dict_do_not_change_the_event():
         sink.append,
         seq=6,
         conversation_uid="conv-1",
+        generation="daemon-1",
         event_type="input.state",
         data=data,
     )

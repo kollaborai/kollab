@@ -12,6 +12,7 @@ def emit_chat_event(
     *,
     seq: int,
     conversation_uid: str,
+    generation: str,
     event_type: str,
     data: dict[str, Any],
 ) -> Event:
@@ -23,6 +24,7 @@ def emit_chat_event(
     event: Event = {
         "seq": seq,
         "conversation_uid": conversation_uid,
+        "generation": generation,
         "type": event_type,
         "data": dict(data),
     }
