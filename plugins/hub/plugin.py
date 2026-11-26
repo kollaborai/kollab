@@ -8371,7 +8371,7 @@ class HubPlugin(BasePlugin):
 
             env = {**os.environ, **spec.env}
             proc = subprocess.Popen(
-                spec.argv,
+                [*spec.argv, spec.initial_message],
                 cwd=spec.cwd or None,
                 env=env,
                 stdin=subprocess.DEVNULL,
