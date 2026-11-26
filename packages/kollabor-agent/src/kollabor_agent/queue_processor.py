@@ -141,6 +141,9 @@ class TaggedInput:
     # Exact durable user row created for this queued input, when admission
     # persisted one. Kept distinct from parent_uuid, which is also a chain link.
     history_row_uuid: str | None = field(default=None, kw_only=True)
+    # Authored display text when the model payload also contains hidden
+    # context/media that must not become part of the transcript input row.
+    stream_display_content: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -1430,6 +1433,7 @@ class QueueProcessor:
         it waited for room. Its stream has already ended, so callers must not
         report it as accepted (#589).
         """
+        self._track_native_stream_input(message)
         # Watchdog heartbeat: new work arriving is activity — keeps a session
         # that just received a message from being flagged as wedged.
         self.mark_progress()
@@ -1437,7 +1441,7 @@ class QueueProcessor:
             # Voice admission must never acknowledge a message silently dropped
             # by an overflow strategy. Reject before modifying the queue.
             if not self._has_unreserved_capacity():
-                self._end_dropped(message)
+                await self._end_dropped_persisted(message)
                 raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
             return True
@@ -1474,9 +1478,9 @@ class QueueProcessor:
                     message, cancellation_generation=generation
                 )
             else:
-                admitted = self._unknown_strategy(message)
+                admitted = await self._unknown_strategy(message)
         except RuntimeError:
-            self._end_dropped(message)  # refused: it never runs, so its stream ends now
+            await self._end_dropped_persisted(message)
             raise
         if not admitted:
             return False
@@ -1487,9 +1491,58 @@ class QueueProcessor:
         ):
             # A Stop swept the queue while this waited for room: no drain runs it
             # until the next message, so it ends as the swept ones did.
-            self._end_queued(message)
+            await self._end_queued_persisted(message)
             return False
         return True
+
+    def _track_native_stream_input(self, item: Any) -> None:
+        """Register a durable single-input row before overflow can end it."""
+        if not isinstance(item, (TaggedInput, QueuedInput)):
+            return
+        request_ids = item.request_ids
+        row_uuid = item.history_row_uuid
+        if (
+            len(request_ids) != 1
+            or not isinstance(request_ids[0], str)
+            or not request_ids[0]
+            or not isinstance(row_uuid, str)
+            or not row_uuid
+        ):
+            return
+        native_inputs = getattr(self, "_native_stream_inputs", None)
+        if not isinstance(native_inputs, dict):
+            native_inputs = self._native_stream_inputs = {}
+        native_inputs[request_ids[0]] = {
+            "history_row_uuid": row_uuid,
+            "content": deepcopy(
+                item.stream_display_content
+                if isinstance(item, TaggedInput)
+                and isinstance(item.stream_display_content, str)
+                else item.content
+            ),
+            "chat_stream_input_count": 1,
+        }
+
+    async def _end_dropped_persisted(
+        self,
+        item: Any,
+        why: str = "The agent's queue was full, so this message was dropped. Send it again.",
+    ) -> None:
+        """Persist a durable admission's outcome before publishing its end."""
+        request_ids = getattr(item, "request_ids", ())
+        if isinstance(request_ids, tuple) and request_ids:
+            await self._persist_native_input_outcomes(request_ids, "error")
+        self._end_dropped(item, why)
+
+    async def _end_queued_persisted(self, item: Any) -> None:
+        """Remove one queued item and persist its terminal outcome first."""
+        queue = self.processing_queue
+        queue._queue.remove(item)
+        queue.task_done()
+        queue._wakeup_next(queue._putters)
+        await self._end_dropped_persisted(
+            item, "Stopped before this message ran. Send it again."
+        )
 
     def _end_dropped(
         self,
@@ -1535,7 +1588,7 @@ class QueueProcessor:
         # Note: We need access to task_manager metadata here
         # For now, we'll drop from queue directly
         try:
-            self._end_dropped(self._pop_oldest_droppable())
+            await self._end_dropped_persisted(self._pop_oldest_droppable())
             self._queue_metrics["drop_oldest_count"] += 1
             if self.task_config.queue.log_queue_events:
                 logger.info("Dropped oldest message from queue")
@@ -1552,7 +1605,7 @@ class QueueProcessor:
             return True
         except asyncio.QueueFull:
             self.dropped_messages += 1
-            self._end_dropped(message)
+            await self._end_dropped_persisted(message)
             return False
 
     def _pop_oldest_droppable(self) -> Any:
@@ -1595,7 +1648,7 @@ class QueueProcessor:
 
         while True:
             if getattr(self, "_cancel_generation", 0) != cancellation_generation:
-                self._end_dropped(
+                await self._end_dropped_persisted(
                     message, "Stopped before this message ran. Send it again."
                 )
                 return False
@@ -1618,18 +1671,18 @@ class QueueProcessor:
                         f"Block timeout after {elapsed:.2f}s, dropping message"
                     )
                 self.dropped_messages += 1
-                self._end_dropped(message)
+                await self._end_dropped_persisted(message)
                 return False
 
             await asyncio.sleep(poll_interval)
 
-    def _unknown_strategy(self, message: MessageContent) -> bool:
+    async def _unknown_strategy(self, message: MessageContent) -> bool:
         """Handle unknown overflow strategy."""
         logger.warning(
             f"Unknown overflow strategy '{self.task_config.queue.overflow_strategy}', defaulting to drop_oldest"
         )
         try:
-            self._end_dropped(self._pop_oldest_droppable())
+            await self._end_dropped_persisted(self._pop_oldest_droppable())
             if not self._has_unreserved_capacity():
                 raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
@@ -1637,7 +1690,7 @@ class QueueProcessor:
             return True
         except (asyncio.QueueEmpty, asyncio.QueueFull):
             self.dropped_messages += 1
-            self._end_dropped(message)
+            await self._end_dropped_persisted(message)
             return False
 
     def note_chain_end(self) -> None:
@@ -2041,7 +2094,12 @@ class QueueProcessor:
                 {
                     "request_id": request_id,
                     "history_row_uuid": getattr(item, "history_row_uuid", None),
-                    "content": deepcopy(item.content),
+                    "content": deepcopy(
+                        item.stream_display_content
+                        if isinstance(item, TaggedInput)
+                        and isinstance(item.stream_display_content, str)
+                        else item.content
+                    ),
                 }
                 for item in messages
                 if isinstance(item, (QueuedInput, TaggedInput))
