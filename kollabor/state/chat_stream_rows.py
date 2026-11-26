@@ -18,6 +18,11 @@ CHAT_STREAM_MAX_ROW_BYTES = 256 * 1024
 CHAT_STREAM_INLINE_TOOL_OUTPUT_BYTES = 8 * 1024
 CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS = 1024
 CHAT_STREAM_TOOL_OUTPUT_CHUNK_CHARS = 32 * 1024
+CHAT_STREAM_CONTENT_PREVIEW_CHARS = 1024
+CHAT_STREAM_PART_PAGE_SIZE = 32
+CHAT_STREAM_PART_PAGE_BYTES = 256 * 1024
+CHAT_STREAM_PART_INLINE_BYTES = 16 * 1024
+CHAT_STREAM_ROW_PLACEHOLDER = "[Large chat row. Expand to load all content.]"
 
 
 def chat_stream_wire_bytes(value: Any) -> int:
@@ -56,11 +61,31 @@ def chat_stream_tool_output_revision(content: str, output_type: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def chat_stream_parts_revision(parts: list[Any]) -> tuple[str, str, str]:
+    """Serialize and fingerprint one row's exact canonical part list."""
+    content = json.dumps(
+        parts,
+        ensure_ascii=False,
+        allow_nan=False,
+        default=str,
+        separators=(",", ":"),
+    )
+    return (
+        content,
+        "json",
+        chat_stream_tool_output_revision(content, "json"),
+    )
+
+
 def bounded_chat_stream_row(
     row: dict[str, Any],
     *,
     output_resolver: Callable[
         [str | None, str | None, Any], tuple[str, str, str]
+    ]
+    | None = None,
+    content_resolver: Callable[
+        [str | None, int, str, Any], tuple[str, str, str]
     ]
     | None = None,
 ) -> dict[str, Any]:
@@ -72,8 +97,89 @@ def bounded_chat_stream_row(
     copied = copy.deepcopy(row)
     parts = copied.get("parts")
     if not isinstance(parts, list):
+        if chat_stream_wire_bytes(copied) > CHAT_STREAM_MAX_ROW_BYTES:
+            raise ValueError("chat stream row metadata exceeds the row byte budget")
         return copied
-    for part in parts:
+    original_parts = copy.deepcopy(parts)
+    row_id = copied.get("id")
+
+    def ensure_retrievable_row_id() -> None:
+        if not isinstance(row_id, str) or not row_id or len(row_id) > 512:
+            raise ValueError("chat stream row id exceeds the content retrieval limit")
+
+    def tool_output_is_retrievable(part: dict[str, Any]) -> bool:
+        tool_call_id = part.get("tool_call_id")
+        return (
+            isinstance(tool_call_id, str)
+            and bool(tool_call_id)
+            and len(tool_call_id) <= 512
+        )
+
+    def output_preview(part: dict[str, Any], part_index: int, value: Any) -> dict[str, Any]:
+        tool_call_id = part.get("tool_call_id")
+        try:
+            if output_resolver is None:
+                content, output_type = _tool_output_text(value)
+                revision = chat_stream_tool_output_revision(content, output_type)
+            else:
+                content, output_type, revision = output_resolver(
+                    row_id, tool_call_id, value
+                )
+        except (TypeError, ValueError):
+            content, output_type = str(value), "text"
+            revision = chat_stream_tool_output_revision(content, output_type)
+        return {
+            "kind": "chat-stream-tool-output-preview",
+            "row_id": row_id,
+            "tool_call_id": tool_call_id,
+            "output_bytes": len(content.encode("utf-8", errors="replace")),
+            "output_chars": len(content),
+            "output_type": output_type,
+            "output_revision": revision,
+            "preview": content[:CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS],
+        }
+
+    def content_preview(
+        part_index: int, field: str, value: Any
+    ) -> tuple[dict[str, Any], str]:
+        ensure_retrievable_row_id()
+        try:
+            if content_resolver is None:
+                content, output_type = _tool_output_text(value)
+                revision = chat_stream_tool_output_revision(content, output_type)
+            else:
+                content, output_type, revision = content_resolver(
+                    row_id, part_index, field, value
+                )
+        except (TypeError, ValueError):
+            content, output_type = str(value), "text"
+            revision = chat_stream_tool_output_revision(content, output_type)
+        return (
+            {
+                "kind": "chat-stream-content-preview",
+                "row_id": row_id,
+                "part_index": part_index,
+                "field": field,
+                "output_bytes": len(content.encode("utf-8", errors="replace")),
+                "output_chars": len(content),
+                "output_type": output_type,
+                "output_revision": revision,
+                "preview": content[:CHAT_STREAM_CONTENT_PREVIEW_CHARS],
+            },
+            content,
+        )
+
+    def preview_args(part: dict[str, Any], part_index: int) -> None:
+        args = part.get("args")
+        if args is None or (
+            isinstance(args, dict)
+            and args.get("kind") == "chat-stream-content-preview"
+        ):
+            return
+        marker, _content = content_preview(part_index, "args", args)
+        part["args"] = marker
+
+    for part_index, part in enumerate(parts):
         if not isinstance(part, dict) or part.get("type") != "tool-call":
             continue
         result = part.get("result")
@@ -82,74 +188,41 @@ def bounded_chat_stream_row(
             and result.get("kind") == "chat-stream-tool-output-preview"
         ):
             continue
-        try:
-            if output_resolver is None:
-                content, output_type = _tool_output_text(result)
-                output_revision = chat_stream_tool_output_revision(
-                    content, output_type
-                )
-            else:
-                content, output_type, output_revision = output_resolver(
-                    copied.get("id"), part.get("tool_call_id"), result
-                )
-        except (TypeError, ValueError):
-            content, output_type = str(result), "text"
-            output_revision = chat_stream_tool_output_revision(
-                content, output_type
-            )
-        output_bytes = len(content.encode("utf-8", errors="replace"))
+        marker = output_preview(part, part_index, result)
+        output_bytes = marker["output_bytes"]
         if output_bytes <= CHAT_STREAM_INLINE_TOOL_OUTPUT_BYTES:
             continue
-        copied_part = part
-        tool_call_id = copied_part.get("tool_call_id")
-        copied_part["result"] = {
-            "kind": "chat-stream-tool-output-preview",
-            "row_id": copied.get("id"),
-            "tool_call_id": tool_call_id,
-            "output_bytes": output_bytes,
-            "output_chars": len(content),
-            "output_type": output_type,
-            "output_revision": output_revision,
-            "preview": content[:CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS],
-        }
+        if not tool_output_is_retrievable(part):
+            continue
+        ensure_retrievable_row_id()
+        part["result"] = marker
 
-    # Other part types are expected to be small. Still cap free-form text as a
-    # last-resort wire guard so a single non-tool row cannot exceed the limit.
-    # Tool result content itself remains available through the chunk endpoint.
+    # First replace individually large text, reasoning and argument fields.
+    # Any remaining oversized or unusually wide part list is exposed through
+    # the row-level page marker below.
     if chat_stream_wire_bytes(copied) > CHAT_STREAM_MAX_ROW_BYTES:
-        for part in parts:
+        for part_index, part in enumerate(parts):
             if not isinstance(part, dict):
                 continue
-            for field in ("text", "reasoning"):
-                value = part.get(field)
+            if part.get("type") in {"text", "reasoning"}:
+                value = part.get("text")
+                field = part["type"]
                 if (
                     isinstance(value, str)
-                    and len(value.encode("utf-8", errors="replace")) > 16 * 1024
+                    and len(value.encode("utf-8", errors="replace"))
+                    > CHAT_STREAM_PART_INLINE_BYTES
                 ):
-                    part[field] = (
-                        value[:CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS]
-                        + "\n… [chat stream preview clipped; full text remains in conversation history]"
-                    )
+                    marker, content = content_preview(part_index, field, value)
+                    part["text"] = content[:CHAT_STREAM_CONTENT_PREVIEW_CHARS]
+                    part["chat_stream_content_preview"] = marker
             args = part.get("args")
-            if args is not None and chat_stream_wire_bytes(args) > 16 * 1024:
-                encoded_args = json.dumps(
-                    args,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    default=str,
-                    separators=(",", ":"),
-                )
-                part["args"] = {
-                    "kind": "chat-stream-tool-args-preview",
-                    "output_bytes": len(encoded_args.encode("utf-8", errors="replace")),
-                    "preview": encoded_args[:CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS],
-                }
-            if chat_stream_wire_bytes(copied) <= CHAT_STREAM_MAX_ROW_BYTES:
-                break
+            if args is not None and chat_stream_wire_bytes(args) > CHAT_STREAM_PART_INLINE_BYTES:
+                preview_args(part, part_index)
     if chat_stream_wire_bytes(copied) > CHAT_STREAM_MAX_ROW_BYTES:
         compact_parts = []
-        for part in parts:
+        for part_index, part in enumerate(parts):
             if not isinstance(part, dict):
+                compact_parts.append(copy.deepcopy(part))
                 continue
             if part.get("type") == "tool-call":
                 compact: dict[str, Any] = {
@@ -157,26 +230,118 @@ def bounded_chat_stream_row(
                     "tool_call_id": part.get("tool_call_id"),
                     "tool_name": part.get("tool_name", "Tool"),
                 }
+                if "args" in part:
+                    compact["args"] = copy.deepcopy(part["args"])
+                    if chat_stream_wire_bytes(compact["args"]) > CHAT_STREAM_PART_INLINE_BYTES:
+                        compact["args"] = content_preview(
+                            part_index, "args", part["args"]
+                        )[0]
                 result = part.get("result")
-                if isinstance(result, dict) and result.get("kind") == "chat-stream-tool-output-preview":
-                    compact["result"] = result
+                if result is not None:
+                    if (
+                        isinstance(result, dict)
+                        and result.get("kind") == "chat-stream-tool-output-preview"
+                    ):
+                        compact["result"] = result
+                    elif tool_output_is_retrievable(part):
+                        ensure_retrievable_row_id()
+                        compact["result"] = output_preview(part, part_index, result)
+                    else:
+                        compact["result"] = copy.deepcopy(result)
+                if "is_error" in part:
+                    compact["is_error"] = part["is_error"]
                 compact_parts.append(compact)
             elif part.get("type") in {"text", "reasoning"}:
-                field = "text" if part.get("type") == "text" else "reasoning"
-                value = part.get(field)
+                field = part["type"]
+                value = part.get("text")
                 if isinstance(value, str):
-                    compact_parts.append(
-                        {
-                            "type": part["type"],
-                            field: value[:CHAT_STREAM_TOOL_OUTPUT_PREVIEW_CHARS],
-                        }
-                    )
-        copied["parts"] = compact_parts[:32]
+                    compact: dict[str, Any] = {
+                        "type": part["type"],
+                        "text": value[:CHAT_STREAM_CONTENT_PREVIEW_CHARS],
+                    }
+                    marker = part.get("chat_stream_content_preview")
+                    if isinstance(marker, dict):
+                        compact["chat_stream_content_preview"] = marker
+                    elif (
+                        len(value.encode("utf-8", errors="replace"))
+                        > CHAT_STREAM_PART_INLINE_BYTES
+                    ):
+                        compact["chat_stream_content_preview"] = content_preview(
+                            part_index, field, value
+                        )[0]
+                    compact_parts.append(compact)
+            else:
+                compact_parts.append(copy.deepcopy(part))
+        copied["parts"] = compact_parts
     if chat_stream_wire_bytes(copied) > CHAT_STREAM_MAX_ROW_BYTES:
-        copied["parts"] = [
-            {"type": "text", "text": "[row content omitted from chat stream preview]"}
-        ]
+        ensure_retrievable_row_id()
+        if content_resolver is None:
+            content, output_type, revision = chat_stream_parts_revision(
+                original_parts
+            )
+        else:
+            content, output_type, revision = content_resolver(
+                row_id, -1, "parts", original_parts
+            )
+        copied["parts"] = [{"type": "text", "text": CHAT_STREAM_ROW_PLACEHOLDER}]
+        copied["chat_stream_parts_preview"] = {
+            "kind": "chat-stream-parts-preview",
+            "row_id": row_id,
+            "part_count": len(original_parts),
+            "output_bytes": len(content.encode("utf-8", errors="replace")),
+            "output_chars": len(content),
+            "output_type": output_type,
+            "output_revision": revision,
+        }
+    if chat_stream_wire_bytes(copied) > CHAT_STREAM_MAX_ROW_BYTES:
+        # Required row metadata cannot itself be paged because the row id is the
+        # paging key. Fail explicitly instead of returning an oversized payload.
+        raise ValueError("chat stream row metadata exceeds the row byte budget")
     return copied
+
+
+def bounded_chat_stream_part(
+    row_id: str,
+    part_index: int,
+    part: dict[str, Any],
+    *,
+    content_resolver: Callable[
+        [str | None, int, str, Any], tuple[str, str, str]
+    ]
+    | None = None,
+) -> dict[str, Any]:
+    """Keep a page item small; expose the exact oversized part by revision."""
+    copied = copy.deepcopy(part)
+    if chat_stream_wire_bytes(copied) <= CHAT_STREAM_PART_INLINE_BYTES:
+        return copied
+    if content_resolver is None:
+        content = json.dumps(
+            part,
+            ensure_ascii=False,
+            allow_nan=False,
+            default=str,
+            separators=(",", ":"),
+        )
+        output_type = "json"
+        revision = chat_stream_tool_output_revision(content, "json")
+    else:
+        content, output_type, revision = content_resolver(
+            row_id, part_index, "part", part
+        )
+    return {
+        "type": "text",
+        "text": "[Large part. Expand to load full content.]",
+        "chat_stream_part_preview": {
+            "kind": "chat-stream-part-preview",
+            "row_id": row_id,
+            "part_index": part_index,
+            "output_bytes": len(content.encode("utf-8", errors="replace")),
+            "output_chars": len(content),
+            "output_type": output_type,
+            "output_revision": revision,
+            "preview": content[:CHAT_STREAM_CONTENT_PREVIEW_CHARS],
+        },
+    }
 
 
 def bounded_chat_stream_rows(

@@ -160,6 +160,99 @@ def test_rows_route_materializes_tool_output_preview_session_identity(monkeypatc
     assert result["session_id"] == "s1"
 
 
+def test_rows_route_materializes_text_and_args_content_preview_session_identity(
+    monkeypatch,
+):
+    row = _row("content-row-1", 1)
+    row.update({"kind": "reply", "role": "assistant"})
+    row["parts"] = [
+        {
+            "type": "text",
+            "text": "preview",
+            "chat_stream_content_preview": {
+                "kind": "chat-stream-content-preview",
+                "row_id": "content-row-1",
+                "part_index": 0,
+                "field": "text",
+                "output_bytes": 100,
+                "output_chars": 100,
+                "output_type": "text",
+                "output_revision": "a" * 64,
+                "preview": "preview",
+            },
+        },
+        {
+            "type": "tool-call",
+            "tool_call_id": "call-1",
+            "tool_name": "read",
+            "args": {
+                "kind": "chat-stream-content-preview",
+                "row_id": "content-row-1",
+                "part_index": 1,
+                "field": "args",
+                "output_bytes": 100,
+                "output_chars": 100,
+                "output_type": "json",
+                "output_revision": "b" * 64,
+                "preview": "{}",
+            },
+        },
+    ]
+    client, _session = _install_client(
+        monkeypatch,
+        bypass_auth=True,
+        responses={None: {"rows": [row], "older": None}},
+    )
+
+    response = client.get("/sessions/s1/rows")
+
+    assert response.status_code == 200
+    parts = response.json()["rows"][0]["parts"]
+    assert parts[0]["chat_stream_content_preview"]["session_id"] == "s1"
+    assert parts[1]["args"]["session_id"] == "s1"
+
+
+def test_rows_route_materializes_row_and_part_page_marker_session_identity(monkeypatch):
+    row = _row("large-row-1", 1)
+    row["chat_stream_parts_preview"] = {
+        "kind": "chat-stream-parts-preview",
+        "row_id": row["id"],
+        "part_count": 300,
+        "output_bytes": 300_000,
+        "output_chars": 300_000,
+        "output_type": "json",
+        "output_revision": "a" * 64,
+    }
+    row["parts"] = [
+        {
+            "type": "text",
+            "text": "[Large part. Expand to load full content.]",
+            "chat_stream_part_preview": {
+                "kind": "chat-stream-part-preview",
+                "row_id": row["id"],
+                "part_index": 0,
+                "output_bytes": 200_000,
+                "output_chars": 200_000,
+                "output_type": "json",
+                "output_revision": "b" * 64,
+                "preview": "{\"type\":\"prompt\"",
+            },
+        }
+    ]
+    client, _session = _install_client(
+        monkeypatch,
+        bypass_auth=True,
+        responses={None: {"rows": [row], "older": None}},
+    )
+
+    response = client.get("/sessions/s1/rows")
+
+    assert response.status_code == 200
+    result = response.json()["rows"][0]
+    assert result["chat_stream_parts_preview"]["session_id"] == "s1"
+    assert result["parts"][0]["chat_stream_part_preview"]["session_id"] == "s1"
+
+
 def test_rows_route_returns_409_for_a_stale_cursor_after_compaction(monkeypatch):
     client, _session = _install_client(
         monkeypatch,

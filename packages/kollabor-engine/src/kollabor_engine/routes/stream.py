@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from sse_starlette.sse import EventSourceResponse
 
-from kollabor_events.chat_stream import ROLES, ROW_KINDS
+from kollabor_events.chat_stream import ROLES, ROW_KINDS, event_problems
 from kollabor_rpc import RpcError, RpcHandlerError, RpcMethodNotFound
 
 from ..server import get_session_registry
@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["chat-stream"])
 _TOOL_OUTPUT_CHUNK_CHARS = 32 * 1024
 _TOOL_OUTPUT_RPC_BYTES = 256 * 1024
+_PART_PAGE_SIZE = 32
+_PART_PAGE_RPC_BYTES = 256 * 1024
 _ROW_FIELDS = frozenset(
     {"id", "seq", "kind", "role", "turn_id", "status", "parts", "created_at"}
 )
@@ -163,12 +165,15 @@ async def _read_events(
 
 
 def _valid_row(value: Any) -> bool:
-    if not isinstance(value, dict) or set(value) != _ROW_FIELDS:
+    if (
+        not isinstance(value, dict)
+        or set(value) - {"chat_stream_parts_preview"} != _ROW_FIELDS
+    ):
         return False
     seq = value.get("seq")
     kind = value.get("kind")
     role = value.get("role")
-    return (
+    valid = (
         isinstance(value.get("id"), str)
         and bool(value["id"])
         and isinstance(seq, int)
@@ -184,6 +189,27 @@ def _valid_row(value: Any) -> bool:
         and all(isinstance(part, dict) for part in value["parts"])
         and isinstance(value.get("created_at"), str)
     )
+    marker = value.get("chat_stream_parts_preview")
+    if marker is not None:
+        valid = valid and (
+            isinstance(marker, dict)
+            and marker.get("kind") == "chat-stream-parts-preview"
+            and marker.get("row_id") == value.get("id")
+            and isinstance(marker.get("part_count"), int)
+            and not isinstance(marker.get("part_count"), bool)
+            and marker["part_count"] >= 0
+            and isinstance(marker.get("output_bytes"), int)
+            and not isinstance(marker.get("output_bytes"), bool)
+            and marker["output_bytes"] >= 0
+            and isinstance(marker.get("output_chars"), int)
+            and not isinstance(marker.get("output_chars"), bool)
+            and marker["output_chars"] >= 0
+            and isinstance(marker.get("output_revision"), str)
+            and len(marker["output_revision"]) == 64
+            and all(character in "0123456789abcdef" for character in marker["output_revision"])
+            and marker.get("output_type") == "json"
+        )
+    return valid
 
 
 def _resolved_image_url(url: Any, session_id: str) -> str | None:
@@ -218,24 +244,50 @@ def _materialize_row_images(rows: Any, session_id: str) -> None:
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("parts"), list):
             continue
+        parts_marker = row.get("chat_stream_parts_preview")
+        if isinstance(parts_marker, dict):
+            row["chat_stream_parts_preview"] = {
+                **parts_marker,
+                "session_id": session_id,
+            }
         parts = []
         for part in row["parts"]:
             if not isinstance(part, dict) or part.get("type") != "image":
-                if (
-                    isinstance(part, dict)
-                    and part.get("type") == "tool-call"
-                    and isinstance(part.get("result"), dict)
-                    and part["result"].get("kind")
-                    == "chat-stream-tool-output-preview"
-                ):
-                    parts.append(
-                        {
-                            **part,
-                            "result": {**part["result"], "session_id": session_id},
-                        }
-                    )
-                else:
+                if not isinstance(part, dict):
                     parts.append(part)
+                    continue
+                materialized = dict(part)
+                result = part.get("result")
+                if (
+                    isinstance(result, dict)
+                    and result.get("kind") == "chat-stream-tool-output-preview"
+                ):
+                    materialized["result"] = {**result, "session_id": session_id}
+                args = part.get("args")
+                if (
+                    isinstance(args, dict)
+                    and args.get("kind") == "chat-stream-content-preview"
+                ):
+                    materialized["args"] = {**args, "session_id": session_id}
+                content_preview = part.get("chat_stream_content_preview")
+                if (
+                    isinstance(content_preview, dict)
+                    and content_preview.get("kind") == "chat-stream-content-preview"
+                ):
+                    materialized["chat_stream_content_preview"] = {
+                        **content_preview,
+                        "session_id": session_id,
+                    }
+                part_preview = part.get("chat_stream_part_preview")
+                if (
+                    isinstance(part_preview, dict)
+                    and part_preview.get("kind") == "chat-stream-part-preview"
+                ):
+                    materialized["chat_stream_part_preview"] = {
+                        **part_preview,
+                        "session_id": session_id,
+                    }
+                parts.append(materialized)
                 continue
             resolved = _resolved_image_url(part.get("url"), session_id)
             if resolved is not None:
@@ -373,6 +425,213 @@ async def chat_stream_tool_output(
         raise HTTPException(
             status_code=502,
             detail="The local daemon returned an oversized tool output chunk.",
+        )
+    return payload
+
+
+@router.get("/{session_id}/chat-stream/rows/{row_id}/content")
+async def chat_stream_content(
+    session_id: str,
+    row_id: str,
+    part_index: int = Query(ge=0),
+    field: str = Query(pattern=r"^(text|reasoning|args|part)$"),
+    output_revision: str = Query(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=_TOOL_OUTPUT_CHUNK_CHARS, ge=1, le=_TOOL_OUTPUT_CHUNK_CHARS),
+):
+    """Return a bounded chunk of one authenticated chat row content field."""
+    result = await _call_daemon(
+        session_id,
+        "state.chat_stream.content",
+        {
+            "row_id": row_id,
+            "part_index": part_index,
+            "field": field,
+            "output_revision": output_revision,
+            "offset": offset,
+            "limit": limit,
+        },
+    )
+    if isinstance(result, dict):
+        error = result.get("error")
+        if error == "not_found":
+            raise HTTPException(status_code=404, detail="Chat content not found.")
+        if error == "invalid_request":
+            raise HTTPException(status_code=400, detail="Invalid chat content request.")
+        if error == "output_changed":
+            raise HTTPException(
+                status_code=409,
+                detail="The chat content changed. Reload the current chat row.",
+            )
+    content = result.get("content") if isinstance(result, dict) else None
+    next_offset = result.get("next_offset") if isinstance(result, dict) else None
+    total_chars = result.get("total_chars") if isinstance(result, dict) else None
+    output_type = result.get("output_type") if isinstance(result, dict) else None
+    returned_revision = result.get("output_revision") if isinstance(result, dict) else None
+    done = result.get("done") if isinstance(result, dict) else None
+    if (
+        not isinstance(result, dict)
+        or result.get("row_id") != row_id
+        or result.get("part_index") != part_index
+        or result.get("field") != field
+        or result.get("offset") != offset
+        or not isinstance(content, str)
+        or len(content) > limit
+        or isinstance(next_offset, bool)
+        or not isinstance(next_offset, int)
+        or isinstance(total_chars, bool)
+        or not isinstance(total_chars, int)
+        or total_chars < 0
+        or output_type not in {"text", "json"}
+        or returned_revision != output_revision
+        or not isinstance(done, bool)
+        or next_offset != offset + len(content)
+        or next_offset > total_chars
+        or done != (next_offset >= total_chars)
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon returned an invalid chat content chunk.",
+        )
+    payload = {
+        "row_id": row_id,
+        "part_index": part_index,
+        "field": field,
+        "offset": offset,
+        "next_offset": next_offset,
+        "total_chars": total_chars,
+        "output_type": output_type,
+        "output_revision": output_revision,
+        "content": content,
+        "done": done,
+    }
+    if len(json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) > _TOOL_OUTPUT_RPC_BYTES:
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon returned an oversized chat content chunk.",
+        )
+    return payload
+
+
+@router.get("/{session_id}/chat-stream/rows/{row_id}/parts")
+async def chat_stream_parts(
+    session_id: str,
+    row_id: str,
+    output_revision: str = Query(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=_PART_PAGE_SIZE, ge=1, le=_PART_PAGE_SIZE),
+):
+    """Return a bounded page of parts for a large authenticated chat row."""
+    result = await _call_daemon(
+        session_id,
+        "state.chat_stream.parts",
+        {
+            "row_id": row_id,
+            "output_revision": output_revision,
+            "offset": offset,
+            "limit": limit,
+        },
+    )
+    if isinstance(result, dict):
+        error = result.get("error")
+        if error == "not_found":
+            raise HTTPException(status_code=404, detail="Chat row parts not found.")
+        if error == "invalid_request":
+            raise HTTPException(status_code=400, detail="Invalid chat parts request.")
+        if error == "output_changed":
+            raise HTTPException(
+                status_code=409,
+                detail="The chat row changed. Reload the current chat row.",
+            )
+    parts = result.get("parts") if isinstance(result, dict) else None
+    next_offset = result.get("next_offset") if isinstance(result, dict) else None
+    total_parts = result.get("total_parts") if isinstance(result, dict) else None
+    done = result.get("done") if isinstance(result, dict) else None
+    if (
+        not isinstance(result, dict)
+        or result.get("row_id") != row_id
+        or result.get("offset") != offset
+        or isinstance(next_offset, bool)
+        or not isinstance(next_offset, int)
+        or not offset <= next_offset <= offset + limit
+        or isinstance(total_parts, bool)
+        or not isinstance(total_parts, int)
+        or total_parts < 0
+        or next_offset > total_parts
+        or not isinstance(parts, list)
+        or len(parts) != next_offset - offset
+        or any(not isinstance(part, dict) for part in parts)
+        or not isinstance(done, bool)
+        or done != (next_offset >= total_parts)
+        or result.get("output_revision") != output_revision
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon returned an invalid chat parts page.",
+        )
+    probe_row = {
+        "id": row_id,
+        "seq": 0,
+        "kind": "reply",
+        "role": "assistant",
+        "turn_id": None,
+        "status": "completed",
+        "parts": parts,
+        "created_at": "",
+    }
+    if event_problems({
+        "seq": 0,
+        "conversation_uid": "parts-page-validation",
+        "generation": "parts-page-validation",
+        "type": "row.upsert",
+        "data": probe_row,
+    }):
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon returned invalid chat parts.",
+        )
+    for part_index, part in enumerate(parts, start=offset):
+        marker = part.get("chat_stream_part_preview")
+        if marker is None:
+            continue
+        if (
+            not isinstance(marker, dict)
+            or marker.get("kind") != "chat-stream-part-preview"
+            or marker.get("row_id") != row_id
+            or marker.get("part_index") != part_index
+            or isinstance(marker.get("part_index"), bool)
+            or not isinstance(marker.get("output_bytes"), int)
+            or isinstance(marker.get("output_bytes"), bool)
+            or marker["output_bytes"] < 0
+            or not isinstance(marker.get("output_chars"), int)
+            or isinstance(marker.get("output_chars"), bool)
+            or marker["output_chars"] < 0
+            or marker.get("output_type") != "json"
+            or not isinstance(marker.get("output_revision"), str)
+            or len(marker["output_revision"]) != 64
+            or any(character not in "0123456789abcdef" for character in marker["output_revision"])
+            or not isinstance(marker.get("preview"), str)
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail="The local daemon returned invalid chat part metadata.",
+            )
+    materialized_parts = {"parts": parts}
+    _materialize_row_images([materialized_parts], session_id)
+    parts = materialized_parts["parts"]
+    payload = {
+        "row_id": row_id,
+        "offset": offset,
+        "next_offset": next_offset,
+        "total_parts": total_parts,
+        "output_revision": output_revision,
+        "parts": parts,
+        "done": done,
+    }
+    if len(json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) > _PART_PAGE_RPC_BYTES:
+        raise HTTPException(
+            status_code=502,
+            detail="The local daemon returned an oversized chat parts page.",
         )
     return payload
 

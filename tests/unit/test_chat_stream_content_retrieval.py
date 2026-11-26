@@ -211,6 +211,7 @@ def test_pathological_valid_parts_use_bounded_row_placeholder_and_page_back():
     assert page["done"] is True
     assert page["total_parts"] == len(original_parts)
     assert len(page["parts"]) == len(original_parts)
+    assert chat_stream_wire_bytes(page) <= 256 * 1024
     for part_index, (page_part, original_part) in enumerate(
         zip(page["parts"], original_parts, strict=True)
     ):
@@ -237,6 +238,17 @@ def test_pathological_valid_parts_use_bounded_row_placeholder_and_page_back():
             offset = chunk["next_offset"]
         assert json.loads("".join(chunks)) == original_part
 
+    changed_row = {**row, "parts": [{"type": "text", "text": "replacement"}]}
+    service._upsert("content-preview-test", changed_row)
+    assert service.get_parts(
+        {
+            "row_id": row["id"],
+            "output_revision": marker["output_revision"],
+            "offset": 0,
+            "limit": len(original_parts),
+        }
+    ) == {"error": "output_changed"}
+
 
 def test_pathological_part_count_is_pageable_without_truncation():
     original_parts = [
@@ -256,13 +268,102 @@ def test_pathological_part_count_is_pageable_without_truncation():
     assert marker["part_count"] == len(original_parts)
     assert chat_stream_wire_bytes(projected) <= CHAT_STREAM_MAX_ROW_BYTES
 
+    actual_parts = []
+    offset = 0
+    while True:
+        page = service.get_parts(
+            {
+                "row_id": row["id"],
+                "output_revision": marker["output_revision"],
+                "offset": offset,
+                "limit": 32,
+            }
+        )
+        assert page["offset"] == offset
+        assert page["next_offset"] > offset
+        assert chat_stream_wire_bytes(page) <= 256 * 1024
+        actual_parts.extend(page["parts"])
+        if page["done"]:
+            break
+        offset = page["next_offset"]
+    assert actual_parts == original_parts
+
+
+def test_unpageable_required_row_metadata_fails_explicitly():
+    row = _row([{"type": "text", "text": "small"}])
+    row["status"] = "x" * CHAT_STREAM_MAX_ROW_BYTES
+
+    try:
+        bounded_chat_stream_row(row)
+    except ValueError as exc:
+        assert str(exc) == "chat stream row metadata exceeds the row byte budget"
+    else:
+        raise AssertionError("unpageable row metadata must not produce an oversized row")
+
+    long_id_row = _row([{"type": "text", "text": "x" * 300_000}])
+    long_id_row["id"] = "row-" + "x" * 600
+    try:
+        bounded_chat_stream_row(long_id_row)
+    except ValueError as exc:
+        assert str(exc) == "chat stream row id exceeds the content retrieval limit"
+    else:
+        raise AssertionError("an inaccessible content marker must not be returned")
+
+
+def test_persisted_hub_note_parts_are_recoverable_after_service_restart():
+    original_part = {
+        "type": "hub-note",
+        "from": "agent-large",
+        "to": "",
+        "text": "persistent note " * 20_000,
+        "observed": False,
+    }
+    persisted_row = {
+        **_row([original_part]),
+        "id": "persistent-large-note",
+        "kind": "note",
+        "role": "system",
+    }
+    manager = SimpleNamespace(chat_stream_rows=[persisted_row])
+    state = SimpleNamespace(
+        _llm_service=SimpleNamespace(
+            conversation_manager=manager,
+            conversation_history=[],
+        ),
+        get_conversation_uid=lambda: "content-preview-test",
+    )
+    service = ChatStreamService(state)
+
+    projected = service._project_chat_stream_row(
+        "content-preview-test", service._transcript_rows("content-preview-test")[0]
+    )
+    marker = projected["chat_stream_parts_preview"]
     page = service.get_parts(
         {
-            "row_id": row["id"],
+            "row_id": persisted_row["id"],
             "output_revision": marker["output_revision"],
-            "offset": 4_990,
-            "limit": 10,
+            "offset": 0,
+            "limit": 1,
         }
     )
+    part_marker = page["parts"][0]["chat_stream_part_preview"]
+    chunks = []
+    offset = 0
+    while True:
+        chunk = service.get_content(
+            {
+                "row_id": persisted_row["id"],
+                "part_index": 0,
+                "field": "part",
+                "output_revision": part_marker["output_revision"],
+                "offset": offset,
+                "limit": 32_768,
+            }
+        )
+        chunks.append(chunk["content"])
+        if chunk["done"]:
+            break
+        offset = chunk["next_offset"]
+
     assert page["done"] is True
-    assert page["parts"] == original_parts[4_990:]
+    assert json.loads("".join(chunks)) == original_part
