@@ -209,10 +209,10 @@ def bounded_chat_stream_row(
         if not isinstance(part, dict) or part.get("type") != "tool-call":
             continue
         result = part.get("result")
-        if result is None or (
-            isinstance(result, dict)
-            and result.get("kind") == "chat-stream-tool-output-preview"
-        ):
+        if isinstance(part.get("chat_stream_result_preview"), dict):
+            part.pop("result", None)
+            continue
+        if result is None:
             continue
         marker = output_preview(part, part_index, result)
         output_bytes = marker["output_bytes"]
@@ -221,7 +221,8 @@ def bounded_chat_stream_row(
         if not tool_output_is_retrievable(part):
             continue
         ensure_retrievable_row_id()
-        part["result"] = marker
+        part.pop("result", None)
+        part["chat_stream_result_preview"] = marker
 
     # First replace individually large text, reasoning and argument fields.
     # Any remaining oversized or unusually wide part list is exposed through
@@ -276,18 +277,21 @@ def bounded_chat_stream_row(
                             compact["chat_stream_args_preview"] = content_preview(
                                 part_index, "args", part["args"]
                             )[0]
-                result = part.get("result")
-                if result is not None:
-                    if (
-                        isinstance(result, dict)
-                        and result.get("kind") == "chat-stream-tool-output-preview"
-                    ):
-                        compact["result"] = result
-                    elif tool_output_is_retrievable(part):
-                        ensure_retrievable_row_id()
-                        compact["result"] = output_preview(part, part_index, result)
-                    else:
-                        compact["result"] = copy.deepcopy(result)
+                result_preview = part.get("chat_stream_result_preview")
+                if isinstance(result_preview, dict):
+                    compact["chat_stream_result_preview"] = copy.deepcopy(
+                        result_preview
+                    )
+                else:
+                    result = part.get("result")
+                    if result is not None:
+                        if tool_output_is_retrievable(part):
+                            ensure_retrievable_row_id()
+                            compact["chat_stream_result_preview"] = output_preview(
+                                part, part_index, result
+                            )
+                        else:
+                            compact["result"] = copy.deepcopy(result)
                 if "is_error" in part:
                     compact["is_error"] = part["is_error"]
                 compact_parts.append(compact)

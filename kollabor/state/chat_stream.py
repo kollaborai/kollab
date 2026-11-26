@@ -2529,10 +2529,7 @@ class ChatStreamService:
                             break
                     if result is not None:
                         break
-                if result is None or (
-                    isinstance(result, dict)
-                    and result.get("kind") == "chat-stream-tool-output-preview"
-                ):
+                if result is None:
                     return {"error": "not_found"}
                 try:
                     content, output_type, current_revision = self._cached_tool_output(
