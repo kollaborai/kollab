@@ -265,7 +265,7 @@ function noteOf(part: Extract<ChatPart, { type: "hub-note" }>): HubNote {
   };
 }
 
-const HubNoteMessage: FC = () => {
+export const HubNoteMessage: FC = () => {
   // The message's row is the note row the store holds under the same id.
   const id = useAuiState((s) => s.message.id);
   const { rows } = useChatStore();
