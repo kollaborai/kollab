@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from kollabor.state.web_message_queue_runtime import register_web_message_queue_runtime
 from kollabor.state.chat_stream import ChatStreamService
+from kollabor.state.web_message_queue_runtime import register_web_message_queue_runtime
 from kollabor_rpc import RpcCallerContext, RpcServer
 
 
