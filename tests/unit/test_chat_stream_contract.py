@@ -134,6 +134,53 @@ def test_an_input_that_changes_after_it_ended_is_reported():
     assert any("changed after it ended" in problem for problem in problems)
 
 
+@pytest.mark.parametrize(
+    ("outcome", "should_report"),
+    [("completed", True), ("cancelled", False)],
+)
+def test_queued_input_can_only_end_without_a_turn_when_cancelled(outcome, should_report):
+    events = [
+        {
+            "seq": 0,
+            "conversation_uid": "c",
+            "type": "snapshot",
+            "data": {
+                "rows": [
+                    {
+                        "id": "i",
+                        "seq": 0,
+                        "kind": "input",
+                        "role": "user",
+                        "turn_id": None,
+                        "status": "queued",
+                        "parts": [],
+                        "created_at": "now",
+                    }
+                ],
+                "next_seq": 1,
+                "older": None,
+                "turns": [],
+                "inputs": [{"id": "i", "state": "queued", "turn_id": None}],
+            },
+        },
+        {
+            "seq": 1,
+            "conversation_uid": "c",
+            "type": "input.state",
+            "data": {
+                "id": "i",
+                "state": "ended",
+                "turn_id": None,
+                "outcome": outcome,
+            },
+        },
+    ]
+
+    problems = sequence_problems(events)
+    invalid_completion = any("queued" in problem and "ended" in problem for problem in problems)
+    assert invalid_completion is should_report, problems
+
+
 def test_a_completed_input_must_wait_for_its_turn():
     events = json.loads((FIXTURES / "steered-input.json").read_text())["events"]
     turn_end = next(
