@@ -74,18 +74,28 @@ async def test_native_admission_keeps_the_request_id_and_echoes_it():
         )
     )
 
-    # Typed TUI input with no id echoes none but still carries provenance.
-    # The operator record and admission serial are independent of request ids.
+    # Typed TUI input has no sender-chosen id, so admission mints one and uses
+    # that same id for the response, queued item, and persisted operator row.
     service._enqueue_with_overflow_strategy.reset_mock()
-    assert await service.submit_human_input("typed here", source=UserInputSource.TUI) == {"status": "queued"}
+    result = await service.submit_human_input("typed here", source=UserInputSource.TUI)
+    assert result["status"] == "queued"
+    generated_id = result["request_id"]
+    assert isinstance(generated_id, str) and generated_id
     service._enqueue_with_overflow_strategy.assert_awaited_once_with(
         TaggedInput(
             "typed here",
-            (),
+            (generated_id,),
             parent_uuid="parent-2",
             history_row_uuid="parent-2",
             admission_serial=2,
-            operator_inputs=({"source": "user", "timestamp": ANY, "text": "typed here"},),
+            operator_inputs=(
+                {
+                    "source": "user",
+                    "timestamp": ANY,
+                    "text": "typed here",
+                    "request_id": generated_id,
+                },
+            ),
         )
     )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,10 +12,11 @@ from kollabor.llm.acp_bridge import ACPAdmission, ACPResult, ACPRunner
 from kollabor.llm.acp_orchestrator import ACPOrchestrator
 from kollabor.llm.permissions.attach_bridge import AttachPermissionBridge
 from kollabor.state.chat_stream import ChatStreamService
+from kollabor_agent.queue_processor import QueueProcessor, TaggedInput, batch_request_ids
 from kollabor_events.chat_stream import REPLAY_WINDOW, sequence_problems
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.permissions_models import ConfirmationResponse
-from kollabor_tui.display_tap import DisplayTap
+from kollabor_tui.display_tap import DisplayTap, publish_semantic
 from plugins.hub.models import HubMessage
 
 
@@ -125,6 +127,71 @@ async def test_native_queued_input_streams_one_reply_and_ends_after_its_turn():
     ]
     assert {row["id"] for row in input_rows} == {"web-native-1"}
     assert any(event["type"] == "row.append" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_native_queue_drain_starts_the_admitted_turn_before_reply_events():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    input_id = "web-native-worker-1"
+    await _add(stream, input_id, "hello")
+
+    processor = QueueProcessor.__new__(QueueProcessor)
+    tap = state._event_bus.tap
+    tap_events = tap.subscribe("native-worker")
+    processor.renderer = tap
+    processor.processing_queue = asyncio.Queue()
+    processor.processing_queue.put_nowait(TaggedInput("hello", (input_id,)))
+    processor.is_processing = False
+    processor.current_processing_tokens = 0
+    processor.processing_start_time = 0
+    processor.cancel_processing = False
+    processor.turn_completed = False
+    processor._last_tool_error_sig = None
+    processor._open_voice_turn = None
+    processor.active_origin_context = None
+    processor.active_request_ids = ()
+    processor._after_turn = []
+    processor._turn_token = None
+    processor._queue_handoffs = {}
+    processor._drained_batch_messages = ()
+    processor._drained_handoff_items = ()
+    processor._drained_handoff_started = False
+    processor._active_turn_handoff_attempts = ()
+
+    async def process_batch(messages):
+        request_ids = batch_request_ids(messages)
+        assert request_ids == (input_id,)
+        processor._stamp_turn(None, request_ids)
+        publish_semantic(tap, "token", text="hello back")
+        publish_semantic(tap, "turn_complete", stop_reason="end_turn")
+        processor._stamp_turn(None)
+        processor.turn_completed = True
+
+    await processor._drain_queue(None, process_batch, AsyncMock())
+
+    events = _events(stream, initial)
+    assert sequence_problems(events) == []
+    assert any(
+        item["type"] == "input.state"
+        and item["data"]["id"] == input_id
+        and item["data"]["state"] == "started"
+        for item in events
+    )
+    assert any(
+        item["type"] == "turn.state" and item["data"]["state"] == "ended"
+        for item in events
+    )
+    raw_events = []
+    while not tap_events.empty():
+        raw_events.append(tap_events.get_nowait())
+    start = next(event for event in raw_events if event.get("type") == "turn_start")
+    token = next(event for event in raw_events if event.get("type") == "token")
+    assert start["turn_id"]
+    assert start["request_ids"] == [input_id]
+    assert raw_events.index(start) < raw_events.index(token)
 
 
 @pytest.mark.asyncio
@@ -819,6 +886,205 @@ async def test_acp_tool_rows_preserve_structured_args_results_and_rebuild_from_h
     ]
 
 
+@pytest.mark.asyncio
+async def test_native_tool_result_keeps_args_from_tool_executor_start():
+    from unittest.mock import AsyncMock
+
+    from kollabor_agent.tool_executor import ToolExecutionResult, ToolExecutor
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    executor = ToolExecutor(None, state._event_bus)
+    executor._execute_tool_inner = AsyncMock(
+        return_value=ToolExecutionResult(
+            "native-search-1",
+            "mcp_tool",
+            True,
+            output="found it",
+        )
+    )
+
+    await executor.execute_tool(
+        {
+            "id": "native-search-1",
+            "type": "mcp_tool",
+            "name": "search",
+            "input": {"query": "lunar eclipse"},
+        }
+    )
+
+    _, rows = _snapshot_rows(stream)
+    tool = next(row for row in rows if row["kind"] == "tool")
+    assert tool["parts"] == [
+        {
+            "type": "tool-call",
+            "tool_call_id": "native-search-1",
+            "tool_name": "search",
+            "args": {"query": "lunar eclipse"},
+            "result": "found it",
+            "is_error": False,
+        }
+    ]
+
+
+def test_sparse_tool_result_keeps_name_and_args_from_start():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+
+    _publish(
+        state,
+        "tool_start",
+        turn_id="native-sparse-tool-turn",
+        tool_id="native-sparse-tool-1",
+        tool_name="Search the web",
+        input={"query": "eclipse"},
+    )
+    _publish(
+        state,
+        "tool_result",
+        turn_id="native-sparse-tool-turn",
+        tool_id="native-sparse-tool-1",
+        success=True,
+        output={"count": 1},
+    )
+
+    _, rows = _snapshot_rows(stream)
+    tool = next(row for row in rows if row["kind"] == "tool")
+    assert tool["parts"][0]["tool_name"] == "Search the web"
+    assert tool["parts"][0]["args"] == {"query": "eclipse"}
+    assert tool["parts"][0]["result"] == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_native_hub_hud_context_is_not_a_second_input_and_hub_input_owns_turn():
+    import asyncio
+    from types import MethodType
+
+    from kollabor.llm.agent_hud import AgentHudEntry
+    from kollabor.llm.llm_coordinator import LLMService
+    from kollabor.llm.message_handler import MessageHandler
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    tap = state._event_bus.tap
+    input_id = "native-wake-hud-1"
+    hub_note = {
+        "type": "hub-note",
+        "from": "peer",
+        "to": "koordinator",
+        "text": "Please check the build.",
+        "observed": False,
+        "is_direct": True,
+    }
+    _publish(
+        state,
+        "hub_message",
+        message_id=input_id,
+        request_id=input_id,
+        input_source="hub",
+        hub_note=hub_note,
+        hub_admission="input",
+    )
+
+    qp = SimpleNamespace(
+        cancel_processing=False,
+        cancel_origin=None,
+        is_processing=False,
+        turn_completed=False,
+        _stop_hook_active=False,
+        _stop_hook_continuations=0,
+        _last_tool_error_sig=None,
+        last_turn_error=None,
+        processing_queue=asyncio.Queue(),
+        active_request_ids=(),
+    )
+    background_tasks = []
+    coordinator = SimpleNamespace(
+        event_bus=state._event_bus,
+        renderer=tap,
+        conversation_manager=None,
+        conversation_history=[],
+        current_parent_uuid="parent-1",
+        _queue_processor=qp,
+        _continue_serial=None,
+        _batch_tail_uuid=None,
+        is_processing=False,
+        message_display_service=SimpleNamespace(
+            display_error_message=lambda *_args, **_kwargs: None
+        ),
+        _is_hidden_voice_message=lambda _message: False,
+        _profile_selects_acp=lambda: (False, False),
+        _active_acp=lambda: None,
+        claim_turn_serial=lambda: 1,
+        publish_cursor=lambda _uuid, _serial: True,
+        pop_pending_agent_hud=lambda: [
+            AgentHudEntry(
+                section="hub",
+                label="peer->koordinator",
+                content="Please check the build.",
+                message_id=input_id,
+                hub_note=hub_note,
+                hub_admission="input",
+            )
+        ],
+    )
+    coordinator._add_conversation_message = MethodType(
+        LLMService._add_conversation_message, coordinator
+    )
+
+    async def continue_conversation():
+        tap.publish({"type": "token", "text": "I will check."})
+        tap.publish({"type": "turn_complete", "stop_reason": "end_turn"})
+        qp.turn_completed = True
+
+    coordinator._continue_conversation = continue_conversation
+    coordinator._process_queue = AsyncMock()
+    coordinator.create_background_task = lambda fn, name=None: background_tasks.append(
+        asyncio.create_task(fn())
+    )
+
+    handler = MessageHandler(coordinator)
+    result = await handler.handle_llm_continue(
+        {
+            "source": "hub:peer",
+            "request_id": input_id,
+            "hub_message_id": input_id,
+            "hub_note": hub_note,
+        },
+        None,
+    )
+    await asyncio.gather(*background_tasks)
+
+    assert result["status"] == "triggered"
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    rows = snapshot["data"]["rows"]
+    inputs = [row for row in rows if row["kind"] == "input"]
+    assert [row["id"] for row in inputs] == [input_id]
+    assert inputs[0]["status"] == "completed"
+    starts = [
+        event
+        for event in tap._history
+        if event.get("type") == "turn_start"
+    ]
+    assert len(starts) == 1
+    assert starts[0]["request_ids"] == [input_id]
+    assert starts[0]["input_source"] == "hub"
+    assert inputs[0]["turn_id"] == starts[0]["turn_id"]
+    assert snapshot["data"]["turns"] == [
+        {"turn_id": starts[0]["turn_id"], "state": "ended", "input_ids": [input_id]}
+    ]
+    assert sequence_problems([snapshot]) == []
+
+    state._llm_service = coordinator
+    reloaded = ChatStreamService(state).subscribe(
+        {"after": None, "conversation_uid": None}
+    )["events"][0]
+    assert reloaded["data"]["rows"] == []
+
+
 class _RpcServer:
     def __init__(self):
         self.handlers = {}
@@ -874,3 +1140,215 @@ async def test_permission_prompt_row_carries_full_data_and_resolution():
     assert prompt["status"] == "granted"
     assert prompt["turn_id"] == "19"
     assert sequence_problems([snapshot]) == []
+def test_goal_origin_survives_inputless_turn_replay_and_snapshot():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "full-goal-id", "attempt_id": "full-attempt-id"}
+    _publish(state, "turn_start", turn_id="goal-turn", origin=origin)
+    running = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert running["data"]["turns"] == [{"turn_id": "goal-turn", "state": "running", "input_ids": [], "origin": origin}]
+    _publish(state, "turn_complete", turn_id="goal-turn", stop_reason="cancelled")
+    events = _events(stream, initial)
+    turns = [e["data"] for e in events if e["type"] == "turn.state"]
+    assert [t["state"] for t in turns] == ["running", "ended"]
+    assert all(t["origin"] == origin for t in turns)
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"][-1] == turns[-1]
+
+
+def test_goal_intermediate_completion_does_not_end_attempt():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    _publish(state, "turn_start", turn_id="t", origin=origin)
+    _publish(state, "turn_complete", turn_id="t", origin=origin, stop_reason="end_turn")
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert snapshot["data"]["turns"][0]["state"] == "running"
+    _publish(state, "turn_complete", turn_id="t", origin=origin, goal_attempt_terminal=True)
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    assert snapshot["data"]["turns"][0]["state"] == "ended"
+
+
+@pytest.mark.asyncio
+async def test_goal_origin_survives_joined_human_input():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "full-goal", "attempt_id": "full-attempt"}
+    _publish(state, "turn_start", turn_id="goal-turn", origin=origin)
+    await _add(stream, "human", "steer")
+    _publish(state, "user_message", request_id="human", turn_id="goal-turn", text="steer")
+    turns = [e["data"] for e in _events(stream, initial) if e["type"] == "turn.state"]
+    expected = {"turn_id": "goal-turn", "state": "running", "input_ids": ["human"], "origin": origin}
+    assert turns[-1] == expected
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"] == [expected]
+    _publish(state, "turn_complete", turn_id="goal-turn", goal_attempt_terminal=True)
+    turns = [e["data"] for e in _events(stream, initial) if e["type"] == "turn.state"]
+    assert any(t["input_ids"] == ["human"] for t in turns)
+    assert all(t["origin"] == origin for t in turns)
+    assert turns[-1]["state"] == "ended"
+    assert stream.subscribe({"after": None, "conversation_uid": None})["events"][0]["data"]["turns"][-1] == turns[-1]
+
+
+@pytest.mark.parametrize("transition", ["start", "end"])
+def test_snapshot_cursor_is_atomic_with_goal_turn_transition(transition):
+    import threading
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    if transition == "end":
+        _publish(state, "turn_start", turn_id="t", origin=origin)
+    log = stream._log("conversation-a")
+    publish = log.publish
+    entered = threading.Event()
+    release = threading.Event()
+    snapshot_done = threading.Event()
+    snapshots = []
+    def paused_publish(kind, data):
+        if kind == "turn.state":
+            entered.set()
+            assert release.wait(2)
+        return publish(kind, data)
+    log.publish = paused_publish
+    def produce():
+        if transition == "start":
+            _publish(state, "turn_start", turn_id="t", origin=origin)
+        else:
+            _publish(state, "turn_complete", turn_id="t", goal_attempt_terminal=True)
+    def snapshot():
+        snapshots.append(stream.subscribe({"after": None, "conversation_uid": None})["events"][0])
+        snapshot_done.set()
+    producer = threading.Thread(target=produce)
+    reader = threading.Thread(target=snapshot)
+    producer.start()
+    try:
+        assert entered.wait(2)
+        reader.start()
+        assert not snapshot_done.wait(0.1)
+    finally:
+        release.set()
+        producer.join(2)
+        if reader.ident is not None:
+            reader.join(2)
+    assert snapshot_done.is_set()
+    turn = snapshots[0]["data"]["turns"][0]
+    assert turn["origin"] == origin
+    assert turn["state"] == ("running" if transition == "start" else "ended")
+    assert snapshots[0]["data"]["next_seq"] == log.next_seq
+
+
+def test_goal_continuation_responses_replace_only_current_segment():
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"}
+    _publish(state, "turn_start", turn_id="t", origin=origin)
+    for raw, clean in [("First <tool>", "First "), ("Second <tool>", "Second "), ("Third <tool>", "Third")]:
+        _publish(state, "reply_segment_start", turn_id="t", origin=origin)
+        _publish(state, "token", turn_id="t", text=raw)
+        _publish(state, "response", turn_id="t", text=clean)
+    events = _events(stream, initial)
+    replies = [e["data"] for e in events if e["type"] == "row.upsert" and e["data"]["kind"] == "reply"]
+    assert replies[-1]["parts"][0]["text"] == "First Second Third"
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    reply = next(row for row in snapshot["data"]["rows"] if row["kind"] == "reply")
+    assert reply["parts"][0]["text"] == "First Second Third"
+
+
+@pytest.mark.asyncio
+async def test_native_model_continuations_clean_only_their_own_reply_segment():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from kollabor_agent.queue_processor import QueueProcessor
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    _publish(state, "turn_start", turn_id="native", request_id="input")
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = state._event_bus
+    processor._turn_lock = asyncio.Lock()
+    processor._run_after_turn = AsyncMock()
+    processor._turn_token = None
+    processor.active_request_ids = ()
+    processor.turn_completed = False
+    processor.cancel_processing = False
+    segments = iter(
+        [("First <tool>", "First "), ("<tool>", ""), ("Last <tool>", "Last")]
+    )
+
+    async def model_call(*args, **kwargs):
+        raw, clean = next(segments)
+        _publish(state, "token", turn_id="native", text=raw)
+        _publish(state, "response", turn_id="native", text=clean)
+        return "parent"
+
+    processor._execute_llm_turn_inner = model_call
+    for first in (True, False, False):
+        await processor._execute_llm_turn(first, "parent")
+
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    reply = next(row for row in snapshot["data"]["rows"] if row["kind"] == "reply")
+    assert reply["parts"][0]["text"] == "First Last"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("goal", [False, True])
+async def test_native_reply_segments_keep_tool_order_in_replay_and_snapshot(goal):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from kollabor_agent.queue_processor import QueueProcessor
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    origin = {"kind": "goal", "goal_id": "g", "attempt_id": "a"} if goal else None
+    _publish(state, "turn_start", turn_id="t", request_id="input", origin=origin)
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = state._event_bus
+    processor._turn_lock = asyncio.Lock()
+    processor._run_after_turn = AsyncMock()
+    processor._turn_token = None
+    processor.active_request_ids = ()
+    processor.turn_completed = False
+    processor.cancel_processing = False
+    segments = iter([("before <tool>", "before"), ("after <tool>", "after")])
+
+    async def model_call(*args, **kwargs):
+        raw, clean = next(segments)
+        _publish(state, "token", turn_id="t", text=raw)
+        _publish(state, "response", turn_id="t", text=clean)
+        return "parent"
+
+    processor._execute_llm_turn_inner = model_call
+    await processor._execute_llm_turn(True, "parent")
+    _publish(state, "tool_start", turn_id="t", tool_id="tool", tool_name="Search")
+    _publish(state, "tool_result", turn_id="t", tool_id="tool", tool_name="Search", success=True)
+    await processor._execute_llm_turn(False, "parent")
+    _publish(state, "turn_complete", turn_id="t", origin=origin, goal_attempt_terminal=True)
+
+    events = _events(stream, initial)
+    assert sequence_problems(events) == []
+    rows = {}
+    for event in events[1:]:
+        if event["type"] == "row.upsert":
+            rows[event["data"]["id"]] = event["data"]
+        elif event["type"] == "row.append":
+            data = event["data"]
+            rows[data["id"]]["parts"][data["part"]]["text"] += data["text"]
+    replay = [row for row in rows.values() if row["kind"] in {"reply", "tool"}]
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    saved = [row for row in snapshot["data"]["rows"] if row["kind"] in {"reply", "tool"}]
+    for result in (replay, saved):
+        assert [row["kind"] for row in result] == ["reply", "tool", "reply"]
+        assert [result[0]["parts"][0]["text"], result[2]["parts"][0]["text"]] == ["before", "after"]
+        assert result[0]["id"] != result[2]["id"]

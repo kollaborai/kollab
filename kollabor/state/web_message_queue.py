@@ -35,12 +35,9 @@ DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024
 DEFAULT_MAX_QUEUE_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_OPERATIONS = 4096
 DEFAULT_OPERATION_RETRY_LEASE_SECONDS = 900.0
+MAX_REQUEST_ID_LENGTH = 256
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
-_CLIENT_ITEM_ID = re.compile(
-    r"([A-Za-z][A-Za-z0-9._:-]{0,63})-([A-Za-z0-9][A-Za-z0-9._:-]{0,63})\Z"
-)
-_RESERVED_ITEM_PREFIXES = frozenset({"item", "op", "batch"})
 
 
 class WebMessageQueueError(Exception):
@@ -339,6 +336,16 @@ class WebMessageQueue:
         if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
             raise InvalidIdentifier("invalid queue identifier")
 
+    @staticmethod
+    def _validate_request_id(value: str) -> None:
+        """Validate an input ID using the public chat stream contract."""
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > MAX_REQUEST_ID_LENGTH
+        ):
+            raise InvalidIdentifier("invalid queue identifier")
+
     def _new_token(self, kind: str) -> str:
         issued_at_ns = time.monotonic_ns()
         self._last_id_issued_at_ns = issued_at_ns
@@ -413,13 +420,18 @@ class WebMessageQueue:
         return issued_at_ns
 
     def _validate_new_item_id(self, value: str) -> int:
-        """Validate a daemon-minted ID or a client-prefixed chat input ID."""
-        if value.startswith("item-"):
+        """Validate an input ID or authenticate a daemon-minted item token."""
+        self._validate_request_id(value)
+        parts = value.split("-")
+        if (
+            len(parts) == 5
+            and parts[0] == "item"
+            and re.fullmatch(r"[0-9a-f]{32}", parts[1]) is not None
+            and re.fullmatch(r"[0-9]+", parts[2]) is not None
+            and re.fullmatch(r"[0-9a-f]{32}", parts[3]) is not None
+            and re.fullmatch(r"[0-9a-f]{32}", parts[4]) is not None
+        ):
             return self._validate_new_entity_id(value, "item")
-        self._validate_identifier(value)
-        match = _CLIENT_ITEM_ID.fullmatch(value)
-        if match is None or match.group(1).lower() in _RESERVED_ITEM_PREFIXES:
-            raise InvalidIdentifier("invalid queue identifier")
         return time.monotonic_ns()
 
     def _existing_item_issue_time(self, request_id: str) -> int:
@@ -725,7 +737,7 @@ class WebMessageQueue:
         for item in messages:
             if not isinstance(item, WebMessage):
                 raise CapacityExceeded("invalid batch item")
-            self._validate_identifier(item.request_id)
+            self._validate_request_id(item.request_id)
             if item.request_id in request_ids:
                 raise ItemConflict("duplicate request ID in batch")
             request_ids.add(item.request_id)
@@ -1013,7 +1025,7 @@ class WebMessageQueue:
         if not isinstance(send_now, bool):
             raise ValueError("send_now must be a bool")
         if request_id is not None:
-            self._validate_identifier(request_id)
+            self._validate_request_id(request_id)
             if not send_now:
                 raise ValueError("a selected item requires send_now")
         input_fingerprint = self._fingerprint("claim_batch", batch_id, send_now, request_id)
@@ -1499,7 +1511,7 @@ class WebMessageQueue:
     ) -> QueueReceipt:
         """Remove exactly one queued item; claimed batches cannot be edited."""
         self._validate_identifier(operation_id)
-        self._validate_identifier(request_id)
+        self._validate_request_id(request_id)
         input_fingerprint = self._fingerprint("remove_item", request_id)
         async with self._lock:
             replay = self._replay(operation_id, input_fingerprint)
@@ -1552,7 +1564,7 @@ class WebMessageQueue:
     ) -> QueueReceipt:
         """Remove one queued item and release only its attachment refs."""
         self._validate_identifier(operation_id)
-        self._validate_identifier(request_id)
+        self._validate_request_id(request_id)
         self._validate_attachment_scope(attachment_scope)
         input_fingerprint = self._fingerprint(
             "remove_item_with_attachments", request_id

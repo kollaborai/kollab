@@ -131,6 +131,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             return {"error": str(e)}
         return {"content": content}
 
+    async def _get_goal_state(params: dict[str, Any]) -> dict[str, Any]:
+        return await state_service.get_goal_state()
+
     async def _get_session_stats(params: dict[str, Any]) -> dict[str, Any]:
         stats = await state_service.get_session_stats()
         return stats.to_dict()
@@ -819,6 +822,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
 
     handlers: dict[str, Any] = {
         "state.get_conversation": _get_conversation,
+        "state.get_goal_state": _get_goal_state,
         "state.save_conversation": _save_conversation,
         "state.get_session_stats": _get_session_stats,
         "state.get_context_compaction_snapshot": _get_context_compaction_snapshot,

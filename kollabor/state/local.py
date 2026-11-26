@@ -4004,6 +4004,14 @@ class LocalStateService(StateService):
             submit_one=submit_one,
         )
 
+    async def get_goal_state(self) -> dict[str, Any]:
+        """Read persisted goal identity for the current conversation only."""
+        uid = self.get_conversation_uid()
+        service = self._goal_service()
+        if not uid or service is None:
+            raise RuntimeError("goal state unavailable")
+        return {"conversation_uid": uid, "goal": service.store.conversation_goal_state(uid)}
+
     def _goal_service(self):
         event_bus = getattr(self, "_event_bus", None)
         if event_bus is None:

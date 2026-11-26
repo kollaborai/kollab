@@ -1594,6 +1594,66 @@ class QueueProcessor:
         self.processing_start_time = time.time()
         logger.info("Started processing queue")
 
+        native_turn_id: str | None = None
+        native_turn_context_tokens: list[Any] = []
+
+        def clear_native_turn_context() -> None:
+            nonlocal native_turn_id
+            while native_turn_context_tokens:
+                token = native_turn_context_tokens.pop()
+                try:
+                    current_turn.reset(token)
+                except (RuntimeError, ValueError):
+                    pass
+            native_turn_id = None
+
+        def start_native_input_turn(messages: list[Any]) -> None:
+            nonlocal native_turn_id
+            request_ids = batch_request_ids(messages)
+            if not request_ids:
+                return
+
+            context = current_turn.get()
+            origin = context.get("origin")
+            goal_owned = isinstance(origin, dict) and origin.get("kind") == "goal"
+            acp_owned = (
+                context.get("input_source") == "acp_client"
+                or "_client_completion" in context
+            )
+            if goal_owned or acp_owned:
+                return
+
+            if native_turn_id is None:
+                inherited_turn_id = context.get("turn_id")
+                native_turn_id = (
+                    str(inherited_turn_id)
+                    if isinstance(inherited_turn_id, (str, int))
+                    and not isinstance(inherited_turn_id, bool)
+                    and str(inherited_turn_id)
+                    else f"native-{uuid.uuid4().hex}"
+                )
+
+            request_id = request_ids[0]
+            native_turn_context_tokens.append(
+                current_turn.set(
+                    {
+                        **context,
+                        "turn_id": native_turn_id,
+                        "request_id": request_id,
+                        "request_ids": list(request_ids),
+                        "input_source": "native",
+                    }
+                )
+            )
+            publish_semantic(
+                self.renderer,
+                "turn_start",
+                request_id=request_id,
+                request_ids=list(request_ids),
+                turn_id=native_turn_id,
+                input_source="native",
+            )
+
         try:
             # Outer loop: re-check queue after each conversation completes.
             # Messages can arrive (user typing, hub peers) while LOOP 2
@@ -1630,6 +1690,7 @@ class QueueProcessor:
                             self._drained_handoff_started = True
                             self._active_turn_handoff_attempts = attempts
                             try:
+                                start_native_input_turn(messages)
                                 await process_message_batch_fn(messages)
                             finally:
                                 self._drained_batch_messages = ()
@@ -1753,6 +1814,9 @@ class QueueProcessor:
                     async with self._turn_lock:
                         await self._run_after_turn()
 
+                if self.turn_completed or self.cancel_processing:
+                    clear_native_turn_context()
+
                 # Nothing left -- exit outer loop
                 if self.turn_completed or self.cancel_processing:
                     self._finish_active_queue_handoffs()
@@ -1764,6 +1828,7 @@ class QueueProcessor:
                 logger.info("Re-entering queue drain after mid-turn message arrival")
 
         finally:
+            clear_native_turn_context()
             self._finish_active_queue_handoffs()
             self._drained_batch_messages = ()
             self._drained_handoff_items = ()
@@ -2056,8 +2121,14 @@ class QueueProcessor:
             # queued clears its own stamp as it ends, never this one's. A chain
             # this batch cuts into still owes its requests their completion, so
             # this turn's names them too (#551).
-            self.active_request_ids = tuple(dict.fromkeys((*self.active_request_ids, *request_ids)))
+            self.active_request_ids = tuple(
+                dict.fromkeys((*self.active_request_ids, *request_ids))
+            )
             self._stamp_turn(_voice_turn_id(execution_context), self.active_request_ids)
+            if not user_message_provided:
+                publish_semantic(
+                    getattr(self, "renderer", None), "reply_segment_start"
+                )
             try:
                 if execution_context is not None:
                     parent_uuid = await self._execute_llm_turn_inner(

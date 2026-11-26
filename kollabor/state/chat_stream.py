@@ -170,8 +170,10 @@ class ChatStreamLog:
         if event["type"] == "turn.state":
             data = event["data"]
             if data["state"] == "running":
-                self._current_turn_id = data["turn_id"]
-                self._current_turn_events = {event["seq"]: event}
+                if self._current_turn_id != data["turn_id"]:
+                    self._current_turn_id = data["turn_id"]
+                    self._current_turn_events = {}
+                self._current_turn_events[event["seq"]] = event
             elif data["turn_id"] == self._current_turn_id:
                 self._current_turn_events[event["seq"]] = event
                 self._current_turn_id = None
@@ -216,6 +218,9 @@ class ChatStreamService:
         self._active_turns: dict[str, str] = {}
         self._reply_rows: dict[tuple[str, str], str] = {}
         self._reply_text: dict[tuple[str, str], str] = {}
+        self._reply_segment_offsets: dict[tuple[str, str], int] = {}
+        self._reply_after_tool: set[tuple[str, str]] = set()
+        self._reply_row_ids: dict[tuple[str, str], list[str]] = {}
         self._turn_history_keys: dict[tuple[str, str], str] = {}
         self._turn_errors: dict[tuple[str, str], str] = {}
         self._display_tap: Any = None
@@ -612,6 +617,16 @@ class ChatStreamService:
     def record_event(self, event_type: str, data: dict[str, Any]) -> Event:
         """Record one producer event for the active daemon conversation."""
         uid = self._conversation_uid()
+        with self._log(uid)._lock:
+            return self._record_event_locked(uid, event_type, data)
+
+    def _record_event_locked(
+        self, uid: str, event_type: str, data: dict[str, Any]
+    ) -> Event:
+        if event_type == "turn.state":
+            prior = self._turns.get(uid, {}).get(data.get("turn_id"))
+            if prior is not None and prior.get("origin") != data.get("origin"):
+                raise ValueError("turn origin is immutable")
         if event_type == "row.upsert":
             self._rows.setdefault(uid, {})[data["id"]] = copy.deepcopy(data)
         elif event_type == "row.append":
@@ -675,16 +690,32 @@ class ChatStreamService:
         uid = event.get("conversation_uid") or self._conversation_uid()
         if not isinstance(uid, str) or not uid or uid != self._conversation_uid():
             return
+        with self._log(uid)._lock:
+            self._dispatch_display_event(uid, event)
+
+    def _dispatch_display_event(self, uid: str, event: dict[str, Any]) -> None:
         kind = event.get("type")
         if kind == "turn_start":
             self._on_turn_start(uid, event)
         elif kind == "user_message":
             self._on_user_message(uid, event)
+        elif kind == "reply_segment_start":
+            turn_id = self._event_turn_id(event) or self._active_turns.get(uid)
+            if turn_id is not None:
+                key = (uid, turn_id)
+                self._reply_segment_offsets[key] = len(self._reply_text.get(key, ""))
         elif kind in {"token", "response"}:
             self._on_reply_text(uid, event)
         elif kind in {"tool_start", "tool_result"}:
             self._on_tool_event(uid, event)
         elif kind == "turn_complete":
+            origin = event.get("origin")
+            if (
+                isinstance(origin, dict)
+                and origin.get("kind") == "goal"
+                and not event.get("goal_attempt_terminal")
+            ):
+                return
             self._on_turn_complete(uid, event)
         elif kind == "error":
             self._on_turn_error(uid, event)
@@ -728,7 +759,7 @@ class ChatStreamService:
             row = self._rows.setdefault(uid, {}).get(input_id)
             if row is not None:
                 self._upsert(uid, {**row, "turn_id": turn_id, "status": state})
-        self._set_turn_state(uid, turn_id, "running")
+        self._set_turn_state(uid, turn_id, "running", origin=event.get("origin"))
         self._active_turns[uid] = turn_id
 
     def _on_user_message(self, uid: str, event: dict[str, Any]) -> None:
@@ -778,13 +809,15 @@ class ChatStreamService:
                     "parts": parts,
                 },
             )
-        if current.get("state") != "running":
+        if current.get("state") != "running" or joined:
             self._set_turn_state(uid, turn_id, "running")
         self._active_turns[uid] = turn_id
 
     def _on_reply_text(self, uid: str, event: dict[str, Any]) -> None:
         text = event.get("text")
-        if not isinstance(text, str) or not text:
+        if not isinstance(text, str) or (
+            not text and event.get("type") != "response"
+        ):
             return
         turn_id = self._event_turn_id(event)
         input_ids = self._event_input_ids(event)
@@ -794,11 +827,24 @@ class ChatStreamService:
             turn_id = self._active_turns.get(uid)
         if turn_id is None:
             return
+        key = (uid, turn_id)
+        if key in self._reply_after_tool:
+            self._reply_after_tool.discard(key)
+            self._new_reply_row(
+                uid,
+                turn_id,
+                history_key=self._turn_history_key(
+                    uid, turn_id, event=event, input_ids=input_ids
+                ),
+            )
+            self._reply_segment_offsets[key] = 0
         if event.get("type") == "response":
+            offset = self._reply_segment_offsets.get(key, 0)
+            prefix = self._reply_text.get(key, "")[:offset]
             self._upsert_reply(
                 uid,
                 turn_id,
-                text,
+                prefix + text,
                 status="streaming",
                 history_key=self._turn_history_key(
                     uid, turn_id, event=event, input_ids=input_ids
@@ -834,7 +880,7 @@ class ChatStreamService:
             return
         key = (uid, turn_id)
         input_ids = list(dict.fromkeys((*self._turn_inputs.get(key, []), *input_ids)))
-        if not input_ids:
+        if not input_ids and turn_id not in self._turns.get(uid, {}):
             return
         stop_reason = str(event.get("stop_reason") or "")
         if stop_reason in {"cancelled", "canceled", "interrupted", "stop"}:
@@ -854,6 +900,11 @@ class ChatStreamService:
                 uid, turn_id, event=event, input_ids=input_ids
             ),
         )
+        for row_id in self._reply_row_ids.get(key, [])[:-1]:
+            row = self._rows.get(uid, {}).get(row_id)
+            if row is not None:
+                self._upsert(uid, {**row, "status": outcome})
+        self._reply_after_tool.discard(key)
         self._set_turn_state(uid, turn_id, "ended")
         for input_id in input_ids:
             prior = self._inputs.setdefault(uid, {}).get(input_id, {})
@@ -991,29 +1042,47 @@ class ChatStreamService:
         if not isinstance(tool_id, str) or not tool_id:
             tool_id = uuid.uuid4().hex
         turn_id = self._event_turn_id(event) or self._active_turns.get(uid)
+        if event.get("type") == "tool_start" and turn_id is not None:
+            key = (uid, turn_id)
+            if key in self._reply_rows:
+                self._reply_after_tool.add(key)
         history_key = self._turn_history_key(
             uid, turn_id, event=event, input_ids=self._event_input_ids(event)
         )
         row_id = self._tool_row_id(uid, turn_id, tool_id, history_key)
         name = event.get("tool_name")
-        name = name if isinstance(name, str) and name else "Tool"
+        name = name if isinstance(name, str) and name else None
         metadata = event.get("metadata")
         acp_data = metadata.get("acp") if isinstance(metadata, dict) else None
         acp_data = acp_data if isinstance(acp_data, dict) else {}
         raw_input = acp_data.get("rawInput")
-        args = (
-            raw_input
-            if raw_input is not None
-            else event.get("input", {})
+        existing_row = self._rows.get(uid, {}).get(row_id)
+        existing_parts = existing_row.get("parts") if isinstance(existing_row, dict) else None
+        existing_part = (
+            existing_parts[0]
+            if isinstance(existing_parts, list)
+            and existing_parts
+            and isinstance(existing_parts[0], dict)
+            and existing_parts[0].get("type") == "tool-call"
+            and existing_parts[0].get("tool_call_id") == tool_id
+            else None
         )
-        part: dict[str, Any] = {
-            "type": "tool-call",
-            "tool_call_id": tool_id,
-            "tool_name": name,
-            "args": args,
-        }
+        part: dict[str, Any] = copy.deepcopy(existing_part) if existing_part else {}
+        part.update({"type": "tool-call", "tool_call_id": tool_id})
+        if name is not None:
+            part["tool_name"] = name
+        elif not isinstance(part.get("tool_name"), str) or not part["tool_name"]:
+            part["tool_name"] = "Tool"
+        if raw_input is not None:
+            part["args"] = copy.deepcopy(raw_input)
+        elif event.get("input") is not None:
+            part["args"] = copy.deepcopy(event["input"])
+        elif "args" not in part:
+            part["args"] = {}
         if event.get("type") == "tool_start":
             status = "running"
+            part.pop("result", None)
+            part.pop("is_error", None)
         else:
             status = "completed" if event.get("success") is True else "failed"
             result = acp_data.get("rawOutput")
@@ -1184,8 +1253,20 @@ class ChatStreamService:
         self, uid: str, turn_id: str, *, history_key: str | None = None
     ) -> str:
         history_key = history_key or self._turn_history_keys.get((uid, turn_id))
-        row_id = self._reply_row_id(uid, turn_id, history_key)
-        self._reply_rows[(uid, turn_id)] = row_id
+        key = (uid, turn_id)
+        row_ids = self._reply_row_ids.setdefault(key, [])
+        if row_ids:
+            identity = (
+                f"{uid}:acp:{history_key}"
+                if isinstance(history_key, str) and history_key
+                else f"{uid}:turn:{turn_id}"
+            )
+            segment_identity = f"{identity}:segment:{len(row_ids)}"
+            row_id = f"reply-{uuid.uuid5(uuid.NAMESPACE_URL, segment_identity).hex}"
+        else:
+            row_id = self._reply_row_id(uid, turn_id, history_key)
+        row_ids.append(row_id)
+        self._reply_rows[key] = row_id
         self._reply_text[(uid, turn_id)] = ""
         self._upsert(
             uid,
@@ -1218,7 +1299,7 @@ class ChatStreamService:
         if row is None:
             return
         current_text = self._reply_text.get((uid, turn_id), "")
-        if text and text != current_text:
+        if text != current_text:
             current_text = text
             self._reply_text[(uid, turn_id)] = text
         self._upsert(
@@ -1550,11 +1631,14 @@ class ChatStreamService:
                 )
                 else current.get("state") or "running"
             )
-            turns[turn_id] = {
+            turn_snapshot = {
                 "turn_id": turn_id,
                 "state": turn_state,
                 "input_ids": input_ids,
             }
+            if isinstance(current.get("origin"), dict):
+                turn_snapshot["origin"] = copy.deepcopy(current["origin"])
+            turns[turn_id] = turn_snapshot
         return (
             snapshot_rows,
             list(turns.values()),
@@ -1599,6 +1683,8 @@ class ChatStreamService:
                 continue
             metadata = field(message, "metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
+            if metadata.get("stream_context_only") is True:
+                continue
             source_role = role
             role = (
                 source_role
@@ -1867,8 +1953,28 @@ class ChatStreamService:
         state: str,
         *,
         input_id: str | None = None,
+        origin: dict[str, Any] | None = None,
+    ) -> None:
+        with self._log(uid)._lock:
+            self._set_turn_state_locked(
+                uid, turn_id, state, input_id=input_id, origin=origin
+            )
+
+    def _set_turn_state_locked(
+        self,
+        uid: str,
+        turn_id: str,
+        state: str,
+        *,
+        input_id: str | None = None,
+        origin: dict[str, Any] | None = None,
     ) -> None:
         previous = self._turns.setdefault(uid, {}).get(turn_id, {})
+        previous_origin = previous.get("origin")
+        if origin is None:
+            origin = previous_origin
+        elif previous_origin is not None and previous_origin != origin:
+            raise ValueError("turn origin is immutable")
         input_ids = list(
             dict.fromkeys(
                 (
@@ -1884,7 +1990,14 @@ class ChatStreamService:
             "state": state,
             "input_ids": input_ids,
         }
-        self._turns[uid][turn_id] = data
+        if origin is not None:
+            data["origin"] = copy.deepcopy(origin)
+        problems = event_problems(
+            {"seq": 1, "conversation_uid": uid, "type": "turn.state", "data": data}
+        )
+        if problems:
+            raise ValueError("; ".join(problems))
+        self._turns[uid][turn_id] = copy.deepcopy(data)
         self._log(uid).publish("turn.state", data)
 
     def _upsert(self, uid: str, row: dict[str, Any]) -> None:

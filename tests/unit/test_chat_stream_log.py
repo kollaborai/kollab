@@ -105,6 +105,25 @@ def test_the_current_turn_stays_replayable_past_the_regular_window():
     assert log.read(after=0, conversation_uid="conv-1")[0]["type"] == "snapshot"
 
 
+def test_join_keeps_the_running_turn_replayable_past_the_window():
+    log = ChatStreamLog("conv-1", snapshot_provider=_snapshot, replay_window=2)
+    log.publish(
+        "turn.state", {"turn_id": "turn-1", "state": "running", "input_ids": ["first"]}
+    )
+    cursor = log.publish("row.delete", {"id": "before-join"})["seq"]
+    log.publish("row.delete", {"id": "more"})
+    log.publish(
+        "turn.state",
+        {"turn_id": "turn-1", "state": "running", "input_ids": ["first", "joined"]},
+    )
+    log.publish("row.delete", {"id": "after-join"})
+    log.publish("row.delete", {"id": "later"})
+
+    replay = log.read(after=cursor, conversation_uid="conv-1")
+
+    assert [event["seq"] for event in replay] == [3, 4, 5, 6]
+
+
 def test_live_publish_callbacks_preserve_the_log_sequence_across_threads():
     callback_started = threading.Event()
     release_first = threading.Event()
