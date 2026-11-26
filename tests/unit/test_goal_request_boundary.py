@@ -894,3 +894,43 @@ async def test_private_goal_result_is_not_written_to_shared_history(boundary):
     assert "secret-private-preview" in reply["message"]
     assert "secret-private-preview" not in repr(boundary.history)
     assert reply["history_recorded"] is False
+
+@pytest.mark.asyncio
+async def test_ordered_input_dispatches_private_goal_once_and_is_owner_scoped(boundary):
+    from kollabor.state.chat_stream import ChatStreamService, register_chat_stream_handlers
+    from kollabor.state.web_message_queue_runtime import register_web_message_queue_runtime
+    from kollabor_rpc import RpcCallerContext, RpcServer
+
+    server = RpcServer()
+    runtime = register_web_message_queue_runtime(server, boundary.state)
+    boundary.bus.services['web_message_queue_runtime'] = runtime
+    stream = ChatStreamService(boundary.state)
+    register_chat_stream_handlers(server, stream)
+    boundary.bus.services['chat_stream'] = stream
+    capability = 'goal-' + 'a' * 32
+    body = {'id': 'web-private-1', 'text': '/goal show', 'attachments': [],
+            'goal_reply_id': capability}
+
+    async def call(params, uid=501):
+        return await server.handle_wire(
+            {'action': 'rpc_request', 'request_id': 'test',
+             'method': 'state.chat_stream.add_input', 'params': params},
+            caller_context=RpcCallerContext.from_unix_peer(uid))
+
+    try:
+        first = await call(body)
+        assert first['result'] == {'id': body['id'], 'state': 'queued'}
+        for _ in range(100):
+            if getattr(boundary.state, '_goal_reply_mailbox', None):
+                break
+            await asyncio.sleep(.01)
+        await finish(boundary)
+        mailbox = boundary.state._goal_reply_mailbox
+        assert mailbox.poll(capability, 'conversation-a')['status'] == 'complete'
+        assert (await call(body))['result']['id'] == body['id']
+        assert (await call({**body, 'goal_reply_id': 'goal-' + 'b' * 32}))['result']['error']
+        assert (await call(body, uid=502))['result']['error']
+        assert capability not in repr(stream.subscribe({})) + repr(boundary.events)
+        boundary.llm.submit_human_input.assert_not_awaited()
+    finally:
+        await runtime.close()
