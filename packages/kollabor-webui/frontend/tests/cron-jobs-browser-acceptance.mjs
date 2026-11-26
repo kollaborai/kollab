@@ -236,7 +236,11 @@ async function openCronTab(page, pageErrors = []) {
   if (!(await settingsBtn.isVisible().catch(() => false))) {
     // Narrow viewports keep the sidebar behind a sheet trigger; open it first.
     const trigger = page.getByRole("button", { name: /Toggle Sidebar/ }).first();
-    await trigger.click({ timeout: 5000, noWaitAfter: true, force: true });
+    await trigger.waitFor({ state: "visible", timeout: 5000 });
+    // The sidebar's open/close transition can keep Playwright waiting for a
+    // stable bounding box. This proof is checking the view behind the sidebar,
+    // so activate the real button handler without waiting on that animation.
+    await trigger.evaluate((button) => button.click());
     await settingsBtn.waitFor({ state: "visible", timeout: 5000 });
   }
   await settingsBtn.click();
