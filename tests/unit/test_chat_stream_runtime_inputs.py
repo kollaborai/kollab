@@ -247,6 +247,37 @@ async def test_send_now_selects_one_input_from_a_shared_batch():
     assert [handoff.request_id for _, handoff, _ in state.dispatches] == [
         "web-selected"
     ]
+
+
+@pytest.mark.asyncio
+async def test_send_now_reports_dispatch_unavailable_without_ending_queued_input():
+    server, state, runtime = _server_and_runtime()
+    admitted = await _call(
+        server,
+        "state.chat_stream.add_input",
+        {"id": "web-still-queued", "text": "keep queued", "attachments": []},
+    )
+    assert admitted["result"] == {
+        "id": "web-still-queued",
+        "state": "queued",
+    }
+    runtime.dispatch_available = False
+
+    sent = await _call(
+        server, "state.chat_stream.send_now", {"id": "web-still-queued"}
+    )
+
+    assert sent["result"] == {
+        "found": True,
+        "accepted": False,
+        "state": "queued",
+        "reason": "dispatch_unavailable",
+    }
+    assert state.dispatches == []
+    scopes = await runtime.registry.known_scopes()
+    async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
+        snapshot = await queue.snapshot()
+    assert snapshot.batches[0].request_ids == ("web-still-queued",)
     assert sent["result"]["accepted"] is True
     async with runtime.registry.acquire_existing_scope(scopes[0]) as queue:
         snapshot = await queue.snapshot()

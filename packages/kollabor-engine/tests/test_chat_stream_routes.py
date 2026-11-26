@@ -809,6 +809,23 @@ def test_send_now_route_returns_409_when_input_is_not_queued(monkeypatch):
     assert response.status_code == 409
 
 
+def test_send_now_route_returns_503_when_dispatch_is_unavailable(monkeypatch):
+    client, session = _install_client(monkeypatch, bypass_auth=True)
+    session.rpc.send_now_result = {
+        "found": True,
+        "accepted": False,
+        "state": "queued",
+        "reason": "dispatch_unavailable",
+    }
+
+    response = client.post("/sessions/s1/inputs/web-a1/send-now")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Queue dispatch is unavailable; the message remains queued."
+    )
+
+
 def test_goal_input_passes_private_capability_to_registered_daemon(monkeypatch):
     client, session = _install_client(monkeypatch, bypass_auth=True)
     bus = _LiveBus()

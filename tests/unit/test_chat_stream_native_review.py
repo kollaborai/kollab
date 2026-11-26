@@ -781,6 +781,27 @@ async def test_plugin_send_now_rpc_prioritizes_exact_native_tagged_input(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_second_plugin_send_now_reports_queued_while_reservation_is_held(tmp_path):
+    state = _State()
+    _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=3
+    )
+    coordinator.create_background_task = lambda *_args, **_kwargs: None
+    first_id = await _add_triggered_plugin_input(coordinator, "send this first")
+    second_id = await _add_triggered_plugin_input(coordinator, "still queued second")
+
+    first = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": first_id})
+    second = await _rpc_call(rpc, "state.chat_stream.send_now", {"id": second_id})
+
+    assert first == {"found": True, "accepted": True, "state": "queued"}
+    assert second == {"found": True, "accepted": False, "state": "queued"}
+    assert [item.request_ids[0] for item in processor.processing_queue._queue] == [
+        first_id,
+        second_id,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_plugin_send_now_isolates_selected_input_from_queue_siblings(tmp_path):
     state = _State()
     _logger, coordinator, processor, _stream, rpc = _prepare_triggered_plugin_stream(
