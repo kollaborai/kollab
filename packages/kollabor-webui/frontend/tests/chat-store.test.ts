@@ -1277,7 +1277,7 @@ describe("LiveChatStore", () => {
     const first = await startOpen(store, streams);
     const visibleBeforeCompaction = row("before-compaction", "Still visible during refresh");
     first.emit(snapshot(2, [visibleBeforeCompaction]));
-    const visibleCounts: number[] = [];
+    const visibleCounts: number[] = [store.rows.length];
     const unsubscribe = store.subscribe(() => visibleCounts.push(store.rows.length));
 
     // The event carries only the 2,000-row replay window. A fresh snapshot is
