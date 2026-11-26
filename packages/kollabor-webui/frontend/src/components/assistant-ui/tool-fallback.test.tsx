@@ -39,6 +39,7 @@ function chatStreamPreviewResult(
   sessionId: string,
   preview: string,
   outputRevision = "a".repeat(64),
+  outputChars = 40_000,
 ) {
   return {
     kind: "chat-stream-tool-output-preview",
@@ -46,8 +47,8 @@ function chatStreamPreviewResult(
     row_id: "row-1",
     tool_call_id: "tool-call-1",
     output_revision: outputRevision,
-    output_bytes: 40_000,
-    output_chars: 40_000,
+    output_bytes: outputChars,
+    output_chars: outputChars,
     output_type: "text",
     preview,
   };
@@ -256,22 +257,22 @@ describe("expanding a chat stream tool output preview", () => {
     mocks.getChatStreamToolOutput
       .mockResolvedValueOnce({
         row_id: "row-1", tool_call_id: "tool-call-1", output_revision: oldRevision,
-        offset: 0, next_offset: 9, total_chars: 9, output_type: "text", content: "old result", done: true,
+        offset: 0, next_offset: 10, total_chars: 10, output_type: "text", content: "old result", done: true,
       })
       .mockResolvedValueOnce({
         row_id: "row-1", tool_call_id: "tool-call-1", output_revision: newRevision,
-        offset: 0, next_offset: 9, total_chars: 9, output_type: "text", content: "new result", done: true,
+        offset: 0, next_offset: 10, total_chars: 10, output_type: "text", content: "new result", done: true,
       });
 
-    await expect(fetchOutput("stream-revision", "row-1", "tool-call-1", oldRevision, 9, "text"))
+    await expect(fetchOutput("stream-revision", "row-1", "tool-call-1", oldRevision, 10, "text"))
       .resolves.toBe("old result");
-    await expect(fetchOutput("stream-revision", "row-1", "tool-call-1", newRevision, 9, "text"))
+    await expect(fetchOutput("stream-revision", "row-1", "tool-call-1", newRevision, 10, "text"))
       .resolves.toBe("new result");
     expect(mocks.getChatStreamToolOutput).toHaveBeenCalledTimes(2);
 
     const markup = cardMarkup(
       true,
-      chatStreamPreviewResult("stream-revision", "preview for the new result", newRevision),
+      chatStreamPreviewResult("stream-revision", "preview for the new result", newRevision, 10),
     );
     expect(markup).toContain("new result");
     expect(markup).not.toContain("old result");
@@ -288,19 +289,19 @@ describe("expanding a chat stream tool output preview", () => {
       .mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; }))
       .mockResolvedValueOnce({
         row_id: "row-1", tool_call_id: "tool-call-1", output_revision: newRevision,
-        offset: 0, next_offset: 11, total_chars: 11, output_type: "text", content: "current value", done: true,
+        offset: 0, next_offset: 13, total_chars: 13, output_type: "text", content: "current value", done: true,
       });
 
-    const oldRequest = fetchOutput("stream-inflight", "row-1", "tool-call-1", oldRevision, 10, "text");
+    const oldRequest = fetchOutput("stream-inflight", "row-1", "tool-call-1", oldRevision, 11, "text");
     void oldRequest.catch(() => undefined);
-    const newRequest = fetchOutput("stream-inflight", "row-1", "tool-call-1", newRevision, 11, "text");
+    const newRequest = fetchOutput("stream-inflight", "row-1", "tool-call-1", newRevision, 13, "text");
     await expect(newRequest).resolves.toBe("current value");
     finishOld({
       row_id: "row-1", tool_call_id: "tool-call-1", output_revision: oldRevision,
-      offset: 0, next_offset: 10, total_chars: 10, output_type: "text", content: "old version", done: true,
+      offset: 0, next_offset: 11, total_chars: 11, output_type: "text", content: "old version", done: true,
     });
     await expect(oldRequest).resolves.toBe("old version");
-    await expect(fetchOutput("stream-inflight", "row-1", "tool-call-1", newRevision, 11, "text"))
+    await expect(fetchOutput("stream-inflight", "row-1", "tool-call-1", newRevision, 13, "text"))
       .resolves.toBe("current value");
     expect(mocks.getChatStreamToolOutput).toHaveBeenCalledTimes(2);
   });
@@ -320,15 +321,15 @@ describe("expanding a chat stream tool output preview", () => {
       .mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; }))
       .mockResolvedValueOnce({
         row_id: "row-1", tool_call_id: "tool-call-1", output_revision: newRevision,
-        offset: 0, next_offset: 11, total_chars: 11, output_type: "text", content: "current value", done: true,
+        offset: 0, next_offset: 13, total_chars: 13, output_type: "text", content: "current value", done: true,
       });
 
     try {
       await act(async () => {
-        root.render(<ToolFallbackResult result={chatStreamPreviewResult("stream-card", "old preview", oldRevision)} />);
+        root.render(<ToolFallbackResult result={chatStreamPreviewResult("stream-card", "old preview", oldRevision, 11)} />);
       });
       await act(async () => {
-        root.render(<ToolFallbackResult result={chatStreamPreviewResult("stream-card", "new preview", newRevision)} />);
+        root.render(<ToolFallbackResult result={chatStreamPreviewResult("stream-card", "new preview", newRevision, 13)} />);
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       expect(rootElement.textContent).toContain("current value");
@@ -336,7 +337,7 @@ describe("expanding a chat stream tool output preview", () => {
       await act(async () => {
         finishOld({
           row_id: "row-1", tool_call_id: "tool-call-1", output_revision: oldRevision,
-          offset: 0, next_offset: 10, total_chars: 10, output_type: "text", content: "old version", done: true,
+          offset: 0, next_offset: 11, total_chars: 11, output_type: "text", content: "old version", done: true,
         });
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
