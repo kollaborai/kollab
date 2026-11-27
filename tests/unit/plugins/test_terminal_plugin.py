@@ -165,3 +165,26 @@ def test_send_to_session_reports_missing_and_exited_sessions():
     assert "not found" in missing["message"]
     assert not exited["success"]
     assert "already exited" in exited["message"]
+
+
+@pytest.mark.asyncio
+async def test_capture_after_exit_waits_for_the_reader_thread(monkeypatch):
+    """A capture right after a command exits still gets its output (#1465)."""
+    import time
+
+    original = TmuxPlugin._pump_output
+
+    def slow_pump(*args, **kwargs):
+        time.sleep(0.5)  # the reader thread falls behind the process
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(TmuxPlugin, "_pump_output", staticmethod(slow_pump))
+    plugin = TmuxPlugin()
+    result = await plugin.execute_background("printf 'done\\n'", name="quick")
+    assert result["success"] is True
+    session = plugin.sessions["quick"]
+    await asyncio.wait_for(asyncio.to_thread(session.proc.wait), timeout=5)
+
+    captured = await plugin.capture_session_output("quick")
+
+    assert captured["output"] == ["done"]
