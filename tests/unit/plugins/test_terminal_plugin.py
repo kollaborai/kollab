@@ -221,3 +221,42 @@ async def test_capture_waits_for_the_reader_without_blocking_the_loop():
         tick.cancel()
 
     assert max(gaps, default=0) < 0.5, gaps
+
+
+@pytest.mark.asyncio
+async def test_capture_after_exit_gets_output_a_held_reader_still_copies():
+    """The wait is real: output a background child writes after the shell exits
+    reaches the capture (#1465 review)."""
+    plugin = TmuxPlugin()
+    result = await plugin.execute_background(
+        "(sleep 0.5; printf 'late\\n') & printf 'early\\n'", name="late"
+    )
+    assert result["success"] is True
+    session = plugin.sessions["late"]
+    await asyncio.wait_for(asyncio.to_thread(session.proc.wait), timeout=5)
+
+    captured = await plugin.capture_session_output("late")
+
+    assert captured["output"] == ["early", "late"]
+
+
+@pytest.mark.asyncio
+async def test_capture_reads_the_session_it_waited_for_even_if_the_name_is_reused():
+    """A new session that takes the name during the wait does not answer for the
+    old one (#1465 review)."""
+    plugin = TmuxPlugin()
+    result = await plugin.execute_background(
+        "(sleep 0.5; printf 'old-late\\n') & printf 'old\\n'", name="reused"
+    )
+    assert result["success"] is True
+    old = plugin.sessions["reused"]
+    await asyncio.wait_for(asyncio.to_thread(old.proc.wait), timeout=5)
+
+    capture = asyncio.create_task(plugin.capture_session_output("reused"))
+    await asyncio.sleep(0.1)
+    del plugin.sessions["reused"]
+    await plugin.execute_background("printf 'replacement\\n'", name="reused")
+
+    captured = await capture
+
+    assert captured["output"] == ["old", "old-late"]
