@@ -301,6 +301,15 @@ def test_throughput_by_author_and_lane():
 # --------------------------------------------------------- GitHub access
 
 
+def test_gh_api_wraps_invalid_json_with_the_request_path():
+    api = kpi.GhApi(lambda _args: "not json")
+
+    with pytest.raises(kpi.GhError, match="repos/o/r/pulls") as exc_info:
+        api.get("repos/o/r/pulls?state=closed")
+
+    assert not isinstance(exc_info.value, json.JSONDecodeError)
+
+
 def test_fetch_pulls_stops_at_updated_boundary_without_extra_pages():
     cutoff = NOW - timedelta(hours=24)
     page1 = [
@@ -718,6 +727,42 @@ def test_gh_failure_yields_unavailable_report_with_missing_metrics():
     assert any("boom" in e for e in report["errors"])
     md = kpi.render_markdown(report)
     assert "missing" in md and "0.00" not in md
+
+
+def test_collect_continues_when_ci_workflow_responses_are_invalid_json():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r", "windows": [24]}})
+    recent = NOW - timedelta(hours=2)
+    closed = [_pr(1, closed=recent, merged=recent, updated=recent)]
+    runner = _per_merge_runner(closed, _pr_runs(1))
+    original = runner
+
+    def invalid_ci_json(args):
+        if "actions/workflows/ci.yml/runs" in args[1]:
+            return "not json"
+        return original(args)
+
+    report = kpi.collect(kpi.GhApi(invalid_ci_json), cfg, NOW)
+
+    assert report["status"] == "partial"
+    assert report["ci"]["ci_runs_per_merge"] is None
+    assert report["ci"]["main_red_to_green_rate"] is None
+    assert any("CI runs per merged PR" in error for error in report["errors"])
+    assert any("main CI red-to-green rate" in error for error in report["errors"])
+
+
+def test_collect_returns_unavailable_when_closed_pr_json_is_invalid():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r"}})
+
+    def invalid_closed_json(args):
+        if "pulls?state=closed" in args[1]:
+            return "not json"
+        raise AssertionError(f"unexpected gh call: {args[1]}")
+
+    report = kpi.collect(kpi.GhApi(invalid_closed_json), cfg, NOW)
+
+    assert report["status"] == "unavailable"
+    assert report["windows"][0]["rate_per_hour"] is None
+    assert any("pulls?state=closed" in error for error in report["errors"])
 
 
 # ------------------------------------------------------ report and output
