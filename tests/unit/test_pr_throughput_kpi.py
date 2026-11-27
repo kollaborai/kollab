@@ -69,6 +69,8 @@ class FakeRunner:
         for needle, payload in self.routes.items():
             if needle in path:
                 return json.dumps(payload)
+        if "actions/workflows/ci.yml/runs" in path:
+            return json.dumps({"total_count": 0, "workflow_runs": []})
         raise AssertionError(f"unexpected gh call: {path}")
 
 
@@ -110,6 +112,54 @@ def test_config_reads_kpi_section_and_rejects_bad_values():
         kpi.parse_config({"kpi": {"target_per_hour": 0}})
     with pytest.raises(kpi.ConfigError):
         kpi.parse_config({"kpi": {"windows": [0]}})
+
+
+def test_main_ci_red_to_green_share_counts_same_run_attempts():
+    runs = [
+        {"id": 1, "run_attempt": 2, "status": "completed", "conclusion": "success"},
+        {"id": 2, "run_attempt": 1, "status": "completed", "conclusion": "success"},
+        {"id": 3, "run_attempt": 2, "status": "completed", "conclusion": "failure"},
+        {"id": 4, "run_attempt": 2, "status": "in_progress", "conclusion": None},
+    ]
+
+    assert kpi.red_to_green_share(runs, {(1, 1), (3, 1)}) == pytest.approx(1 / 3)
+    assert kpi.red_to_green_share([], set()) is None
+
+
+def test_main_ci_red_to_green_fetch_reads_successful_rerun_attempts():
+    runner = FakeRunner(
+        {
+            "actions/workflows/ci.yml/runs": {
+                "total_count": 2,
+                "workflow_runs": [
+                    {
+                        "id": 11,
+                        "run_attempt": 2,
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "id": 12,
+                        "run_attempt": 1,
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                ],
+            },
+            "actions/runs/11/attempts/1/jobs": {
+                "jobs": [{"conclusion": "failure"}]
+            },
+        }
+    )
+
+    result = kpi._main_ci_red_to_green(
+        kpi.GhApi(runner), "o/r", NOW - timedelta(hours=24), 10
+    )
+
+    assert result["main_red_to_green_rate"] == pytest.approx(0.5)
+    assert result["main_red_to_green_runs"] == 1
+    assert result["main_completed_runs"] == 2
+    assert any("attempts/1/jobs" in call for call in runner.calls)
 
 
 # ------------------------------------------------------- rolling rate
@@ -709,6 +759,7 @@ def test_collect_builds_full_report_from_mocked_api():
     assert report["review"]["time_to_first_review_hours_median"] == pytest.approx(1.0)
     assert report["review"]["review_rounds_per_pr"] == pytest.approx(1.0)
     assert report["ci"]["first_push_pass_rate"] == pytest.approx(1.0)
+    assert report["ci"]["main_red_to_green_rate"] is None
     assert report["open"]["stale"] == 1
     assert report["open"]["conflicted"] == 1
 
@@ -757,6 +808,7 @@ def test_render_markdown_states_target_and_all_windows():
     )
     md = kpi.render_markdown(report)
     assert "target 3.0/h" in md
+    assert "Main ci.yml runs red then green (24h)" in md
     for hours in (1, 8, 24):
         assert f"| {hours}h |" in md
 
@@ -777,3 +829,30 @@ def test_markdown_shows_unknown_merge_states():
         },
     }
     assert "Merge state unknown: 2" in kpi.render_markdown(report)
+
+
+def test_main_ci_red_to_green_counts_a_timed_out_attempt_as_red():
+    runner = FakeRunner(
+        {
+            "actions/workflows/ci.yml/runs": {
+                "total_count": 1,
+                "workflow_runs": [
+                    {
+                        "id": 21,
+                        "run_attempt": 2,
+                        "status": "completed",
+                        "conclusion": "success",
+                    }
+                ],
+            },
+            "actions/runs/21/attempts/1/jobs": {
+                "jobs": [{"conclusion": "timed_out"}]
+            },
+        }
+    )
+
+    result = kpi._main_ci_red_to_green(
+        kpi.GhApi(runner), "o/r", NOW - timedelta(hours=24), 10
+    )
+
+    assert result["main_red_to_green_rate"] == pytest.approx(1.0)

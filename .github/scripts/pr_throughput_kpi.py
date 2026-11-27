@@ -426,6 +426,122 @@ def _paginate_check_runs(api: GhApi, endpoint: str) -> list[dict]:
     )
 
 
+def red_to_green_counts(
+    runs: list[dict], failed_attempts: set[tuple[int, int]]
+) -> tuple[int, int]:
+    """Count completed main CI runs that failed earlier and finally passed."""
+    completed = [
+        run
+        for run in runs
+        if run.get("status") == "completed" and run.get("conclusion") is not None
+    ]
+    flaky = 0
+    for run in completed:
+        if run.get("conclusion") != "success":
+            continue
+        try:
+            run_id = int(run["id"])
+            attempt = int(run.get("run_attempt", 1))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if any((run_id, prior) in failed_attempts for prior in range(1, attempt)):
+            flaky += 1
+    return flaky, len(completed)
+
+
+def red_to_green_share(
+    runs: list[dict], failed_attempts: set[tuple[int, int]]
+) -> float | None:
+    flaky, completed = red_to_green_counts(runs, failed_attempts)
+    return flaky / completed if completed else None
+
+
+def _main_ci_runs(
+    api: GhApi, repo: str, window_start: datetime, max_pages: int
+) -> list[dict]:
+    created_after = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    endpoint = (
+        f"repos/{repo}/actions/workflows/ci.yml/runs?branch=main"
+        f"&created=%3E{created_after}"
+    )
+    runs: list[dict] = []
+    expected_total: int | None = None
+    for page in range(1, max_pages + 1):
+        payload = api.get(
+            f"{endpoint}&per_page={PER_PAGE}&page={page}"
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"{endpoint} returned a non-object page {page}")
+        total_count = payload.get("total_count")
+        batch = payload.get("workflow_runs")
+        if (
+            not isinstance(total_count, int)
+            or isinstance(total_count, bool)
+            or total_count < 0
+            or not isinstance(batch, list)
+        ):
+            raise RuntimeError(f"{endpoint} returned an invalid page {page}")
+        if expected_total is None:
+            expected_total = total_count
+        elif total_count != expected_total:
+            raise RuntimeError(f"{endpoint} total_count changed while paging")
+        runs.extend(row for row in batch if isinstance(row, dict))
+        if len(runs) == expected_total:
+            return runs
+        if len(batch) < PER_PAGE:
+            raise RuntimeError(
+                f"{endpoint} returned a short page before total_count was reached"
+            )
+    raise RuntimeError(
+        f"{endpoint} exceeded max_pages={max_pages}; main CI rate is incomplete"
+    )
+
+
+# A job that failed or ran out of time; a cancelled attempt is someone stopping
+# it, not a flake.
+RED_JOB_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure"})
+
+
+def _main_ci_red_to_green(
+    api: GhApi,
+    repo: str,
+    window_start: datetime,
+    max_pages: int,
+) -> dict[str, Any]:
+    runs = _main_ci_runs(api, repo, window_start, max_pages)
+    failed_attempts: set[tuple[int, int]] = set()
+    for run in runs:
+        if run.get("status") != "completed" or run.get("conclusion") != "success":
+            continue
+        try:
+            run_id = int(run["id"])
+            attempts = int(run.get("run_attempt", 1))
+        except (KeyError, TypeError, ValueError):
+            continue
+        for attempt in range(1, attempts):
+            payload = api.get(
+                f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+            )
+            jobs = payload.get("jobs") if isinstance(payload, dict) else None
+            if not isinstance(jobs, list):
+                raise RuntimeError(
+                    f"main CI run {run_id} attempt {attempt} returned invalid jobs"
+                )
+            if any(
+                isinstance(job, dict) and job.get("conclusion") in RED_JOB_CONCLUSIONS
+                for job in jobs
+            ):
+                failed_attempts.add((run_id, attempt))
+                break
+    flaky, completed = red_to_green_counts(runs, failed_attempts)
+    return {
+        "main_red_to_green_rate": flaky / completed if completed else None,
+        "main_red_to_green_runs": flaky,
+        "main_completed_runs": completed,
+        "main_window_hours": None,
+    }
+
+
 def _enrich_closed(
     api: GhApi, repo: str, prs: list[dict], errors: list[str]
 ) -> dict[str, Any]:
@@ -544,7 +660,12 @@ def collect(
             "merge_state_unknown": None,
         }
         report["review"] = {}
-        report["ci"] = {}
+        report["ci"] = {
+            "main_red_to_green_rate": None,
+            "main_red_to_green_runs": None,
+            "main_completed_runs": None,
+            "main_window_hours": longest,
+        }
         report["throughput"] = {}
         return report
 
@@ -572,6 +693,20 @@ def collect(
         "first_push_pass_rate": enriched["first_push_pass_rate"],
         "first_push_checked": enriched["first_push_checked"],
     }
+    try:
+        main_ci = _main_ci_red_to_green(
+            api, config.repo, stop_before, config.max_pages
+        )
+        main_ci["main_window_hours"] = longest
+    except (GhError, RuntimeError) as exc:
+        errors.append(f"main CI red-to-green rate: {exc}")
+        main_ci = {
+            "main_red_to_green_rate": None,
+            "main_red_to_green_runs": None,
+            "main_completed_runs": None,
+            "main_window_hours": longest,
+        }
+    report["ci"].update(main_ci)
     key_lane = lane_key(config.lane_labels) if config.lane_labels else None
     report["throughput"] = {
         "by_author": throughput_by(closed, now, longest, author_key)
@@ -633,6 +768,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Review rounds per PR: {_num(review.get('review_rounds_per_pr'), '.2f')}",
         f"- CI pass rate on first push: {_pct(ci.get('first_push_pass_rate'))}"
         f" ({_num(ci.get('first_push_checked'), 'd')} PRs checked)",
+        f"- Main ci.yml runs red then green ({ci.get('main_window_hours', 'unknown')}h): "
+        f"{_pct(ci.get('main_red_to_green_rate'))} "
+        f"({_num(ci.get('main_red_to_green_runs'), 'd')} of "
+        f"{_num(ci.get('main_completed_runs'), 'd')} completed runs)",
     ]
     throughput = report.get("throughput") or {}
     for label, group in (("Author", "by_author"), ("Lane", "by_lane")):

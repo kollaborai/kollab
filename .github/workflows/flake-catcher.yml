@@ -1,0 +1,39 @@
+name: Flake catcher
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  catch-flakes:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.run_attempt > 1 && github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    concurrency:
+      group: flake-catcher-${{ github.event.workflow_run.id }}
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Record flaky tests from earlier attempts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: python scripts/flake_catcher.py --repo "$REPO" --run-id "$RUN_ID" --attempt "$RUN_ATTEMPT"
