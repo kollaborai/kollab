@@ -6,6 +6,7 @@ import path from "node:path";
 import { after, test } from "node:test";
 import { hasTestFrameworkImport } from "../scripts/test-framework-import.mjs";
 import { uncollectedTests } from "../scripts/check-test-discovery.mjs";
+import { nodeTestFiles } from "../scripts/node-test-files.mjs";
 import { nodeTestSuites } from "../scripts/vitest-skips.ts";
 
 const root = mkdtempSync(path.join(os.tmpdir(), "kollab-test-discovery-"));
@@ -113,11 +114,45 @@ test("classifies suites by their framework import rather than matching text", ()
   ]);
 });
 
+test("type-only imports do not change runtime test runner classification", () => {
+  const sources = [
+    'import type { TestContext } from "node:test";\nimport { test } from "vitest";\ntest("fixture", () => {});\n',
+    'import { type TestContext } from "node:test";\nimport { test } from "vitest";\ntest("fixture", () => {});\n',
+  ];
+  for (const [index, source] of sources.entries()) {
+    const file = `tests/type-only-node-import-${index}.test.ts`;
+    writeFileSync(path.join(root, file), source);
+  }
+  try {
+    for (const [index, source] of sources.entries()) {
+      const file = `tests/type-only-node-import-${index}.test.ts`;
+      assert.equal(hasTestFrameworkImport(source, "node:test", file), false, `${file} has no runtime Node import`);
+      assert.equal(hasTestFrameworkImport(source, "vitest", file), true, `${file} is a Vitest suite`);
+      assert.equal(nodeTestSuites(root).includes(file), false, `${file} is not skipped by Vitest`);
+      assert.equal(nodeTestFiles(root).includes(file), false, `${file} is not selected by Node`);
+    }
+  } finally {
+    for (let index = 0; index < sources.length; index++) {
+      unlinkSync(path.join(root, `tests/type-only-node-import-${index}.test.ts`));
+    }
+  }
+});
+
+test("parses each test file using its own syntax kind and names parse failures", () => {
+  assert.doesNotThrow(() => hasTestFrameworkImport('const value: string = <string>"ok";', "vitest", "tests/assertion.test.ts"));
+  assert.doesNotThrow(() => hasTestFrameworkImport("@suite class Example {}", "vitest", "tests/decorator.test.ts"));
+  assert.doesNotThrow(() => hasTestFrameworkImport("const view = <div />;", "vitest", "src/component.test.tsx"));
+  assert.throws(
+    () => hasTestFrameworkImport("const = ;", "vitest", "tests/invalid.test.ts"),
+    /tests\/invalid\.test\.ts/,
+  );
+});
+
 test("CI runs the shared Node selector and ignores framework text inside fixtures", () => {
   for (const [file, source] of Object.entries(embeddedNodeSources)) {
     writeFileSync(path.join(root, file), source);
-    assert.equal(hasTestFrameworkImport(source, "vitest"), true, `${file} is a Vitest suite`);
-    assert.equal(hasTestFrameworkImport(source, "node:test"), false, `${file} has no Node import`);
+    assert.equal(hasTestFrameworkImport(source, "vitest", file), true, `${file} is a Vitest suite`);
+    assert.equal(hasTestFrameworkImport(source, "node:test", file), false, `${file} has no Node import`);
   }
   assert.deepEqual(
     nodeTestSuites(root).filter((file) => file.startsWith("tests/embedded-node-") || file.includes("multiline-vitest")),
@@ -142,7 +177,7 @@ test("CI runner selects the same Node files as the shared matcher", () => {
   assert.equal(selected.status, 0, selected.stderr || selected.error?.message);
   const selectedByMatcher = files
     .filter((file) => /^tests\/[^/]+\.test\.ts$/.test(file))
-    .filter((file) => !hasTestFrameworkImport(readFileSync(path.join(root, file), "utf8"), "vitest"))
+    .filter((file) => !hasTestFrameworkImport(readFileSync(path.join(root, file), "utf8"), "vitest", file))
     .sort();
   assert.deepEqual(selected.stdout.trim().split("\n").sort(), selectedByMatcher);
 });
