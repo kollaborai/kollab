@@ -2077,3 +2077,34 @@ async def test_a_queued_command_moves_to_where_its_turn_starts():
             order.remove(row_id)
     assert len(tool_rows) == 2, order
     assert order.index("web-help") > max(order.index(row_id) for row_id in tool_rows), order
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_snapshot_keeps_a_moved_input_after_the_earlier_turn():
+    """A browser that connects after a queued message moved gets the same order
+    as one that watched the move: snapshots place live rows by created_at, so the
+    moved row carries the time its turn took it (#1451 review r5)."""
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+
+    def tool(turn_id, tool_id):
+        _publish(state, "tool_start", turn_id=turn_id, tool_id=tool_id,
+                 tool_name="terminal", input={"command": "ls"})
+        _publish(state, "tool_result", turn_id=turn_id, tool_id=tool_id,
+                 tool_name="terminal", input={"command": "ls"}, success=True, output="ok")
+
+    await _add(stream, "web-first", "look around")
+    _publish(state, "turn_start", request_id="web-first", turn_id="native-1", input_source="web")
+    tool("native-1", "tool-1")
+    await _add(stream, "web-later", "and then this")
+    tool("native-1", "tool-2")
+    _publish(state, "turn_complete", request_id="web-first", turn_id="native-1", stop_reason="cancelled")
+    _publish(state, "turn_start", request_id="web-later", turn_id="native-2", input_source="web")
+
+    snapshot = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+    rows = snapshot["data"]["rows"]
+    order = [row["id"] for row in rows]
+    tools = [index for index, row in enumerate(rows) if row["kind"] == "tool"]
+    assert len(tools) == 2, order
+    assert order.index("web-later") > max(tools), order
