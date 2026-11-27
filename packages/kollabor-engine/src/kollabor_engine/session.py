@@ -478,7 +478,13 @@ class EngineSession:
         try:
             # initialize() uses DaemonPool.spawn(), the same kollab_argv()-based
             # launcher used for an Offline row in the sidebar.
-            await self.initialize(resume_conversation_id=self.conversation_id)
+            async def persist_spawned(candidate: "EngineSession") -> None:
+                candidate._notify_persistence_changed()
+
+            await self.initialize(
+                on_spawned=persist_spawned,
+                resume_conversation_id=self.conversation_id,
+            )
         except Exception as exc:
             logger.warning(
                 "session %s stopped its old agent but could not restart it (%s)",
