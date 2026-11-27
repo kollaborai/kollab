@@ -88,11 +88,24 @@ def parse_failed_lines(logs: str) -> list[str]:
     """Extract distinct pytest node IDs from FAILED summary lines."""
     nodeids: list[str] = []
     seen: set[str] = set()
-    for line in logs.splitlines():
-        marker = line.find("FAILED ")
-        if marker < 0:
+    timestamp_prefix = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z[ \t]+")
+    summary_header = re.compile(r"=+\s*short test summary info\s*=+")
+    result_line = re.compile(r"^(FAILED|ERROR|SKIPPED|XFAIL|XPASS|PASSED)\s+(.+)$")
+    in_summary = False
+    for line in logs.removeprefix("\ufeff").splitlines():
+        line = timestamp_prefix.sub("", line, count=1)
+        if summary_header.search(line):
+            in_summary = True
             continue
-        summary = line[marker + len("FAILED ") :].strip()
+        if not in_summary:
+            continue
+        result = result_line.match(line)
+        if result is None:
+            in_summary = False
+            continue
+        if result.group(1) != "FAILED":
+            continue
+        summary = result.group(2).strip()
         # A parameter id may itself hold " - ", so the id ends at its closing bracket when it has one.
         match = re.match(r"\S+?\.py::[^\s\[]+(?:\[[^\]]*\])?", summary)
         nodeid = match.group(0) if match else summary.partition(" - ")[0].strip()
