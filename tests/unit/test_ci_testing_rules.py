@@ -39,6 +39,15 @@ def test_ci_gate_requires_repeat_job_but_excludes_nonblocking_quarantine() -> No
     assert jobs["quarantine"]["continue-on-error"] is True
 
 
+def test_flake_catcher_runs_only_for_successful_retries_from_this_repository() -> None:
+    job = _workflow(".github/workflows/flake-catcher.yml")["jobs"]["catch-flakes"]
+    condition = job["if"]
+
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in condition
+    assert "github.event.workflow_run.conclusion == 'success'" in condition
+    assert "github.event.workflow_run.run_attempt > 1" in condition
+
+
 def test_every_blocking_pytest_invocation_excludes_quarantine() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     for job_id, job in workflow["jobs"].items():
