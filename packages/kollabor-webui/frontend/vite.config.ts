@@ -3,14 +3,17 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
+import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { learnPhoneMediaPlugin } from "./scripts/learn-phone-media-plugin";
 import { pluginRuntimePlugin } from "./scripts/plugin-runtime-plugin.ts";
+import { nodeTestSuites } from "./scripts/vitest-skips.ts";
 import pkg from "./package.json";
 
 
 const frontendDir = path.dirname(fileURLToPath(import.meta.url));
+
 
 // The web bundle version tracks the release version (frontend package.json,
 // gated by scripts/check_version_parity.py). Injected at build time so the
@@ -293,7 +296,13 @@ const mainConfig = defineConfig({
       "tests/new-chat-view.test.ts",
       "tests/app-store-wiring.test.ts",
       "tests/chat-runtime-retired.test.ts",
+      "tests/**/*.test.ts",
+      "tests/**/*.test.tsx",
+      "tests/**/*.test.mjs",
+      "src/**/*.test.ts",
+      "src/**/*.test.tsx",
     ],
+    exclude: [...configDefaults.exclude, ...nodeTestSuites(frontendDir)],
     environment: "node",
   },
 });
