@@ -874,6 +874,47 @@ describe("plugins-changed", () => {
     expect(normalized?.omitted.contributions).toBeGreaterThan(0);
   });
 
+  it("uses returned sanitized contributions when the backend reports omissions", () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [], views: [], pages: [], modals: [], slash: ["publish"], renderers: [],
+    };
+    const previous = entry("hello", { contributes });
+    const updated = normalizePluginEntry({
+      ...previous,
+      contributes: { ...contributes, slash: ["deploy"] },
+      omitted: { ...previous.omitted, contributions: 1 },
+    }, previous);
+
+    expect(updated?.contributes.slash).toEqual(["deploy"]);
+    expect(updated?.omitted.contributions).toBe(1);
+  });
+
+  it("uses a sanitized slash update when casing duplicates account for an omission", () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [], views: [], pages: [], modals: [], slash: ["publish"], renderers: [],
+    };
+    const previous = entry("hello", { contributes });
+    const updated = normalizePluginEntry({
+      ...previous,
+      contributes: { ...contributes, slash: ["deploy", "DEPLOY"] },
+      omitted: { ...previous.omitted, contributions: 1 },
+    }, previous);
+
+    expect(updated?.contributes.slash).toEqual(["deploy"]);
+  });
+
+  it("retains last-good contributions when the current row omits the contribution field", () => {
+    const previous = entry("hello", {
+      contributes: {
+        menu: [], views: [], pages: [], modals: [], slash: ["publish"], renderers: [],
+      },
+    });
+
+    const normalized = normalizePluginEntry({ id: "hello", name: "Hello" }, previous);
+
+    expect(normalized?.contributes).toEqual(previous.contributes);
+  });
+
   it("retains the last-good declarations when rows over the limit are cut locally", () => {
     const contributes: PluginEntry["contributes"] = {
       menu: [], views: [], pages: [], modals: [], slash: ["publish"], renderers: [],

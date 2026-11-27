@@ -201,3 +201,57 @@ def test_echoed_secret_and_token_are_redacted_in_cli(tmp_path, monkeypatch, caps
     assert "arbitrary-value-xyz" not in output
     assert "hidden" not in output
     assert "abc123" not in output
+
+
+def test_unlabelled_token_formats_are_redacted_without_short_false_positives():
+    from kollabor_plugins.redaction import contains_sensitive_text, redact_sensitive_text
+
+    suffix = "A1b2C3d4E5f6G7h8I9j0"
+    aws_access_key_suffix = "A1B2C3D4E5F6G7H8"
+    tokens = [
+        *(f"xox{kind}-{suffix}" for kind in "abprs"),
+        f"xapp-{suffix}",
+        *(f"gh{kind}_{suffix}" for kind in "pousr"),
+        f"github_pat_{suffix}",
+        f"glpat-{suffix}",
+        f"sk_live_{suffix}",
+        f"sk_test_{suffix}",
+        f"rk_live_{suffix}",
+        f"rk_test_{suffix}",
+        f"pk_live_{suffix}",
+        f"pk_test_{suffix}",
+        f"AKIA{aws_access_key_suffix}",
+        f"ASIA{aws_access_key_suffix}",
+        f"AIza{'A' * 35}",
+        f"npm_{suffix}",
+        f"hf_{suffix}",
+        f"eyJ{'A' * 12}.{'B' * 20}.{'C' * 20}",
+        f"sk-{suffix}",
+    ]
+    short_lookalikes = [
+        f"xoxb-{'A' * 19}",
+        f"xapp-{'A' * 19}",
+        f"ghp_{'A' * 19}",
+        f"github_pat_{'A' * 19}",
+        f"glpat-{'A' * 19}",
+        f"sk_live_{'A' * 15}",
+        f"sk_test_{'A' * 15}",
+        f"rk_live_{'A' * 15}",
+        f"rk_test_{'A' * 15}",
+        f"AKIA{'A' * 15}",
+        f"ASIA{'A' * 15}",
+        f"AIza{'A' * 33}",
+        f"npm_{'A' * 19}",
+        f"hf_{'A' * 19}",
+        f"eyJ{'A' * 9}.{'B' * 19}.{'C' * 20}",
+        f"sk-{'A' * 19}",
+        "xoxb-not-a-token",
+        "hf_development",
+    ]
+
+    for token in tokens:
+        assert contains_sensitive_text(token)
+        assert redact_sensitive_text(token, redact_paths=False) == "[redacted]"
+    for value in short_lookalikes:
+        assert not contains_sensitive_text(value)
+        assert redact_sensitive_text(value, redact_paths=False) == value

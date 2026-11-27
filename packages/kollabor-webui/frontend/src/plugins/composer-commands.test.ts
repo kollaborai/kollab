@@ -1025,6 +1025,73 @@ describe("early plugin command submission", () => {
     }
   });
 
+  it.each(["wait timeout", "catalog becomes ready"] as const)(
+    "keeps a pending plugin slash in its old draft when %s replays under the composer lock",
+    async (replay) => {
+      vi.useFakeTimers();
+      prepareMountedThread();
+      const draft = "/probe now";
+      const draftKey = "plugin-lock-old-session";
+      const queueSessionId = "plugin-lock-old-engine";
+      const run = vi.fn();
+      saveComposerDraft(draftKey, "");
+      pluginRegistry.setListed(null);
+      putLoadingThreadCommand("probe");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(createElement(ThreadHarness, {
+          commandCatalogStatus: "loading",
+          draftKey,
+          queueSessionId,
+        })));
+        const runtime = sendCapture.runtime as {
+          thread: { composer: { setText(text: string): void } };
+        };
+        await act(async () => {
+          runtime.thread.composer.setText(draft);
+          publishComposerText(draft);
+        });
+        const form = host.querySelector("form");
+        expect(form).not.toBeNull();
+        await act(async () => form?.requestSubmit());
+        expect(sendCapture.modelRuns).toBe(0);
+
+        await act(async () => root.render(createElement(ThreadHarness, {
+          commandCatalogStatus: "loading",
+          draftKey,
+          queueSessionId,
+          locked: "Switching session",
+        })));
+        if (replay === "catalog becomes ready") {
+          await act(async () => {
+            putThreadCommand("probe", run);
+            root.render(createElement(ThreadHarness, {
+              commandCatalogStatus: "ready",
+              draftKey,
+              queueSessionId,
+              locked: "Switching session",
+            }));
+          });
+        } else {
+          await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+        }
+
+        expect(sendCapture.modelRuns).toBe(0);
+        expect(run).not.toHaveBeenCalled();
+        expect(sendCapture.text).toBe(draft);
+        expect(loadComposerDraft(draftKey)).toBe(draft);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+        saveComposerDraft(draftKey, "");
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("does not hold an unknown slash draft when the plugin inventory has no entries", () => {
     sendCapture.text = "/probe";
 

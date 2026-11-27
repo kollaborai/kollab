@@ -256,6 +256,7 @@ const mainConfig = defineConfig({
       "src/plugins/registry.test.ts",
       "src/plugins/sdk.test.ts",
       "src/plugins/loader.test.ts",
+      "src/plugins/plugin-errors.test.ts",
       "src/plugins/mount.test.tsx",
       "src/plugins/settings-values.test.ts",
       "src/plugins/settings-page.test.tsx",
