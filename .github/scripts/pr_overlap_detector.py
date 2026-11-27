@@ -124,6 +124,13 @@ def find_overlaps(
     for candidate in candidates:
         if int(candidate.get("number", -1)) == current_number:
             continue
+        if any(
+            str((pull.get("head") or {}).get("ref") or "").startswith(
+                "merge-flow/window-"
+            )
+            for pull in (current, candidate)
+        ):
+            continue
         if candidate.get("state", "open").lower() != "open":
             continue
         reasons = []
