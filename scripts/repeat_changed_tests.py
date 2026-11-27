@@ -74,6 +74,8 @@ def run_test_file(
         "-m",
         "not quarantine",
         *(["-o", "asyncio_mode=auto"] if path.startswith(PACKAGE_SUITES) else []),  # as ci.yml runs them
+        # As the unit shards run them; the option is defined in tests/conftest.py, so root suite only.
+        *(["--allow-host-process-enumeration"] if path.startswith(f"{ROOT_SUITE}/") else []),
         path,
     ]
     for attempt in range(1, runs + 1):
