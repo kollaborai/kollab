@@ -4,11 +4,12 @@ Provides a framework for creating custom plugins that integrate with
 the LLM core service, separate from MCP tools.
 """
 
-import asyncio
 import inspect
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+from .redaction import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -222,8 +223,9 @@ class {class_name}:
             return {"status": "success", "result": result}
 
         except Exception as e:
-            logger.error(f"Failed to execute custom tool {tool_name}: {e}")
-            return {"error": str(e)}
+            message = redact_sensitive_text(str(e))
+            logger.error("Failed to execute custom tool %s: %s", tool_name, message)
+            return {"error": message}
 
     def validate_plugin(self, plugin_path: str) -> Dict[str, Any]:
         """Validate a plugin structure and security.
@@ -321,11 +323,15 @@ class {class_name}:
                         )
 
             except Exception as e:
-                validation_result["errors"].append(f"Failed to import plugin: {e}")
+                validation_result["errors"].append(
+                    f"Failed to import plugin: {redact_sensitive_text(str(e))}"
+                )
                 validation_result["valid"] = False
 
         except Exception as e:
-            validation_result["errors"].append(f"Failed to read plugin file: {e}")
+            validation_result["errors"].append(
+                f"Failed to read plugin file: {redact_sensitive_text(str(e))}"
+            )
             validation_result["valid"] = False
 
         # Run custom validators
@@ -340,7 +346,9 @@ class {class_name}:
                         validator_result.get("errors", [])
                     )
             except Exception as e:
-                logger.warning(f"Custom validator failed: {e}")
+                logger.warning(
+                    "Custom validator failed: %s", redact_sensitive_text(str(e))
+                )
 
         return validation_result
 

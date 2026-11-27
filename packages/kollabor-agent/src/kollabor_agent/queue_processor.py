@@ -13,7 +13,7 @@ import sys
 import time
 import uuid
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 from kollabor_agent.execution_context import remote_task_id
@@ -34,6 +34,7 @@ from kollabor_ai.providers.errors import (
 from kollabor_ai.providers.errors import (
     is_context_overflow as is_context_overflow_info,
 )
+from kollabor_events.chat_stream import outcome_for_stop_reason
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
@@ -57,6 +58,41 @@ from .yes_approval import YesApprovals
 logger = logging.getLogger(__name__)
 
 CancellationOrigin = Literal["human", "remote_task", "external"]
+
+
+def _native_chat_stream_parts(content: Any) -> list[dict[str, Any]]:
+    """Return restart-safe transcript parts for one native input.
+
+    Managed uploads intentionally remain process-local. Their live projection
+    resolves from the per-input content while the daemon is running; only
+    HTTPS image references are stored in JSONL.
+    """
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    if not isinstance(content, list):
+        return []
+
+    parts: list[dict[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                parts.append({"type": "text", "text": text})
+            continue
+        if item.get("type") not in {"image", "image_url"}:
+            continue
+        source = item.get("source")
+        url = source.get("url") if isinstance(source, dict) and source.get("kind") == "url" else None
+        if url is None and item.get("type") == "image_url":
+            image_url = item.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else image_url
+        if url is None:
+            url = item.get("image")
+        if isinstance(url, str) and url.lower().startswith("https://"):
+            parts.append({"type": "image", "url": url})
+    return parts
 
 
 def publish_turn_error(
@@ -102,11 +138,44 @@ class TaggedInput:
     parent_uuid: str | None = None
     # Authenticated operator words carried to the resulting history message.
     operator_inputs: tuple[dict[str, str], ...] = ()
+    # Exact durable user row created for this queued input, when admission
+    # persisted one. Kept distinct from parent_uuid, which is also a chain link.
+    history_row_uuid: str | None = field(default=None, kw_only=True)
+    # Authored display text when the model payload also contains hidden
+    # context/media that must not become part of the transcript input row.
+    stream_display_content: str | None = field(default=None, kw_only=True)
+    # The stream can route queue controls only for explicitly marked plugin
+    # admissions; ordinary native and daemon handoff inputs keep their own API.
+    stream_origin: str | None = field(default=None, kw_only=True)
+
+
+@dataclass
+class QueueHandoffInput(TaggedInput):
+    """A daemon queue item already in native provider custody.
+
+    The request and dispatch-attempt IDs bind Stop retention to the exact
+    worker attempt. It remains a TaggedInput for event correlation, but unlike
+    page-local typed input it must not be swept when the active model turn is
+    stopped.
+    """
+
+    queue_request_id: str = ""
+    attempt_id: str = ""
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.queue_request_id, str)
+            or not self.queue_request_id
+            or self.request_ids != (self.queue_request_id,)
+        ):
+            raise ValueError("queue handoff request identity is invalid")
+        if not isinstance(self.attempt_id, str) or not self.attempt_id:
+            raise ValueError("queue handoff attempt identity is invalid")
 
 
 def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
     """The request ids a batch answers (#551)."""
-    return tuple(i for m in messages if isinstance(m, TaggedInput) for i in m.request_ids)
+    return tuple(i for m in messages if isinstance(m, (TaggedInput, QueuedInput)) for i in m.request_ids)
 
 
 @dataclass
@@ -128,6 +197,10 @@ class QueuedInput:
     parent_uuid: str | None = None
     # Authenticated operator words carried to the resulting history message.
     operator_inputs: tuple[dict[str, str], ...] = ()
+    # Exact durable user row created for this queued input, when admission
+    # persisted one. Kept distinct from parent_uuid, which is also a chain link.
+    history_row_uuid: str | None = field(default=None, kw_only=True)
+    request_ids: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 _UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")
@@ -439,6 +512,59 @@ def _xml_tool_call_entries(all_tools: List[Dict[str, Any]]) -> List[Dict[str, An
     return entries
 
 
+def _unique_xml_tool_call_ids(
+    history: List[Any],
+    tools: List[Dict[str, Any]],
+    reserved_ids: List[str] | None = None,
+) -> List[Dict[str, Any]]:
+    """Give parser-generated XML IDs a session-wide unique display identity.
+
+    The response parser restarts ordinal IDs such as ``terminal_0`` on each
+    model response. Tool events use these IDs while a call is live, and the
+    same IDs are persisted with their assistant/result records, so a collision
+    would merge two cards both live and after reload.
+    """
+    used_ids = {value for value in reserved_ids or [] if isinstance(value, str) and value}
+    for message in history:
+        metadata = (
+            message.get("metadata")
+            if isinstance(message, dict)
+            else getattr(message, "metadata", None)
+        )
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("tool_calls", "xml_tool_calls"):
+            calls = metadata.get(key)
+            if not isinstance(calls, list):
+                continue
+            used_ids.update(
+                call["id"]
+                for call in calls
+                if isinstance(call, dict)
+                and isinstance(call.get("id"), str)
+                and call["id"]
+            )
+
+    unique_tools = []
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            unique_tools.append(tool)
+            continue
+        tool_id = tool.get("id")
+        if not isinstance(tool_id, str) or not tool_id:
+            tool_id = f"xml_{index}"
+        if tool_id in used_ids:
+            base_id = tool_id
+            while True:
+                tool_id = f"{base_id}_{uuid.uuid4().hex}"
+                if tool_id not in used_ids:
+                    break
+            tool = {**tool, "id": tool_id}
+        used_ids.add(tool_id)
+        unique_tools.append(tool)
+    return unique_tools
+
+
 def _voice_turn_id(origin: Any) -> str | None:
     """The LiveKit voice turn an origin context belongs to, if any."""
     if isinstance(origin, dict) and origin.get("source") == "livekit_voice":
@@ -611,6 +737,9 @@ class QueueProcessor:
         self._streaming_handler = streaming_handler
         self._native_tools_handler = native_tools_handler
         self._add_message_fn = add_message_fn
+        self._native_stream_inputs: dict[str, dict[str, Any]] = {}
+        self._native_stream_messages: dict[str, list[ConversationMessage]] = {}
+        self._persisted_native_stream_ids: set[str] = set()
 
         # Tool output has a producer-level spill boundary and a batch-level
         # packing boundary. The artifact root is session/project scoped so the
@@ -647,6 +776,26 @@ class QueueProcessor:
             maxsize=max_queue_size
         )
         self.max_queue_size = max_queue_size
+        self._chain_idle_event = asyncio.Event()
+        self._chain_idle_event.set()
+        self._forced_send_lock = asyncio.Lock()
+        self._forced_send_clear = asyncio.Event()
+        self._forced_send_clear.set()
+        self._forced_send_owner: object | None = None
+        self._forced_priority_count = 0
+        self._forced_plugin_batch_request_id: str | None = None
+        self._published_plugin_stream_ids: set[str] = set()
+        # Trusted multi-step admissions reserve capacity while writing the
+        # matching durable user row. Ordinary producers count reservations as
+        # occupied, so they cannot steal a promised slot during an await.
+        self._admission_reservations: dict[object, int] = {}
+        # Exact daemon queue handoffs remain protected while queued and while
+        # the drain temporarily owns them in a local batch.
+        self._queue_handoffs: dict[str, tuple[QueueHandoffInput, str]] = {}
+        self._drained_batch_messages: tuple[Any, ...] = ()
+        self._drained_handoff_items: tuple[QueueHandoffInput, ...] = ()
+        self._drained_handoff_started = False
+        self._active_turn_handoff_attempts: tuple[str, ...] = ()
         self.dropped_messages = 0
         self.is_processing = False
         self.turn_completed = False
@@ -665,6 +814,7 @@ class QueueProcessor:
         self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
         self._after_turn: list[tuple[str, Callable[[], Awaitable[Any]]]] = []  # see after_turn
         self._after_turn_flush: asyncio.Task | None = None
+        self._queued_terminal_tasks: set[asyncio.Task] = set()
         self._cancel_processing = False
         self._cancel_generation = 0
         self._cancel_origin: CancellationOrigin | None = None
@@ -705,6 +855,12 @@ class QueueProcessor:
         # request's turn can never be left open by a path that forgot to say so.
         was = self.is_processing
         self._is_processing = value
+        idle_event = getattr(self, "_chain_idle_event", None)
+        if idle_event is not None:
+            if value:
+                idle_event.clear()
+            else:
+                idle_event.set()
         if was and not value:
             approvals = getattr(getattr(self, "tool_executor", None), "yes_approvals", None)
             if isinstance(approvals, YesApprovals):
@@ -740,22 +896,357 @@ class QueueProcessor:
     def cancel_origin(self) -> CancellationOrigin | None:
         return self._cancel_origin
 
-    def request_cancellation(self, *, origin: CancellationOrigin) -> int:
-        """Set the cancellation latch and return its supersession generation."""
+    def request_cancellation(
+        self, *, origin: CancellationOrigin, preserve_queued: bool = False
+    ) -> int:
+        """Set the cancellation latch and return its supersession generation.
+
+        Human Stop keeps admitted inputs queued for the next drain. The
+        ``preserve_queued`` flag also keeps them queued for a force-send
+        handover, so its item can be inserted ahead of older work after the
+        current turn settles.
+        """
         if origin not in {"human", "remote_task", "external"}:
             raise ValueError("invalid cancellation origin")
+        if not isinstance(preserve_queued, bool):
+            raise ValueError("preserve_queued must be a bool")
         self._cancel_generation += 1
         self._cancel_processing = True
         self._cancel_origin = origin
-        self._end_queued_chat()
+        retain_queued = origin == "human" or preserve_queued
+        self._restore_unstarted_queue_handoffs(preserve_queued=retain_queued)
+        if not retain_queued:
+            self._end_queued_chat()
         return self._cancel_generation
 
-    def _end_queued_chat(self) -> None:
-        """A cancel stops the drain, and the queue waits for the next message:
-        a chat message in it would wait with its stream open, so it ends now (#551)."""
+    async def begin_forced_send(self) -> object:
+        """Block ordinary input while a forced stop/admission transaction runs."""
+        lock = getattr(self, "_forced_send_lock", None)
+        if not isinstance(lock, asyncio.Lock):
+            lock = self._forced_send_lock = asyncio.Lock()
+        await lock.acquire()
+        token = object()
+        self._forced_send_owner = token
+        self._forced_priority_count = 0
+        event = getattr(self, "_forced_send_clear", None)
+        if event is None:
+            event = self._forced_send_clear = asyncio.Event()
+            event.set()
+        event.clear()
+        return token
+
+    def end_forced_send(self, token: object) -> bool:
+        """Release only the transaction that owns the forced-send gate."""
+        if token is not getattr(self, "_forced_send_owner", None):
+            lock = getattr(self, "_forced_send_lock", None)
+            # Make cleanup retryable after this token already released the
+            # gate. A different owner or a still-locked gate remains a hard
+            # failure; possessing a stale token cannot unlock it.
+            return (
+                getattr(self, "_forced_send_owner", None) is None
+                and (not isinstance(lock, asyncio.Lock) or not lock.locked())
+            )
+        self._forced_send_owner = None
+        self._forced_priority_count = 0
+        event = getattr(self, "_forced_send_clear", None)
+        if event is not None:
+            event.set()
+        lock = getattr(self, "_forced_send_lock", None)
+        if isinstance(lock, asyncio.Lock) and lock.locked():
+            lock.release()
+        return True
+
+    def owns_forced_send(self, token: object) -> bool:
+        return (
+            token is getattr(self, "_forced_send_owner", None)
+            and token is not None
+        )
+
+    async def wait_for_forced_send(self) -> None:
+        """Wait before ordinary admission can clear a forced-stop latch."""
+        event = getattr(self, "_forced_send_clear", None)
+        if event is not None:
+            await event.wait()
+
+    async def wait_until_idle(self) -> None:
+        """Wait until the current queue drain has completed its terminal path."""
+        if not self.is_processing:
+            return
+        event = getattr(self, "_chain_idle_event", None)
+        if event is None:
+            raise RuntimeError("queue drain settlement signal is unavailable")
+        await event.wait()
+
+    def clear_force_cancellation(self, generation: int) -> bool:
+        """Clear a force-send Stop only if it still owns the idle chain."""
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or self.is_processing
+            or not self._cancel_processing
+            or self._cancel_origin != "human"
+            or self._cancel_generation != generation
+        ):
+            return False
+        self._cancel_processing = False
+        self._cancel_origin = None
+        return True
+
+    def reserve_admission_slot(self) -> object | None:
+        """Reserve one bounded queue slot for a trusted admission path."""
         queue = getattr(self, "processing_queue", None)
-        for item in [i for i in getattr(queue, "_queue", ()) if isinstance(i, TaggedInput)]:
+        max_size = getattr(self, "max_queue_size", 0)
+        if queue is None or isinstance(max_size, bool) or not isinstance(max_size, int) or max_size <= 0:
+            return None
+        reservations = getattr(self, "_admission_reservations", None)
+        if not isinstance(reservations, dict):
+            reservations = self._admission_reservations = {}
+        local_reserved = (
+            len(getattr(self, "_drained_batch_messages", ()))
+            if not getattr(self, "_drained_handoff_started", False)
+            else 0
+        )
+        if queue.qsize() + len(reservations) + local_reserved >= max_size:
+            return None
+        token = object()
+        reservations[token] = getattr(self, "_cancel_generation", 0)
+        return token
+
+    def release_admission_slot(self, reservation: object) -> bool:
+        """Release an uncommitted reservation; tokens are one-use."""
+        reservations = getattr(self, "_admission_reservations", None)
+        return isinstance(reservations, dict) and reservations.pop(
+            reservation, None
+        ) is not None
+
+    def refresh_admission_slot(
+        self, reservation: object, *, expected_generation: int
+    ) -> bool:
+        """Carry a reservation only across its owner's exact Stop generation."""
+        reservations = getattr(self, "_admission_reservations", None)
+        if not isinstance(reservations, dict) or reservation not in reservations:
+            return False
+        if (
+            isinstance(expected_generation, bool)
+            or not isinstance(expected_generation, int)
+            or getattr(self, "_cancel_generation", 0) != expected_generation
+        ):
+            return False
+        queue = getattr(self, "processing_queue", None)
+        max_size = getattr(self, "max_queue_size", 0)
+        if (
+            queue is None
+            or isinstance(max_size, bool)
+            or not isinstance(max_size, int)
+            or queue.qsize()
+            + len(reservations)
+            + (
+                len(getattr(self, "_drained_batch_messages", ()))
+                if not getattr(self, "_drained_handoff_started", False)
+                else 0
+            )
+            > max_size
+        ):
+            return False
+        reservations[reservation] = expected_generation
+        return True
+
+    def owns_admission_slot(self, reservation: object) -> bool:
+        reservations = getattr(self, "_admission_reservations", None)
+        return isinstance(reservations, dict) and reservation in reservations
+
+    def owns_current_admission_slot(self, reservation: object) -> bool:
+        """Whether a reservation still belongs to the current Stop generation."""
+        reservations = getattr(self, "_admission_reservations", None)
+        return (
+            isinstance(reservations, dict)
+            and reservation in reservations
+            and reservations[reservation] == getattr(self, "_cancel_generation", 0)
+        )
+
+    def commit_admission_slot(
+        self, reservation: object, message: Any, *, priority: bool = False
+    ) -> bool:
+        """Consume a reservation and enqueue without an intervening await.
+
+        Stop advances the cancellation generation. A stale token is consumed
+        and refused before the message can enter the provider queue.
+        """
+        reservations = getattr(self, "_admission_reservations", None)
+        if not isinstance(reservations, dict) or reservation not in reservations:
+            return False
+        if not isinstance(priority, bool):
+            return False
+        handoff_ledger = getattr(self, "_queue_handoffs", None)
+        if isinstance(message, QueueHandoffInput) and isinstance(handoff_ledger, dict):
+            if message.attempt_id in handoff_ledger:
+                reservations.pop(reservation, None)
+                return False
+        generation = reservations.pop(reservation)
+        if generation != getattr(self, "_cancel_generation", 0):
+            return False
+        queue = getattr(self, "processing_queue", None)
+        if queue is None:
+            return False
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            return False
+        if priority:
+            # put_nowait accounts for unfinished work and wakes a waiting
+            # getter. Rotation/insertion is synchronous, so that getter cannot
+            # observe the item before it has moved ahead of older queued work.
+            if getattr(self, "_forced_send_owner", None) is not None:
+                # Every item in one held forced-send transaction belongs ahead
+                # of the pre-existing queue, in the order it was admitted.
+                # Repeated appendleft/rotate would reverse a multi-message
+                # batch, so put the new item after the prior forced prefix.
+                priority_count = max(
+                    0, int(getattr(self, "_forced_priority_count", 0))
+                )
+                queue._queue.pop()
+                queue._queue.insert(min(priority_count, len(queue._queue)), message)
+                self._forced_priority_count = priority_count + 1
+            else:
+                queue._queue.rotate(1)
+        if isinstance(message, QueueHandoffInput):
+            if not isinstance(handoff_ledger, dict):
+                handoff_ledger = self._queue_handoffs = {}
+            handoff_ledger[message.attempt_id] = (message, "queued")
+        self.mark_progress()
+        metrics = getattr(self, "_queue_metrics", None)
+        if isinstance(metrics, dict):
+            metrics["total_enqueue_attempts"] = metrics.get("total_enqueue_attempts", 0) + 1
+            metrics["total_enqueue_successes"] = metrics.get("total_enqueue_successes", 0) + 1
+        return True
+
+    def rollback_committed_admission(self, message: Any) -> bool:
+        """Remove one exact, not-yet-consumed admission during its sync commit.
+
+        Queue handoff calls this only before yielding back to the event loop,
+        while the just-enqueued object cannot yet have been consumed by the
+        drain task. Identity matching keeps a rollback from removing an equal
+        older message.
+        """
+        queue = getattr(self, "processing_queue", None)
+        entries = getattr(queue, "_queue", None)
+        if queue is None or entries is None:
+            return False
+        for index, current in enumerate(entries):
+            if current is message:
+                del entries[index]
+                queue.task_done()
+                queue._wakeup_next(queue._putters)
+                if isinstance(message, QueueHandoffInput):
+                    handoffs = getattr(self, "_queue_handoffs", None)
+                    if isinstance(handoffs, dict):
+                        owned = handoffs.get(message.attempt_id)
+                        if owned is not None and owned[0] is message:
+                            handoffs.pop(message.attempt_id, None)
+                return True
+        return False
+
+    def _has_unreserved_capacity(self) -> bool:
+        queue = getattr(self, "processing_queue", None)
+        max_size = getattr(self, "max_queue_size", 0)
+        reservations = getattr(self, "_admission_reservations", None)
+        reserved = len(reservations) if isinstance(reservations, dict) else 0
+        local_reserved = (
+            len(getattr(self, "_drained_batch_messages", ()))
+            if not getattr(self, "_drained_handoff_started", False)
+            else 0
+        )
+        return (
+            queue is not None
+            and isinstance(max_size, int)
+            and not isinstance(max_size, bool)
+            and queue.qsize() + reserved + local_reserved < max_size
+        )
+
+    def _end_queued_chat(self) -> None:
+        """End request-tagged queued work for cancellation that abandons the queue."""
+        queue = getattr(self, "processing_queue", None)
+        for item in [
+            i
+            for i in getattr(queue, "_queue", ())
+            if (
+                isinstance(i, TaggedInput)
+                and not isinstance(i, QueueHandoffInput)
+            )
+            or (isinstance(i, QueuedInput) and bool(i.request_ids))
+        ]:
             self._end_queued(item)
+
+    def has_queued_queue_handoffs(self) -> bool:
+        """Whether a not-yet-started daemon handoff needs a QP drain."""
+        queue = getattr(self, "processing_queue", None)
+        handoffs = getattr(self, "_queue_handoffs", {})
+        return bool(
+            isinstance(handoffs, dict)
+            and any(status == "queued" for _item, status in handoffs.values())
+        ) or bool(
+            queue is not None
+            and any(isinstance(item, QueueHandoffInput) for item in queue._queue)
+        )
+
+    def _finish_active_queue_handoffs(self) -> None:
+        """Release QP's in-flight custody records after a terminal drain path."""
+        attempts = getattr(self, "_active_turn_handoff_attempts", ())
+        handoffs = getattr(self, "_queue_handoffs", None)
+        if isinstance(handoffs, dict):
+            for attempt_id in attempts:
+                handoffs.pop(attempt_id, None)
+        self._active_turn_handoff_attempts = ()
+
+    def _restore_unstarted_queue_handoffs(
+        self, *, preserve_queued: bool = False
+    ) -> None:
+        """Restore unstarted local work when it must remain queued."""
+        if getattr(self, "_drained_handoff_started", False):
+            return
+        messages = tuple(getattr(self, "_drained_batch_messages", ()))
+        if not messages:
+            return
+        handoffs = tuple(
+            item for item in messages if isinstance(item, QueueHandoffInput)
+        )
+        if not handoffs and not preserve_queued:
+            return
+        queue = getattr(self, "processing_queue", None)
+        entries = getattr(queue, "_queue", None)
+        if queue is None or entries is None:
+            return
+        if not preserve_queued:
+            for item in messages:
+                if isinstance(item, TaggedInput) and not isinstance(item, QueueHandoffInput):
+                    self._schedule_end_dropped_persisted(
+                        item, "Stopped before this message ran. Send it again."
+                    )
+                elif isinstance(item, QueuedInput) and item.request_ids:
+                    self._schedule_end_dropped_persisted(
+                        item, "Stopped before this message ran. Send it again."
+                    )
+        # The messages were removed from this queue moments ago. Reinsert all
+        # queued work for Stop/force-send, or only protected handoffs and
+        # untagged voice input for other cancellation origins. Preserve order
+        # and keep them ahead of work admitted while the local batch was held.
+        retained = tuple(
+            item
+            for item in messages
+            if preserve_queued
+            or isinstance(item, QueueHandoffInput)
+            or (isinstance(item, QueuedInput) and not item.request_ids)
+        )
+        for item in reversed(retained):
+            if not any(current is item for current in entries):
+                entries.appendleft(item)
+            if isinstance(item, QueueHandoffInput):
+                handoffs_by_attempt = getattr(self, "_queue_handoffs", {})
+                if isinstance(handoffs_by_attempt, dict):
+                    handoffs_by_attempt[item.attempt_id] = (item, "queued")
+        self._drained_batch_messages = ()
+        self._drained_handoff_items = ()
+        self._drained_handoff_started = False
 
     def _end_queued(self, item: Any) -> None:
         """Take a chat message out of the queue unrun, and end its stream."""
@@ -763,7 +1254,9 @@ class QueueProcessor:
         queue._queue.remove(item)
         queue.task_done()
         queue._wakeup_next(queue._putters)
-        self._end_dropped(item, "Stopped before this message ran. Send it again.")
+        self._schedule_end_dropped_persisted(
+            item, "Stopped before this message ran. Send it again."
+        )
 
     def clear_remote_task_cancellation(self, generation: int) -> bool:
         """Clear an idle relay cancellation only if no newer request replaced it."""
@@ -790,7 +1283,10 @@ class QueueProcessor:
         self.last_progress_at = time.monotonic()
 
     def _resolve_text_tool_calls(
-        self, tools: List[Dict[str, Any]], has_native_tools: bool = False
+        self,
+        tools: List[Dict[str, Any]],
+        has_native_tools: bool = False,
+        reserved_tool_ids: List[str] | None = None,
     ) -> List[Dict[str, Any]]:
         """Send each call written as text (<tool_call>, <functions.NAME>) to
         the tool it names, with the names the native path uses.
@@ -804,17 +1300,23 @@ class QueueProcessor:
             if echoes:
                 logger.info("Not running %d text-written call(s) beside native calls", len(echoes))
                 tools = [tool for tool in tools if not is_text_written_call(tool)]
-        if not any(tool.get("type") == "mcp_tool" for tool in tools):
-            return tools
-        mcp = getattr(self._native_tools_handler, "mcp_integration", None)
-        mcp_names = set(getattr(mcp, "tool_registry", None) or {})
-        plugin_names = set(getattr(self.tool_executor, "plugin_handlers", None) or {})
-        return [
-            resolve_text_tool_call(
-                tool, mcp_tool_names=mcp_names, plugin_handler_names=plugin_names
+        if any(tool.get("type") == "mcp_tool" for tool in tools):
+            mcp = getattr(self._native_tools_handler, "mcp_integration", None)
+            mcp_names = set(getattr(mcp, "tool_registry", None) or {})
+            plugin_names = set(
+                getattr(self.tool_executor, "plugin_handlers", None) or {}
             )
-            for tool in tools
-        ]
+            tools = [
+                resolve_text_tool_call(
+                    tool,
+                    mcp_tool_names=mcp_names,
+                    plugin_handler_names=plugin_names,
+                )
+                for tool in tools
+            ]
+        return _unique_xml_tool_call_ids(
+            self.conversation_history, tools, reserved_tool_ids
+        )
 
     def _drain_env_block(self) -> str:
         """Drain pending env events and render as an [env: N events] block.
@@ -935,16 +1437,20 @@ class QueueProcessor:
         """Enqueue message with overflow strategy.
 
         Returns True only when the message entered the queue and will run. False
-        means it never will: the strategy dropped it, or a Stop swept it while it
-        waited for room. Its stream has already ended, so callers must not report
-        it as accepted (#589).
+        means it never will: the strategy dropped it, or a Stop fenced it while
+        it waited for room. Its stream has already ended, so callers must not
+        report it as accepted (#589).
         """
+        self._track_native_stream_input(message)
         # Watchdog heartbeat: new work arriving is activity — keeps a session
         # that just received a message from being flagged as wedged.
         self.mark_progress()
         if isinstance(message, QueuedInput):
             # Voice admission must never acknowledge a message silently dropped
             # by an overflow strategy. Reject before modifying the queue.
+            if not self._has_unreserved_capacity():
+                await self._end_dropped_persisted(message)
+                raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
             return True
         self._queue_metrics["total_enqueue_attempts"] += 1
@@ -956,7 +1462,10 @@ class QueueProcessor:
 
         # Try immediate enqueue
         try:
+            if not self._has_unreserved_capacity():
+                raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
+            await self._publish_plugin_stream_input(message)
             self._queue_metrics["total_enqueue_successes"] += 1
             if self.task_config.queue.log_queue_events:
                 logger.debug("Message enqueued successfully")
@@ -974,11 +1483,13 @@ class QueueProcessor:
                 self._drop_newest_strategy()  # always raises: the new message is refused
                 admitted = False
             elif strategy == "block":
-                admitted = await self._block_strategy(message)
+                admitted = await self._block_strategy(
+                    message, cancellation_generation=generation
+                )
             else:
-                admitted = self._unknown_strategy(message)
+                admitted = await self._unknown_strategy(message)
         except RuntimeError:
-            self._end_dropped(message)  # refused: it never runs, so its stream ends now
+            await self._end_dropped_persisted(message)
             raise
         if not admitted:
             return False
@@ -989,9 +1500,258 @@ class QueueProcessor:
         ):
             # A Stop swept the queue while this waited for room: no drain runs it
             # until the next message, so it ends as the swept ones did.
-            self._end_queued(message)
+            await self._end_queued_persisted(message)
             return False
+        await self._publish_plugin_stream_input(message)
         return True
+
+    async def _publish_plugin_stream_input(self, item: Any) -> None:
+        """Publish a triggered plugin row only after its queue outcome is known."""
+        if (
+            not isinstance(item, TaggedInput)
+            or isinstance(item, QueueHandoffInput)
+            or item.stream_origin != "plugin"
+            or len(item.request_ids) != 1
+            or not isinstance(item.request_ids[0], str)
+            or not item.request_ids[0]
+            or not isinstance(item.stream_display_content, str)
+            or not item.stream_display_content.strip()
+        ):
+            return
+        request_id = item.request_ids[0]
+        published = getattr(self, "_published_plugin_stream_ids", None)
+        if not isinstance(published, set):
+            published = self._published_plugin_stream_ids = set()
+        if request_id in published:
+            return
+        pending_record = getattr(self, "_native_stream_inputs", {}).get(request_id)
+        logger_service = getattr(self, "conversation_logger", None)
+        update_metadata = getattr(
+            logger_service, "update_user_message_metadata", None
+        )
+        row_uuid = item.history_row_uuid
+        target_outcome = next(
+            (
+                message.metadata.get("chat_stream_outcome")
+                for message in getattr(self, "conversation_history", ())
+                if isinstance(getattr(message, "metadata", None), dict)
+                and message.metadata.get("chat_stream_pending_input_id")
+                == request_id
+                and message.metadata.get("chat_stream_outcome")
+                in {"completed", "failed", "cancelled"}
+            ),
+            None,
+        )
+        for message in getattr(self, "conversation_history", ()):
+            metadata = getattr(message, "metadata", None)
+            if (
+                not isinstance(metadata, dict)
+                or metadata.get("chat_stream_pending_input_id") != request_id
+            ):
+                continue
+            metadata.pop("chat_stream_pending_input_id", None)
+            metadata.update(
+                {
+                    "input_id": request_id,
+                    "request_id": request_id,
+                    "chat_stream_display_text": item.stream_display_content,
+                    "chat_stream_trigger_llm": True,
+                    "status": target_outcome or "queued",
+                }
+            )
+        published.add(request_id)
+        publish_semantic(
+            self.renderer,
+            "user_message",
+            role="user",
+            text=content_to_text(item.content),
+            request_id=request_id,
+            input_id=request_id,
+            chat_stream_trigger_llm=True,
+            display_text=item.stream_display_content,
+        )
+        if (
+            isinstance(pending_record, dict)
+            and pending_record.get("plugin_pending_admission") is True
+            and isinstance(row_uuid, str)
+            and row_uuid
+            and callable(update_metadata)
+        ):
+            updates = {
+                "input_id": request_id,
+                "request_id": request_id,
+                "chat_stream_display_text": item.stream_display_content,
+                "chat_stream_trigger_llm": True,
+            }
+            if target_outcome is not None:
+                updates["chat_stream_outcome"] = target_outcome
+                updates["status"] = target_outcome
+            else:
+                updates["status"] = "queued"
+            try:
+                persisted = await update_metadata(
+                    row_uuid,
+                    expected_metadata={
+                        "chat_stream_pending_input_id": request_id
+                    },
+                    updates=updates,
+                    remove_metadata_keys=("chat_stream_pending_input_id",),
+                )
+            except Exception:
+                logger.exception(
+                    "Could not persist plugin input admission %s", request_id
+                )
+            else:
+                if persisted is not True:
+                    logger.warning(
+                        "Plugin input admission row did not match %s", request_id
+                    )
+
+    def _track_native_stream_input(self, item: Any) -> None:
+        """Register a durable single-input row before overflow can end it."""
+        if not isinstance(item, (TaggedInput, QueuedInput)):
+            return
+        request_ids = item.request_ids
+        row_uuid = item.history_row_uuid
+        if (
+            len(request_ids) != 1
+            or not isinstance(request_ids[0], str)
+            or not request_ids[0]
+            or not isinstance(row_uuid, str)
+            or not row_uuid
+        ):
+            return
+        native_inputs = getattr(self, "_native_stream_inputs", None)
+        if not isinstance(native_inputs, dict):
+            native_inputs = self._native_stream_inputs = {}
+        native_inputs[request_ids[0]] = {
+            "history_row_uuid": row_uuid,
+            "content": deepcopy(
+                item.stream_display_content
+                if isinstance(item, TaggedInput)
+                and isinstance(item.stream_display_content, str)
+                else item.content
+            ),
+            "chat_stream_input_count": 1,
+            "plugin_pending_admission": (
+                isinstance(item, TaggedInput)
+                and item.stream_origin == "plugin"
+            ),
+        }
+
+    def _queued_plugin_input(self, request_id: str) -> TaggedInput | None:
+        """Find one exact plugin input still held by the native queue."""
+        queue = getattr(self, "processing_queue", None)
+        entries = getattr(queue, "_queue", None)
+        if entries is None:
+            return None
+        return next(
+            (
+                item
+                for item in entries
+                if isinstance(item, TaggedInput)
+                and not isinstance(item, QueueHandoffInput)
+                and item.stream_origin == "plugin"
+                and item.request_ids == (request_id,)
+            ),
+            None,
+        )
+
+    async def cancel_queued_plugin_input(self, request_id: str) -> bool:
+        """Cancel one exact, queued plugin input and persist its outcome."""
+        if not isinstance(request_id, str) or not request_id:
+            return False
+        item = self._queued_plugin_input(request_id)
+        if item is None:
+            return False
+        queue = self.processing_queue
+        queue._queue.remove(item)
+        queue.task_done()
+        queue._wakeup_next(queue._putters)
+        await self._persist_native_input_outcomes((request_id,), "cancelled")
+        return True
+
+    def prioritize_queued_plugin_input(self, request_id: str) -> bool:
+        """Move one exact input forward and reserve its isolated next batch."""
+        if not isinstance(request_id, str) or not request_id:
+            return False
+        forced_batch_id = getattr(self, "_forced_plugin_batch_request_id", None)
+        if forced_batch_id not in (None, request_id):
+            return False
+        item = self._queued_plugin_input(request_id)
+        if item is None:
+            return False
+        queue = self.processing_queue
+        entries = queue._queue
+        if entries[0] is item:
+            self._forced_plugin_batch_request_id = request_id
+            return True
+        entries.remove(item)
+        entries.appendleft(item)
+        self._forced_plugin_batch_request_id = request_id
+        return True
+
+    def clear_forced_plugin_batch(self, request_id: str) -> bool:
+        """Release an isolated batch reservation whose Send Now did not commit."""
+        if getattr(self, "_forced_plugin_batch_request_id", None) != request_id:
+            return False
+        self._forced_plugin_batch_request_id = None
+        return True
+
+    async def _end_dropped_persisted(
+        self,
+        item: Any,
+        why: str = "The agent's queue was full, so this message was dropped. Send it again.",
+    ) -> None:
+        """Persist a durable admission's outcome before publishing its end."""
+        request_ids = getattr(item, "request_ids", ())
+        if isinstance(request_ids, tuple) and request_ids:
+            await self._persist_native_input_outcomes(request_ids, "error")
+        await self._publish_plugin_stream_input(item)
+        self._end_dropped(item, why)
+
+    def _schedule_end_dropped_persisted(
+        self,
+        item: Any,
+        why: str = "The agent's queue was full, so this message was dropped. Send it again.",
+    ) -> None:
+        """Persist a sync cancellation's queued outcomes before its end event."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Preserve persist-before-end semantics for synchronous callers as
+            # well; there is no running app loop here to own the persistence task.
+            asyncio.run(self._end_dropped_persisted(item, why))
+            return
+
+        pending = getattr(self, "_queued_terminal_tasks", None)
+        if not isinstance(pending, set):
+            pending = self._queued_terminal_tasks = set()
+        task = loop.create_task(self._end_dropped_persisted(item, why))
+        pending.add(task)
+
+        def release_task(done: asyncio.Task) -> None:
+            pending.discard(done)
+            if done.cancelled():
+                return
+            error = done.exception()
+            if error is not None:
+                logger.error(
+                    "Could not persist queued input cancellation outcome",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        task.add_done_callback(release_task)
+
+    async def _end_queued_persisted(self, item: Any) -> None:
+        """Remove one queued item and persist its terminal outcome first."""
+        queue = self.processing_queue
+        queue._queue.remove(item)
+        queue.task_done()
+        queue._wakeup_next(queue._putters)
+        await self._end_dropped_persisted(
+            item, "Stopped before this message ran. Send it again."
+        )
 
     def _end_dropped(
         self,
@@ -1001,15 +1761,25 @@ class QueueProcessor:
         """A chat message that never runs: its stream ends, saying why (#551)."""
         if isinstance(item, TaggedInput):
             ids = list(item.request_ids)
-            publish_semantic(self.renderer, "error", request_ids=ids, message=why)
-            publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
+        elif isinstance(item, QueuedInput):
+            if not item.request_ids:
+                return
+            ids = list(item.request_ids)
+        else:
+            return
+        publish_semantic(self.renderer, "error", request_ids=ids, message=why)
+        publish_semantic(
+            self.renderer, "turn_complete", stop_reason="error", request_ids=ids
+        )
 
-    def _end_requests(self, why: str) -> None:
+    async def _end_requests(self, why: str) -> None:
         """A chain stopped short of its turn's completion still ends the requests
         it answers: their streams wait for one, and the next turn would name them."""
         if not self.active_request_ids:
             return
-        self._publish_ended(self.active_request_ids, why)
+        request_ids = self.active_request_ids
+        await self._persist_native_input_outcomes(request_ids, "error")
+        self._publish_ended(request_ids, why)
         self.active_request_ids = ()
         self._stamp_turn(None)
 
@@ -1020,8 +1790,6 @@ class QueueProcessor:
 
     async def _drop_oldest_strategy(self, message: MessageContent) -> bool:
         """Drop oldest task to make room. False when a rival took the freed slot (#589)."""
-        if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
-            raise RuntimeError("Queue is full; cannot discard an admitted voice request")
         if self.task_config.queue.log_queue_events:
             logger.debug("Applying drop_oldest strategy")
 
@@ -1029,7 +1797,7 @@ class QueueProcessor:
         # Note: We need access to task_manager metadata here
         # For now, we'll drop from queue directly
         try:
-            self._end_dropped(self.processing_queue.get_nowait())
+            await self._end_dropped_persisted(self._pop_oldest_droppable())
             self._queue_metrics["drop_oldest_count"] += 1
             if self.task_config.queue.log_queue_events:
                 logger.info("Dropped oldest message from queue")
@@ -1039,13 +1807,31 @@ class QueueProcessor:
         await asyncio.sleep(0.01)
 
         try:
+            if not self._has_unreserved_capacity():
+                raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
             return True
         except asyncio.QueueFull:
             self.dropped_messages += 1
-            self._end_dropped(message)
+            await self._end_dropped_persisted(message)
             return False
+
+    def _pop_oldest_droppable(self) -> Any:
+        """Remove the oldest ordinary queue item, skipping protected handoffs."""
+        queue = self.processing_queue
+        for item in tuple(queue._queue):
+            if isinstance(item, QueuedInput):
+                raise RuntimeError(
+                    "Queue is full; cannot discard an admitted voice request"
+                )
+            if isinstance(item, QueueHandoffInput):
+                continue
+            queue._queue.remove(item)
+            queue.task_done()
+            queue._wakeup_next(queue._putters)
+            return item
+        raise asyncio.QueueEmpty
 
     def _drop_newest_strategy(self) -> None:
         """Raise error when queue is full."""
@@ -1056,8 +1842,10 @@ class QueueProcessor:
             f"Queue is full (max size: {self.max_queue_size}) and overflow strategy is 'drop_newest'"
         )
 
-    async def _block_strategy(self, message: MessageContent) -> bool:
-        """Block until queue has space or timeout. False when the timeout dropped it (#589)."""
+    async def _block_strategy(
+        self, message: MessageContent, *, cancellation_generation: int
+    ) -> bool:
+        """Block until space, timeout, or Stop fences the pending admission."""
         self._queue_metrics["block_count"] += 1
         if self.task_config.queue.log_queue_events:
             logger.debug(
@@ -1068,7 +1856,12 @@ class QueueProcessor:
         poll_interval = 0.01
 
         while True:
-            if self.processing_queue.qsize() < self.max_queue_size:
+            if getattr(self, "_cancel_generation", 0) != cancellation_generation:
+                await self._end_dropped_persisted(
+                    message, "Stopped before this message ran. Send it again."
+                )
+                return False
+            if self._has_unreserved_capacity():
                 try:
                     self.processing_queue.put_nowait(message)
                     self._queue_metrics["total_enqueue_successes"] += 1
@@ -1087,26 +1880,26 @@ class QueueProcessor:
                         f"Block timeout after {elapsed:.2f}s, dropping message"
                     )
                 self.dropped_messages += 1
-                self._end_dropped(message)
+                await self._end_dropped_persisted(message)
                 return False
 
             await asyncio.sleep(poll_interval)
 
-    def _unknown_strategy(self, message: MessageContent) -> bool:
+    async def _unknown_strategy(self, message: MessageContent) -> bool:
         """Handle unknown overflow strategy."""
-        if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
-            raise RuntimeError("Queue is full; cannot discard an admitted voice request")
         logger.warning(
             f"Unknown overflow strategy '{self.task_config.queue.overflow_strategy}', defaulting to drop_oldest"
         )
         try:
-            self._end_dropped(self.processing_queue.get_nowait())
+            await self._end_dropped_persisted(self._pop_oldest_droppable())
+            if not self._has_unreserved_capacity():
+                raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
             return True
-        except asyncio.QueueEmpty:
+        except (asyncio.QueueEmpty, asyncio.QueueFull):
             self.dropped_messages += 1
-            self._end_dropped(message)
+            await self._end_dropped_persisted(message)
             return False
 
     def note_chain_end(self) -> None:
@@ -1166,6 +1959,66 @@ class QueueProcessor:
         self.processing_start_time = time.time()
         logger.info("Started processing queue")
 
+        native_turn_id: str | None = None
+        native_turn_context_tokens: list[Any] = []
+
+        def clear_native_turn_context() -> None:
+            nonlocal native_turn_id
+            while native_turn_context_tokens:
+                token = native_turn_context_tokens.pop()
+                try:
+                    current_turn.reset(token)
+                except (RuntimeError, ValueError):
+                    pass
+            native_turn_id = None
+
+        def start_native_input_turn(messages: list[Any]) -> None:
+            nonlocal native_turn_id
+            request_ids = batch_request_ids(messages)
+            if not request_ids:
+                return
+
+            context = current_turn.get()
+            origin = context.get("origin")
+            goal_owned = isinstance(origin, dict) and origin.get("kind") == "goal"
+            acp_owned = (
+                context.get("input_source") == "acp_client"
+                or "_client_completion" in context
+            )
+            if goal_owned or acp_owned:
+                return
+
+            if native_turn_id is None:
+                inherited_turn_id = context.get("turn_id")
+                native_turn_id = (
+                    str(inherited_turn_id)
+                    if isinstance(inherited_turn_id, (str, int))
+                    and not isinstance(inherited_turn_id, bool)
+                    and str(inherited_turn_id)
+                    else f"native-{uuid.uuid4().hex}"
+                )
+
+            request_id = request_ids[0]
+            native_turn_context_tokens.append(
+                current_turn.set(
+                    {
+                        **context,
+                        "turn_id": native_turn_id,
+                        "request_id": request_id,
+                        "request_ids": list(request_ids),
+                        "input_source": "native",
+                    }
+                )
+            )
+            publish_semantic(
+                self.renderer,
+                "turn_start",
+                request_id=request_id,
+                request_ids=list(request_ids),
+                turn_id=native_turn_id,
+                input_source="native",
+            )
+
         try:
             # Outer loop: re-check queue after each conversation completes.
             # Messages can arrive (user typing, hub peers) while LOOP 2
@@ -1176,12 +2029,67 @@ class QueueProcessor:
                 while not self.processing_queue.empty() and not self.cancel_processing:
                     try:
                         messages = []
-                        while not self.processing_queue.empty():
-                            message = await self.processing_queue.get()
-                            messages.append(message)
+                        forced_request_id = getattr(
+                            self, "_forced_plugin_batch_request_id", None
+                        )
+                        if isinstance(forced_request_id, str):
+                            selected = self._queued_plugin_input(forced_request_id)
+                            self._forced_plugin_batch_request_id = None
+                            if selected is not None:
+                                self.processing_queue._queue.remove(selected)
+                                self.processing_queue._wakeup_next(
+                                    self.processing_queue._putters
+                                )
+                                messages.append(selected)
+
+                        if not messages:
+                            while not self.processing_queue.empty():
+                                message = await self.processing_queue.get()
+                                messages.append(message)
+                                self._drained_batch_messages = tuple(messages)
+                                self._drained_handoff_items = tuple(
+                                    item
+                                    for item in messages
+                                    if isinstance(item, QueueHandoffInput)
+                                )
+                                self._drained_handoff_started = False
+
+                        if messages:
+                            self._drained_batch_messages = tuple(messages)
+                            self._drained_handoff_items = tuple(
+                                item
+                                for item in messages
+                                if isinstance(item, QueueHandoffInput)
+                            )
+                            self._drained_handoff_started = False
 
                         if messages and not self.cancel_processing:
-                            await process_message_batch_fn(messages)
+                            attempts = tuple(
+                                item.attempt_id
+                                for item in messages
+                                if isinstance(item, QueueHandoffInput)
+                            )
+                            handoffs = getattr(self, "_queue_handoffs", {})
+                            if isinstance(handoffs, dict):
+                                for attempt_id in attempts:
+                                    owned = handoffs.get(attempt_id)
+                                    if owned is not None:
+                                        handoffs[attempt_id] = (owned[0], "started")
+                            self._drained_handoff_started = True
+                            self._active_turn_handoff_attempts = attempts
+                            try:
+                                start_native_input_turn(messages)
+                                await process_message_batch_fn(messages)
+                            finally:
+                                self._drained_batch_messages = ()
+                                self._drained_handoff_items = ()
+                                self._drained_handoff_started = False
+                        elif messages:
+                            # Cancellation while the messages were moved from
+                            # the deque but before the batch started is a
+                            # proven no-start. Return only protected handoffs;
+                            # ordinary tagged streams are ended by Stop.
+                            self._restore_unstarted_queue_handoffs()
 
                     except Exception as e:
                         logger.error(f"Queue processing error: {e}")
@@ -1243,7 +2151,7 @@ class QueueProcessor:
                         )
                         self.message_display_service.display_error_message(why)
                         self.turn_completed = True
-                        self._end_requests(why)
+                        await self._end_requests(why)
                         break
 
                     try:
@@ -1266,7 +2174,7 @@ class QueueProcessor:
                             why = f"Stuck loop detected: same tool error repeated {stuck.count} times. Breaking."
                             self.message_display_service.display_error_message(why)
                             self.turn_completed = True
-                            self._end_requests(why)
+                            await self._end_requests(why)
                             break
 
                     except Exception as e:
@@ -1280,7 +2188,7 @@ class QueueProcessor:
                             f"conversation failed on turn {turn_count}: {e}"
                         )
                         self.turn_completed = True
-                        self._end_requests(self.last_turn_error)
+                        await self._end_requests(self.last_turn_error)
                         break
 
                 # Done, cancelled or cut off by new input: no round of it is left.
@@ -1294,7 +2202,12 @@ class QueueProcessor:
                     async with self._turn_lock:
                         await self._run_after_turn()
 
+                if self.turn_completed or self.cancel_processing:
+                    clear_native_turn_context()
+
                 # Nothing left -- exit outer loop
+                if self.turn_completed or self.cancel_processing:
+                    self._finish_active_queue_handoffs()
                 if self.processing_queue.empty() or self.cancel_processing:
                     break
 
@@ -1303,6 +2216,11 @@ class QueueProcessor:
                 logger.info("Re-entering queue drain after mid-turn message arrival")
 
         finally:
+            clear_native_turn_context()
+            self._finish_active_queue_handoffs()
+            self._drained_batch_messages = ()
+            self._drained_handoff_items = ()
+            self._drained_handoff_started = False
             self.is_processing = False  # ends the chain (note_chain_end)
             self._open_voice_turn = None
             if self._after_turn:  # a drain that died: its turn's cut lands once the lock is free
@@ -1361,6 +2279,8 @@ class QueueProcessor:
         messages: List[MessageContent],
         current_parent_uuid: str,
         request_ids: tuple[str, ...] | None = None,
+        stream_inputs: tuple[dict[str, Any], ...] | None = None,
+        stream_input_count: int | None = None,
     ) -> str:
         """Process a batch of messages.
 
@@ -1369,6 +2289,11 @@ class QueueProcessor:
             current_parent_uuid: Current parent UUID for message threading
             request_ids: What the batch answers, when the caller merged its
                 TaggedInputs away; else read from ``messages``
+            stream_inputs: Original input content and durable row identities,
+                captured before a caller merges HUD context into the batch.
+            stream_input_count: Number of original batch items before a
+                caller merges or combines them. This is persisted as evidence
+                for legacy transcript image attribution.
 
         Returns:
             Updated parent UUID
@@ -1388,6 +2313,61 @@ class QueueProcessor:
         # Taken up once this batch's turn holds the lock (#551): a turn still
         # running clears what it answered as it ends, never these.
         batch_ids = batch_request_ids(messages) if request_ids is None else request_ids
+        if (
+            not isinstance(stream_input_count, int)
+            or isinstance(stream_input_count, bool)
+            or stream_input_count < 1
+        ):
+            stream_input_count = max(
+                len(messages), len(batch_ids), len(stream_inputs or ())
+            )
+        if stream_inputs is None:
+            stream_inputs = tuple(
+                {
+                    "request_id": request_id,
+                    "history_row_uuid": getattr(item, "history_row_uuid", None),
+                    "content": deepcopy(
+                        item.stream_display_content
+                        if isinstance(item, TaggedInput)
+                        and isinstance(item.stream_display_content, str)
+                        else item.content
+                    ),
+                }
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for request_id in item.request_ids
+            )
+        native_stream_inputs = [
+            {
+                "request_id": record.get("request_id"),
+                "content": deepcopy(record.get("content")),
+            }
+            for record in stream_inputs
+            if isinstance(record, dict)
+            and isinstance(record.get("request_id"), str)
+            and record.get("request_id")
+            and "content" in record
+        ]
+        if not hasattr(self, "_native_stream_inputs"):
+            self._native_stream_inputs = {}
+        if not hasattr(self, "_native_stream_messages"):
+            self._native_stream_messages = {}
+        if not hasattr(self, "_persisted_native_stream_ids"):
+            self._persisted_native_stream_ids = set()
+        else:
+            self._persisted_native_stream_ids.clear()
+        for record in stream_inputs:
+            if not isinstance(record, dict):
+                continue
+            input_id = record.get("request_id")
+            row_uuid = record.get("history_row_uuid")
+            if not isinstance(input_id, str) or not input_id:
+                continue
+            self._native_stream_inputs[input_id] = {
+                "history_row_uuid": row_uuid if isinstance(row_uuid, str) else None,
+                "content": deepcopy(record.get("content")),
+                "chat_stream_input_count": stream_input_count,
+            }
         try:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
             self.active_voice = voice_inputs[-1].voice if voice_inputs else None
@@ -1459,31 +2439,207 @@ class QueueProcessor:
             if operator_inputs:
                 metadata["operator_inputs"] = operator_inputs
 
+            # These explicit empty fields fence DisplayTap's current-turn
+            # defaults for untracked TUI input. Without them, an id-less
+            # message can inherit the previous batch's request ID and be
+            # rendered as an update to that input row.
+            metadata["request_id"] = batch_ids[0] if batch_ids else ""
+            metadata["request_ids"] = list(batch_ids)
+            if stream_input_count > 0:
+                metadata["chat_stream_input_count"] = stream_input_count
+            if native_stream_inputs:
+                metadata["chat_stream_inputs"] = native_stream_inputs
+            active_turn_id = current_turn.get().get("turn_id")
+            if (
+                isinstance(active_turn_id, (str, int))
+                and not isinstance(active_turn_id, bool)
+                and str(active_turn_id)
+            ):
+                metadata["turn_id"] = str(active_turn_id)
+
             # Add user message to conversation history
+            stream_message = ConversationMessage(
+                role="user", content=combined_message, metadata=metadata
+            )
+            for record in native_stream_inputs:
+                self._native_stream_messages.setdefault(
+                    record["request_id"], []
+                ).append(stream_message)
             self._add_message_fn(
-                ConversationMessage(role="user", content=combined_message, metadata=metadata),
+                stream_message,
                 parent_uuid=current_parent_uuid,
             )
         except Exception as exc:
             # No turn took its requests up: they end here, or their streams
             # wait for a completion that never comes (#551).
             if batch_ids:
+                await self._persist_native_input_outcomes(batch_ids, "error")
                 self._publish_ended(batch_ids, str(exc) or type(exc).__name__)
             raise
 
         # Execute LLM turn with user message
-        if self.active_origin_context is not None:
-            return await self._execute_llm_turn(
-                user_message_provided=True,
-                current_parent_uuid=current_parent_uuid,
-                execution_context=self.active_origin_context,
-                request_ids=batch_ids,
+        try:
+            if self.active_origin_context is not None:
+                result = await self._execute_llm_turn(
+                    user_message_provided=True,
+                    current_parent_uuid=current_parent_uuid,
+                    execution_context=self.active_origin_context,
+                    request_ids=batch_ids,
+                )
+            else:
+                result = await self._execute_llm_turn(
+                    user_message_provided=True,
+                    current_parent_uuid=current_parent_uuid,
+                    request_ids=batch_ids,
+                )
+        finally:
+            # The real turn path persists before publishing turn_complete.
+            # This fallback also covers injected/test turn drivers that do not
+            # own the terminal event lifecycle.
+            is_terminal = bool(
+                getattr(self, "turn_completed", False)
+                or getattr(self, "_cancel_processing", False)
+                or getattr(self, "last_turn_error", None)
             )
-        return await self._execute_llm_turn(
-            user_message_provided=True,
-            current_parent_uuid=current_parent_uuid,
-            request_ids=batch_ids,
-        )
+            pending_ids = tuple(
+                input_id
+                for input_id in batch_ids
+                if input_id not in self._persisted_native_stream_ids
+            )
+            if is_terminal and pending_ids:
+                await self._persist_native_input_outcomes(
+                    pending_ids, self._terminal_stop_reason()
+                )
+            if is_terminal:
+                for input_id in batch_ids:
+                    getattr(self, "_native_stream_inputs", {}).pop(input_id, None)
+                    getattr(self, "_native_stream_messages", {}).pop(input_id, None)
+                    self._persisted_native_stream_ids.discard(input_id)
+        return result
+
+    async def _persist_native_input_outcomes(
+        self, request_ids: tuple[str, ...], stop_reason: str
+    ) -> None:
+        """Persist native input outcomes on each exact admission row.
+
+        The per-input rows are written before the terminal event is published,
+        so a reconnect or daemon restart observes the same result as a live
+        subscriber. Combined turn history is updated too for the live
+        projection.
+        """
+        outcome = outcome_for_stop_reason(stop_reason)
+        turn_id = current_turn.get().get("turn_id")
+        updates_base: dict[str, Any] = {"chat_stream_outcome": outcome}
+        if isinstance(turn_id, (str, int)) and not isinstance(turn_id, bool) and str(turn_id):
+            updates_base["turn_id"] = str(turn_id)
+
+        for input_id in request_ids:
+            for message in getattr(self, "_native_stream_messages", {}).get(
+                input_id, ()
+            ):
+                message.metadata["chat_stream_outcome"] = outcome
+                if "turn_id" in updates_base:
+                    message.metadata["turn_id"] = updates_base["turn_id"]
+            for message in getattr(self, "conversation_history", ()):
+                metadata = getattr(message, "metadata", None)
+                if (
+                    not isinstance(metadata, dict)
+                    or metadata.get("chat_stream_pending_input_id") != input_id
+                ):
+                    continue
+                metadata["chat_stream_outcome"] = outcome
+                if "turn_id" in updates_base:
+                    metadata["turn_id"] = updates_base["turn_id"]
+
+        logger_service = getattr(self, "conversation_logger", None)
+        update_metadata = getattr(logger_service, "update_user_message_metadata", None)
+        for input_id in request_ids:
+            record = getattr(self, "_native_stream_inputs", {}).get(input_id)
+            if not isinstance(record, dict):
+                continue
+            row_uuid = record.get("history_row_uuid")
+            if isinstance(row_uuid, str) and row_uuid and callable(update_metadata):
+                updates = dict(updates_base)
+                input_count = record.get("chat_stream_input_count")
+                if (
+                    isinstance(input_count, int)
+                    and not isinstance(input_count, bool)
+                    and input_count > 0
+                ):
+                    updates["chat_stream_input_count"] = input_count
+                content = record.get("content")
+                has_managed_upload = isinstance(content, list) and any(
+                    isinstance(part, dict)
+                    and part.get("type") == "image"
+                    and isinstance(part.get("source"), dict)
+                    and part["source"].get("kind") == "managed_upload"
+                    for part in content
+                )
+                # Native admission writes durable managed media refs before
+                # queueing. Keep those exact refs when the terminal outcome is
+                # persisted; regenerating this metadata from process-local IDs
+                # would erase the image from history after the turn.
+                if not has_managed_upload:
+                    parts = _native_chat_stream_parts(content)
+                    if parts:
+                        updates["chat_stream_parts"] = parts
+                plugin_pending = record.get("plugin_pending_admission") is True
+                expected_metadata = {"request_id": input_id}
+                if plugin_pending:
+                    expected_metadata = {
+                        "chat_stream_pending_input_id": input_id
+                    }
+                    updates.update(
+                        {
+                            "input_id": input_id,
+                            "request_id": input_id,
+                            "chat_stream_display_text": content_to_text(content),
+                            "chat_stream_trigger_llm": True,
+                        }
+                    )
+                expected_options = [expected_metadata]
+                if plugin_pending:
+                    # Admission may already have atomically retired the
+                    # private pending marker before this terminal update
+                    # acquired the JSONL lock. Accept either exact phase.
+                    expected_options.append({"request_id": input_id})
+                try:
+                    persisted = False
+                    for expected in expected_options:
+                        persisted = await update_metadata(
+                            row_uuid,
+                            expected_metadata=expected,
+                            updates=updates,
+                            remove_metadata_keys=(
+                                ("chat_stream_pending_input_id",)
+                                if plugin_pending
+                                else ()
+                            ),
+                        )
+                        if persisted:
+                            break
+                except Exception:
+                    logger.exception(
+                        "Could not persist native input outcome for %s", input_id
+                    )
+                else:
+                    if persisted is not True:
+                        logger.warning(
+                            "Native input outcome row did not match admission %s",
+                            input_id,
+                        )
+                    else:
+                        getattr(self, "_persisted_native_stream_ids", set()).add(
+                            input_id
+                        )
+                        getattr(self, "_native_stream_inputs", {}).pop(input_id, None)
+                        getattr(self, "_native_stream_messages", {}).pop(input_id, None)
+            else:
+                # No durable admission row exists, but the live combined row
+                # was still stamped above and there is nothing to retry.
+                getattr(self, "_persisted_native_stream_ids", set()).add(input_id)
+                getattr(self, "_native_stream_inputs", {}).pop(input_id, None)
+                getattr(self, "_native_stream_messages", {}).pop(input_id, None)
 
     async def _goal_scoped_call_llm(self, **kwargs):
         # Only the owning queue's provider calls may use goal image parts;
@@ -1591,8 +2747,14 @@ class QueueProcessor:
             # queued clears its own stamp as it ends, never this one's. A chain
             # this batch cuts into still owes its requests their completion, so
             # this turn's names them too (#551).
-            self.active_request_ids = tuple(dict.fromkeys((*self.active_request_ids, *request_ids)))
+            self.active_request_ids = tuple(
+                dict.fromkeys((*self.active_request_ids, *request_ids))
+            )
             self._stamp_turn(_voice_turn_id(execution_context), self.active_request_ids)
+            if not user_message_provided:
+                publish_semantic(
+                    getattr(self, "renderer", None), "reply_segment_start"
+                )
             try:
                 if execution_context is not None:
                     parent_uuid = await self._execute_llm_turn_inner(
@@ -1625,9 +2787,13 @@ class QueueProcessor:
                             code=getattr(self, "last_turn_error_code", None),
                             retryable=False,
                         )
+                    stop_reason = self._terminal_stop_reason()
+                    await self._persist_native_input_outcomes(
+                        self.active_request_ids, stop_reason
+                    )
                     publish_semantic(
                         self.renderer, "turn_complete",
-                        stop_reason="error" if self.last_turn_error else "end_turn",
+                        stop_reason=stop_reason,
                     )
                     self.active_request_ids = ()
                     self._stamp_turn(None)
@@ -1941,6 +3107,8 @@ class QueueProcessor:
                             "[system] Your response was truncated due to output "
                             "token limits. Continue exactly where you left off."
                         ),
+                        # For the model only: the chat never shows it as the user's message.
+                        metadata={"hidden": True},
                     )
                 )
                 continuation_msg_count += 2
@@ -2155,7 +3323,17 @@ class QueueProcessor:
             parsed_response = self.response_parser.parse_response(response)
             clean_response = parsed_response["content"]
             parsed_tools = self.response_parser.get_all_tools(parsed_response)
-            all_tools = self._resolve_text_tool_calls(parsed_tools, has_native_tools)
+            reserved_tool_ids = [
+                tool_id
+                for tool_call in raw_tool_calls
+                if isinstance((tool_id := getattr(tool_call, "id", None)), str)
+                and tool_id
+            ]
+            all_tools = self._resolve_text_tool_calls(
+                parsed_tools,
+                has_native_tools,
+                reserved_tool_ids=reserved_tool_ids,
+            )
             # Echoes left out of the run still leave the shown text clean.
             hid_text_calls = len(all_tools) < len(parsed_tools)
 
@@ -2447,6 +3625,12 @@ class QueueProcessor:
                     thinking_content=thinking_list,
                     tool_calls=tool_call_entries,
                     provider_reasoning=_last_provider_reasoning(self.api_service),
+                    display_content=(
+                        clean_response
+                        if clean_response != response or all_tools or hid_text_calls
+                        else None
+                    ),
+                    turn_id=self._turn_history_metadata().get("turn_id"),
                     voice_turn_id=self._voice_turn_metadata().get("voice_turn_id"),
                 )
             except Exception as exc:
@@ -2465,6 +3649,7 @@ class QueueProcessor:
                     thinking_duration,
                     _last_provider_reasoning(self.api_service),
                 )
+                assistant_metadata.update(self._turn_history_metadata())
                 if raw_tool_calls:
                     assistant_metadata["tool_calls"] = [
                         {
@@ -2596,6 +3781,7 @@ class QueueProcessor:
                     thinking_duration,
                     _last_provider_reasoning(self.api_service),
                 )
+                xml_metadata.update(self._turn_history_metadata())
                 xml_metadata.update(
                     _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
@@ -2677,7 +3863,11 @@ class QueueProcessor:
             # turn completion happens when the model returns no tool calls, or
             # when a tool ended the turn on purpose (hub_msg wait="true"): the
             # results wait in history and the reply starts the next turn.
-            if _tool_results_requiring_followup(all_results):
+            if self.cancel_processing:
+                # A Stop or Send Now landed while the tools ran: the cut-off
+                # tool still returns a result, but no model call follows it.
+                self.turn_completed = True
+            elif _tool_results_requiring_followup(all_results):
                 self.turn_completed = False
             elif all_results:
                 self.turn_completed = True
@@ -2773,6 +3963,10 @@ class QueueProcessor:
             revoke_voice_admission_context(self.active_origin_context)
             self.active_origin_context = None
             self._error_retried = False
+            stop_reason = self._terminal_stop_reason()
+            await self._persist_native_input_outcomes(
+                self.active_request_ids, stop_reason
+            )
             self.active_request_ids = ()  # stamped already; a later chain answers none
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
@@ -2791,8 +3985,7 @@ class QueueProcessor:
                 input_tokens=self.session_stats.get("input_tokens", 0),
                 output_tokens=self.session_stats.get("output_tokens", 0),
                 tool_calls=self.tool_executor.take_executed_count(),
-                stop_reason=getattr(self.api_service, "last_stop_reason", "")
-                or ("error" if self.last_turn_error else "end_turn"),
+                stop_reason=stop_reason,
             )
             self._stamp_turn(None)
 
@@ -2825,6 +4018,28 @@ class QueueProcessor:
         it to the part that was heard (LocalStateService.record_interrupted_voice_reply)."""
         turn_id = _voice_turn_id(self.active_origin_context)
         return {"voice_turn_id": turn_id} if turn_id else {}
+
+    @staticmethod
+    def _turn_history_metadata() -> dict[str, Any]:
+        """Keep durable native rows attached to the turn that streamed them."""
+        turn_id = current_turn.get().get("turn_id")
+        if isinstance(turn_id, (str, int)) and not isinstance(turn_id, bool) and str(turn_id):
+            return {"turn_id": str(turn_id)}
+        return {}
+
+    def _terminal_stop_reason(self) -> str:
+        """Separate a user Stop from a provider's normal `stop` finish reason."""
+        if getattr(self, "_cancel_processing", False):
+            return "cancelled"
+        if getattr(self, "last_turn_error", None):
+            return "error"
+        reason = str(
+            getattr(getattr(self, "api_service", None), "last_stop_reason", "")
+            or ""
+        ).strip().lower()
+        if reason in {"", "stop", "tool_calls"}:
+            return "end_turn"
+        return reason
 
     def after_turn(self, voice_turn: str, work: Callable[[], Awaitable[Any]]) -> None:
         """Run `work` under the turn lock once `voice_turn` has no round left to run.
@@ -2871,11 +4086,14 @@ class QueueProcessor:
         if not isinstance(text, str) or not text.strip():
             return
         voice = self._voice_turn_metadata()
+        turn = self._turn_history_metadata()
         # History first: a second cancel can land on the await below, and the
         # engine reads history when turn_complete goes out.
         self._add_message_fn(
             ConversationMessage(
-                role="assistant", content=text, metadata={"interrupted": True, **voice}
+                role="assistant",
+                content=text,
+                metadata={"interrupted": True, **turn, **voice},
             ),
             parent_uuid=parent_uuid,
         )
@@ -2884,6 +4102,7 @@ class QueueProcessor:
                 text,
                 parent_uuid=parent_uuid,
                 model=getattr(self.api_service, "model", None),
+                turn_id=turn.get("turn_id"),
                 voice_turn_id=voice.get("voice_turn_id"),
             )
         except Exception:

@@ -23,7 +23,7 @@ status: active
 - [Agents](features/agents.md) - Agent system, bundles, custom agents
 - [ACP Agents](features/acp.md) - Harness agents and Kollab as an ACP client target; qualification pending
 - [Attach Mode](features/attach-mode.md) - Daemons, RPC state, contexts, and reattach
-- [Tools](features/tools.md) - Tool calling, built-in tools, custom tools
+- [Tools](features/tools/overview.md) - Tool calling, built-in tools, custom tools
 - [Tasks](features/tasks.md) - Durable task ledger, checkpoints, snoozes, and QA
 - [Tool-output Artifacts](specs/tool-output-artifacts.md) - Context budgets and lossless spill files
 - [MCP](features/mcp.md) - Model Context Protocol integration

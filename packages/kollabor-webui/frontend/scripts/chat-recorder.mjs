@@ -1,8 +1,8 @@
 // Frame-by-frame recorder for the web UI chat.
 //
 // Drives a real page against a running engine and a real agent, samples the
-// chat on every animation frame inside the page, logs each /assistant, /events
-// and /history exchange on the same clock, records a video, and writes one
+// chat on every animation frame inside the page, logs each /stream, /inputs,
+// /events and /history exchange on the same clock, records a video, and writes one
 // timeline per flow with the defects it saw:
 //
 //   BLANK         the chat had rows and showed none
@@ -13,37 +13,52 @@
 //   DUP-TOOLS     the chat draws more tool calls than the turn has started
 //   REPLY-GONE    a reply that was on screen left it
 //   PICKER        an "N / M" branch switcher shows
-//   ERROR-BOX     an error box shows (expected for a moment in the cut flows)
+//   ERROR-BOX     an error box remains at the end (temporary cut errors are logged)
 //   ANCHOR-MOVED  the row a reader scrolled to moved, or ANCHOR-LOST: was rebuilt
 //
 // Use it on any change to the chat's history sync, live turn or runtime, before
 // calling the change done. Run after `npm ci`, from this folder's parent:
 //
-//   node scripts/chat-recorder.mjs <flow|all> --agent <name> [options]
+//   node scripts/chat-recorder.mjs <flow|all> --agent <identity> [options]
+//   node scripts/chat-recorder.mjs <flow|all> --runtime-matrix native=<identity>,codex-cli=<identity>,claude-code=<identity> [options]
 //
 //   --web <url>          the web UI (default http://127.0.0.1:8080)
 //   --engine <url>       the engine the page talks to (default http://127.0.0.1:7433)
 //   --token-file <path>  the engine's token file (default ~/.kollab/engine.token)
-//   --agent <name>       the agent's name as the sidebar shows it (required)
+//   --agent <identity>   one agent identity, as the sidebar shows it
+//   --runtime-matrix ... runs each selected flow on all three named runtimes
 //   --session <id>       its session id (default: the session with that identity)
 //   --label <text>       makes this run's messages unique (default: the time)
 //   --out <dir>          where the recordings go (default ./chat-recordings)
 //   --headed             show the browser
 //
 // Flows: plain, tools, busy, cut, cuterr, cutwatch, other, watch, watchsend,
-// read, three, reload. `all` runs each in turn. The agent runs real turns with
-// its model and needs a terminal tool it may run without asking (`sleep`).
+// read, three, reload, prompt-other, compact, goal-reload, hub-note. `all`
+// runs each in turn. The agent runs real turns with its model and needs a
+// terminal tool it may run without asking (`sleep`); prompt-other temporarily
+// changes approval mode and restores it. hub-note needs a hub-reachable agent.
 // Use a throwaway agent in a scratch folder, on a side engine when the change
 // touches the engine. Exits 1 when a flow shows a defect.
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  analyzeChatFrames,
+  CHAT_RECORDER_FLOWS,
+  classifyChatRuntime,
+  chatRecorderStreamSuffix,
+  captureRecorderFailure,
+  findPromptStatusUpdate,
+  hasRunningTurnWithInputs,
+  hasMatchingGoalTurn,
+  isCompactionComplete,
+  parseRuntimeMatrix,
+  requireRecorderApprovalMode,
+} from "./chat-recorder-analysis.mjs";
 
 const require = createRequire(import.meta.url);
-const { chromium } = require(process.env.PLAYWRIGHT_CORE_PATH ?? "playwright-core");
 
-const FLOWS = ["plain", "tools", "busy", "cut", "cuterr", "cutwatch", "other", "watch", "watchsend", "read", "three", "reload"];
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
   const at = args.indexOf(`--${name}`);
@@ -51,8 +66,23 @@ const option = (name, fallback) => {
 };
 const wanted = args[0] && !args[0].startsWith("--") ? args[0] : "";
 const AGENT = option("agent", "");
-if (!(wanted === "all" || FLOWS.includes(wanted)) || !AGENT) {
-  console.error(`usage: node scripts/chat-recorder.mjs <${FLOWS.join("|")}|all> --agent <name> [--web url] [--engine url] [--token-file path] [--session id] [--label text] [--out dir] [--headed]`);
+const matrixText = option("runtime-matrix", "");
+const sessionOverride = option("session", "");
+let runtimeMatrix = null;
+if (matrixText) {
+  try {
+    runtimeMatrix = parseRuntimeMatrix(matrixText);
+  } catch (error) {
+    console.error(`invalid --runtime-matrix: ${error.message}`);
+    process.exit(2);
+  }
+}
+const usage = `usage: node scripts/chat-recorder.mjs <${CHAT_RECORDER_FLOWS.join("|")}|all> (--agent <identity> | --runtime-matrix native=<identity>,codex-cli=<identity>,claude-code=<identity>) [--web url] [--engine url] [--token-file path] [--session id] [--label text] [--out dir] [--headed]`;
+if (
+  !(wanted === "all" || CHAT_RECORDER_FLOWS.includes(wanted)) ||
+  (runtimeMatrix ? Boolean(AGENT || sessionOverride) : !AGENT)
+) {
+  console.error(usage);
   process.exit(2);
 }
 const WEB = option("web", "http://127.0.0.1:8080");
@@ -65,103 +95,295 @@ const engine = (route, init = {}) => fetch(`${ENGINE}${route}`, {
   ...init, headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...init.headers },
 });
 
-async function sessionId() {
-  const given = option("session", "");
+async function sessionId(agent, runtime, given = "") {
   if (given) return given;
   const listed = await (await engine("/sessions")).json();
   const sessions = Array.isArray(listed) ? listed : listed.sessions ?? [];
-  const match = sessions.filter((session) => session.identity === AGENT);
-  if (match.length !== 1) throw new Error(`${match.length} sessions have the identity "${AGENT}"; pass --session`);
+  const match = sessions.filter((session) => session.identity === agent);
+  if (match.length !== 1) {
+    const hint = runtime === "single" ? "; pass --session" : ` for runtime ${runtime}`;
+    throw new Error(`${match.length} sessions have the identity "${agent}"${hint}`);
+  }
   return match[0].session_id;
 }
 
 // ---------------------------------------------------------------- in the page
 function installRecorder(cfg) {
   if (window.__rec) return;
-  const rec = (window.__rec = { frames: [], net: [], marks: [], cut: null, anchorEl: null, toolsStarted: 0 });
+  let restore = null;
+  try {
+    const saved = sessionStorage.getItem("__kollabChatRecorderRestore");
+    if (saved) restore = JSON.parse(saved);
+    sessionStorage.removeItem("__kollabChatRecorderRestore");
+  } catch { /* a browser with blocked session storage starts with empty recorder state */ }
+  const rec = (window.__rec = {
+    frames: [], net: [], marks: [], cut: null, anchorEl: null,
+    toolsStarted: Number(restore?.toolsStarted) || 0,
+    toolCalls: Array.isArray(restore?.toolCalls) ? restore.toolCalls : [],
+    measuredInputs: restore?.measuredInputs ?? [],
+    measuredTurns: restore?.measuredTurns ?? [],
+    goalTurn: restore?.goalTurn ?? null,
+    goalMode: restore?.goalMode ?? false,
+    goalReplyId: null,
+    goalCardsObserved: restore?.goalCardsObserved ?? false,
+    pendingToolCalls: restore?.pendingToolCalls ?? [],
+    measuring: restore?.measuring ?? false,
+    flowSeq: Number.isInteger(restore?.flowSeq) ? restore.flowSeq : null,
+    streamTurns: Array.isArray(restore?.streamTurns) ? restore.streamTurns : [],
+    streamInputs: Array.isArray(restore?.streamInputs) ? restore.streamInputs : [],
+    streamRows: [],
+    expectedActiveTurn: restore?.expectedActiveTurn ?? null,
+    latestSnapshot: null,
+    lastStreamSeq: null,
+    streamReady: false,
+  });
   const now = () => Math.round(performance.timeOrigin + performance.now() - cfg.wall0);
-  rec.mark = (name) => rec.marks.push({ t: now(), name });
+  rec.goalEvidenceKind = (role, text) => {
+    if (!rec.goalMode) return null;
+    const content = String(text ?? "").trim();
+    if (role === "user" && /^\/(?:goal|goals)(?:\s+|$)/i.test(content)) return "command";
+    if (role === "assistant" && /^goal [A-Za-z0-9_-]+ created\b[\s\S]*\bobjective\s*:/i.test(content)) return "reply";
+    return null;
+  };
+  rec.maskPrivateGoalRows = () => {
+    if (!rec.goalMode || typeof document === "undefined" || !document.querySelectorAll) return;
+    for (const el of document.querySelectorAll('[data-role="user"], [data-role="assistant"]')) {
+      const kind = rec.goalEvidenceKind(el.dataset.role, el.textContent);
+      if (!kind || (kind === "reply" && el.querySelector?.('[data-chat-tool-call-id], [data-slot="tool-group-root"], [data-slot="tool-fallback-root"]'))) continue;
+      if (el.dataset.recorderPrivateGoal === kind) continue;
+      el.dataset.recorderPrivateGoal = kind;
+      el.style?.setProperty("visibility", "hidden", "important");
+    }
+  };
+  rec.watchPrivateGoalRows = () => {
+    if (!rec.goalMode || typeof document === "undefined" || !document.querySelectorAll) return;
+    rec.maskPrivateGoalRows();
+    if (rec.goalPrivateMaskObserver || typeof MutationObserver !== "function") return;
+    rec.goalPrivateMaskObserver = new MutationObserver(() => rec.maskPrivateGoalRows());
+    try {
+      rec.goalPrivateMaskObserver.observe(document.documentElement ?? document, {
+        childList: true, characterData: true, subtree: true,
+      });
+    } catch { rec.goalPrivateMaskObserver = null; }
+  };
+  const historyText = (value) => {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return value.map((part) => typeof part?.text === "string" ? part.text : "").join("\n");
+    if (value && typeof value === "object" && typeof value.text === "string") return value.text;
+    return String(value ?? "");
+  };
+  rec.refreshMeasured = () => {
+    for (const input of rec.streamInputs) {
+      if (rec.measuredInputs.includes(input.id) && input.turn_id && !rec.measuredTurns.includes(input.turn_id)) {
+        rec.measuredTurns.push(input.turn_id);
+      }
+    }
+    for (const turn of rec.streamTurns) {
+      if (turn.input_ids?.some((id) => rec.measuredInputs.includes(id)) && !rec.measuredTurns.includes(turn.turn_id)) {
+        rec.measuredTurns.push(turn.turn_id);
+      }
+    }
+    rec.toolsStarted = rec.pendingToolCalls.filter((call) => rec.measuredTurns.includes(call.turn_id)).length;
+  };
+  rec.verifyGoalTurn = (turnId) => {
+    rec.goalTurn = turnId;
+    if (!rec.measuredTurns.includes(turnId)) rec.measuredTurns.push(turnId);
+    rec.refreshMeasured();
+  };
+  rec.goalToolSample = (cards) => {
+    const calls = rec.goalTurn ? rec.pendingToolCalls.filter((call) => call.turn_id === rec.goalTurn) : [];
+    const counts = new Map();
+    for (const card of cards) {
+      const { chatToolCallId } = card.dataset;
+      if (!calls.some((call) => call.id === chatToolCallId)) continue;
+      counts.set(chatToolCallId, (counts.get(chatToolCallId) ?? 0) + 1);
+    }
+    const toolsDrawn = [...counts.values()].reduce((sum, count) => sum + count, 0);
+    if (toolsDrawn) rec.goalCardsObserved = true;
+    return { toolsStarted: calls.length, toolsDrawn, duplicateTools: [...counts.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0) };
+  };
+  rec.mark = (name) => {
+    if (name.startsWith("GOAL VERIFIED ")) rec.verifyGoalTurn(name.slice("GOAL VERIFIED ".length));
+    if (/^(PAGE SEND U1(?: \(|$)|OTHER CLIENT SEND U1$|PAGE START GOAL$)/.test(name)) {
+      rec.toolsStarted = 0;
+      rec.measuring = true;
+      rec.measuredInputs = [];
+      rec.measuredTurns = [];
+      rec.pendingToolCalls = [];
+      rec.goalTurn = null;
+      rec.goalMode = name === "PAGE START GOAL";
+      rec.goalReplyId = null;
+      rec.goalCardsObserved = false;
+      if (rec.goalMode) rec.watchPrivateGoalRows();
+    }
+    rec.marks.push({ t: now(), name });
+  };
+  rec.noteToolRow = (row) => {
+    if (!row || !Array.isArray(row.parts)) return;
+    if (rec.measuring && row.kind === "input" && row.id && row.parts.some((part) =>
+      part.type === "text" && cfg.user.some((marker) => part.text?.includes(marker)))) {
+      if (!rec.measuredInputs.includes(row.id)) rec.measuredInputs.push(row.id);
+      if (row.turn_id && !rec.measuredTurns.includes(row.turn_id)) rec.measuredTurns.push(row.turn_id);
+    }
+    for (const part of row.parts) {
+      if (part.type !== "tool-call" || !part.tool_call_id) continue;
+      const pending = rec.pendingToolCalls.find((call) => call.id === part.tool_call_id);
+      if (pending && row.turn_id) pending.turn_id = row.turn_id;
+      if (pending && row.id && !pending.rows.includes(row.id)) pending.rows.push(row.id);
+      const known = rec.toolCalls.includes(part.tool_call_id);
+      if (!known) rec.toolCalls.push(part.tool_call_id);
+      if (rec.measuring && !pending) rec.pendingToolCalls.push({ id: part.tool_call_id, turn_id: row.turn_id, rows: row.id ? [row.id] : [] });
+      else if (!rec.measuring && !known && rec.flowSeq !== null) rec.toolsStarted += 1;
+    }
+    if (rec.measuring) rec.refreshMeasured();
+  };
 
   // The chat's streams, logged as they pass.
   const realFetch = window.fetch.bind(window);
   let seq = 0;
   const brief = (value, max = 40) => String(typeof value === "string" ? value : JSON.stringify(value ?? ""))
     .replace(/<agent_hud>[\s\S]*?<\/agent_hud>\s*/g, "").replace(/\s+/g, " ").slice(0, max);
-  const rowBrief = (row) => {
-    if (!row || typeof row !== "object") return row;
-    const parts = Array.isArray(row.content)
-      ? row.content.map((part) => part?.type === "text" ? `t${String(part.text ?? "").length}`
-        : part?.type === "tool-call" ? `c:${part.toolCallId}${"result" in part ? "+" : ""}` : part?.type?.[0] ?? "?").join(",")
-      : `s${String(row.content ?? "").length}`;
-    const custom = row.metadata?.custom ?? {};
-    return `${row.id}|${row.role?.[0]}|${parts}|${row.status?.type ?? ""}` +
-      `${custom.historySourceIndex !== undefined ? `|src${custom.historySourceIndex}` : ""}` +
-      `${custom.requestId ? `|rq:${custom.requestId}` : ""}${custom.requestIds ? `|rqs:${custom.requestIds.join("+")}` : ""}`;
-  };
   let tokens = 0;
   const logEvent = (id, kind, raw) => {
     const data = raw.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("");
     if (!data) return;
     if (data === "[DONE]") return void rec.net.push({ id, kind, t: now(), ev: "[DONE]" });
     let event;
-    try { event = JSON.parse(data); } catch { return void rec.net.push({ id, kind, t: now(), raw: data.slice(0, 80) }); }
+    try { event = JSON.parse(data); } catch {
+      if (kind !== "message" || !rec.goalMode) rec.net.push({ id, kind, t: now(), raw: data.slice(0, 80) });
+      return;
+    }
     const type = event.type ?? "?";
     if (kind === "events") {
       if (type === "token" || type === "thinking") { tokens += 1; return; }
-      if (type === "tool_start") rec.toolsStarted += 1;
       const entry = { id, kind, t: now(), ev: type };
       if (tokens) { entry.tokensBefore = tokens; tokens = 0; }
       if (event.request_id) entry.rq = event.request_id;
       if (event.request_ids) entry.rqs = event.request_ids;
-      for (const key of ["stop_reason", "message", "input_source", "queued", "tool_name"]) {
+      const summaryKeys = type === "goal.state_changed"
+        ? ["input_source", "queued", "tool_name", "status", "action"]
+        : ["stop_reason", "message", "input_source", "queued", "tool_name", "status", "action"];
+      for (const key of summaryKeys) {
         if (event[key] !== undefined) entry[key] = brief(event[key], 60);
       }
-      if (type === "user_message") entry.text = brief(event.content ?? event.text ?? event.message, 50);
+      if (type === "goal.state_changed") {
+        entry.goal_id = event.goal_id;
+        entry.goal_conversation_uid = event.conversation_uid;
+        entry.goal_status = event.status;
+        entry.goal_kind = event.kind;
+      }
+      if (type === "user_message") {
+        entry.text = rec.goalMode ? "<goal command>" : brief(event.content ?? event.text ?? event.message, 50);
+      }
       return void rec.net.push(entry);
     }
-    if (type === "update-state") {
-      const ops = (event.operations ?? []).map((op) => {
-        const where = (op.path ?? []).join(".");
-        if (where === "messages" && Array.isArray(op.value)) return { set: "messages", rows: op.value.map(rowBrief) };
-        if (/^messages\.\d+$/.test(where)) return { set: where, row: rowBrief(op.value) };
-        if (where === "synced" || where === "error") return { set: where, value: op.value };
-        return { op: op.type, path: where };
-      });
-      return void rec.net.push({ id, kind, t: now(), ev: type, ops });
+    if (kind === "stream") {
+      const data = event.data ?? {};
+      if (type === "snapshot" || type === "replace") {
+        rec.streamRows = JSON.parse(JSON.stringify(data.rows ?? []));
+      } else if (type === "row.upsert") {
+        rec.streamRows = [...rec.streamRows.filter((row) => row.id !== data.id), JSON.parse(JSON.stringify(data))];
+      } else if (type === "row.delete") {
+        rec.streamRows = rec.streamRows.filter((row) => row.id !== data.id);
+      } else if (type === "row.append") {
+        const row = rec.streamRows.find((item) => item.id === data.id);
+        const part = row?.parts?.[data.part];
+        if (part && typeof part.text === "string") part.text += data.text;
+      }
+      if (type === "snapshot") {
+        rec.streamReady = true;
+        rec.latestSnapshot = {
+          conversation_uid: event.conversation_uid,
+          turns: Array.isArray(data.turns) ? data.turns : [],
+          inputs: Array.isArray(data.inputs) ? data.inputs : [],
+        };
+        rec.streamTurns = rec.latestSnapshot.turns;
+        rec.streamInputs = rec.latestSnapshot.inputs;
+        rec.lastStreamSeq = Number.isInteger(data.next_seq) ? data.next_seq - 1 : event.seq;
+        (data.rows ?? []).forEach(rec.noteToolRow);
+      } else if (type === "turn.state") {
+        rec.streamTurns = [
+          ...rec.streamTurns.filter((turn) => turn.turn_id !== data.turn_id),
+          data,
+        ];
+      } else if (type === "input.state") {
+        rec.streamInputs = [
+          ...rec.streamInputs.filter((input) => input.id !== data.id),
+          data,
+        ];
+      } else if (type === "replace") {
+        (data.rows ?? []).forEach(rec.noteToolRow);
+      } else if (type === "row.upsert") {
+        rec.noteToolRow(data);
+      }
+      rec.streamConversation = event.conversation_uid;
+      if (rec.measuring) rec.refreshMeasured();
+      if (Number.isInteger(event.seq)) rec.lastStreamSeq = Math.max(rec.lastStreamSeq ?? -1, event.seq);
+      const entry = { id, kind, t: now(), ev: type, seq: event.seq };
+      if (data.id) entry.row = data.id;
+      if (data.kind) entry.rowKind = data.kind;
+      if (data.kind === "note" && Array.isArray(data.parts)) entry.parts = data.parts.filter((part) => part.type === "hub-note");
+      if (data.state) entry.state = data.state;
+      if (type === "turn.state") {
+        entry.conversation_uid = event.conversation_uid;
+        entry.turn_id = data.turn_id;
+        if (data.origin) entry.origin = data.origin;
+      }
+      if (data.status !== undefined) entry.status = data.status;
+      if (Array.isArray(data.rows)) entry.rows = data.rows.length;
+      return void rec.net.push(entry);
     }
     if (/-delta$|^part-|^tool-call-|^result$/.test(type)) return;
     rec.net.push({ id, kind, t: now(), ev: type, ...(event.finishReason ? { finishReason: event.finishReason } : {}),
-      ...(event.error ? { error: brief(event.error, 80) } : {}) });
+      ...(event.error && (kind !== "message" || !rec.goalMode) ? { error: brief(event.error, 80) } : {}) });
   };
   window.fetch = async (input, init) => {
     let parsed;
     try { parsed = new URL(String(input instanceof Request ? input.url : input), location.href); } catch { return realFetch(input, init); }
-    const match = /\/sessions\/[^/]+\/(assistant|events|history)(?:\/|$)/.exec(parsed.pathname);
+    const match = /\/sessions\/[^/]+\/(events|history|stream|inputs|message)(?:\/|$)/.exec(parsed.pathname);
     if (!match) return realFetch(input, init);
+    const sessionSuffix = cfg.sessionStreamSuffix.replace(/\/stream$/, `/${match[1]}`);
+    const selectedSessionRequest = parsed.pathname.endsWith(sessionSuffix);
+    if (["stream", "events", "message"].includes(match[1]) && !selectedSessionRequest) {
+      return realFetch(input, init);
+    }
     const id = ++seq;
     const kind = match[1];
     const entry = { id, kind, t: now(), req: `${init?.method ?? "GET"} ${parsed.pathname.replace(/^.*\/sessions\/[^/]+/, "")}${parsed.search.slice(0, 40)}` };
-    if (kind === "assistant" && init?.body) {
+    if (["inputs", "message"].includes(kind) && init?.body) {
       try {
         const body = JSON.parse(String(init.body));
-        entry.commands = (body.commands ?? []).map((command) =>
-          `${command.type}:${command.message?.id ?? command.toolCallId ?? ""}:${brief((command.message?.parts ?? []).map((part) => part.text ?? "[img]").join(" "), 40)}`);
-        entry.sent = (body.state?.messages ?? []).slice(-6).map(rowBrief);
-        entry.sentCount = (body.state?.messages ?? []).length;
-        entry.sentSynced = body.state?.synced ?? null;
+        if (selectedSessionRequest && rec.goalMode && typeof body.goal_reply_id === "string" && body.goal_reply_id) {
+          rec.goalReplyId = body.goal_reply_id;
+        }
+        if (kind === "inputs") {
+          entry.input = body.id;
+          const goalCommand = typeof body.text === "string" && /^\/goal(?:\s|$)/.test(body.text);
+          entry.text = goalCommand || (rec.goalMode && body.goal_reply_id) ? "<goal command>" : brief(body.text, 50);
+          entry.attachments = Array.isArray(body.attachments) ? body.attachments.length : 0;
+        }
       } catch { /* not JSON */ }
     }
     rec.net.push(entry);
     let response;
     try { response = await realFetch(input, init); } catch (error) {
-      rec.net.push({ id, kind, t: now(), fetchError: String(error) });
+      rec.net.push({ id, kind, t: now(), fetchError: kind === "message" && rec.goalMode ? "private goal request failed" : String(error) });
       throw error;
     }
     rec.net.push({ id, kind, t: now(), status: response.status });
     if (kind === "history") {
       response.clone().json().then((page) => rec.net.push({
         id, kind, t: now(), page: `${page.start_index}..${page.end_index}/${page.total_messages}${page.stale ? " STALE" : ""}`,
-        tail: (page.history ?? []).slice(-4).map((row) => `${row.role?.[0]}:${brief(row.content, 26)}`),
+        tail: (page.history ?? []).slice(-4).map((row) => {
+          const privateKind = rec.goalEvidenceKind(row.role, historyText(row.content));
+          return `${row.role?.[0]}:${privateKind ? `<private goal ${privateKind}>` : brief(row.content, 26)}`;
+        }),
+      })).catch(() => undefined);
+      return response;
+    }
+    if (kind === "inputs") {
+      response.clone().json().then((result) => rec.net.push({
+        id, kind, t: now(), ev: "accepted", input: result.id, state: result.state,
       })).catch(() => undefined);
       return response;
     }
@@ -186,13 +408,13 @@ function installRecorder(cfg) {
         } catch (error) {
           if (closed) return;
           closed = true;
-          rec.net.push({ id, kind, t: now(), streamError: String(error) });
+          rec.net.push({ id, kind, t: now(), streamError: kind === "message" && rec.goalMode ? "private goal stream failed" : String(error) });
           controller.error(error);
         }
       },
       cancel(reason) { closed = true; return reader.cancel(reason); },
     });
-    if (kind === "assistant") {
+    if (kind === "stream") {
       // The request's stream ends before the agent's turn does: a dropped
       // connection ("close" ends it cleanly, "error" fails it).
       rec.cut = (mode) => {
@@ -210,6 +432,11 @@ function installRecorder(cfg) {
   // The chat, sampled once per animation frame and stored when it changes.
   let nodeSeq = 0;
   const nodeId = (el) => (el.__recNode ??= ++nodeSeq);
+  rec.snapshotStreamUserRows = () => JSON.parse(JSON.stringify(rec.streamRows.filter((row) => row.role === "user")));
+  rec.snapshotUserRows = () => [...document.querySelectorAll('[data-role="user"]')].map((el) => {
+    const privateKind = rec.goalEvidenceKind(el.dataset.role, el.textContent);
+    return { id: nodeId(el), text: privateKind ? `<private goal ${privateKind}>` : el.textContent ?? "" };
+  });
   const hash = (text) => { let h = 2166136261; for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
   let viewport = null;
   const findViewport = (row) => {
@@ -233,6 +460,7 @@ function installRecorder(cfg) {
   let last = "";
   const sample = () => {
     try {
+      rec.maskPrivateGoalRows();
       const all = document.querySelectorAll("[data-role]");
       const rows = [];
       const texts = [];
@@ -246,15 +474,17 @@ function installRecorder(cfg) {
       for (let i = 0; i < all.length; i++) {
         const el = all[i];
         const role = el.dataset.role;
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+        const rawText = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+        const privateKind = rec.goalEvidenceKind(role, rawText);
+        const text = privateKind ? `<private goal ${privateKind}>` : rawText;
         if (role === "user") {
           let own = false;
-          cfg.user.forEach((marker, index) => { if (text.includes(marker)) { users[index] += 1; own = true; } });
+          cfg.user.forEach((marker, index) => { if (rawText.includes(marker)) { users[index] += 1; own = true; } });
           if (own) sent = true;
         }
         if (role === "assistant") {
           if (sent) toolsDrawn += Number(/(\d+) tool calls?/.exec(text)?.[1] ?? (text.includes("Run · ") ? 1 : 0));
-          cfg.reply.forEach((marker, index) => { replies[index] += text.split(marker).length - 1; });
+          if (privateKind !== "reply") cfg.reply.forEach((marker, index) => { replies[index] += rawText.split(marker).length - 1; });
         }
         if (i >= all.length - 14) {
           const opacity = Number(getComputedStyle(el).opacity);
@@ -265,12 +495,18 @@ function installRecorder(cfg) {
       }
       if (!viewport || !viewport.isConnected) viewport = findViewport(all[all.length - 1]);
       const errors = [...document.querySelectorAll(".aui-message-error-root")];
+      const goalTools = rec.goalMode ? rec.goalToolSample(document.querySelectorAll('[data-chat-tool-call-id]')) : null;
       const frame = {
         n: all.length, rows, texts, fading, users, replies, toolsDrawn, toolsStarted: rec.toolsStarted,
+        ...(goalTools ?? {}),
         st: viewport ? Math.round(viewport.scrollTop) : -1,
         pick: document.querySelectorAll('[class*="branch-picker-root"]').length,
         err: errors.length,
-        errText: errors.map((el) => (el.textContent ?? "").trim().slice(0, 70)).join(" | "),
+        errText: errors.map((el) => {
+          const row = el.closest?.("[data-role]");
+          const privateKind = row && rec.goalEvidenceKind(row.dataset.role, row.textContent);
+          return privateKind ? `<private goal ${privateKind}>` : (el.textContent ?? "").trim().slice(0, 70);
+        }).join(" | "),
         run: document.querySelector('[aria-label="Stop generating"]') ? 1 : 0,
       };
       if (rec.anchorEl) frame.anc = rec.anchorEl.isConnected ? Math.round(rec.anchorEl.getBoundingClientRect().top) : null;
@@ -281,25 +517,35 @@ function installRecorder(cfg) {
     }
     requestAnimationFrame(sample);
   };
+  if (rec.goalMode) rec.watchPrivateGoalRows();
   requestAnimationFrame(sample);
 }
 
 // ---------------------------------------------------------------- one flow
-async function record(flow, session, browser) {
-  const dir = path.join(OUT, `${flow}-${LABEL}`);
+async function record(flow, session, browser, target) {
+  const { runtime, agent } = target;
+  const dir = runtime === "single"
+    ? path.join(OUT, `${flow}-${LABEL}`)
+    : path.join(OUT, runtime, `${flow}-${LABEL}`);
   fs.mkdirSync(dir, { recursive: true });
   const wall0 = Date.now();
-  const tag = `${flow}${LABEL}`;
+  const tag = `${runtime === "single" ? "" : `${runtime}-`}${flow}${LABEL}`;
   const U = (n) => `U${n}-${tag}`;
   const R = (n) => `zebra${n}${tag}`;
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, recordVideo: { dir, size: { width: 1280, height: 860 } } });
-  await context.addInitScript(installRecorder, { wall0, user: [U(1), U(2), U(3)], reply: [R(1), R(2), R(3)] });
+  await context.addInitScript(installRecorder, {
+    wall0,
+    sessionStreamSuffix: chatRecorderStreamSuffix(session),
+    user: [U(1), U(2), U(3)],
+    reply: [R(1), R(2), R(3)],
+  });
   const page = await context.newPage();
   const videoStart = Date.now() - wall0;
   const consoleLog = [];
   page.on("pageerror", (error) => consoleLog.push(`${Date.now() - wall0} pageerror: ${String(error).slice(0, 300)}`));
 
   const collected = { frames: [], net: [], marks: [] };
+  let externalSeq = 0;
   const collect = async () => {
     const part = await page.evaluate(() => {
       const rec = window.__rec;
@@ -315,6 +561,19 @@ async function record(flow, session, browser) {
   };
   const mark = (name) => page.evaluate((n) => window.__rec.mark(n), name)
     .catch(() => collected.marks.push({ t: Date.now() - wall0, name }));
+  const postFromClient = async (route, body, name) => {
+    await mark(name);
+    const id = `client-${++externalSeq}`;
+    collected.net.push({ id, kind: "client", t: Date.now() - wall0, req: `POST ${route}${body.id ? ` id=${body.id}` : ""}` });
+    const response = await engine(route, { method: "POST", body: JSON.stringify(body) });
+    collected.net.push({ id, kind: "client", t: Date.now() - wall0, status: response.status });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`client request ${route} returned ${response.status}${detail ? `: ${detail.slice(0, 180)}` : ""}`);
+    }
+    response.text().catch(() => undefined);
+    return response;
+  };
   const sleep = (ms) => page.waitForTimeout(ms);
   const box = () => page.getByPlaceholder(/^Message /i).first();
   const send = async (text, name) => {
@@ -330,9 +589,13 @@ async function record(flow, session, browser) {
     }
   };
   const other = async (content, name) => {
-    await mark(`OTHER CLIENT SEND ${name}`);
-    const response = await engine(`/sessions/${session}/message`, { method: "POST", body: JSON.stringify({ content }) });
-    response.text().catch(() => undefined);  // an unread stream can stall the engine's send
+    const id = `recorder-${tag}-${name}`.replace(/[^A-Za-z0-9._:-]/g, "-");
+    await postFromClient(`/sessions/${session}/inputs`, { id, text: content }, `OTHER CLIENT SEND ${name}`);
+  };
+  const command = async (text, name) => {
+    await box().fill(text);
+    await mark(name);
+    await box().press("Enter");
   };
   const cut = async (mode) => mark(`CUT ${mode} -> ${await page.evaluate((m) => window.__rec.cut?.(m) ?? false, mode)}`);
   /** Until the page shows no run and the reply, and stays so for `quiet` ms. */
@@ -348,14 +611,201 @@ async function record(flow, session, browser) {
       if (!state.run && state.has) { calm ??= Date.now(); if (Date.now() - calm >= quiet) return; } else calm = null;
     }
     await mark("SETTLE TIMEOUT");
+    throw new Error(`settle timeout waiting for reply ${reply}`);
   };
   const tools = (n, seconds) => `run \`sleep ${seconds}\` with your terminal tool ${n} times, one call at a time, waiting for each to finish`;
   const say = (n) => `Then reply with only this, as one word with nothing between the parts: zebra, the digit ${n}, then ${tag}.`;
+  const apiJson = async (route, init) => {
+    const response = await engine(route, init);
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`engine request ${route} returned ${response.status}${detail ? `: ${detail.slice(0, 180)}` : ""}`);
+    }
+    return response.json();
+  };
+  const waitForRunning = async (timeout = 45000) => {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      if (await page.evaluate(() => !!document.querySelector('[aria-label="Stop generating"]'))) return;
+      await sleep(250);
+    }
+    throw new Error("the turn did not reach a running state before the recorder action");
+  };
+  const waitForStreamSnapshot = async (timeout = 30000) => {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const snapshot = await page.evaluate(() => window.__rec.latestSnapshot);
+      if (snapshot) return snapshot;
+      await sleep(250);
+    }
+    throw new Error("the chat stream did not send its initial snapshot");
+  };
+  const waitForStreamRowKind = async (kind, { timeout = 30000, whileRunning = false, afterIndex = 0, hubNote = null } = {}) => {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const state = await page.evaluate(({ rowKind, offset, expected }) => ({
+        row: window.__rec.net.slice(offset).find((entry) =>
+          entry.kind === "stream" && entry.ev === "row.upsert" && entry.rowKind === rowKind &&
+          (!expected || entry.parts?.some((part) => part.type === "hub-note" &&
+            part.from === expected.from && part.text === expected.text))),
+        running: !!document.querySelector('[aria-label="Stop generating"]'),
+      }), { rowKind: kind, offset: afterIndex, expected: hubNote });
+      if (state.row) {
+        if (whileRunning && !state.running) throw new Error(`the ${kind} row arrived after the turn ended`);
+        return state.row;
+      }
+      if (whileRunning && !state.running) throw new Error(`the turn ended before its ${kind} row arrived`);
+      await sleep(250);
+    }
+    throw new Error(`the chat stream did not deliver a ${kind} row within ${timeout / 1000} seconds`);
+  };
+  const waitForRenderedHubNote = async (from, text, timeout = 30000) => {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const state = await page.evaluate(({ from, text }) => ({
+        rendered: [...document.querySelectorAll('[data-slot="kollab_hub-message"]')]
+          .some((el) => (el.textContent ?? "").includes(from) && (el.textContent ?? "").includes(text)),
+        running: !!document.querySelector('[aria-label="Stop generating"]'),
+      }), { from, text });
+      if (!state.running) throw new Error("the turn ended before the hub note rendered");
+      if (state.rendered) return;
+      await sleep(250);
+    }
+    throw new Error("the injected hub note did not render");
+  };
+  const waitForPromptStatusUpdate = async (rowId, initialStatus, afterIndex, timeout = 30000) => {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const entries = await page.evaluate(() => window.__rec.net);
+      const updated = findPromptStatusUpdate(entries, rowId, initialStatus, afterIndex);
+      if (updated) return updated;
+      await sleep(250);
+    }
+    throw new Error(`the prompt row ${rowId} did not receive an updated status after approval`);
+  };
+  const preserveRecorderState = async (expectedActiveTurn) => page.evaluate((activeTurn) => sessionStorage.setItem(
+    "__kollabChatRecorderRestore",
+    JSON.stringify({
+      toolsStarted: window.__rec.toolsStarted,
+      toolCalls: window.__rec.toolCalls,
+      measuredInputs: window.__rec.measuredInputs,
+      measuredTurns: window.__rec.measuredTurns,
+      goalTurn: window.__rec.goalTurn,
+      goalMode: window.__rec.goalMode,
+      goalCardsObserved: window.__rec.goalCardsObserved,
+      pendingToolCalls: window.__rec.pendingToolCalls,
+      measuring: window.__rec.measuring,
+      flowSeq: window.__rec.flowSeq,
+      streamTurns: window.__rec.streamTurns,
+      streamInputs: window.__rec.streamInputs,
+      expectedActiveTurn: activeTurn,
+    }),
+  ), expectedActiveTurn);
+  const readPersistedGoal = () => apiJson(`/sessions/${session}/goal`);
+  const currentStreamState = () => page.evaluate(() => ({
+    conversation_uid: window.__rec.streamConversation,
+    turns: window.__rec.streamTurns,
+    inputs: window.__rec.streamInputs,
+  }));
+  const reloadDuringRun = async (reply, goalCheck = null) => {
+    await waitForRunning();
+    await sleep(1200);
+    const expectedActiveTurn = await page.evaluate((allowEmptyInputs) => {
+      const turn = window.__rec.streamTurns.filter((item) => item.state === "running").at(-1);
+      if (!turn || !Array.isArray(turn.input_ids) || (!allowEmptyInputs && turn.input_ids.length === 0)) return null;
+      return { turn_id: turn.turn_id, input_ids: [...turn.input_ids], origin: turn.origin };
+    }, goalCheck?.allowEmptyInputs === true);
+    if (!expectedActiveTurn) {
+      throw new Error("the stream did not identify the running turn and its inputs before reload");
+    }
+    if (goalCheck) await goalCheck.before(expectedActiveTurn, await currentStreamState());
+    await collect();
+    await preserveRecorderState(expectedActiveTurn);
+    collected.marks.push({ t: Date.now() - wall0, name: "RELOAD" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    const snapshot = await waitForStreamSnapshot();
+    const preservedTurn = await page.evaluate(() => window.__rec.expectedActiveTurn);
+    if (!hasRunningTurnWithInputs(snapshot, preservedTurn, { allowEmptyInputs: goalCheck?.allowEmptyInputs === true })) {
+      throw new Error("reload proof inconclusive: the snapshot did not retain the active running turn and its inputs");
+    }
+    if (goalCheck) await goalCheck.after(preservedTurn, snapshot, await currentStreamState());
+    await sleep(2500);
+    await mark("RELOADED");
+    await settle(reply);
+  };
+  const waitForPermission = async (existing) => {
+    const started = Date.now();
+    while (Date.now() - started < 90000) {
+      const permissions = await apiJson(`/sessions/${session}/permissions`);
+      const prompt = (permissions.pending_prompts ?? []).find((item) => {
+        const key = `${item.tool_id ?? item.details?.tool_id ?? ""}:${item.permission_id ?? item.details?.permission_id ?? ""}`;
+        return key !== ":" && !existing.has(key);
+      });
+      if (prompt) return prompt;
+      await sleep(400);
+    }
+    throw new Error("the agent did not open a permission prompt within 90 seconds");
+  };
+  const contextCompactionStatus = async () => {
+    const state = await apiJson(`/sessions/${session}/state`);
+    return state.context_compaction?.compaction_status ?? "unknown";
+  };
+  const waitForCompaction = async (previousNetCount, phase = "staged") => {
+    const started = Date.now();
+    let sawStart = phase === "transcript";
+    let observedUpdates = 0;
+    while (Date.now() - started < 240000) {
+      const startedBeforeState = sawStart;
+      const status = await contextCompactionStatus();
+      const updates = await page.evaluate((offset) => window.__rec.net.slice(offset), previousNetCount);
+      const eventStatuses = updates
+        .filter((entry) => entry.kind === "events" && entry.ev === "context_compaction_status")
+        .map((entry) => entry.status);
+      const replaced = updates.some((entry) => entry.kind === "stream" && entry.ev === "replace");
+      sawStart ||= status === "compacting" || eventStatuses.includes("compacting") || replaced;
+      const latestEventStatus = eventStatuses.at(-1);
+      const newerEventStatuses = updates.slice(observedUpdates)
+        .filter((entry) => entry.kind === "events" && entry.ev === "context_compaction_status")
+        .map((entry) => entry.status);
+      observedUpdates = updates.length;
+      if (["failed", "paused", "warning", "rolled_over"].includes(status) ||
+          ["failed", "paused", "warning", "rolled_over"].includes(latestEventStatus)) {
+        throw new Error(`compaction ended with status ${status === "compacting" ? latestEventStatus : status}`);
+      }
+      if (isCompactionComplete({
+        sawStart: activeRuntime === "native" ? sawStart : startedBeforeState,
+        status: newerEventStatuses.includes("compacting") ? "compacting" : status,
+        latestEventStatus,
+        replaced,
+        runtime: activeRuntime,
+        phase,
+      })) return;
+      await sleep(1000);
+    }
+    throw new Error(phase === "transcript"
+      ? "the native transcript replacement did not arrive within 240 seconds"
+      : "the compaction did not finish within 240 seconds");
+  };
+  const runtimeForSession = async () => {
+    const details = await apiJson(`/sessions/${session}`);
+    return classifyChatRuntime(details);
+  };
 
-  await page.goto(WEB, { waitUntil: "domcontentloaded" });
-  await page.getByText(new RegExp(AGENT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first().click({ timeout: 30000 });
-  await sleep(5000);
-  await mark("READY");
+  let activeRuntime = runtime === "single" ? "unknown" : runtime;
+  let failed = await captureRecorderFailure(async () => {
+    await page.goto(WEB, { waitUntil: "domcontentloaded" });
+    await page.getByText(new RegExp(agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first().click({ timeout: 30000 });
+    await sleep(5000);
+    await waitForStreamSnapshot();
+    await page.evaluate(() => {
+      if (window.__rec.flowSeq === null) window.__rec.flowSeq = (window.__rec.lastStreamSeq ?? -1) + 1;
+    });
+    activeRuntime = await runtimeForSession();
+    if (runtime !== "single" && activeRuntime !== runtime) {
+      throw new Error(`identity "${agent}" is ${activeRuntime}, expected ${runtime}`);
+    }
+    await mark("READY");
+  });
 
   const flows = {
     // One plain send and reply.
@@ -427,19 +877,310 @@ async function record(flow, session, browser) {
     async reload() {
       await send(`${U(1)}: ${tools(3, 6)}. ${say(1)}`, "U1");
       await sleep(7000);
-      await collect();
-      // The page's own log goes with the page: keep these marks and its count here.
-      const started = await page.evaluate(() => window.__rec.toolsStarted);
-      collected.marks.push({ t: Date.now() - wall0, name: "RELOAD" });
-      await page.reload({ waitUntil: "domcontentloaded" });
-      await page.evaluate((count) => { window.__rec.toolsStarted += count; }, started);
-      await sleep(2500);
-      await mark("RELOADED");
+      await reloadDuringRun(R(1));
+    },
+    // A permission prompt appears in this page and an independent client approves it.
+    async "prompt-other"() {
+      const initial = await apiJson(`/sessions/${session}/permissions`);
+      const pending = initial.pending_prompts ?? [];
+      if (pending.length) throw new Error("clear existing permission prompts before recording prompt-other");
+      const originalMode = requireRecorderApprovalMode(initial.approval_mode);
+      if (originalMode !== "confirm_all") {
+        await postFromClient(`/sessions/${session}/permissions/mode`, { mode: "confirm_all" }, "SET APPROVAL MODE confirm_all");
+      }
+      try {
+        await send(`${U(1)}: ${tools(1, 8)}. ${say(1)}`, "U1");
+        const existing = new Set(pending.map((item) =>
+          `${item.tool_id ?? item.details?.tool_id ?? ""}:${item.permission_id ?? item.details?.permission_id ?? ""}`));
+        const prompt = await waitForPermission(existing);
+        const toolId = prompt.tool_id ?? prompt.details?.tool_id;
+        const permissionId = prompt.permission_id ?? prompt.details?.permission_id;
+        if (!toolId || !permissionId) throw new Error("permission prompt omitted its tool or permission id");
+        const promptRow = await waitForStreamRowKind("prompt");
+        if (!promptRow.row || typeof promptRow.status !== "string") {
+          throw new Error("the prompt stream row omitted its id or initial status");
+        }
+        await mark(`PROMPT OPEN ${toolId}`);
+        await sleep(900);
+        const approvalOffset = await page.evaluate(() => window.__rec.net.length - 1);
+        await postFromClient(`/sessions/${session}/permission`, {
+          tool_id: toolId,
+          permission_id: permissionId,
+          decision: "approve",
+          scope: "once",
+        }, "OTHER CLIENT ANSWER PROMPT");
+        await waitForPromptStatusUpdate(promptRow.row, promptRow.status, approvalOffset);
+        await settle(R(1));
+      } finally {
+        if (originalMode !== "confirm_all") {
+          await postFromClient(`/sessions/${session}/permissions/mode`, { mode: originalMode }, `RESTORE APPROVAL MODE ${originalMode}`);
+        }
+      }
+    },
+    // Seed enough turns for /compact now, then preserve the live thread through compaction.
+    async compact() {
+      for (let n = 1; n <= 5; n += 1) {
+        const reply = `recorder-seed-${n}-${tag}`;
+        await send(`Store this short context seed ${n} for later reference, then reply with only ${reply}.`, `SEED ${n}`);
+        await settle(reply, 1500);
+      }
+      const priorEvents = await page.evaluate(() => window.__rec.net.length);
+      const before = await contextCompactionStatus();
+      if (before === "compacting") throw new Error("a compaction is already running in this session");
+      if (before === "unknown") throw new Error("the engine did not report context compaction status for this session");
+      await command("/compact now", "PAGE COMMAND /compact now");
+      await waitForCompaction(priorEvents);
+      if (activeRuntime === "native") await mark("COMPACTION STAGED");
+      else await mark("COMPACTION COMPLETE");
+      await send(`${U(1)}: ${say(1)}`, "U1");
+      if (activeRuntime === "native") {
+        await waitForCompaction(priorEvents, "transcript");
+        await mark("COMPACTION COMPLETE");
+      }
+      await settle(R(1));
+    },
+    // ACP does not expose the persisted goal capability required by this flow.
+    async "goal-reload"() {
+      if (activeRuntime !== "native") throw new Error("goal-reload is unsupported for ACP: persisted goals are unavailable");
+      const existingGoal = await readPersistedGoal();
+      if (existingGoal?.goal) {
+        throw new Error("goal-reload requires a session with no active goal; refusing to replace or clear it");
+      }
+      const initialStream = await currentStreamState();
+      const initialConversationUid = existingGoal?.conversation_uid ?? initialStream?.conversation_uid;
+      if (!initialConversationUid ||
+          (existingGoal?.conversation_uid && initialStream?.conversation_uid &&
+           existingGoal.conversation_uid !== initialStream.conversation_uid)) {
+        throw new Error("goal-reload could not establish one conversation identity; refusing to create or clear a goal");
+      }
+      const goalMarker = `[chat-recorder-${Date.now()}-${Math.random().toString(36).slice(2)}]`;
+      const goalObjective = `${goalMarker} ${U(1)}: Use your terminal tool to run ` + "`sleep 10`" + `, then complete this goal with a concise report containing exactly ${R(1)}.`;
+      let ownedGoal = null;
+      let privateGoalReplyId = null;
+      let creationReceipt = null;
+      const clearPrivateGoalReply = async () => {
+        privateGoalReplyId = null;
+        try {
+          await page.evaluate(() => {
+            if (window.__rec) window.__rec.goalReplyId = null;
+          });
+        } catch { /* page teardown also releases the in-memory capability */ }
+      };
+      const matchesOwnedGoal = (persisted) => {
+        const goal = persisted?.goal;
+        if (!ownedGoal || !goal || persisted.conversation_uid !== ownedGoal.conversation_uid ||
+            goal.goal_id !== ownedGoal.goal_id) return false;
+        return true;
+      };
+      const readCreationReceipt = async () => {
+        if (creationReceipt) return creationReceipt;
+        if (!privateGoalReplyId) {
+          try {
+            privateGoalReplyId = await page.evaluate(() => {
+              const replyId = window.__rec?.goalReplyId;
+              if (window.__rec) window.__rec.goalReplyId = null;
+              return typeof replyId === "string" && replyId ? replyId : null;
+            });
+          } catch { return null; }
+        }
+        if (!privateGoalReplyId) return null;
+
+        let reply;
+        try {
+          reply = await apiJson(`/sessions/${session}/goal-replies/poll`, {
+            method: "POST",
+            body: JSON.stringify({ goal_reply_id: privateGoalReplyId }),
+          });
+        } catch {
+          await clearPrivateGoalReply();
+          throw new Error("goal reload could not read its private creation receipt; refusing to clear an unidentified goal");
+        }
+        if (reply?.status === "pending") return null;
+        await clearPrivateGoalReply();
+        if (reply?.status !== "complete" || reply.success !== true || typeof reply.message !== "string") {
+          throw new Error("goal reload could not confirm its private creation receipt; refusing to clear an unidentified goal");
+        }
+
+        const [header, ...lines] = reply.message.split(/\r?\n/);
+        const created = /^goal ([A-Za-z0-9_-]+) created(?:\s|$)/.exec(header ?? "");
+        const objectiveLine = lines.find((line) => line.startsWith("objective: "));
+        const replyConversationUid = typeof reply.conversation_uid === "string"
+          ? reply.conversation_uid
+          : initialConversationUid;
+        if (!created || objectiveLine?.slice("objective: ".length) !== goalObjective ||
+            replyConversationUid !== initialConversationUid) {
+          throw new Error("goal reload could not match its private creation receipt; refusing to clear an unidentified goal");
+        }
+        creationReceipt = { goal_id: created[1], conversation_uid: replyConversationUid };
+        return creationReceipt;
+      };
+      const bindReceiptToPersistedGoal = (persisted, receipt) => {
+        if (!persisted?.goal || !receipt) return receipt;
+        if (persisted.conversation_uid !== initialConversationUid ||
+            receipt.conversation_uid !== initialConversationUid ||
+            !persisted.goal.goal_id?.startsWith(receipt.goal_id)) {
+          throw new Error("goal reload could not claim the active goal; refusing to clear a goal not created by this run");
+        }
+        if (typeof persisted.goal.objective === "string" && persisted.goal.objective !== goalObjective) {
+          throw new Error("goal reload could not claim the active goal; refusing to clear a goal not created by this run");
+        }
+        return creationReceipt;
+      };
+      const captureAttemptIdentity = (persisted) => {
+        if (!matchesOwnedGoal(persisted)) return false;
+        const attempt = persisted.goal.attempt ?? {};
+        if (attempt.attempt_id) {
+          if (ownedGoal.attempt_id && attempt.attempt_id !== ownedGoal.attempt_id) return false;
+          ownedGoal.attempt_id = attempt.attempt_id;
+        }
+        if (attempt.turn_id) {
+          if (ownedGoal.turn_id && attempt.turn_id !== ownedGoal.turn_id) return false;
+          ownedGoal.turn_id = attempt.turn_id;
+        }
+        return true;
+      };
+      await command(`/goal ${goalObjective}`, "PAGE START GOAL");
+      let expectedGoal;
+      let proofFailure = null;
+      try {
+        const createDeadline = Date.now() + 45000;
+        let created = await readPersistedGoal();
+        let receipt = await readCreationReceipt();
+        receipt = bindReceiptToPersistedGoal(created, receipt);
+        while (!created?.goal || !created.goal.goal_id || !created.conversation_uid || !receipt) {
+          if (Date.now() >= createDeadline) {
+            throw new Error("goal reload could not confirm its private creation receipt and persisted goal identity");
+          }
+          await sleep(250);
+          created = await readPersistedGoal();
+          receipt = await readCreationReceipt();
+          receipt = bindReceiptToPersistedGoal(created, receipt);
+        }
+        if (receipt.conversation_uid !== created.conversation_uid ||
+            !receipt.goal_id || !created.goal.goal_id.startsWith(receipt.goal_id)) {
+          throw new Error("goal reload could not claim the active goal; refusing to clear a goal not created by this run");
+        }
+        ownedGoal = {
+          conversation_uid: created.conversation_uid,
+          goal_id: created.goal.goal_id,
+          attempt_id: created.goal.attempt?.attempt_id ?? null,
+          turn_id: created.goal.attempt?.turn_id ?? null,
+        };
+        await reloadDuringRun(R(1), {
+          allowEmptyInputs: true,
+          before: async (turn, stream) => {
+            expectedGoal = await readPersistedGoal();
+            if (!captureAttemptIdentity(expectedGoal) || !hasMatchingGoalTurn(stream, expectedGoal, turn) ||
+                !hasMatchingGoalTurn(await currentStreamState(), expectedGoal, turn)) {
+              throw new Error("goal reload proof inconclusive: persisted goal and running stream turn do not match before reload");
+            }
+            await mark(`GOAL VERIFIED ${turn.turn_id}`);
+            const goalIdentity = {
+              conversation_uid: expectedGoal.conversation_uid,
+              goal_id: expectedGoal.goal.goal_id,
+              status: expectedGoal.goal.status,
+              attempt_id: expectedGoal.goal.attempt?.attempt_id ?? null,
+              turn_id: expectedGoal.goal.attempt?.turn_id ?? null,
+            };
+            await mark(`GOAL BEFORE ${JSON.stringify({ persisted: goalIdentity, turn, conversation_uid: stream.conversation_uid })}`);
+          },
+          after: async (turn, snapshot, stream) => {
+            const restored = await readPersistedGoal();
+            if (!captureAttemptIdentity(restored) || !hasMatchingGoalTurn(snapshot, restored, turn) ||
+                !hasMatchingGoalTurn(stream, restored, turn) ||
+                !hasMatchingGoalTurn(await currentStreamState(), restored, turn) ||
+                restored.conversation_uid !== expectedGoal.conversation_uid ||
+                restored.goal.goal_id !== expectedGoal.goal.goal_id ||
+                restored.goal.attempt.attempt_id !== expectedGoal.goal.attempt.attempt_id ||
+                restored.goal.attempt.turn_id !== expectedGoal.goal.attempt.turn_id) {
+              throw new Error("goal reload proof inconclusive: persisted goal or running turn changed during reload");
+            }
+            const reloadedTurn = snapshot.turns.find((item) => item.turn_id === turn.turn_id);
+            const goalIdentity = {
+              conversation_uid: restored.conversation_uid,
+              goal_id: restored.goal.goal_id,
+              status: restored.goal.status,
+              attempt_id: restored.goal.attempt?.attempt_id ?? null,
+              turn_id: restored.goal.attempt?.turn_id ?? null,
+            };
+            await mark(`GOAL AFTER ${JSON.stringify({ persisted: goalIdentity, turn: reloadedTurn, conversation_uid: snapshot.conversation_uid })}`);
+          },
+        });
+        const observed = typeof page !== "undefined" && await page.evaluate(() =>
+          window.__rec.goalCardsObserved && !window.__rec.sampleError &&
+          window.__rec.pendingToolCalls.some((call) => call.turn_id === window.__rec.goalTurn));
+        if (!observed) throw new Error("goal reload proof inconclusive: rendered tool cards cannot be associated with the verified goal turn");
+      } catch (error) {
+        proofFailure = error;
+        throw error;
+      } finally {
+        try {
+          await clearPrivateGoalReply();
+          creationReceipt = null;
+          let persisted = await readPersistedGoal();
+          if (persisted?.goal && !matchesOwnedGoal(persisted)) {
+            throw new Error("persisted goal identity changed; refusing to clear a goal not created by this run");
+          }
+          if (ownedGoal && persisted?.goal) {
+            await command("/goal clear", "PAGE CLEANUP /goal clear");
+            const cleanupDeadline = Date.now() + 60000;
+            while (persisted?.goal && Date.now() < cleanupDeadline) {
+              await sleep(500);
+              persisted = await readPersistedGoal();
+              if (persisted?.goal && !matchesOwnedGoal(persisted)) {
+                throw new Error("persisted goal identity changed during cleanup; refusing to clear another goal");
+              }
+            }
+            if (persisted?.goal) {
+              throw new Error("timed out waiting for /goal clear to remove the persisted goal");
+            }
+          }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          const original = proofFailure instanceof Error ? `; original proof failure: ${proofFailure.message}` : "";
+          throw new Error(`goal reload cleanup failed: ${detail}${original}`);
+        }
+      }
+    },
+    // Inject a real hub message while the page's turn is still running.
+    async "hub-note"() {
+      await send(`${U(1)}: ${tools(3, 6)}. ${say(1)}`, "U1");
+      await waitForRunning();
+      await sleep(7000);
+      if (!await page.evaluate(() => !!document.querySelector('[aria-label="Stop generating"]'))) {
+        throw new Error("the turn finished before the hub note could arrive");
+      }
+      const details = await apiJson(`/sessions/${session}`);
+      const presence = await apiJson("/hub/agents?refresh=true");
+      const matches = (presence.agents ?? []).filter((item) =>
+        details.daemon_pid > 0 && item.pid === details.daemon_pid &&
+        item.identity === details.identity && item.agent_id);
+      if (matches.length !== 1) throw new Error("could not uniquely resolve the selected session hub presence");
+      const from = `chat-recorder-${LABEL}`;
+      const text = `${tag} hub note arriving during the active turn. Acknowledge it briefly, then finish the current request.`;
+      const beforeUsers = await page.evaluate(() => window.__rec.snapshotUserRows?.() ?? []);
+      const beforeStreamUsers = await page.evaluate(() => window.__rec.snapshotStreamUserRows?.() ?? []);
+      const afterIndex = await page.evaluate(() => window.__rec.net.length);
+      await postFromClient("/hub/messages", {
+        target: agent,
+        agent_id: matches[0].agent_id,
+        from_identity: from,
+        content: text,
+      }, "HUB NOTE ARRIVES MID-TURN");
+      await waitForStreamRowKind("note", { whileRunning: true, afterIndex, hubNote: { from, text } });
+      await waitForRenderedHubNote(from, text);
+      const afterUsers = await page.evaluate(() => window.__rec.snapshotUserRows?.() ?? []);
+      const afterStreamUsers = await page.evaluate(() => window.__rec.snapshotStreamUserRows?.() ?? []);
+      if (beforeStreamUsers.some((before) => !afterStreamUsers.some((after) => after.id === before.id && JSON.stringify(after) === JSON.stringify(before)))) {
+        throw new Error("an existing stream user row changed after the hub note");
+      }
+      if (beforeUsers.some((before) => !afterUsers.some((after) => after.id === before.id && after.text === before.text))) {
+        throw new Error("an existing user row changed after the hub note");
+      }
       await settle(R(1));
     },
   };
-  let failed = null;
-  try { await flows[flow](); } catch (error) { failed = String(error); }
+  if (!failed) failed = await captureRecorderFailure(() => flows[flow]());
   await mark("END");
   await collect();
   await page.screenshot({ path: path.join(dir, "final.png") }).catch(() => undefined);
@@ -450,68 +1191,10 @@ async function record(flow, session, browser) {
   // ---- what the frames show
   const { frames, net, marks } = collected;
   frames.sort((a, b) => a.t - b.t);
-  const at = (name) => marks.find((m) => m.name === name)?.t;
-  const readyAt = at("READY") ?? 0;
-  // A page reload blanks the page: that is the flow, not a defect.
-  const reloading = (t) => at("RELOAD") !== undefined && t >= at("RELOAD") && t <= (at("RELOADED") ?? Infinity) + 3000;
-  const baseline = frames.find((frame) => frame.t >= readyAt) ?? frames[0];
-  const events = [];
-  const defects = { blank: 0, remount: 0, massFade: 0, dupUser: 0, dupReply: 0, dupTools: 0, replyGone: 0, picker: 0, anchorMoved: 0, anchorLost: 0, errorBoxLeft: 0 };
-  const flag = (t, name, note, counter) => { events.push({ t, name, note }); if (counter) defects[counter] += 1; };
-  const ids = (frame) => new Set(frame.rows.map((row) => /^[a-z](\d+):/.exec(row)?.[1]));
-  const over = (counts, base) => counts.some((count, index) => count - (base?.[index] ?? 0) > 1);
-  const on = { dupUser: false, dupReply: false, dupTools: false, picker: false, err: false, fade: false };
-  const seen = baseline ? baseline.replies.map(() => false) : [];
-  const gone = seen.map(() => false);
-  let previous = null;
-  let anchor = null;
-  for (const frame of frames) {
-    if (frame.t < readyAt || reloading(frame.t)) { previous = frame; continue; }
-    if (previous && !reloading(previous.t)) {
-      if (frame.n === 0 && previous.n > 0) flag(frame.t, "BLANK", `rows ${previous.n} -> 0`, "blank");
-      if (previous.n >= 3 && frame.n >= 3 && ![...ids(frame)].some((id) => ids(previous).has(id))) {
-        flag(frame.t, "REMOUNT-ALL", `every row is a new element (${previous.n} -> ${frame.n} rows)`, "remount");
-      }
-    }
-    const fade = frame.fading >= 3;
-    if (fade && !on.fade) flag(frame.t, "MASS-FADE", `${frame.fading} rows fading in at once`, "massFade");
-    on.fade = fade;
-    const dupUser = over(frame.users, baseline?.users);
-    if (dupUser && !on.dupUser) flag(frame.t, "DUP-USER", `bubbles per message: ${frame.users.join("/")}`, "dupUser");
-    if (!dupUser && on.dupUser) flag(frame.t, "DUP-USER-END", "");
-    on.dupUser = dupUser;
-    const dupReply = over(frame.replies, baseline?.replies);
-    if (dupReply && !on.dupReply) flag(frame.t, "DUP-REPLY", `copies per reply: ${frame.replies.join("/")}`, "dupReply");
-    if (!dupReply && on.dupReply) flag(frame.t, "DUP-REPLY-END", "");
-    on.dupReply = dupReply;
-    const dupTools = frame.toolsDrawn > frame.toolsStarted;
-    if (dupTools && !on.dupTools) flag(frame.t, "DUP-TOOLS", `${frame.toolsDrawn} tool calls drawn, ${frame.toolsStarted} started`, "dupTools");
-    if (!dupTools && on.dupTools) flag(frame.t, "DUP-TOOLS-END", "");
-    on.dupTools = dupTools;
-    frame.replies.forEach((count, index) => {
-      const shows = count - (baseline?.replies?.[index] ?? 0) > 0;
-      if (shows && gone[index]) { gone[index] = false; flag(frame.t, "REPLY-BACK", `reply ${index + 1}`); }
-      if (shows) seen[index] = true;
-      else if (seen[index] && !gone[index]) { gone[index] = true; flag(frame.t, "REPLY-GONE", `reply ${index + 1} left the screen`, "replyGone"); }
-    });
-    const picker = frame.pick > (baseline?.pick ?? 0);
-    if (picker && !on.picker) flag(frame.t, "PICKER", `${frame.pick} "N / M" switcher(s)`, "picker");
-    on.picker = picker;
-    const err = frame.err > (baseline?.err ?? 0);
-    if (err && !on.err) flag(frame.t, "ERROR-BOX", `"${frame.errText}"`);
-    if (!err && on.err) flag(frame.t, "ERROR-BOX-END", "");
-    on.err = err;
-    if ("anc" in frame) {
-      if (frame.anc === null) { if (anchor !== "lost") flag(frame.t, "ANCHOR-LOST", "the row being read was rebuilt", "anchorLost"); anchor = "lost"; }
-      else if (anchor === null) anchor = frame.anc;
-      else if (anchor !== "lost" && Math.abs(frame.anc - anchor) > 3) { flag(frame.t, "ANCHOR-MOVED", `the row being read moved ${frame.anc - anchor} px`, "anchorMoved"); anchor = frame.anc; }
-    }
-    previous = frame;
-  }
-  if (on.err) defects.errorBoxLeft = 1;
+  const { events, defects } = analyzeChatFrames(frames, marks);
   const final = frames.at(-1);
   const summary = {
-    flow, label: LABEL, web: WEB, failed, defects,
+    flow, runtime: runtime === "single" ? activeRuntime : runtime, agent, label: LABEL, web: WEB, failed, defects,
     final: final ? { users: final.users, replies: final.replies, running: final.run } : null,
     frames: frames.length, videoStartMs: videoStart, sampleError: collected.sampleError ?? null,
   };
@@ -520,7 +1203,7 @@ async function record(flow, session, browser) {
   const fmt = (t) => `${(t / 1000).toFixed(3).padStart(8)}s`;
   const wire = (entry) => {
     const head = `${entry.kind}#${entry.id}`;
-    if (entry.req) return `${head} -> ${entry.req}${entry.commands ? ` commands=${JSON.stringify(entry.commands)} rows=${entry.sentCount} synced=${JSON.stringify(entry.sentSynced)} tail=${JSON.stringify(entry.sent)}` : ""}`;
+    if (entry.req) return `${head} -> ${entry.req}${entry.commands ? ` commands=${JSON.stringify(entry.commands)} rows=${entry.sentCount} synced=${JSON.stringify(entry.sentSynced)} tail=${JSON.stringify(entry.sent)}` : ""}${entry.input ? ` input=${entry.input} text=${JSON.stringify(entry.text)} attachments=${entry.attachments}` : ""}`;
     if (entry.status !== undefined) return `${head} <- HTTP ${entry.status}`;
     if (entry.page) return `${head} <- rows ${entry.page} tail=${JSON.stringify(entry.tail)}`;
     if (entry.ops) return `${head} state ${entry.ops.map((op) => op.rows ? `messages=[..${op.rows.length}: ${op.rows.slice(-4).join("  ")}]` : op.row ? `${op.set}=${op.row}` : op.set ? `${op.set}=${JSON.stringify(op.value)}` : `${op.op}:${op.path}`).join(" ; ")}`;
@@ -545,23 +1228,59 @@ async function record(flow, session, browser) {
     ...lines.map((line) => `${fmt(line.t)} ${line.text}`), "", ...consoleLog.map((line) => `console: ${line}`), "",
     `SUMMARY ${JSON.stringify(summary)}`, "",
   ].join("\n"));
-  fs.writeFileSync(path.join(dir, "frames.json"), JSON.stringify({ wall0, videoStart, marks, events, frames }));
+  fs.writeFileSync(path.join(dir, "frames.json"), JSON.stringify({ wall0, videoStart, runtime: summary.runtime, agent, marks, events, frames }));
   fs.writeFileSync(path.join(dir, "summary.json"), JSON.stringify(summary, null, 1));
   return { summary, dir };
 }
 
 // ---------------------------------------------------------------- run
-const session = await sessionId();
+const targets = runtimeMatrix
+  ? Object.entries(runtimeMatrix).map(([runtime, agent]) => ({ runtime, agent }))
+  : [{ runtime: "single", agent: AGENT }];
+for (const target of targets) {
+  target.session = await sessionId(target.agent, target.runtime, target.runtime === "single" ? sessionOverride : "");
+}
+if (runtimeMatrix) {
+  for (const target of targets) {
+    const response = await engine(`/sessions/${target.session}`);
+    if (!response.ok) {
+      throw new Error(`could not preflight runtime ${target.runtime}: session lookup returned ${response.status}`);
+    }
+    const activeRuntime = classifyChatRuntime(await response.json());
+    if (activeRuntime !== target.runtime) {
+      throw new Error(`identity "${target.agent}" is ${activeRuntime}, expected ${target.runtime}`);
+    }
+  }
+}
+const { chromium } = require(process.env.PLAYWRIGHT_CORE_PATH ?? "playwright-core");
 const browser = await chromium.launch({ headless: !HEADED, executablePath: process.env.CHROME_PATH ?? chromium.executablePath() });
 let bad = 0;
+const defectLabels = {
+  blank: "BLANK",
+  remount: "REMOUNT-ALL",
+  massFade: "MASS-FADE",
+  dupUser: "DUP-USER",
+  dupReply: "DUP-REPLY",
+  dupTools: "DUP-TOOLS",
+  replyGone: "REPLY-GONE",
+  picker: "PICKER",
+  anchorMoved: "ANCHOR-MOVED",
+  anchorLost: "ANCHOR-LOST",
+  errorBoxLeft: "ERROR-BOX",
+};
 try {
-  for (const flow of wanted === "all" ? FLOWS : [wanted]) {
-    const { summary, dir } = await record(flow, session, browser);
-    const found = Object.entries(summary.defects).filter(([, count]) => count > 0).map(([name, count]) => `${name}=${count}`);
-    const incomplete = summary.failed ? [`failed: ${summary.failed}`] : [];
-    if (found.length || incomplete.length) bad += 1;
-    console.log(`${found.length || incomplete.length ? "DEFECT" : "CLEAN "} ${flow.padEnd(10)} ${[...found, ...incomplete].join(" ") || "no defect in any frame"}`);
-    console.log(`       ${path.join(dir, "timeline.txt")}`);
+  for (const target of targets) {
+    for (const flow of wanted === "all" ? CHAT_RECORDER_FLOWS : [wanted]) {
+      const { summary, dir } = await record(flow, target.session, browser, target);
+      const found = Object.entries(summary.defects)
+        .filter(([, count]) => count > 0)
+        .map(([name, count]) => `${defectLabels[name] ?? name}=${count}`);
+      const incomplete = summary.failed ? [`failed: ${summary.failed}`] : [];
+      if (found.length || incomplete.length) bad += 1;
+      const label = target.runtime === "single" ? flow : `${target.runtime}/${flow}`;
+      console.log(`${found.length || incomplete.length ? "DEFECT" : "CLEAN "} ${label.padEnd(27)} ${[...found, ...incomplete].join(" ") || "no defect in any frame"}`);
+      console.log(`       ${path.join(dir, "timeline.txt")}`);
+    }
   }
 } finally {
   await browser.close();

@@ -1,5 +1,7 @@
-import type { ReactNode } from "react";
+// @vitest-environment jsdom
+import { act, useState, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarProvider } from "@/components/ui/sidebar";
@@ -40,6 +42,7 @@ const Body = ({ k, session }: { k: PluginApi; session?: { session_id: string; wo
     {session ? ` in ${session.workspace}` : ""}
   </p>
 );
+const Suspends = () => { throw new Promise<void>(() => {}); };
 
 function put(id: string, name: string, extra: Partial<PluginRecord> = {}, entry: Partial<PluginEntry> = {}) {
   const record: PluginRecord = {
@@ -54,8 +57,16 @@ function put(id: string, name: string, extra: Partial<PluginRecord> = {}, entry:
       state: "ok",
       error: null,
       web: { entry: "web/dist/index.js", hash: "abc" },
-      contributes: { menu: [{ id, label: name, icon: "git-pull-request", open: { page: "main" } }] },
+      contributes: {
+        menu: [{ id, label: name, icon: "git-pull-request", open: { page: "main" } }],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: [],
+        renderers: [],
+      },
       services: [],
+      omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
       ...entry,
     },
     status: "ready",
@@ -81,7 +92,12 @@ const page = (pluginId = "hello", pageId = "main") =>
     </SidebarProvider>,
   );
 
-afterEach(() => pluginRegistry.reset());
+afterEach(() => {
+  pluginRegistry.reset();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("with no plugins", () => {
   it("draws nothing at all, so the app looks exactly as before", () => {
@@ -117,7 +133,7 @@ describe("right-hand menu rows", () => {
     const engineError = put("hello", "Hello", {}, { state: "error", error: "engine part failed" });
     expect(rowCount(engineError, undefined).text).toBe("Failed to Load");
     const crashed = put("hello", "Hello", {}, {
-      services: [{ name: "loop", state: "crash-stopped" }],
+      services: [{ name: "loop", state: "crash-stopped", secrets_omitted: 0 }],
     });
     expect(rowCount(crashed, { text: "4", hint: "4 chains running" }).text).toBe("Stopped");
     const stopping = put("hello", "Hello", {}, { state: "stopping" });
@@ -125,10 +141,10 @@ describe("right-hand menu rows", () => {
     expect(rows()).toContain("Stopping");
     const stopFailed = put("hello", "Hello", {}, {
       state: "stop-failed",
-      services: [{ name: "loop", state: "stop-failed", error: "signal failed" }],
+      services: [{ name: "loop", state: "stop-failed", error: "signal failed", secrets_omitted: 0 }],
     });
-    expect(rowCount(stopFailed, undefined)).toEqual({ text: "Stop Failed", hint: "signal failed" });
-    expect(rows()).toContain("Stop Failed");
+    expect(rowCount(stopFailed, undefined)).toEqual({ text: "Failed to Stop", hint: "signal failed" });
+    expect(rows()).toContain("Failed to Stop");
   });
 
   it("otherwise shows the plugin's own count and hover text", () => {
@@ -214,6 +230,84 @@ describe("notices", () => {
     expect(html.match(/aria-label="Dismiss"/g)).toHaveLength(2);
     expect(html.match(/>Open<\/button>/g)).toHaveLength(1);
   });
+
+  it.each(["throws", "rejects"] as const)(
+    "shows a fixed safe toast when a plugin notice action %s",
+    async (failure) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz";
+      const toast = vi.fn();
+      const run = () => {
+        if (failure === "throws") throw new Error(secret);
+        return Promise.reject(new Error(secret));
+      };
+      put("hello", "Hello", {
+        k: { id: "hello", toast } as unknown as PluginApi,
+        contributions: contributions({
+          notices: [{ key: 3, text: "Action", button: { label: "Open", run } }],
+        }),
+      });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => root.render(<PluginNotices />));
+        const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.trim() === "Open");
+        expect(button).toBeDefined();
+        await act(async () => {
+          button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+
+        expect(toast).toHaveBeenCalledWith(
+          "The plugin action failed. Check the browser console for redacted details.",
+        );
+        expect(log.mock.calls.flat().join(" ")).toContain("[redacted]");
+        expect(log.mock.calls.flat().join(" ")).not.toContain(secret);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("ignores a notice action rejection after its plugin unloads", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz";
+    let rejectAction!: (reason: unknown) => void;
+    const action = new Promise<void>((_resolve, reject) => { rejectAction = reject; });
+    const toast = vi.fn();
+    put("hello", "Hello", {
+      k: { id: "hello", toast } as unknown as PluginApi,
+      contributions: contributions({
+        notices: [{ key: 4, text: "Action", button: { label: "Open", run: () => action } }],
+      }),
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<PluginNotices />));
+      const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.trim() === "Open");
+      await act(async () => {
+        button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+      await act(async () => { pluginRegistry.remove("hello"); });
+      await act(async () => {
+        rejectAction(new Error(secret));
+        await action.catch(() => {});
+      });
+
+      expect(toast).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("main-area views", () => {
@@ -268,6 +362,58 @@ describe("main-area views", () => {
     expect(html).toContain('<div data-plugin="hello"');
     expect(html).toContain("body of hello in /work");
   });
+
+  it("contains a suspended real chat view and names that surface in its failure panel", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    put("hello", "Hello", { contributions: contributions({ views: [{ id: "peek", label: "Peek", render: Suspends }] }) });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(
+        <PluginViewHost viewKey={pluginViewKey("hello", "peek")} session={{ session_id: "s1" }} />,
+      ));
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(host.textContent).toContain("Hello Failed to Render");
+      const viewError = [...host.querySelectorAll("button")].find((button) => button.textContent === "View Error");
+      await act(async () => viewError?.click());
+      expect(host.textContent).toContain("chat view renderer");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("contains a suspended real plugin page tab and names that surface in its failure panel", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    put("hello", "Hello", { contributions: contributions({
+      pages: [{ id: "main", title: "Main", tabs: [{ id: "board", label: "Board", render: Suspends }] }],
+    }) });
+    pluginRegistry.setListed(null);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(
+        <SidebarProvider><TooltipProvider><PluginPage pluginId="hello" pageId="main" onExit={() => {}} /></TooltipProvider></SidebarProvider>,
+      ));
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(host.textContent).toContain("Hello Failed to Render");
+      const viewError = [...host.querySelectorAll("button")].find((button) => button.textContent === "View Error");
+      await act(async () => viewError?.click());
+      expect(host.textContent).toContain("page tab renderer");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("modals", () => {
@@ -284,4 +430,113 @@ describe("modals", () => {
     expect(html).toContain('role="tablist"');
     expect(html).toContain('<div data-plugin="hello"');
   });
+
+  it("contains a suspended real plugin modal tab and names that surface in its failure panel", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    put("hello", "Hello", { contributions: contributions({
+      modals: [{ id: "about", title: "About Hello", tabs: [{ id: "one", label: "One", render: Suspends }] }],
+    }) });
+    pluginRegistry.openModal("hello", "about");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<PluginModalHost />));
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(host.textContent).toContain("Hello Failed to Render");
+      const viewError = [...host.querySelectorAll("button")].find((button) => button.textContent === "View Error");
+      await act(async () => viewError?.click());
+      expect(host.textContent).toContain("modal tab renderer");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+});
+
+describe("plugin view icons", () => {
+  it("keeps a stateful icon mounted as views are recomputed and drops it on unload", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const StatefulIcon = () => {
+      const [clicks, setClicks] = useState(0);
+      return (
+        <button type="button" onClick={() => setClicks((count) => count + 1)}>
+          {clicks}
+        </button>
+      );
+    };
+    const addStatefulView = () => put("stateful-icon", "Stateful", {
+      contributions: contributions({
+        views: [{ id: "kept", label: "Kept", icon: StatefulIcon, render: Body }],
+      }),
+    });
+    addStatefulView();
+    const [, , FirstIcon] = pluginViews(pluginRegistry.getSnapshot(), true)[0];
+    expect(pluginViews(pluginRegistry.getSnapshot(), true)[0][2]).toBe(FirstIcon);
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<FirstIcon className="size-4" />));
+      await act(async () => host.querySelector("button")?.click());
+      expect(host.textContent).toBe("1");
+
+      const [, , NextIcon] = pluginViews(pluginRegistry.getSnapshot(), true)[0];
+      expect(NextIcon).toBe(FirstIcon);
+      await act(async () => root.render(<NextIcon className="size-4" />));
+      expect(host.textContent).toBe("1");
+
+      pluginRegistry.remove("stateful-icon");
+      expect(pluginViews(pluginRegistry.getSnapshot(), true)).toEqual([]);
+      addStatefulView();
+      const [, , ReloadedIcon] = pluginViews(pluginRegistry.getSnapshot(), true)[0];
+      expect(ReloadedIcon).not.toBe(FirstIcon);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["throws", "suspends"] as const)(
+    "F2 contains a plugin view icon that %s and uses the host fallback icon",
+    async (failure) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      vi.useFakeTimers();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const never = new Promise<void>(() => {});
+      const BrokenIcon = () => {
+        if (failure === "throws") throw new Error("broken view icon");
+        throw never;
+      };
+      put("hello", "Hello", {
+        contributions: contributions({
+          views: [{ id: "peek", label: "Peek", icon: BrokenIcon, render: Body }],
+        }),
+      });
+      const [, , Icon] = pluginViews(pluginRegistry.getSnapshot(), true)[0];
+      const host = document.createElement("div");
+      document.body.append(host);
+      const uncaught = vi.fn();
+      const root = createRoot(host, { onUncaughtError: uncaught });
+
+      try {
+        await act(async () => root.render(<Icon className="size-4" />));
+        if (failure === "suspends") {
+          expect(host.textContent).toContain("Rendering plugin view");
+          await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+        }
+
+        expect(uncaught).not.toHaveBeenCalled();
+        expect(host.querySelector('[data-plugin="hello"] svg')).not.toBeNull();
+        expect(host.textContent).not.toContain("broken view icon");
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
 });

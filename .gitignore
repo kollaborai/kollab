@@ -209,6 +209,7 @@ backups/
 code_audit/
 codemon/
 tools/
+!docs/features/tools/
 docs/project-management/
 docs/archive/
 .archive
@@ -222,7 +223,7 @@ docs/scratchpad.md
 
 # Local presentation drafts
 docs/research/2026-05-19-cli-harness-ux-presentation.md
-outputs/manual-20260519-cli-ux/
+outputs/
 docs/scratchpad/
 
 # Beads/Dolt tracker files

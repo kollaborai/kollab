@@ -32,7 +32,6 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from .config_utils import (
     _PROJECT_OWNER_FILE,

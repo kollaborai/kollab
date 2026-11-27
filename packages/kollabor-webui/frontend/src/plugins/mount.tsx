@@ -1,9 +1,19 @@
 /**
- * Where plugin UI mounts: inside `<div data-plugin="<id>">` (plugin CSS scopes to it, and on a touch screen
- * every control in it is at least 44 px tall, styles.css) and an error boundary, so a plugin that throws while
- * drawing shows Failed to Render and the rest of the app keeps working.
+ * Where plugin UI mounts: block surfaces use `<div data-plugin="<id>">`; inline message tags use a scoped
+ * `<span>`. Plugin CSS scopes to either mount and touch controls stay at least 44 px tall. An error boundary
+ * keeps a plugin that throws while drawing from breaking the rest of the app.
  */
-import { Component, useState, type ComponentType, type ErrorInfo, type ReactNode } from "react";
+import {
+  Component,
+  Suspense,
+  createContext,
+  useEffect,
+  useContext,
+  useState,
+  type ComponentType,
+  type ErrorInfo,
+  type ReactNode,
+} from "react";
 import {
   Bell,
   Bot,
@@ -25,6 +35,7 @@ import { PluginPortalScopeContext } from "@/components/ui/plugin-portal-scope";
 import { cn } from "@/lib/utils";
 import type { PluginRecord } from "./registry";
 import type { PluginSession, PluginTab } from "./sdk";
+import { describePluginError, logPluginFailure, pluginRenderFailureMessage } from "./plugin-errors";
 
 // ponytail: a short list of lucide names a manifest's `icon` can use; importing lucide's whole set by name
 // would ship every icon. Add names here as plugins need them.
@@ -56,6 +67,7 @@ export function PluginFailure({
   onRetry,
   initiallyOpen = false,
   inset = true,
+  inline = false,
 }: {
   title?: string;
   error: string;
@@ -63,12 +75,23 @@ export function PluginFailure({
   initiallyOpen?: boolean;
   /** Its own padding; off inside a dialog, which pads its body already. */
   inset?: boolean;
+  /** Phrasing content for an inline message tag. */
+  inline?: boolean;
 }) {
   const [open, setOpen] = useState(initiallyOpen);
+  const Root = inline ? "span" : "div";
+  const Heading = inline ? "span" : "p";
+  const Actions = inline ? "span" : "div";
   return (
-    <div role="alert" className={cn("flex min-w-0 flex-col gap-3 text-sm", inset && "px-4 py-4 sm:px-6")}>
-      {title ? <p className="font-medium">{title}</p> : null}
-      <div className="flex flex-wrap gap-2">
+    <Root
+      role="alert"
+      className={cn(
+        inline ? "inline-flex min-w-0 items-baseline gap-1 text-sm" : "flex min-w-0 flex-col gap-3 text-sm",
+        !inline && inset && "px-4 py-4 sm:px-6",
+      )}
+    >
+      {title ? <Heading className="font-medium">{title}</Heading> : null}
+      <Actions className={inline ? "inline-flex flex-wrap gap-2" : "flex flex-wrap gap-2"}>
         <Button type="button" variant="outline" size="sm" className="pointer-coarse:min-h-11" onClick={onRetry}>
           Retry
         </Button>
@@ -82,46 +105,159 @@ export function PluginFailure({
         >
           View Error
         </Button>
-      </div>
+      </Actions>
       {open ? (
-        <pre className="bg-muted/40 text-muted-foreground max-h-60 overflow-auto rounded-md p-3 text-xs break-words whitespace-pre-wrap">
-          {error || "No error text was given."}
-        </pre>
+        inline ? (
+          <code className="text-muted-foreground break-all whitespace-pre-wrap">{error || "No error text was given."}</code>
+        ) : (
+          <pre className="bg-muted/40 text-muted-foreground max-h-60 overflow-auto rounded-md p-3 text-xs break-words whitespace-pre-wrap">
+            {error || "No error text was given."}
+          </pre>
+        )
       ) : null}
-    </div>
+    </Root>
   );
 }
 
-/** Catches an error a plugin throws while drawing; Retry draws it again. */
-export class PluginBoundary extends Component<{ name: string; children: ReactNode }, { error: Error | null }> {
-  state: { error: Error | null } = { error: null };
+export const PLUGIN_RENDER_TIMEOUT_MS = 5_000;
+
+function PluginSuspenseFallback({
+  inline,
+  onTimeout,
+}: {
+  inline: boolean;
+  onTimeout: () => void;
+}) {
+  useEffect(() => {
+    const timer = setTimeout(onTimeout, PLUGIN_RENDER_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [onTimeout]);
+  const Root = inline ? "span" : "div";
+  return <Root role="status" className="text-muted-foreground text-sm">Rendering plugin view…</Root>;
+}
+
+type PluginBoundaryProps = {
+  name: string;
+  renderer?: string;
+  resetKey?: unknown;
+  inline?: boolean;
+  errorFallback?: ReactNode;
+  children: ReactNode;
+};
+
+const PluginRendererSurfaceContext = createContext<string | undefined>(undefined);
+
+export function PluginRendererSurface({ renderer, children }: { renderer: string; children: ReactNode }) {
+  return (
+    <PluginRendererSurfaceContext.Provider value={renderer}>
+      {children}
+    </PluginRendererSurfaceContext.Provider>
+  );
+}
+
+type PluginBoundaryState = { error: Error | null; timedOutSuspense?: boolean };
+
+export class PluginBoundary extends Component<PluginBoundaryProps, PluginBoundaryState> {
+  state: PluginBoundaryState = { error: null };
 
   static getDerivedStateFromError(error: unknown): { error: Error } {
-    return { error: error instanceof Error ? error : new Error(String(error)) };
+    return { error: new Error(describePluginError(error)) };
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo) {
-    console.error(`${this.props.name} failed to render`, error, info.componentStack);
+    logPluginFailure(this.props.name, "failed to render", error, info.componentStack);
   }
 
-  retry = () => this.setState({ error: null });
+  componentDidUpdate(previousProps: Readonly<PluginBoundaryProps>) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState(this.state.timedOutSuspense
+        ? { error: null, timedOutSuspense: false }
+        : { error: null });
+    }
+  }
+
+  retry = () => this.setState(
+    this.state.timedOutSuspense ? { error: null, timedOutSuspense: false } : { error: null },
+  );
+
+  failSuspendedRender = () => {
+    const error = new Error("Plugin rendering remained suspended past its limit.");
+    logPluginFailure(this.props.name, "render timed out", error);
+    this.setState({ error, timedOutSuspense: true });
+  };
 
   render() {
-    if (!this.state.error) return this.props.children;
-    return <PluginFailure title={`${this.props.name} Failed to Render`} error={this.state.error.message} onRetry={this.retry} />;
+    if (!this.state.error) {
+      return (
+        <Suspense
+          fallback={
+            <PluginSuspenseFallback
+              inline={Boolean(this.props.inline)}
+              onTimeout={this.failSuspendedRender}
+            />
+          }
+        >
+          {this.props.children}
+        </Suspense>
+      );
+    }
+    if (this.props.errorFallback !== undefined) return this.props.errorFallback;
+    return (
+      <PluginFailure
+        title={`${this.props.name} Failed to Render`}
+        error={pluginRenderFailureMessage(this.props.renderer ?? "default")}
+        onRetry={this.retry}
+        inline={this.props.inline}
+      />
+    );
   }
 }
 
+/** Stable React identity for one plugin's renderer boundary. */
+export function pluginRendererBoundaryKey(ownerPluginId: string, renderer: string): string {
+  return JSON.stringify([ownerPluginId, renderer]);
+}
+
 /** Every plugin view, page tab and modal tab mounts through this. */
-export function PluginMount({ record, children }: { record: Pick<PluginRecord, "id" | "name">; children: ReactNode }) {
-  const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(null);
+export function PluginMount({
+  record,
+  renderer = "default",
+  resetKey,
+  inline = false,
+  errorFallback,
+  children,
+}: {
+  record: Pick<PluginRecord, "id" | "name">;
+  renderer?: string;
+  resetKey?: unknown;
+  inline?: boolean;
+  errorFallback?: ReactNode;
+  children: ReactNode;
+}) {
+  const inheritedRenderer = useContext(PluginRendererSurfaceContext);
+  const activeRenderer = renderer === "default" ? inheritedRenderer ?? renderer : renderer;
+  const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
+  const Root = inline ? "span" : "div";
+  const PortalRoot = inline ? "span" : "div";
   return (
-    <div data-plugin={record.id} className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <Root
+      data-plugin={record.id}
+      className={inline ? "inline-flex min-w-0 align-baseline" : "flex min-h-0 min-w-0 flex-1 flex-col"}
+    >
       <PluginPortalScopeContext.Provider value={{ scoped: true, container: portalContainer }}>
-        <PluginBoundary name={record.name}>{children}</PluginBoundary>
-        <div ref={setPortalContainer} data-plugin-portal-root="" className="contents" />
+        <PluginBoundary
+          key={pluginRendererBoundaryKey(record.id, activeRenderer)}
+          name={record.name}
+          renderer={activeRenderer}
+          resetKey={resetKey}
+          inline={inline}
+          errorFallback={errorFallback}
+        >
+          {children}
+        </PluginBoundary>
+        <PortalRoot ref={setPortalContainer} data-plugin-portal-root="" className="contents" />
       </PluginPortalScopeContext.Provider>
-    </div>
+    </Root>
   );
 }
 
@@ -130,10 +266,14 @@ export function PluginTabs({
   record,
   tabs,
   session,
+  rendererPrefix = "page-tab",
+  surfaceId,
 }: {
   record: PluginRecord;
   tabs: readonly PluginTab[];
   session?: PluginSession;
+  rendererPrefix?: "page-tab" | "modal-tab";
+  surfaceId?: string;
 }) {
   const [active, setActive] = useState(tabs[0]?.id ?? "");
   const shown = tabs.some((tab) => tab.id === active) ? active : (tabs[0]?.id ?? "");
@@ -148,7 +288,13 @@ export function PluginTabs({
       </TabsList>
       {tabs.map((tab) => (
         <TabsContent key={tab.id} value={tab.id} className="flex min-h-0 flex-col overflow-y-auto px-4 py-3 sm:px-6">
-          <PluginMount record={record}>{record.k ? <tab.render k={record.k} session={session} /> : null}</PluginMount>
+          <PluginMount
+            record={record}
+            renderer={`${rendererPrefix}:${encodeURIComponent(surfaceId ?? "")}:${encodeURIComponent(tab.id)}`}
+            resetKey={session?.session_id}
+          >
+            {record.k ? <tab.render k={record.k} session={session} /> : null}
+          </PluginMount>
         </TabsContent>
       ))}
     </Tabs>

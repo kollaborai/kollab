@@ -47,16 +47,39 @@ async def test_restart_exec_guard_allows_only_one_claim():
 
 
 @pytest.mark.asyncio
-async def test_restart_watchdog_timeout_execs_when_graceful_path_hangs():
+async def test_restart_watchdog_exits_nonzero_when_cleanup_is_unconfirmed():
     plugin = object.__new__(HubPlugin)
     plugin._self_restart_exec_started = False
+    plugin._shutdown_complete = False
+    exec_argv = ["/usr/bin/python", "main.py"]
+    exit_codes = []
+
+    with (
+        patch("plugins.hub.plugin.os.execvp") as execvp,
+        patch("plugins.hub.plugin.os._exit", side_effect=exit_codes.append),
+        patch("plugins.hub.plugin.asyncio.sleep", new=AsyncMock()),
+    ):
+        await plugin._self_restart_watchdog(exec_argv, "koordinator")
+
+    assert plugin._self_restart_exec_started is False
+    assert exit_codes == [1]
+    execvp.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_watchdog_execs_only_after_cleanup_is_confirmed():
+    plugin = object.__new__(HubPlugin)
+    plugin._self_restart_exec_started = False
+    plugin._shutdown_complete = True
     exec_argv = ["/usr/bin/python", "main.py"]
 
     with (
         patch("plugins.hub.plugin.os.execvp") as execvp,
+        patch("plugins.hub.plugin.os._exit") as exit_process,
         patch("plugins.hub.plugin.asyncio.sleep", new=AsyncMock()),
     ):
         await plugin._self_restart_watchdog(exec_argv, "koordinator")
 
     assert plugin._self_restart_exec_started is True
     execvp.assert_called_once_with(exec_argv[0], exec_argv)
+    exit_process.assert_not_called()

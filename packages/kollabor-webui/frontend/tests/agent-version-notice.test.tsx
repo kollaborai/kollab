@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, isAgentTooOld } from "@/api";
 import { DaemonNotice } from "@/components/code/DaemonNotice";
-import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
+import { AgentVersionNotice, agentVersionNotice, versionNoticeKey } from "@/components/shell/AgentVersionNotice";
 import { TerminalView } from "@/components/terminal/TerminalView";
 
 const terminalMock = vi.hoisted(() => ({ errorCode: "daemon_outdated" }));
@@ -42,6 +42,33 @@ describe("visibleText", () => {
 describe("agentVersionNotice", () => {
   it("is silent when the agent runs the engine's version", () => {
     expect(agentVersionNotice({ engineVersion: "0.21.0+aaaa1111", agent: { ...agent, version: "0.21.0+aaaa1111" }, restartAgents: true })).toBeNull();
+  });
+
+  it("names stop-and-start, not /restart, when the chat cannot reach an older agent (#1451)", () => {
+    const older = { ...agent, version: "0.20.0" };
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: older, restartAgents: false, chatOutdated: true }))
+      .toMatchObject({ kind: "unknown", name: "lapis" });
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: older, restartAgents: true, chatOutdated: true }))
+      .toMatchObject({ kind: "button" });
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: { ...agent, version: "0.21.0" }, restartAgents: false, chatOutdated: true }))
+      .toMatchObject({ kind: "unknown", name: "lapis" });
+  });
+
+  it("keys each chat's notice by session, and a 426 notice apart from a dismissed version notice (#1451 review)", () => {
+    expect(versionNoticeKey("s1", undefined, true)).not.toBe(versionNoticeKey("s2", undefined, true));
+    expect(versionNoticeKey("s1", "a1", true)).not.toBe(versionNoticeKey("s1", "a1", false));
+    expect(versionNoticeKey("s1", "a1", false)).toBe("s1|a1");
+    expect(versionNoticeKey(undefined, "a1", false)).toBe("");
+  });
+
+  it("never leaves an outdated chat without a notice (#1451 review)", () => {
+    const current = { ...agent, version: "0.21.0" };
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: current, restartAgents: true, chatOutdated: true }))
+      .toMatchObject({ kind: "button", name: "lapis" });
+    expect(agentVersionNotice({ engineVersion: "0.21.0", agent: undefined, restartAgents: true, chatOutdated: true, chatName: "ruby" }))
+      .toMatchObject({ kind: "unknown", name: "ruby" });
+    expect(agentVersionNotice({ engineVersion: "", agent: undefined, restartAgents: false, chatOutdated: true, chatName: "ruby" }))
+      .toMatchObject({ kind: "unknown", name: "ruby" });
   });
 
   it("is silent when either side does not say (no agent row, no engine version)", () => {

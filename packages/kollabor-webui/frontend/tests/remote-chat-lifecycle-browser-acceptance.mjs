@@ -1,12 +1,13 @@
-// Deterministic browser regression for remote chat history across sends,
-// session switches, reloads, and a remote state/history timeout (#880).
-// Uses the real App and a synthetic engine API; it never contacts a real relay.
+// Deterministic browser regression for a remote chat across sends, session
+// switches, reloads, and a remote read timeout (#880), on the one ordered chat
+// stream (#1451). Uses the real App and a synthetic engine API; it never
+// contacts a real relay.
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright-core";
-import { makeFixtures, openVite } from "./learn-browser-acceptance.mjs";
+import { makeFixtures, openVite, until, waitForSessionReady } from "./learn-browser-acceptance.mjs";
 
 const timeout = 15_000;
 const localSession = {
@@ -19,43 +20,90 @@ const localSession = {
   active: true,
 };
 const remoteId = "remote-session-1";
+const remoteButtonSelector = '[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]';
 const prompt = "LIFECYCLE_REMOTE_PROMPT";
 const reply = "LIFECYCLE_REMOTE_REPLY";
+// The synthetic daemon's conversation: its rows and its ordered event log.
+const conversation = { conversation_uid: "remote-conversation-880", generation: "remote-daemon-1" };
 const history = [];
-const historyReads = [];
+const log = [];
+let lastSeq = 1;
+const streamReads = [];
 const transportRequests = [];
-let failNextHistoryRead = false;
+let snapshotsServed = 0;
+let streamOutage = false;
+const waiting = new Set();
 
 function json(route, value, status = 200) {
   return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
 }
 
-function historyPage() {
-  return {
-    history: structuredClone(history),
-    conversation_uid: "remote-conversation-880",
-    start_index: 0,
-    end_index: history.length,
-    has_more_older: false,
-    older_cursor: null,
-    has_more_newer: false,
-    newer_cursor: null,
-    source: "mirror",
-    stale: false,
-    last_turn_error: null,
-  };
+function emit(type, data) {
+  lastSeq += 1;
+  const row = type === "row.upsert" ? { ...data, seq: lastSeq } : data;
+  if (type === "row.upsert") history.push(row);
+  log.push({ ...conversation, seq: lastSeq, type, data: row });
 }
 
-function sseFrame(chunk) {
-  return `data: ${JSON.stringify(chunk)}\n\n`;
+function remoteTurn(inputId, text) {
+  const turnId = "remote-turn-880";
+  const turn = { turn_id: turnId, input_ids: [inputId] };
+  const row = (id, kind, role, content, createdAt) => ({
+    id, kind, role, turn_id: turnId, status: "completed", parts: [{ type: "text", text: content }], created_at: createdAt,
+  });
+  emit("input.state", { id: inputId, state: "queued", turn_id: null });
+  emit("turn.state", { ...turn, state: "running" });
+  emit("input.state", { id: inputId, state: "started", turn_id: turnId });
+  emit("row.upsert", row(inputId, "input", "user", text, "2026-11-08T12:00:00Z"));
+  emit("row.upsert", row("synthetic-reply-880", "reply", "assistant", reply, "2026-11-08T12:00:01Z"));
+  emit("turn.state", { ...turn, state: "ended" });
+  emit("input.state", { id: inputId, state: "ended", turn_id: turnId, outcome: "completed" });
+  for (const wake of waiting) wake();
+  waiting.clear();
 }
 
-async function cachedRemoteHistory(page) {
+// One stream request: a snapshot without a complete matching cursor, otherwise
+// the events after it. A caught-up request is held until there is a new event.
+async function serveStream(route) {
+  const url = new URL(route.request().url());
+  streamReads.push({ method: route.request().method(), url: url.href });
+  if (streamOutage) {
+    await json(route, { detail: "synthetic remote state RPC timeout" }, 502);
+    return;
+  }
+  const after = url.searchParams.get("after");
+  const matches = after !== null &&
+    url.searchParams.get("conversation_uid") === conversation.conversation_uid &&
+    url.searchParams.get("generation") === conversation.generation;
+  let events;
+  if (matches) {
+    if (Number(after) >= lastSeq) await new Promise((resolve) => waiting.add(resolve));
+    events = log.filter((event) => event.seq > Number(after));
+  } else {
+    snapshotsServed += 1;
+    events = [{
+      ...conversation,
+      seq: lastSeq,
+      type: "snapshot",
+      data: { rows: structuredClone(history), next_seq: lastSeq + 1, older: null, turns: [], inputs: [] },
+    }];
+  }
+  // The page may have moved on (session switch, reload) while the request waited.
+  await route.fulfill({
+    status: 200,
+    contentType: "text/event-stream",
+    body: events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+  }).catch(() => {});
+}
+
+const rowTexts = (rows) => rows.map((row) => row.parts.map((part) => part.text).join(""));
+
+async function cachedRemoteRows(page) {
   return page.evaluate(async (sessionId) => {
     const databases = await indexedDB.databases();
-    if (!databases.some((database) => database.name === "kollab-history-pages-v1")) return null;
+    if (!databases.some((database) => database.name === "kollab-chat-rows-v1")) return null;
     const database = await new Promise((resolve, reject) => {
-      const request = indexedDB.open("kollab-history-pages-v1");
+      const request = indexedDB.open("kollab-chat-rows-v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -65,7 +113,7 @@ async function cachedRemoteHistory(page) {
       request.onerror = () => reject(request.error);
     });
     database.close();
-    return item?.pages?.flatMap((entry) => entry.history ?? []) ?? [];
+    return item?.rows ?? [];
   }, remoteId);
 }
 
@@ -92,45 +140,37 @@ async function openPageInContext(context, baseUrl, fixtures) {
     externalRequests.push(url.href);
     return route.abort();
   });
-  await page.route("**/*remote-session-1/history*", async (route) => {
-    historyReads.push({ method: route.request().method(), url: route.request().url() });
-    if (failNextHistoryRead) {
-      failNextHistoryRead = false;
-      await json(route, { detail: "synthetic remote state RPC timeout" }, 502);
-      return;
-    }
-    await json(route, historyPage());
-  });
+  await page.route(/\/sessions\/remote-session-1\/stream(\?|$)/, serveStream);
   await page.route("**/*remote-session-1/events", () => new Promise(() => {}));
-  await page.route("**/*remote-session-1/assistant", async (route) => {
+  await page.route(/\/sessions\/remote-session-1\/inputs$/, async (route) => {
     const request = route.request().postDataJSON();
     transportRequests.push(request);
-    const content = request.commands?.find((command) => command.type === "add-message")
-      ?.message?.parts?.find((part) => part.type === "text")?.text;
-    assert.equal(content, prompt, "UI transport must send the exact submitted user text");
-    history.push({ role: "user", content: prompt, timestamp: "2026-11-08T12:00:00Z" });
-    history.push({ role: "assistant", content: reply, timestamp: "2026-11-08T12:00:01Z" });
-    const body = [
-      sseFrame({ type: "part-start", part: { type: "text" } }),
-      sseFrame({ type: "text-delta", path: [0], textDelta: reply }),
-      sseFrame({
-        type: "update-state",
-        operations: [
-          { type: "set", path: ["messages"], value: [
-            { id: "synthetic-user-880", role: "user", content: prompt },
-            { id: "synthetic-assistant-880", role: "assistant", content: [{ type: "text", text: reply }] },
-          ] },
-          { type: "set", path: ["synced"], value: null },
-          { type: "set", path: ["usage"], value: { inputTokens: 1, outputTokens: 1, toolCalls: 0, stopReason: "end_turn" } },
-        ],
-      }),
-      sseFrame({ type: "part-finish", path: [0] }),
-      sseFrame({ type: "message-finish", finishReason: "stop" }),
-      "data: [DONE]\n\n",
-    ].join("");
-    await route.fulfill({ status: 200, contentType: "text/event-stream", body });
+    assert.equal(request.text, prompt, "UI transport must send the exact submitted user text");
+    await json(route, { id: request.id, state: "queued" }, 202);
+    remoteTurn(request.id, request.text);
   });
   return { page, pageErrors, consoleErrors, externalRequests };
+}
+
+async function waitForLocalSession(page) {
+  await waitForSessionReady(page, {
+    sidebarTitleIncludes: localSession.name,
+    sessionHeading: "Local Coder",
+    sessionName: localSession.name,
+    timeout,
+  });
+}
+
+async function selectRemoteSession(page) {
+  await waitForSessionReady(page, {
+    sidebarTitleIncludes: "Open Remote Coder on remote-build",
+    sessionHeading: "Remote Coder",
+    sessionName: "Remote coder session",
+    historyPath: `/sessions/${remoteId}/stream`,
+    composerPlaceholder: "Message Remote Coder…",
+    clickTarget: page.locator(remoteButtonSelector),
+    timeout,
+  });
 }
 
 async function main() {
@@ -152,23 +192,20 @@ async function main() {
     fixtures = makeFixtures({ sessions: [localSession] });
     shell = await openPageInContext(context, baseUrl, fixtures);
     await shell.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    const controls = shell.page.getByRole("complementary", { name: "Session Controls" });
-    await controls.getByText(localSession.name, { exact: true }).waitFor({ timeout });
+    await waitForLocalSession(shell.page);
 
-    await shell.page.locator('[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]').click();
-    await controls.getByText("Remote coder session", { exact: true }).waitFor({ timeout });
+    await selectRemoteSession(shell.page);
     const composer = shell.page.getByRole("textbox", { name: "Message input" });
     await composer.fill(prompt);
     await composer.press("Enter");
     await shell.page.getByText(reply, { exact: true }).first().waitFor({ timeout });
-    assert.equal(transportRequests.length, 1, "one remote assistant-transport request must be sent");
-    assert.deepEqual(history.map((row) => row.content), [prompt, reply]);
+    assert.equal(transportRequests.length, 1, "one remote input request must be sent");
+    assert.deepEqual(rowTexts(history), [prompt, reply]);
 
-    // Switching away and back exercises the history fetch on session open.
+    // Switching away and back exercises the stream snapshot on session open.
     await shell.page.locator(`[data-sidebar="sidebar"] button[title*="${localSession.name}"]`).click();
-    await shell.page.locator('[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]').click();
-    await controls.getByText("Remote coder session", { exact: true }).waitFor({ timeout });
-    await shell.page.waitForTimeout(500);
+    await waitForLocalSession(shell.page);
+    await selectRemoteSession(shell.page);
     console.log("remote reselection observation:", JSON.stringify({
       activeRows: await shell.page.locator('[data-sidebar="sidebar"] button[data-active="true"]').evaluateAll((rows) => rows.map((row) => row.getAttribute("title"))),
       remoteSessionRequests: fixtures.requests.filter((request) => request.endpoint.includes(remoteId)),
@@ -177,22 +214,25 @@ async function main() {
     }));
     await shell.page.getByText(reply, { exact: true }).first().waitFor({ timeout });
 
-    // Reopening the page exercises the saved browser history cache. A failed
-    // remote read must not erase the conversation that was already verified.
-    failNextHistoryRead = true;
+    // Reopening the page exercises the saved browser rows. A failed remote read
+    // must not erase the conversation that was already verified.
+    streamOutage = true;
+    let servedBeforeOutage = snapshotsServed;
     await shell.page.reload({ waitUntil: "domcontentloaded" });
-    await controls.getByText(localSession.name, { exact: true }).waitFor({ timeout });
-    await shell.page.locator('[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]').click();
-    await shell.page.locator(".aui-composer-input").waitFor({ state: "visible", timeout });
-    await shell.page.waitForFunction(() =>
-      document.querySelector(".aui-composer-input")?.getAttribute("placeholder") === "Message Remote Coder…",
-      null,
-      { timeout },
-    );
+    await waitForLocalSession(shell.page);
+    await selectRemoteSession(shell.page);
     await shell.page.getByText(reply, { exact: true }).first().waitFor({ timeout });
-    assert.ok(historyReads.length >= 3, `expected open/switch/reopen history reads, got ${historyReads.length}`);
-    const cachedHistory = await cachedRemoteHistory(shell.page);
-    assert.deepEqual(cachedHistory?.map((row) => row.content), [prompt, reply], "IndexedDB must retain the verified remote conversation");
+    await shell.page.getByText(prompt, { exact: true }).first().waitFor({ timeout });
+    assert.equal(snapshotsServed, servedBeforeOutage, "the reply shown during the outage must come from the saved rows");
+    assert.ok(streamReads.length >= 3, `expected open/switch/reopen stream reads, got ${streamReads.length}`);
+    const cachedRows = await cachedRemoteRows(shell.page);
+    assert.deepEqual(cachedRows && rowTexts(cachedRows), [prompt, reply], "IndexedDB must retain the verified remote conversation");
+
+    // The remote answers again: the reconnect's snapshot replaces the saved rows in place.
+    streamOutage = false;
+    await until(() => snapshotsServed > servedBeforeOutage, "the chat must reconnect after the outage", timeout);
+    await shell.page.getByText(reply, { exact: true }).first().waitFor({ timeout });
+    assert.equal(await shell.page.getByText(reply, { exact: true }).count(), 1, "the reply must stay one bubble");
     assert.ok(shell.externalRequests.length === 0, `unexpected external calls: ${shell.externalRequests.join(", ")}`);
     assert.deepEqual(shell.pageErrors, [], shell.pageErrors.join(" | "));
     const unmodeledConsoleErrors = shell.consoleErrors.filter((error) =>
@@ -201,24 +241,22 @@ async function main() {
     assert.deepEqual(unmodeledConsoleErrors, [], unmodeledConsoleErrors.join(" | "));
 
     // Close and relaunch Chromium with the same isolated profile. Force another
-    // history 502 so the visible reply must come from the persisted browser cache.
+    // stream 502 so the visible reply must come from the persisted browser rows.
     await context.close();
-    failNextHistoryRead = true;
+    streamOutage = true;
+    servedBeforeOutage = snapshotsServed;
+    const readsBeforeRestart = streamReads.length;
     context = await chromium.launchPersistentContext(profileDir, launchOptions);
     shell = await openPageInContext(context, baseUrl, fixtures);
     await shell.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await shell.page.getByRole("complementary", { name: "Session Controls" })
-      .getByText(localSession.name, { exact: true }).waitFor({ timeout });
-    const acrossRestart = await cachedRemoteHistory(shell.page);
-    assert.deepEqual(acrossRestart?.map((row) => row.content), [prompt, reply], "browser recreation must preserve the isolated IndexedDB history");
-    await shell.page.locator('[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]').click();
-    await shell.page.waitForFunction(() =>
-      document.querySelector(".aui-composer-input")?.getAttribute("placeholder") === "Message Remote Coder…",
-      null,
-      { timeout },
-    );
+    await waitForLocalSession(shell.page);
+    const acrossRestart = await cachedRemoteRows(shell.page);
+    assert.deepEqual(acrossRestart && rowTexts(acrossRestart), [prompt, reply], "browser recreation must preserve the isolated IndexedDB history");
+    await selectRemoteSession(shell.page);
     await shell.page.getByText(reply, { exact: true }).first().waitFor({ timeout });
-    assert.ok(historyReads.length >= 4, `expected a history read after browser recreation, got ${historyReads.length}`);
+    assert.equal(snapshotsServed, servedBeforeOutage, "the reply after recreation must come from the saved rows");
+    assert.ok(streamReads.length >= 4 && streamReads.length > readsBeforeRestart,
+      `expected a stream read after browser recreation, got ${streamReads.length}`);
     assert.ok(shell.externalRequests.length === 0, `unexpected external calls after recreation: ${shell.externalRequests.join(", ")}`);
     assert.deepEqual(shell.pageErrors, [], shell.pageErrors.join(" | "));
     const restartConsoleErrors = shell.consoleErrors.filter((error) =>
@@ -226,10 +264,10 @@ async function main() {
     );
     assert.deepEqual(restartConsoleErrors, [], restartConsoleErrors.join(" | "));
 
-    console.log(`PASS remote chat lifecycle: exact send/reply, switch away/back, reload + Chromium profile recreation with two synthetic history 502s; ${historyReads.length} history reads; dynamic Vite port ${new URL(baseUrl).port}; no external calls`);
+    console.log(`PASS remote chat lifecycle: exact send/reply, switch away/back, reload + Chromium profile recreation with two synthetic stream 502 outages; ${streamReads.length} stream reads; dynamic Vite port ${new URL(baseUrl).port}; no external calls`);
   } catch (error) {
     const diagnostics = {
-      historyReads,
+      streamReads,
       transportRequests,
       pageErrors: shell?.pageErrors,
       consoleErrors: shell?.consoleErrors,

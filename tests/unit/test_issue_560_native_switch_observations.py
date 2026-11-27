@@ -279,7 +279,7 @@ async def test_handover_shows_a_retried_row_whose_history_write_fails_in_backgro
     monkeypatch.setattr(manager, "add_message", fails_before_the_row_lands)
     events, shown = [], []
 
-    async def log_user_message(_text):
+    async def log_user_message(_text, **_kwargs):
         await asyncio.sleep(0)
         events.append("write-failed")
         raise OSError(28, "No space left on device")

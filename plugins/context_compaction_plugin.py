@@ -22,6 +22,7 @@ from uuid import uuid4
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_ai.conversation_logger import _session_file_write_lock_path, utc_stamp
 from kollabor_ai.fast_model import resolve_fast_model
+from kollabor_ai.model_registry import parse_json_int
 from kollabor_config.config_utils import resolve_global_path
 from kollabor_config.file_lock import locked_file
 from kollabor_events import EventType, Hook, HookPriority
@@ -88,6 +89,27 @@ MAX_PRESERVED_COORDINATION_CHARS = 16000
 MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS = 8000
 
 
+def _validated_context_window(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if isinstance(value, int):
+        if value <= 0:
+            return None
+        try:
+            return value if math.isfinite(float(value)) else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if isinstance(value, float) and math.isfinite(value) and value > 0:
+        window = int(value)
+        return window if window > 0 else None
+    return None
+
+
 def _load_model_registry() -> Dict[str, Any]:
     """Load the model registry from bundles/data/models.json.
 
@@ -109,7 +131,7 @@ def _load_model_registry() -> Dict[str, Any]:
         if p.exists():
             try:
                 with open(p) as f:
-                    registry = json.load(f)
+                    registry = json.load(f, parse_int=parse_json_int)
                 break
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Failed to load bundled model registry {p}: {e}")
@@ -119,7 +141,7 @@ def _load_model_registry() -> Dict[str, Any]:
     if user_path.exists():
         try:
             with open(user_path) as f:
-                user_data = json.load(f)
+                user_data = json.load(f, parse_int=parse_json_int)
             # Merge models (user wins)
             if "models" in user_data:
                 registry.setdefault("models", {}).update(user_data["models"])
@@ -1081,26 +1103,7 @@ class ContextCompactionPlugin(BasePlugin):
             api_service = getattr(self._llm_service, "api_service", None)
             cfg = getattr(getattr(api_service, "_provider", None), "config", None)
             raw_window = getattr(cfg, "context_window", None)
-            if isinstance(raw_window, bool):
-                window = None
-            elif isinstance(raw_window, (int, float)):
-                try:
-                    numeric_window = float(raw_window)
-                    window = (
-                        int(numeric_window)
-                        if math.isfinite(numeric_window) and numeric_window > 0
-                        else None
-                    )
-                except (TypeError, ValueError, OverflowError):
-                    window = None
-            elif isinstance(raw_window, str):
-                try:
-                    parsed_window = int(raw_window)
-                    window = parsed_window if parsed_window > 0 else None
-                except (TypeError, ValueError, OverflowError):
-                    window = None
-            else:
-                window = None
+            window = _validated_context_window(raw_window)
             if window is not None:
                 return window
         except Exception:
@@ -1130,14 +1133,16 @@ class ContextCompactionPlugin(BasePlugin):
                 if model.startswith(name) and len(name) > best_len:
                     ctx = info.get("context_window")
                     if ctx:
-                        best_window = ctx
+                        best_window = _validated_context_window(ctx)
                         best_len = len(name)
-            if best_window is not None:
+            if best_len and best_window is not None:
                 return best_window
 
         # Fall back to provider default
         if provider and provider in provider_defaults:
-            return provider_defaults[provider].get("context_window")
+            return _validated_context_window(
+                provider_defaults[provider].get("context_window")
+            )
 
         return None
 
@@ -1341,23 +1346,7 @@ class ContextCompactionPlugin(BasePlugin):
 
     def _get_context_window_tokens(self) -> int:
         """Return a validated context-window size, or zero when unknown."""
-        raw_context_window = self._resolve_context_window()
-        try:
-            if isinstance(raw_context_window, bool):
-                return 0
-            if isinstance(raw_context_window, (int, float)):
-                if isinstance(raw_context_window, float) and not math.isfinite(
-                    raw_context_window
-                ):
-                    return 0
-                context_window = int(raw_context_window)
-            elif isinstance(raw_context_window, str):
-                context_window = int(raw_context_window)
-            else:
-                return 0
-        except (TypeError, ValueError, OverflowError):
-            return 0
-        return max(0, context_window)
+        return _validated_context_window(self._resolve_context_window()) or 0
 
     def _get_hard_cap_threshold(self) -> int:
         """Return the absolute boundary cap, distinct from auto-compaction."""
@@ -2630,6 +2619,9 @@ class ContextCompactionPlugin(BasePlugin):
         )
 
         next_round = self._compaction_round + 1
+        compaction_id = uuid4().hex
+        compaction_source_id = self._compaction_source_id(history)
+        snapshot_row_revision = self._compaction_row_revision()
         compacted_history = self._build_compacted_history(
             system_msg=system_msg,
             summary_text=fallback_summary,
@@ -2641,6 +2633,14 @@ class ContextCompactionPlugin(BasePlugin):
             operator_word_records=operator_word_records,
             operator_words_omitted=operator_words_omitted,
             open_state=open_state,
+            compaction_snapshot_count=len(history),
+            compaction_retained_positions=self._compaction_retained_positions(
+                history, [system_msg, *preserved_tasks, *recent]
+            ),
+            compaction_id=compaction_id,
+            compaction_source_id=compaction_source_id,
+            compaction_snapshot_row_revision=snapshot_row_revision,
+            compaction_source_history=history,
         )
         self._pending_compaction = compacted_history
         self._pending_session_id = self._get_current_session_id()
@@ -2651,6 +2651,14 @@ class ContextCompactionPlugin(BasePlugin):
         await self._apply_pending_compaction(data, event)
         duration_seconds = time.perf_counter() - rollover_started_at
         self._last_compaction_duration_seconds = duration_seconds
+        summary_metadata = next(
+            (
+                message.metadata
+                for message in compacted_history
+                if message.metadata.get("context_compaction")
+            ),
+            {},
+        )
         await self._log_compaction_event(
             messages_summarized=max(0, len(history) - len(compacted_history)),
             messages_kept=len(safe_recent),
@@ -2662,6 +2670,19 @@ class ContextCompactionPlugin(BasePlugin):
             reason=self._compaction_reason,
             duration_seconds=duration_seconds,
             summarization_model=None,
+            compaction_snapshot_count=len(history),
+            compaction_retained_positions=summary_metadata.get(
+                "compaction_retained_positions"
+            ),
+            compaction_id=summary_metadata.get("compaction_id"),
+            compaction_source_id=summary_metadata.get("compaction_source_id"),
+            compaction_snapshot_row_revision=summary_metadata.get(
+                "compaction_snapshot_row_revision"
+            ),
+            compaction_retained_position_map=summary_metadata.get(
+                "compaction_retained_position_map"
+            ),
+            compaction_output_count=summary_metadata.get("compaction_output_count"),
         )
         logger.warning(
             "[context_compaction][agent=%s][hub=%s] emergency rollover applied "
@@ -2908,6 +2929,15 @@ class ContextCompactionPlugin(BasePlugin):
             f"Applied compaction round {self._compaction_round}: "
             f"{pre_len} -> {post_len} messages"
         )
+
+        get_service = getattr(self.event_bus, "get_service", None)
+        chat_stream = get_service("chat_stream") if callable(get_service) else None
+        replace_transcript = getattr(chat_stream, "replace_transcript", None)
+        if callable(replace_transcript):
+            try:
+                replace_transcript()
+            except Exception:
+                logger.debug("chat stream compaction replacement failed", exc_info=True)
 
         self._display_compaction_event(pre_len, post_len)
 
@@ -3537,6 +3567,9 @@ class ContextCompactionPlugin(BasePlugin):
             history_snapshot = list(history)
             snapshot_len = len(history_snapshot)
             snapshot_session_id = self._get_current_session_id()
+            compaction_id = uuid4().hex
+            compaction_source_id = self._compaction_source_id(history_snapshot)
+            snapshot_row_revision = self._compaction_row_revision()
 
             keep_recent = self._keep_recent_count(history_snapshot)
             max_summary_tokens = self.config.get(
@@ -3706,6 +3739,15 @@ class ContextCompactionPlugin(BasePlugin):
                 operator_word_records=operator_word_records,
                 operator_words_omitted=operator_words_omitted,
                 open_state=open_state,
+                compaction_snapshot_count=snapshot_len,
+                compaction_retained_positions=self._compaction_retained_positions(
+                    history_snapshot,
+                    [system_msg, *ledger_handled, *preserved_tasks, *to_keep],
+                ),
+                compaction_id=compaction_id,
+                compaction_source_id=compaction_source_id,
+                compaction_snapshot_row_revision=snapshot_row_revision,
+                compaction_source_history=history_snapshot,
             )
 
             # Write checkpoint before staging the compaction swap
@@ -3730,6 +3772,14 @@ class ContextCompactionPlugin(BasePlugin):
             # Log compaction event (summary_text persisted for rebirth)
             duration_seconds = time.perf_counter() - round_started_at
             self._last_compaction_duration_seconds = duration_seconds
+            summary_metadata = next(
+                (
+                    message.metadata
+                    for message in compacted
+                    if message.metadata.get("context_compaction")
+                ),
+                {},
+            )
             await self._log_compaction_event(
                 messages_summarized=len(summarizable),
                 messages_kept=len(to_keep),
@@ -3741,6 +3791,21 @@ class ContextCompactionPlugin(BasePlugin):
                 reason=getattr(self, "_compaction_reason", "threshold"),
                 duration_seconds=duration_seconds,
                 summarization_model=self._last_summarization_model,
+                compaction_snapshot_count=snapshot_len,
+                compaction_retained_positions=summary_metadata.get(
+                    "compaction_retained_positions"
+                ),
+                compaction_id=summary_metadata.get("compaction_id"),
+                compaction_source_id=summary_metadata.get("compaction_source_id"),
+                compaction_snapshot_row_revision=summary_metadata.get(
+                    "compaction_snapshot_row_revision"
+                ),
+                compaction_retained_position_map=summary_metadata.get(
+                    "compaction_retained_position_map"
+                ),
+                compaction_output_count=summary_metadata.get(
+                    "compaction_output_count"
+                ),
             )
 
             logger.info(
@@ -4188,6 +4253,178 @@ class ContextCompactionPlugin(BasePlugin):
             metadata={"compacted_from": ctx_ids, "ledger_decision": "keep"},
         )
 
+    @staticmethod
+    def _compaction_retained_positions(
+        history_snapshot: List[ConversationMessage],
+        retained_messages: List[Optional[ConversationMessage]],
+    ) -> List[int]:
+        """Map retained source messages back to their pre-compaction indexes.
+
+        Some preservation paths clone or rewrite a message (for example, a
+        bounded TaskLedger excerpt or a detached tool result). Identity is the
+        most reliable match; role/timestamp/content and ledger source IDs cover
+        those transformed copies without making timestamp the pruning boundary.
+        """
+
+        retained = [message for message in retained_messages if message is not None]
+        identities = {id(message) for message in retained}
+
+        def field(message: Any, name: str, default: Any = None) -> Any:
+            if isinstance(message, dict):
+                return message.get(name, default)
+            return getattr(message, name, default)
+
+        def signature(message: Any) -> tuple[str, str, str]:
+            timestamp = field(message, "timestamp")
+            if hasattr(timestamp, "isoformat"):
+                timestamp = timestamp.isoformat()
+            return (
+                str(field(message, "role", "")),
+                str(timestamp or ""),
+                str(field(message, "content", "") or ""),
+            )
+
+        signatures = {signature(message) for message in retained}
+        compacted_from = set()
+        for message in retained:
+            metadata = field(message, "metadata", {})
+            values = metadata.get("compacted_from", []) if isinstance(metadata, dict) else []
+            if isinstance(values, list):
+                compacted_from.update(
+                    ctx_id for ctx_id in values if isinstance(ctx_id, str) and ctx_id
+                )
+        positions = []
+        for index, source in enumerate(history_snapshot):
+            metadata = field(source, "metadata", {})
+            source_ctx_ids = (
+                metadata.get("ctx_ids", []) if isinstance(metadata, dict) else []
+            )
+            if (
+                id(source) in identities
+                or signature(source) in signatures
+                or (
+                    isinstance(source_ctx_ids, list)
+                    and any(ctx_id in compacted_from for ctx_id in source_ctx_ids)
+                )
+            ):
+                positions.append(index)
+        return positions
+
+    @staticmethod
+    def _compaction_retained_position_map(
+        history_snapshot: List[ConversationMessage],
+        compacted_history: List[ConversationMessage],
+    ) -> Dict[str, int]:
+        """Map each retained source index to its position after compaction."""
+
+        def field(message: Any, name: str, default: Any = None) -> Any:
+            if isinstance(message, dict):
+                return message.get(name, default)
+            return getattr(message, name, default)
+
+        def signature(message: Any) -> tuple[str, str, str]:
+            timestamp = field(message, "timestamp")
+            if hasattr(timestamp, "isoformat"):
+                timestamp = timestamp.isoformat()
+            content = field(message, "content", "") or ""
+            return (
+                str(field(message, "role", "")),
+                str(timestamp or ""),
+                content if isinstance(content, str) else repr(content),
+            )
+
+        source_by_identity: Dict[int, List[int]] = {}
+        source_by_signature: Dict[tuple[str, str, str], List[int]] = {}
+        source_by_ctx_id: Dict[str, List[int]] = {}
+        source_by_task_id: Dict[str, List[int]] = {}
+        for source_index, source in enumerate(history_snapshot):
+            source_by_identity.setdefault(id(source), []).append(source_index)
+            source_by_signature.setdefault(signature(source), []).append(source_index)
+            source_metadata = field(source, "metadata", {})
+            if not isinstance(source_metadata, dict):
+                continue
+            ctx_ids = source_metadata.get("ctx_ids", [])
+            if isinstance(ctx_ids, list):
+                for ctx_id in ctx_ids:
+                    if isinstance(ctx_id, str) and ctx_id:
+                        source_by_ctx_id.setdefault(ctx_id, []).append(source_index)
+            task_id = source_metadata.get("task_id")
+            if isinstance(task_id, str) and task_id:
+                source_by_task_id.setdefault(task_id, []).append(source_index)
+
+        summary_identities = {
+            id(message)
+            for message in compacted_history
+            if isinstance(field(message, "metadata", {}), dict)
+            and field(message, "metadata", {}).get("context_compaction")
+        }
+        claimed: set[int] = set()
+        result: Dict[str, int] = {}
+        for output_index, output in enumerate(compacted_history):
+            if id(output) in summary_identities:
+                continue
+            metadata = field(output, "metadata", {})
+            if isinstance(metadata, dict) and metadata.get("compaction_task_reminder"):
+                continue
+
+            candidates = source_by_identity.get(id(output), [])
+            if not candidates and isinstance(metadata, dict):
+                compacted_from = metadata.get("compacted_from", [])
+                if isinstance(compacted_from, list):
+                    for ctx_id in compacted_from:
+                        if isinstance(ctx_id, str):
+                            candidates.extend(source_by_ctx_id.get(ctx_id, []))
+                task_id = metadata.get("task_id")
+                if not candidates and isinstance(task_id, str):
+                    candidates.extend(source_by_task_id.get(task_id, []))
+            if not candidates:
+                candidates = source_by_signature.get(signature(output), [])
+            source_index = next(
+                (index for index in candidates if index not in claimed), None
+            )
+            if source_index is None:
+                continue
+            claimed.add(source_index)
+            result[str(source_index)] = output_index
+        return result
+
+    @staticmethod
+    def _compaction_source_id(history: List[ConversationMessage]) -> Optional[str]:
+        for message in reversed(history):
+            metadata = getattr(message, "metadata", None)
+            if isinstance(message, dict):
+                metadata = message.get("metadata")
+            if not isinstance(metadata, dict) or not metadata.get("context_compaction"):
+                continue
+            value = metadata.get("compaction_id")
+            return value if isinstance(value, str) and value else None
+        return None
+
+    def _compaction_row_revision(self) -> int:
+        manager = getattr(self, "_conversation_manager", None)
+        if manager is None:
+            manager = getattr(
+                getattr(self, "_llm_service", None), "conversation_manager", None
+            )
+        value = getattr(manager, "chat_stream_row_revision", 0)
+        revision = value if isinstance(value, int) and not isinstance(value, bool) else 0
+        rows = getattr(manager, "chat_stream_rows", None)
+        if isinstance(rows, list):
+            revision = max(
+                revision,
+                max(
+                    (
+                        row.get("_history_row_revision", 0)
+                        for row in rows
+                        if isinstance(row, dict)
+                        and isinstance(row.get("_history_row_revision", 0), int)
+                        and not isinstance(row.get("_history_row_revision", 0), bool)
+                    ),
+                    default=0,
+                ),
+            )
+        return revision
+
     def _build_compacted_history(
         self,
         system_msg: Optional[ConversationMessage],
@@ -4201,6 +4438,12 @@ class ContextCompactionPlugin(BasePlugin):
         operator_words_omitted: int = 0,
         open_state: str = "",
         _dropped_preserved: int = 0,
+        compaction_snapshot_count: Optional[int] = None,
+        compaction_retained_positions: Optional[List[int]] = None,
+        compaction_id: Optional[str] = None,
+        compaction_source_id: Optional[str] = None,
+        compaction_snapshot_row_revision: Optional[int] = None,
+        compaction_source_history: Optional[List[ConversationMessage]] = None,
     ) -> List[ConversationMessage]:
         """Build the new compacted history list.
 
@@ -4287,8 +4530,38 @@ class ContextCompactionPlugin(BasePlugin):
         summary_metadata["operator_words_omitted"] = max(0, operator_words_omitted)
         if compaction_round is not None:
             summary_metadata["compaction_round"] = compaction_round
+        if isinstance(compaction_id, str) and compaction_id:
+            summary_metadata["compaction_id"] = compaction_id
+        if isinstance(compaction_source_id, str) and compaction_source_id:
+            summary_metadata["compaction_source_id"] = compaction_source_id
+        if (
+            isinstance(compaction_snapshot_row_revision, int)
+            and not isinstance(compaction_snapshot_row_revision, bool)
+            and compaction_snapshot_row_revision >= 0
+        ):
+            summary_metadata["compaction_snapshot_row_revision"] = (
+                compaction_snapshot_row_revision
+            )
         if pre_message_count is not None:
             summary_metadata["pre_message_count"] = pre_message_count
+        if (
+            isinstance(compaction_snapshot_count, int)
+            and not isinstance(compaction_snapshot_count, bool)
+            and compaction_snapshot_count >= 0
+        ):
+            summary_metadata["compaction_snapshot_count"] = (
+                compaction_snapshot_count
+            )
+        if isinstance(compaction_retained_positions, list):
+            summary_metadata["compaction_retained_positions"] = sorted(
+                {
+                    position
+                    for position in compaction_retained_positions
+                    if isinstance(position, int)
+                    and not isinstance(position, bool)
+                    and position >= 0
+                }
+            )
 
         summary_message = ConversationMessage(
             role="user",
@@ -4402,10 +4675,29 @@ class ContextCompactionPlugin(BasePlugin):
                 operator_words_omitted=operator_words_omitted,
                 open_state=open_state,
                 _dropped_preserved=_dropped_preserved + 1,
+                compaction_snapshot_count=compaction_snapshot_count,
+                compaction_retained_positions=compaction_retained_positions,
+                compaction_id=compaction_id,
+                compaction_source_id=compaction_source_id,
+                compaction_snapshot_row_revision=compaction_snapshot_row_revision,
+                compaction_source_history=compaction_source_history,
             )
 
         if pre_message_count is not None:
             summary_message.metadata["post_message_count"] = len(compacted)
+
+        if compaction_id:
+            summary_message.metadata["compaction_output_count"] = len(compacted)
+        if compaction_source_history is not None:
+            position_map = self._compaction_retained_position_map(
+                compaction_source_history, compacted
+            )
+            summary_message.metadata["compaction_retained_positions"] = sorted(
+                int(position) for position in position_map
+            )
+            summary_message.metadata["compaction_retained_position_map"] = (
+                dict(sorted(position_map.items(), key=lambda item: int(item[0])))
+            )
 
         return compacted
 
@@ -4510,6 +4802,13 @@ class ContextCompactionPlugin(BasePlugin):
         reason: Optional[str] = None,
         duration_seconds: Optional[float] = None,
         summarization_model: Optional[str] = None,
+        compaction_snapshot_count: Optional[int] = None,
+        compaction_retained_positions: Optional[List[int]] = None,
+        compaction_id: Optional[str] = None,
+        compaction_source_id: Optional[str] = None,
+        compaction_snapshot_row_revision: Optional[int] = None,
+        compaction_retained_position_map: Optional[Dict[str, int]] = None,
+        compaction_output_count: Optional[int] = None,
     ) -> None:
         """Append compaction record to session JSONL.
 
@@ -4545,6 +4844,49 @@ class ContextCompactionPlugin(BasePlugin):
             "post_message_count": post_count,
             "tasks_preserved": tasks_preserved,
         }
+        if (
+            isinstance(compaction_snapshot_count, int)
+            and not isinstance(compaction_snapshot_count, bool)
+            and compaction_snapshot_count >= 0
+        ):
+            record["compaction_snapshot_count"] = compaction_snapshot_count
+        if isinstance(compaction_retained_positions, list):
+            record["compaction_retained_positions"] = sorted(
+                {
+                    position
+                    for position in compaction_retained_positions
+                    if isinstance(position, int)
+                    and not isinstance(position, bool)
+                    and position >= 0
+                }
+            )
+        if isinstance(compaction_id, str) and compaction_id:
+            record["compaction_id"] = compaction_id
+        if isinstance(compaction_source_id, str) and compaction_source_id:
+            record["compaction_source_id"] = compaction_source_id
+        if (
+            isinstance(compaction_snapshot_row_revision, int)
+            and not isinstance(compaction_snapshot_row_revision, bool)
+            and compaction_snapshot_row_revision >= 0
+        ):
+            record["compaction_snapshot_row_revision"] = (
+                compaction_snapshot_row_revision
+            )
+        if isinstance(compaction_retained_position_map, dict):
+            record["compaction_retained_position_map"] = {
+                str(source): target
+                for source, target in compaction_retained_position_map.items()
+                if str(source).isdigit()
+                and isinstance(target, int)
+                and not isinstance(target, bool)
+                and target >= 0
+            }
+        if (
+            isinstance(compaction_output_count, int)
+            and not isinstance(compaction_output_count, bool)
+            and compaction_output_count >= 0
+        ):
+            record["compaction_output_count"] = compaction_output_count
         agent, hub_identity = self._get_agent_labels()
         record["agent"] = agent
         record["hub_identity"] = hub_identity

@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
-from kollabor_engine.routes.messages import _save_sent_media
+from kollabor_engine import media_store
 from kollabor_engine.media_store import (
     MAX_DECODED_BYTES,
     REF_RE,
+    MediaError,
     attach_media_to_rows,
+    bind_queue_handoff,
     count_image_tokens,
     list_for,
     open_media,
     save,
+    save_managed_upload_media,
+    save_queue_handoff_media,
 )
+from kollabor_engine.routes.messages import _save_sent_media
 
 PNG = "data:image/png;base64,AQID"
 JPEG = "data:image/jpeg;base64,BAUF"
@@ -28,6 +35,20 @@ def test_save_stores_and_returns_ref(tmp_path: Path) -> None:
     stored = list((tmp_path / "media" / "s1").glob("*.png"))
     assert len(stored) == 1
     assert stored[0].read_bytes() == bytes([1, 2, 3])
+
+
+def test_managed_upload_save_reuses_stable_ref_and_rejects_rebinding(tmp_path: Path) -> None:
+    media_id = "img_" + "a" * 32
+    first = save_managed_upload_media(tmp_path, "s1", media_id, PNG)
+    retried = save_managed_upload_media(tmp_path, "s1", media_id, PNG)
+
+    assert retried == first
+    index = json.loads((tmp_path / "media" / "s1" / "index.json").read_text())
+    assert len(index) == 1
+    assert index[0]["managed_upload_id"] == media_id
+    assert open_media(tmp_path, first.ref, session_id="s1") == (b"\x01\x02\x03", "image/png")
+    with pytest.raises(MediaError, match="managed upload id is already bound"):
+        save_managed_upload_media(tmp_path, "s1", media_id, JPEG)
 
 
 @pytest.mark.parametrize(
@@ -87,6 +108,138 @@ def test_open_media_roundtrip_and_rejects_bad_refs(tmp_path: Path) -> None:
     for bad in ("../s1/x.png", "x.txt", "", "a/b.png"):
         with pytest.raises(FileNotFoundError):
             open_media(tmp_path, bad)
+
+
+def test_open_media_rejects_changed_bytes_for_a_persisted_ref(tmp_path: Path) -> None:
+    """A durable queue handoff must not verify a ref after its bytes change."""
+    record = save(tmp_path, "s1", PNG)
+    index_path = tmp_path / "media" / "s1" / "index.json"
+    entries = json.loads(index_path.read_text())
+    assert entries[-1]["sha256"] == hashlib.sha256(bytes([1, 2, 3])).hexdigest()
+
+    image_path = next((tmp_path / "media" / "s1").glob(f"{record.ref}.*"))
+    image_path.write_bytes(b"different bytes")
+
+    with pytest.raises(ValueError, match="integrity"):
+        open_media(tmp_path, record.ref)
+
+
+def test_open_media_keeps_legacy_index_entries_readable(tmp_path: Path) -> None:
+    """Older private media indexes remain readable but cannot prove handoff."""
+    record = save(tmp_path, "s1", PNG)
+    index_path = tmp_path / "media" / "s1" / "index.json"
+    entries = json.loads(index_path.read_text())
+    entries[-1].pop("sha256")
+    index_path.write_text(json.dumps(entries))
+
+    data, mime = open_media(tmp_path, record.ref)
+
+    assert data == bytes([1, 2, 3])
+    assert mime == "image/png"
+
+
+def test_queue_handoff_rejects_index_mime_that_disagrees_with_media_file(
+    tmp_path: Path,
+) -> None:
+    record = save(tmp_path, "s1", PNG)
+    index_path = tmp_path / "media" / "s1" / "index.json"
+    entries = json.loads(index_path.read_text())
+    entries[-1]["mime"] = "image/svg+xml"
+    index_path.write_text(json.dumps(entries))
+
+    with pytest.raises(MediaError, match="mime|type"):
+        bind_queue_handoff(
+            tmp_path,
+            "s1",
+            request_id="queue-request-a",
+            history_row_uuid="row-a",
+            source_media_refs=(("stage-a", record.ref),),
+        )
+
+
+def test_queue_handoff_is_idempotent_but_cannot_rebind_request_to_other_media(
+    tmp_path: Path,
+) -> None:
+    first = save(tmp_path, "s1", PNG)
+    second = save(tmp_path, "s1", JPEG)
+    identity = {
+        "request_id": "queue-request-a",
+        "history_row_uuid": "row-a",
+    }
+
+    initial = bind_queue_handoff(
+        tmp_path,
+        "s1",
+        **identity,
+        source_media_refs=(("stage-a", first.ref),),
+    )
+    assert bind_queue_handoff(
+        tmp_path,
+        "s1",
+        **identity,
+        source_media_refs=(("stage-a", first.ref),),
+    ) == initial
+
+    with pytest.raises(MediaError, match="binding|request"):
+        bind_queue_handoff(
+            tmp_path,
+            "s1",
+            **identity,
+            source_media_refs=(("stage-a", second.ref),),
+        )
+
+    entries = json.loads(
+        (tmp_path / "media" / "s1" / "index.json").read_text()
+    )
+    request_entries = [
+        entry for entry in entries if entry.get("queue_request_id") == identity["request_id"]
+    ]
+    assert [entry["ref"] for entry in request_entries] == [first.ref]
+    assert not any(entry.get("queue_request_id") for entry in entries if entry["ref"] == second.ref)
+
+
+def test_queue_attachment_is_resolvable_only_after_its_history_row_is_bound(
+    tmp_path: Path,
+) -> None:
+    image = b"\x89PNG\r\n\x1a\nattachment bytes"
+    media_refs = save_queue_handoff_media(
+        tmp_path,
+        "s1",
+        request_id="queue-request-a",
+        attachments=(("att-source-a", "image/png", image),),
+    )
+    source_ref, media_ref = media_refs[0]
+
+    with pytest.raises(FileNotFoundError):
+        media_store.open_queue_handoff_media(
+            tmp_path,
+            "s1",
+            request_id="queue-request-a",
+            source_ref=source_ref,
+        )
+
+    bind_queue_handoff(
+        tmp_path,
+        "s1",
+        request_id="queue-request-a",
+        history_row_uuid="history-row-a",
+        source_media_refs=media_refs,
+    )
+
+    assert media_store.open_queue_handoff_media(
+        tmp_path,
+        "s1",
+        request_id="queue-request-a",
+        source_ref=source_ref,
+    ) == (image, "image/png")
+    with pytest.raises(FileNotFoundError):
+        media_store.open_queue_handoff_media(
+            tmp_path,
+            "s1",
+            request_id="queue-request-b",
+            source_ref=source_ref,
+        )
+    assert media_ref
 
 
 def test_non_ascii_digit_tokens_are_not_tokens_and_bind_nothing(tmp_path: Path) -> None:

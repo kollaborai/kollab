@@ -31,6 +31,31 @@ logger = logging.getLogger(__name__)
 _TIGHTEN_ENTRY_LIMIT = 4096
 
 
+
+def _row_metadata_value(metadata: dict, key: str):
+    """Read ``key`` from a saved row, as the chat stream reads it.
+
+    A daemon-queue admission row keeps its request id inside ``queue_handoff``
+    only; the chat stream already treats that as the row's request id (#1451).
+    """
+    if key == "request_id" and "request_id" not in metadata:
+        handoff = metadata.get("queue_handoff")
+        if isinstance(handoff, dict):
+            return handoff.get("request_id")
+    return metadata.get(key)
+
+class ConversationAppendRejected(RuntimeError):
+    """A synchronous admission callback rejected a new durable row."""
+
+
+class ConversationAppendConflict(RuntimeError):
+    """A queue request already has a row and must not be submitted again."""
+
+
+class ConversationAppendUncertain(RuntimeError):
+    """A committed admission could not be paired or rolled back conclusively."""
+
+
 def _session_file_write_lock_path(session_file: Path) -> Path:
     """Return the stable hidden lock path shared by JSONL writers."""
     path = Path(session_file)
@@ -85,6 +110,20 @@ def _acp_display_metadata(value: Any) -> Dict[str, Any]:
     if not isinstance(value, dict) or value.get("provider") != "acp":
         return {}
     result: Dict[str, Any] = {"provider": "acp"}
+    for key in (
+        "request_id",
+        "turn_id",
+        "acp_turn_key",
+        "dispatch_epoch",
+        "dispatch_order",
+    ):
+        value_for_key = value.get(key)
+        if key in {"request_id", "acp_turn_key", "dispatch_epoch"}:
+            if isinstance(value_for_key, str) and value_for_key:
+                result[key] = value_for_key
+        elif isinstance(value_for_key, int) and not isinstance(value_for_key, bool):
+            if value_for_key > 0:
+                result[key] = value_for_key
     for key in ("acp_updates", "tool_calls"):
         if isinstance(value.get(key), list):
             result[key] = deepcopy([entry for entry in value[key] if isinstance(entry, dict)])
@@ -451,8 +490,13 @@ class KollaborConversationLogger:
                 raise
 
     async def _append_to_jsonl(
-        self, message: Dict[str, Any], session_id: Optional[str] = None
-    ):
+        self,
+        message: Dict[str, Any],
+        session_id: Optional[str] = None,
+        *,
+        idempotency_request_id: str | None = None,
+        queue_transaction: dict[str, Any] | None = None,
+    ) -> str | None:
         """Append to the current or explicitly named conversation JSONL.
 
         Raises when the record is not on disk, and counts nothing then. A failed
@@ -475,50 +519,252 @@ class KollaborConversationLogger:
         # Explicit old-session ACP results instead use the path selected from
         # their session_id above.
         bound_file = self.session_file
-        async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
-            async with _async_session_file_lock(_session_file_write_lock_path(path)):
-                # reset_session may replace the current binding while we wait on
-                # either lock. Do not let the captured row land in a new session.
-                if own and self.session_file != bound_file:
-                    logger.warning(
-                        "dropped a %s JSONL append: session replaced while the "
-                        "append waited on the write lock (%s)",
-                        message.get("type"),
-                        bound_file.name,
+
+        def append_locked() -> str | None:
+            # reset_session may replace the current binding while we wait on
+            # either lock. Do not let the captured row land in a new session.
+            if own and self.session_file != bound_file:
+                logger.warning(
+                    "dropped a %s JSONL append: session replaced while the "
+                    "append waited on the write lock (%s)",
+                    message.get("type"),
+                    bound_file.name,
+                )
+                raise OSError(
+                    "conversation record not written: session replaced while "
+                    f"the append waited ({bound_file.name})"
+                )
+
+            if idempotency_request_id is not None:
+                try:
+                    existing = self._find_queue_user_row_unlocked(
+                        path, idempotency_request_id
                     )
-                    raise OSError(
-                        "conversation record not written: session replaced while "
-                        f"the append waited ({bound_file.name})"
+                except Exception as exc:
+                    if queue_transaction is None:
+                        raise
+                    status = queue_transaction.get("status")
+                    if isinstance(status, dict):
+                        status.update(row_preexisting=True, row_conflict=True)
+                    raise ConversationAppendConflict(
+                        "queue request has ambiguous durable history"
+                    ) from exc
+                if existing is not None:
+                    existing_uuid = existing.get("uuid")
+                    status = (
+                        queue_transaction.get("status")
+                        if queue_transaction is not None
+                        else None
                     )
-                reparent = self._read_reparent(path)  # cuts for the destination session
-                parent = message.get("parentUuid")
-                seen = set()
-                while parent in reparent and parent not in seen:  # a cut dropped it
-                    seen.add(parent)
-                    parent = reparent[parent]
-                if "parentUuid" in message:
-                    message["parentUuid"] = parent
+                    if isinstance(status, dict):
+                        status.update(row_preexisting=True, row_uuid=existing_uuid)
+                    expected_message = message.get("message")
+                    existing_message = existing.get("message")
+                    expected_metadata = (
+                        expected_message.get("metadata")
+                        if isinstance(expected_message, dict)
+                        else None
+                    )
+                    existing_metadata = (
+                        existing_message.get("metadata")
+                        if isinstance(existing_message, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(expected_message, dict)
+                        or not isinstance(existing_message, dict)
+                        or expected_message.get("content")
+                        != existing_message.get("content")
+                        or not isinstance(expected_metadata, dict)
+                        or not isinstance(existing_metadata, dict)
+                        or not isinstance(existing_uuid, str)
+                        or not existing_uuid
+                    ):
+                        raise ValueError(
+                            "queue history request conflicts with its durable row"
+                        )
+
+                    expected_handoff = expected_metadata.get("queue_handoff")
+                    existing_handoff = existing_metadata.get("queue_handoff")
+                    if queue_transaction is not None:
+                        stable_keys = (
+                            "version",
+                            "conversation_uid",
+                            "conversation_revision",
+                            "request_id",
+                            "source_attachment_refs",
+                        )
+                        if (
+                            not isinstance(expected_handoff, dict)
+                            or not isinstance(existing_handoff, dict)
+                            or any(
+                                expected_handoff.get(key) != existing_handoff.get(key)
+                                for key in stable_keys
+                            )
+                        ):
+                            raise ValueError(
+                                "queue history request conflicts with its durable row"
+                            )
+                        raise ConversationAppendConflict(
+                            "queue request already has a durable user row"
+                        )
+                    if expected_handoff != existing_handoff:
+                        raise ValueError(
+                            "queue history request conflicts with its durable row"
+                        )
+                    return existing_uuid
+
+            reparent = self._read_reparent(path)
+            parent = message.get("parentUuid")
+            seen = set()
+            while parent in reparent and parent not in seen:
+                seen.add(parent)
+                parent = reparent[parent]
+            if "parentUuid" in message:
+                message["parentUuid"] = parent
+
+            row_uuid = message.get("uuid")
+            if queue_transaction is not None and (
+                not isinstance(row_uuid, str) or not row_uuid
+            ):
+                raise ValueError("conversation record has no durable ID")
+            if queue_transaction is not None:
+                status = queue_transaction.get("status")
+                if isinstance(status, dict):
+                    status.update(row_preexisting=False, row_uuid=row_uuid)
+                prepare = queue_transaction.get("prepare")
+                if not callable(prepare):
+                    raise TypeError("queue history transaction is invalid")
+                if prepare(row_uuid, message) is not True:
+                    raise ConversationAppendRejected(
+                        "provider queue rejected the admission before history"
+                    )
+
+            fd: int | None = None
+            start: int | None = None
+            committed = queue_transaction is not None
+            write_complete = False
+
+            def rollback_admission() -> bool:
+                if not committed:
+                    return True
+                rollback = queue_transaction.get("rollback")
+                if not callable(rollback):
+                    return False
+                try:
+                    return rollback(row_uuid, message) is True
+                except BaseException:
+                    logger.exception("queue admission rollback failed")
+                    return False
+
+            try:
                 data = memoryview((json.dumps(message) + "\n").encode())
                 fd = os.open(
                     path,
                     os.O_WRONLY | os.O_CREAT | os.O_APPEND,
                     0o600,
                 )
-                try:
-                    start = os.fstat(fd).st_size
+                start = os.fstat(fd).st_size
+                while data:
+                    written = os.write(fd, data)
+                    if written <= 0:
+                        raise OSError("JSONL write made no progress")
+                    data = data[written:]
+                write_complete = True
+
+                if queue_transaction is not None:
+                    os.fsync(fd)
+                    finalize = queue_transaction.get("finalize")
+                    if not callable(finalize):
+                        raise TypeError("queue history transaction is invalid")
+                    finalize(row_uuid, message)
+            except BaseException as error:
+                if fd is not None and start is not None and not write_complete:
                     try:
-                        while data:
-                            written = os.write(fd, data)
-                            if written <= 0:  # never spin on a write that makes no progress
-                                raise OSError("JSONL write made no progress")
-                            data = data[written:]
-                    except BaseException:
-                        os.ftruncate(fd, start)  # roll the partial record back
-                        raise
-                finally:
+                        os.ftruncate(fd, start)
+                    except OSError:
+                        logger.exception("failed to truncate a partial conversation row")
+                rolled_back = rollback_admission()
+                if fd is not None and start is not None and rolled_back:
+                    try:
+                        os.ftruncate(fd, start)
+                        if queue_transaction is not None:
+                            os.fsync(fd)
+                    except OSError:
+                        logger.exception("failed to remove a rejected queue history row")
+                        rolled_back = False
+                if write_complete and not rolled_back:
+                    if own:
+                        self.message_count += 1
+                    status = (
+                        queue_transaction.get("status")
+                        if queue_transaction is not None
+                        else None
+                    )
+                    if isinstance(status, dict):
+                        status.update(row_persisted=True, append_uncertain=True)
+                    raise ConversationAppendUncertain(
+                        "provider custody or durable history could not be rolled back"
+                    ) from error
+                if committed and not rolled_back:
+                    status = queue_transaction.get("status")
+                    if isinstance(status, dict):
+                        status["append_uncertain"] = True
+                    raise ConversationAppendUncertain(
+                        "provider custody could not be rolled back after a write failure"
+                    ) from error
+                raise
+            finally:
+                if fd is not None:
                     os.close(fd)
-                if own:
-                    self.message_count += 1
+
+            if own:
+                self.message_count += 1
+            if queue_transaction is not None:
+                status = queue_transaction.get("status")
+                if isinstance(status, dict):
+                    status["row_persisted"] = True
+            return row_uuid
+
+        async with self._write_lock:
+            if queue_transaction is not None:
+                # Match rewrite_voice_turn's lock order before entering the
+                # short synchronous provider-commit/JSONL/media transaction.
+                async with _async_session_file_lock(
+                    _session_file_rewrite_lock_path(path)
+                ):
+                    async with _async_session_file_lock(
+                        _session_file_write_lock_path(path)
+                    ):
+                        return append_locked()
+            async with _async_session_file_lock(_session_file_write_lock_path(path)):
+                return append_locked()
+
+    @staticmethod
+    def _find_queue_user_row_unlocked(
+        path: Path, request_id: str
+    ) -> Dict[str, Any] | None:
+        """Find the one durable user row for a queue request while file-locked."""
+        if not path.exists():
+            return None
+        found = None
+        with open(path, "r", encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict) or row.get("type") != "user":
+                    continue
+                message = row.get("message")
+                metadata = message.get("metadata") if isinstance(message, dict) else None
+                handoff = metadata.get("queue_handoff") if isinstance(metadata, dict) else None
+                if not isinstance(handoff, dict) or handoff.get("request_id") != request_id:
+                    continue
+                if found is not None:
+                    raise ValueError("queue request has duplicate durable rows")
+                found = row
+        return found
 
     def _analyze_user_context(self, content: str) -> Dict[str, Any]:
         """Analyze user context from message content."""
@@ -750,9 +996,17 @@ class KollaborConversationLogger:
         content: str,
         parent_uuid: Optional[str] = None,
         user_context: Optional[Dict] = None,
+        *,
+        message_metadata: Optional[Dict[str, Any]] = None,
+        queue_transaction: Dict[str, Any] | None = None,
     ) -> str:
-        """Log user message with intelligence features."""
+        """Log user message with intelligence features and trusted metadata."""
         message_uuid = str(uuid4())
+        logged_message: Dict[str, Any] = {"role": "user", "content": content}
+        if message_metadata is not None:
+            if not isinstance(message_metadata, dict):
+                raise TypeError("message metadata must be a mapping")
+            logged_message["metadata"] = deepcopy(message_metadata)
 
         message: Dict[str, Any] = {
             "parentUuid": parent_uuid,
@@ -767,7 +1021,7 @@ class KollaborConversationLogger:
             ),
             "gitBranch": self._get_git_branch(),
             "type": "user",
-            "message": {"role": "user", "content": content},
+            "message": logged_message,
             "uuid": message_uuid,
             "timestamp": utc_stamp(),
             "kollabor_intelligence": {
@@ -777,7 +1031,25 @@ class KollaborConversationLogger:
             },
         }
 
-        await self._append_to_jsonl(message)
+        queue_handoff = (
+            message_metadata.get("queue_handoff")
+            if isinstance(message_metadata, dict)
+            else None
+        )
+        request_id = (
+            queue_handoff.get("request_id")
+            if isinstance(queue_handoff, dict)
+            else None
+        )
+        persisted_uuid = await self._append_to_jsonl(
+            message,
+            idempotency_request_id=(
+                request_id if isinstance(request_id, str) and request_id else None
+            ),
+            queue_transaction=queue_transaction,
+        )
+        if isinstance(persisted_uuid, str) and persisted_uuid:
+            message_uuid = persisted_uuid
 
         # Update conversation themes
         intent = message["kollabor_intelligence"]["user_context"].get("detected_intent")
@@ -789,6 +1061,260 @@ class KollaborConversationLogger:
 
         return message_uuid
 
+    async def update_user_message_metadata(
+        self,
+        message_uuid: str,
+        *,
+        expected_metadata: Dict[str, Any],
+        updates: Dict[str, Any],
+        remove_metadata_keys: List[str] | tuple[str, ...] = (),
+    ) -> bool:
+        """Atomically update metadata on one exact user row in the current log.
+
+        ACP assigns dispatch order when a prompt actually begins, after its
+        admission row was written. The row UUID and expected identity prevent a
+        delayed callback from modifying a reused request ID or another turn.
+        ``remove_metadata_keys`` supports lifecycle transitions that retire
+        private admission markers from the durable row.
+        """
+        if (
+            not isinstance(message_uuid, str)
+            or not message_uuid
+            or not isinstance(expected_metadata, dict)
+            or not expected_metadata
+            or not isinstance(updates, dict)
+            or not updates
+            or not isinstance(remove_metadata_keys, (list, tuple))
+            or any(
+                not isinstance(key, str) or not key
+                for key in remove_metadata_keys
+            )
+            or set(remove_metadata_keys) & set(updates)
+        ):
+            return False
+        try:
+            json.dumps(updates)
+        except (TypeError, ValueError):
+            return False
+
+        async with self._write_lock:
+            path = Path(self.session_file)
+            return await asyncio.to_thread(
+                self._update_user_message_metadata_with_file_locks,
+                path,
+                message_uuid,
+                expected_metadata,
+                updates,
+                tuple(remove_metadata_keys),
+            )
+
+    async def reorder_native_queue_history(
+        self, rows: list[tuple[str, str]] | tuple[tuple[str, str], ...]
+    ) -> bool:
+        """Project exact durable queue rows in provider dispatch order.
+
+        Queue items carry the UUID of their own durable user row separately
+        from parent_uuid. Match both UUID and content before moving rows among
+        their existing JSONL slots; unrelated conversation records stay put.
+        """
+        if (
+            not isinstance(rows, (list, tuple))
+            or any(
+                not isinstance(row, tuple)
+                or len(row) != 2
+                or not isinstance(row[0], str)
+                or not row[0]
+                or not isinstance(row[1], str)
+                for row in rows
+            )
+            or len({row[0] for row in rows}) != len(rows)
+        ):
+            return False
+        if len(rows) < 2:
+            return True
+
+        async with self._write_lock:
+            path = Path(self.session_file)
+            return await asyncio.to_thread(
+                self._reorder_native_queue_history_with_file_locks,
+                path,
+                tuple(rows),
+            )
+
+    def _reorder_native_queue_history_with_file_locks(
+        self, path: Path, rows: tuple[tuple[str, str], ...]
+    ) -> bool:
+        """Reorder exact queued user rows under the shared file locks."""
+        temp_path: Path | None = None
+        with locked_file(_session_file_rewrite_lock_path(path), "a+", private=True):
+            with locked_file(_session_file_write_lock_path(path), "a+", private=True):
+                if self.session_file != path or not path.is_file():
+                    return False
+                try:
+                    with open(path, "rb") as source:
+                        original = source.readlines()
+                    expected_content = dict(rows)
+                    targets = set(expected_content)
+                    slots: list[int] = []
+                    rows_by_uuid: dict[str, bytes] = {}
+                    for index, raw_line in enumerate(original):
+                        try:
+                            record = json.loads(raw_line)
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        if not isinstance(record, dict):
+                            continue
+                        row_uuid = record.get("uuid")
+                        if not isinstance(row_uuid, str) or row_uuid not in targets:
+                            continue
+                        if record.get("type") != "user":
+                            continue
+                        message = record.get("message")
+                        if (
+                            not isinstance(message, dict)
+                            or message.get("content") != expected_content[row_uuid]
+                        ):
+                            continue
+                        if row_uuid in rows_by_uuid:
+                            return False
+                        rows_by_uuid[row_uuid] = raw_line
+                        slots.append(index)
+
+                    # A concurrently admitted item may not have finished its
+                    # durable append yet. Reorder the exact rows that exist;
+                    # its later append will reconcile the queue again.
+                    ordered = [
+                        row_uuid
+                        for row_uuid, _content in rows
+                        if row_uuid in rows_by_uuid
+                    ]
+                    if len(ordered) < 2:
+                        return True
+                    output = list(original)
+                    for index, row_uuid in zip(slots, ordered):
+                        output[index] = rows_by_uuid[row_uuid]
+                    if output == original:
+                        return True
+
+                    fd, temp_name = tempfile.mkstemp(
+                        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+                    )
+                    temp_path = Path(temp_name)
+                    try:
+                        with os.fdopen(fd, "wb") as target:
+                            target.writelines(output)
+                            target.flush()
+                            os.fsync(target.fileno())
+                        if self.session_file != path:
+                            return False
+                        os.replace(temp_path, path)
+                        temp_path = None
+                        directory_fd = os.open(path.parent, os.O_RDONLY)
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+                    finally:
+                        if temp_path is not None:
+                            temp_path.unlink(missing_ok=True)
+                    return True
+                except OSError:
+                    logger.exception(
+                        "failed to reconcile native queue history order in %s", path
+                    )
+                    return False
+
+    def _update_user_message_metadata_with_file_locks(
+        self,
+        path: Path,
+        message_uuid: str,
+        expected_metadata: Dict[str, Any],
+        updates: Dict[str, Any],
+        remove_metadata_keys: tuple[str, ...],
+    ) -> bool:
+        """Rewrite one exact JSONL row under the shared rewrite/write locks."""
+        temp_path: Path | None = None
+        with locked_file(_session_file_rewrite_lock_path(path), "a+", private=True):
+            with locked_file(_session_file_write_lock_path(path), "a+", private=True):
+                if self.session_file != path or not path.is_file():
+                    return False
+                output: list[bytes] = []
+                found = False
+                changed = False
+                try:
+                    with open(path, "rb") as source:
+                        for raw_line in source:
+                            try:
+                                record = json.loads(raw_line)
+                            except (UnicodeDecodeError, json.JSONDecodeError):
+                                output.append(raw_line)
+                                continue
+                            if (
+                                not isinstance(record, dict)
+                                or record.get("uuid") != message_uuid
+                                or record.get("type") != "user"
+                            ):
+                                output.append(raw_line)
+                                continue
+                            if found:
+                                return False
+                            found = True
+                            message = record.get("message")
+                            metadata = (
+                                message.get("metadata")
+                                if isinstance(message, dict)
+                                else None
+                            )
+                            if not isinstance(metadata, dict) or any(
+                                _row_metadata_value(metadata, key) != value
+                                for key, value in expected_metadata.items()
+                            ):
+                                return False
+                            if any(
+                                key in metadata and metadata[key] != value
+                                for key, value in updates.items()
+                            ):
+                                return False
+                            changed = any(
+                                metadata.get(key) != value
+                                for key, value in updates.items()
+                            ) or any(key in metadata for key in remove_metadata_keys)
+                            metadata.update(deepcopy(updates))
+                            for key in remove_metadata_keys:
+                                metadata.pop(key, None)
+                            output.append((json.dumps(record) + "\n").encode())
+                    if not found:
+                        return False
+                    if not changed:
+                        return True
+
+                    fd, temp_name = tempfile.mkstemp(
+                        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+                    )
+                    temp_path = Path(temp_name)
+                    try:
+                        with os.fdopen(fd, "wb") as target:
+                            for part in output:
+                                target.write(part)
+                            target.flush()
+                            os.fsync(target.fileno())
+                        if self.session_file != path:
+                            return False
+                        os.replace(temp_path, path)
+                        temp_path = None
+                        directory_fd = os.open(path.parent, os.O_RDONLY)
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+                    finally:
+                        if temp_path is not None:
+                            temp_path.unlink(missing_ok=True)
+                    return True
+                except OSError:
+                    logger.exception("failed to update ACP dispatch metadata in %s", path)
+                    return False
+
     async def log_assistant_message(
         self,
         content: str,
@@ -798,6 +1324,8 @@ class KollaborConversationLogger:
         thinking_content: Optional[List[str]] = None,
         tool_calls: Optional[List[Dict]] = None,
         provider_reasoning: Optional[Dict[str, Any]] = None,
+        display_content: Optional[str] = None,
+        turn_id: Optional[str] = None,
         display_metadata: Optional[Dict[str, Any]] = None,
         voice_turn_id: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -813,6 +1341,11 @@ class KollaborConversationLogger:
             tool_calls: Optional list of tool call dicts with id, name, input keys
             provider_reasoning: Provider-native reasoning artifacts, stored
                 verbatim so a resumed session can hand them back to the model
+            display_content: Optional visible text for XML tool replies. An
+                empty string is meaningful: an XML-only assistant response
+                should not replay its raw tool tags as chat text.
+            turn_id: Stable stream identity for the assistant turn, used to
+                reconstruct the same transcript row identities after resume.
             display_metadata: ACP cards, updates and stop reason for replay;
                 excluded from native provider tool-call reconstruction
             voice_turn_id: The voice turn a reply belongs to, so a talk-over
@@ -885,6 +1418,10 @@ class KollaborConversationLogger:
 
         if provider_reasoning:
             message["provider_reasoning"] = provider_reasoning
+        if display_content is not None:
+            message["display_content"] = display_content
+        if isinstance(turn_id, str) and turn_id:
+            message["turn_id"] = turn_id
         if replay_metadata := _acp_display_metadata(display_metadata):
             message["display_metadata"] = replay_metadata
         if voice_turn_id:
@@ -1037,6 +1574,11 @@ class KollaborConversationLogger:
                     dropped[record["uuid"]] = record.get("parentUuid")
                 continue
             message["content"] = [*content, *calls]
+            if isinstance(record.get("display_content"), str):
+                # The display projection is independently persisted for XML
+                # replies. Keep it in step with a voice cut, including an
+                # intentionally empty value for an XML-only reply.
+                record["display_content"] = text or ""
         kept = []
         for record in records:
             if isinstance(record, dict):
@@ -1064,6 +1606,7 @@ class KollaborConversationLogger:
         subtype: str = "informational",
         tool_use_id: Optional[str] = None,
         tool_result: Optional[Dict[str, Any]] = None,
+        chat_stream_row: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Log system messages including hook outputs and tool calls."""
         message_uuid = str(uuid4())
@@ -1095,6 +1638,13 @@ class KollaborConversationLogger:
             # Display data travels beside the existing textual log. The
             # parent UUID and toolUseID bind it to its assistant's call.
             message["tool_result"] = tool_result
+        if chat_stream_row is not None:
+            if not isinstance(chat_stream_row, dict):
+                raise TypeError("chat stream row must be an object")
+            # This row is display-only persistence. ConversationManager reads
+            # it into its separate chat_stream_rows collection, never into the
+            # model-facing message history.
+            message["chat_stream_row"] = deepcopy(chat_stream_row)
 
         await self._append_to_jsonl(message)
         return message_uuid

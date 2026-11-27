@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, patch
 
 import psutil
 import pytest
-
 from kollabor_engine import daemon_pool
 from kollabor_engine import session as session_module
 from kollabor_engine.session import EngineSession

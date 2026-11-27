@@ -8,6 +8,8 @@
  * never as HTML, and plugin controls are the app's own components (`k.ui`).
  */
 import { useCallback, useEffect, useState, type ComponentType } from "react";
+import type { PanelField } from "@/api";
+import { declaredIds, declaredRendererIds, isPluginDeclarationId, isPluginRendererTagName } from "./plugin-declarations";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -29,6 +31,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { FieldRenderer } from "@/components/panels/FieldRenderer";
 import { GemAvatar } from "@/components/gems/GemAvatar";
+import { describePluginError, logPluginFailure } from "./plugin-errors";
 import { copyText } from "@/phonelink/copy-link";
 import { nextNoticeKey, type Contributions } from "./registry";
 
@@ -43,12 +46,17 @@ export type Declared = string | { id?: string; name?: string; tool?: string; tag
 
 export type PluginService = {
   name: string;
-  state: string;
-  desired?: string;
+  state: "starting" | "running" | "backoff" | "stopping" | "stop-failed" | "exited" | "stopped" | "crash-stopped" | "error" | "unknown" | "failed";
+  desired?: "running" | "stopped";
   pid?: number | null;
   since?: number | null;
   restarts?: number;
+  secrets?: string[];
+  secrets_omitted: number;
+  heartbeat_s?: number | null;
   heartbeat?: number | null;
+  heartbeat_monitor_since?: number | null;
+  stop_deadline?: number | null;
   error?: string | null;
 };
 
@@ -61,21 +69,39 @@ export type PluginEntry = {
   source?: string | null;
   commit?: string | null;
   enabled: boolean;
+  enable_order?: number | null;
   shadowed: boolean;
   state: "ok" | "error" | "off" | "stopping" | "stop-failed" | "changed-on-disk" | "skipped";
   error: string | null;
   web: { entry: string; style?: string | null; hash: string } | null;
   contributes: {
-    menu?: DeclaredRow[];
-    views?: Declared[];
-    pages?: Declared[];
-    modals?: Declared[];
-    slash?: Declared[];
-    renderers?: Declared[];
+    menu: DeclaredRow[];
+    views: Declared[];
+    pages: Declared[];
+    modals: Declared[];
+    slash: Declared[];
+    renderers: Declared[];
   };
   services: PluginService[];
+  settings?: PanelField[];
+  settings_section?: { title?: string } | null;
   uses?: string[];
   granted?: string[];
+  omitted: {
+    services: number;
+    uses: number;
+    granted: number;
+    settings: number;
+    setting_options: number;
+    option_labels: number;
+    contributions: number;
+  };
+};
+
+/** `GET /plugins` response. `server_time` is Unix time in seconds. */
+export type PluginInventoryResponse = {
+  plugins: PluginEntry[];
+  server_time?: number;
 };
 
 /** The open chat, as a plugin view receives it. */
@@ -99,7 +125,21 @@ export type PageSpec = { id: string; title: string; tabs: PluginTab[] };
 export type ModalSpec = { id: string; title: string; tabs: PluginTab[] };
 export type SettingsSpec = { render: PluginComponent };
 export type CommandSpec = { name: string; description: string; run: (args: string) => unknown };
-export type RendererSpec = { tool?: string; tag?: string; render: ComponentType<{ k: PluginApi; data: unknown }> };
+/** What a chat renderer receives: `k` and its props, never a session. */
+export type PluginRendererProps = {
+  k: PluginApi;
+  toolCall?: { name: string; args: unknown; result?: unknown; status?: unknown };
+  tag?: { name: string; content: string };
+};
+export type PluginToolRendererProps = Pick<PluginRendererProps, "k"> & {
+  toolCall: NonNullable<PluginRendererProps["toolCall"]>;
+};
+export type PluginTagRendererProps = Pick<PluginRendererProps, "k"> & {
+  tag: NonNullable<PluginRendererProps["tag"]>;
+};
+export type RendererSpec =
+  | { tool: string; tag?: never; render: ComponentType<PluginToolRendererProps> }
+  | { tag: string; tool?: never; render: ComponentType<PluginTagRendererProps> };
 export type NoticeButton = { label: string; open?: OpenTarget; run?: () => unknown };
 export type NoticeSpec = { text: string; button?: NoticeButton };
 export type ApiOptions = { refreshOn?: string; everyMs?: number };
@@ -159,7 +199,7 @@ export type PluginApi = {
   };
   /** A composer slash command. */
   command(spec: CommandSpec): void;
-  /** A chat card for a tool or a message tag it owns. */
+  /** A chat card for a declared tool or tag. Kollab always keeps its native `request_permission` renderer. */
   renderer(spec: RendererSpec): void;
   /** One NoticeBar line with at most one button; returns its dismissal. */
   notice(spec: NoticeSpec): () => void;
@@ -205,6 +245,7 @@ const TOAST_MS = 5_000;
 
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 const isLine = (value: unknown): value is string => isText(value) && !/[\r\n]/.test(value);
+const isSlashCommandName = isPluginDeclarationId;
 const isComponent = (value: unknown) =>
   typeof value === "function" || (typeof value === "object" && value !== null && "$$typeof" in value);
 const isTabs = (tabs: unknown): tabs is PluginTab[] =>
@@ -220,19 +261,6 @@ export function isOpenTarget(value: unknown): value is OpenTarget {
     ["page", "modal", "view", "url"].includes(keys[0]) &&
     isText((value as Record<string, unknown>)[keys[0]])
   );
-}
-
-function declaredIds(list: readonly unknown[] | undefined): Set<string> {
-  const ids = new Set<string>();
-  for (const item of list ?? []) {
-    if (typeof item === "string") ids.add(item);
-    else if (item && typeof item === "object")
-      for (const key of ["id", "name", "tool", "tag"] as const) {
-        const value = (item as Record<string, unknown>)[key];
-        if (typeof value === "string") ids.add(value);
-      }
-  }
-  return ids;
 }
 
 /** Waits `ms`, or less when `signal` aborts. */
@@ -307,7 +335,7 @@ export function useRemote<T>(k: PluginApi | null, path: string | null | undefine
           setState((current) => ({
             key,
             data: current.key === key ? current.data : undefined,
-            error: error instanceof Error ? error.message : String(error),
+            error: describePluginError(error),
             loading: false,
           }));
       },
@@ -364,19 +392,24 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
   const listeners = new Map<string, Set<(data: unknown) => void>>();
   let events: AbortController | null = null;
   const dispatch = (event: unknown) => {
+    if (disposed) return;
     if (!event || typeof event !== "object") return;
     const { topic, data } = event as { topic?: unknown; data?: unknown };
     if (typeof topic !== "string") return;
     for (const listener of [...(listeners.get(topic) ?? [])]) {
       try {
-        listener(data);
+        const result = listener(data);
+        void Promise.resolve(result).catch((error: unknown) => {
+          if (!disposed) logPluginFailure(id, `event listener for ${topic} failed`, error);
+        });
       } catch (error) {
-        console.error(`${id}: event listener for ${topic} failed`, error);
+        if (!disposed) logPluginFailure(id, `event listener for ${topic} failed`, error);
       }
     }
   };
 
   const notice = (spec: NoticeSpec): (() => void) => {
+    if (disposed) return () => {};
     const button = spec?.button;
     if (!isLine(spec?.text)) {
       invalid("notice", "text must be one line");
@@ -446,22 +479,34 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
     },
     settings,
     command(spec) {
-      if (!bound("slash command", declaredIds(declared.slash), spec?.name)) return;
+      if (!isSlashCommandName(spec?.name)) return invalid("command", "name must be a single slash token");
+      if (!bound("slash command", declaredIds(declared.slash), spec.name)) return;
       if (typeof spec.run !== "function") return invalid("command", "run must be a function");
       const command: CommandSpec = { name: spec.name, description: String(spec.description ?? ""), run: spec.run };
       contribute((current) => ({
         ...current,
-        commands: [...current.commands.filter((item) => item.name !== command.name), command],
+        commands: [...current.commands.filter((item) => item.name.toLowerCase() !== command.name.toLowerCase()), command],
       }));
     },
     renderer(spec) {
-      const name = spec?.tool ?? spec?.tag;
-      if (!bound("renderer", declaredIds(declared.renderers), name)) return;
+      const hasTool = spec?.tool !== undefined;
+      const hasTag = spec?.tag !== undefined;
+      if (hasTool === hasTag) return invalid("renderer", "provide exactly one of tool or tag");
+      const name = hasTool ? spec.tool : spec.tag;
+      if (spec?.tag !== undefined && !isPluginRendererTagName(spec.tag)) {
+        return invalid("renderer", "tag name must start with a letter and use only letters, digits, _ or -");
+      }
+      if (!bound("renderer", declaredRendererIds(declared.renderers, hasTool ? "tool" : "tag"), name)) return;
       if (!isComponent(spec.render)) return invalid("renderer", "render must be a component");
-      const renderer: RendererSpec = spec.tool ? { tool: spec.tool, render: spec.render } : { tag: spec.tag, render: spec.render };
+      const renderer: RendererSpec = spec.tool !== undefined
+        ? { tool: spec.tool, render: spec.render }
+        : { tag: spec.tag!, render: spec.render };
       contribute((current) => ({
         ...current,
-        renderers: [...current.renderers.filter((item) => (item.tool ?? item.tag) !== name), renderer],
+        renderers: [
+          ...current.renderers.filter((item) => (spec.tool ? item.tool : item.tag) !== name),
+          renderer,
+        ],
       }));
     },
     notice,
@@ -504,6 +549,7 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
     },
     copy: async (text) => (disposed ? false : copyText(globalThis.navigator?.clipboard, String(text))),
     toast(text) {
+      if (disposed) return;
       const dismiss = notice({ text });
       setTimeout(dismiss, TOAST_MS);
     },

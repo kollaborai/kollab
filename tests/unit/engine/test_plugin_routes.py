@@ -33,7 +33,7 @@ def test_plugin_list_uses_shared_inventory(tmp_path, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data.pop("server_time") > 0
-    assert data == {"schema": 1, "plugins": entries}
+    assert data == {"schema": 1, "plugins": [registry._normalize_plugin_entry(entries[0])]}
 
 
 def test_no_plugins_disables_engine_plugin_routes(monkeypatch):
@@ -47,6 +47,52 @@ def test_no_plugins_disables_engine_plugin_routes(monkeypatch):
         response = client.get("/plugins")
     assert response.status_code == 404
     assert inventory_calls == []
+
+
+@pytest.mark.parametrize(
+    ("action", "warning"),
+    [("install", None), ("update", "Plugin installed with a service warning")],
+)
+def test_completed_job_route_survives_starting_another_review(
+    tmp_path, monkeypatch, action, warning
+):
+    import asyncio
+    import time
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    with TestClient(create_app()) as client:
+        manager = client.app.state.plugin_jobs
+        previous_id = f"completed-{action}"
+        previous = {
+            "id": previous_id,
+            "action": action,
+            "status": "complete",
+            "updated": time.monotonic(),
+            "commit": "a" * 40,
+            "files_sha256": "b" * 64,
+            "manifest": {"id": "hello", "name": "Hello"},
+            "plugin_id": "hello",
+        }
+        if warning is not None:
+            previous["warning"] = warning
+        manager.jobs[previous_id] = previous
+
+        async def hold_staging(_job):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(manager, "_stage", hold_staging)
+        started = client.post(
+            "/plugins/install", json={"source": "https://example.invalid/repo"}
+        )
+        assert started.status_code == 202, started.text
+
+        recovered = client.get(f"/plugins/jobs/{previous_id}")
+        assert recovered.status_code == 200, recovered.text
+        assert recovered.json()["status"] == "complete"
+        assert recovered.json()["action"] == action
+        assert recovered.json().get("warning") == warning
 
 
 def test_plugin_settings_read_installed_development_and_builtin(tmp_path, monkeypatch):
@@ -90,6 +136,137 @@ def test_plugin_settings_read_installed_development_and_builtin(tmp_path, monkey
         assert client.get("/plugins/hello/settings").status_code == 409
         (installed / "kollab-plugin.json").write_text("{broken", encoding="utf-8")
         assert client.get("/plugins/hello/settings").status_code == 409
+
+
+def test_settings_routes_select_builtin_when_package_id_collides(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from kollabor_engine.routes import plugins as plugin_routes
+
+    from kollabor_plugins import registry
+    from kollabor_plugins import settings as plugin_settings
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    builtin_values = {"plugins.voice.mode": "built-in"}
+    package_values = {"mode": "installed"}
+    package_settings = SimpleNamespace(
+        get=lambda: dict(package_values),
+        save=lambda values: package_values.update(values),
+    )
+    monkeypatch.setattr(
+        plugin_routes,
+        "_package_context",
+        lambda plugin_id: SimpleNamespace(settings=package_settings) if plugin_id == "voice" else None,
+    )
+    monkeypatch.setattr(
+        registry,
+        "plugin_entries",
+        lambda: [{
+            "id": "voice",
+            "kind": "built-in",
+            "settings": [{
+                "path": "plugins.voice.mode",
+                "value": builtin_values["plugins.voice.mode"],
+                "secret": False,
+                "type": "text_input",
+            }],
+        }],
+    )
+
+    def save_builtin(plugin_id, values, **kwargs):
+        assert plugin_id == "voice"
+        assert kwargs["kind"] == "built-in"
+        builtin_values.update(values)
+
+    monkeypatch.setattr(plugin_settings, "save", save_builtin)
+    with TestClient(create_app()) as client:
+        assert client.get("/plugins/voice/settings?kind=built-in").json() == {
+            "plugins.voice.mode": "built-in"
+        }
+        assert client.put(
+            "/plugins/voice/settings?kind=built-in", json={"plugins.voice.mode": "updated"}
+        ).json() == {"plugins.voice.mode": "updated"}
+        assert package_values == {"mode": "installed"}
+
+
+def test_builtin_settings_save_uses_builtin_writer_when_package_id_collides(tmp_path, monkeypatch):
+    import json
+
+    from kollabor_engine.routes import plugins as plugin_routes
+
+    from kollabor_plugins import registry
+    from kollabor_plugins import settings as plugin_settings
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    (home / "plugins.json").write_text(json.dumps({
+        "plugins": {"voice": {"enabled": True}}, "dev": {},
+    }))
+    monkeypatch.setattr(plugin_routes, "_package_context", lambda plugin_id: None)
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [{
+        "id": "voice", "kind": "built-in", "settings": [{
+            "path": "plugins.voice.mode", "value": "before", "secret": False,
+            "type": "text_input",
+        }],
+    }])
+    builtin_writes = []
+    package_writes = []
+    monkeypatch.setattr(
+        plugin_settings, "_save_builtin",
+        lambda entry, values, **kwargs: builtin_writes.append((entry["id"], values)),
+    )
+    monkeypatch.setattr(
+        plugin_settings, "_save_locked",
+        lambda plugin_id, values: package_writes.append((plugin_id, values)),
+    )
+
+    with TestClient(create_app()) as client:
+        response = client.put(
+            "/plugins/voice/settings?kind=built-in", json={"plugins.voice.mode": "after"}
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"plugins.voice.mode": "before"}
+    assert builtin_writes == [("voice", {"plugins.voice.mode": "after"})]
+    assert package_writes == []
+
+
+def test_builtin_enable_route_selects_builtin_when_package_id_collides(tmp_path, monkeypatch):
+    import json
+
+    from kollabor_engine.routes import plugins as plugin_routes
+
+    from kollabor_plugins import registry, services
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    config_path = home / "config.json"
+    config_path.write_text(json.dumps({"plugins": {"voice": {"enabled": True}}}))
+    registry_path = home / "plugins.json"
+    registry_path.write_text(json.dumps({"plugins": {"voice": {"enabled": True}}, "dev": {}}))
+    monkeypatch.setattr(plugin_routes, "_package_context", lambda _plugin_id: None)
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [{
+        "id": "voice", "kind": "built-in", "settings": [{
+            "path": "plugins.voice.enabled", "type": "checkbox", "editable": True,
+            "secret": False, "value": True,
+        }],
+    }])
+    monkeypatch.setattr(services, "stop_services", lambda _plugin_id: [])
+
+    with TestClient(create_app()) as client:
+        response = client.post("/plugins/voice/disable?kind=built-in")
+
+    assert response.status_code == 200, response.text
+    assert json.loads(config_path.read_text())["plugins"]["voice"]["enabled"] is False
+    assert json.loads(registry_path.read_text())["plugins"]["voice"]["enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -226,6 +403,39 @@ def test_plugin_usage_incremental_replay_and_local_day(tmp_path, monkeypatch):
         with usage.open("a") as stream:
             stream.write("{bad json}\n")
         assert restarted.get("/plugins/hello/usage").status_code == 409
+
+
+@pytest.mark.parametrize(
+    ("exception_message", "expected_fragment", "forbidden"),
+    [
+        ("Cannot read /private/tmp/account/config.json", "[path]", "/private/tmp/account/config.json"),
+        ("GITHUB_TOKEN=ghp_fakecredentialvalue123", "GITHUB_TOKEN: [redacted]", "ghp_fakecredentialvalue123"),
+    ],
+)
+def test_plugin_usage_exception_logs_redact_paths_and_credentials(
+    monkeypatch, tmp_path, caplog, exception_message, expected_fragment, forbidden
+):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+    from kollabor_engine.routes import plugins as plugin_routes
+
+    context = SimpleNamespace(
+        settings=SimpleNamespace(get=lambda: {}),
+        data=tmp_path / "plugin-data",
+    )
+    monkeypatch.setattr(plugin_routes, "_package_context", lambda _plugin_id: context)
+
+    def fail_ingest(*_args):
+        raise OSError(exception_message)
+
+    monkeypatch.setattr(plugin_routes, "_ingest_plugin_usage", fail_ingest)
+    with pytest.raises(HTTPException) as raised:
+        plugin_routes.get_plugin_usage("hello")
+
+    assert raised.value.status_code == 503
+    assert expected_fragment in caplog.text
+    assert forbidden not in caplog.text
 
 
 def test_plugin_usage_is_checkpointed_in_bounded_batches(tmp_path, monkeypatch):
@@ -502,7 +712,7 @@ def make_router(ctx):
         assert client.get("/plugins/other/api/value").status_code == 503
         other = next(row for row in client.get("/plugins").json()["plugins"] if row["id"] == "other")
         assert other["state"] == "error"
-        assert "clash" in other["error"].lower()
+        assert other["error"] == "Python entry failed while loading; see the process log for details."
         records["hello"]["enabled"] = False
         path.write_text(json.dumps({"plugins": records, "dev": {}}))
         assert client.get("/plugins/hello/api/value").status_code == 404
@@ -510,7 +720,7 @@ def make_router(ctx):
     assert "plugin_vendor_collision_1028" not in sys.modules
 
 
-def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch):
+def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch, caplog):
     import json
     import shutil
     from pathlib import Path
@@ -541,9 +751,75 @@ def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch)
     with TestClient(create_app()) as client:
         entry = client.get("/plugins").json()["plugins"][0]
         assert entry["state"] == "error"
-        assert "ValueError" in entry["error"]
+        assert entry["error"] == "Python entry failed while loading; see the process log for details."
+        assert "ValueError" not in entry["error"]
         assert "secret-value" not in entry["error"]
         assert client.get("/plugins/hello/api/anything").status_code == 503
+    assert "Plugin engine initialization failed (ValueError)" in caplog.text
+    assert "secret-value" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("exception_message", "expected_fragment", "forbidden"),
+    [
+        ("/private/tmp/account/config.json", "[path]", "/private/tmp/account/config.json"),
+        ("GITHUB_TOKEN=ghp_fakecredentialvalue123", "[redacted]", "ghp_fakecredentialvalue123"),
+    ],
+)
+def test_engine_router_failure_redacts_before_logging_and_storing(
+    tmp_path, monkeypatch, caplog, exception_message, expected_fragment, forbidden
+):
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_engine.routes.plugins import PluginDispatcher
+
+    from kollabor_plugins import registry
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    root = tmp_path / ".kollab" / "plugins" / "hello"
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    shutil.copytree(source, root)
+    manifest = json.loads((root / "kollab-plugin.json").read_text())
+    manifest["engine"] = "python/engine.py:make_router"
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    (root / "python" / "engine.py").write_text("def make_router(ctx):\n    return None\n")
+
+    async def fail_load(*args, **kwargs):
+        raise RuntimeError(exception_message)
+
+    monkeypatch.setattr(PluginDispatcher, "_load", fail_load)
+    (tmp_path / ".kollab" / "plugins.json").write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "hello": {
+                        "enabled": True,
+                        "files_sha256": files_sha256(root),
+                        "granted": [],
+                    }
+                },
+                "dev": {},
+            }
+        )
+    )
+    monkeypatch.setattr(
+        registry,
+        "plugin_entries",
+        lambda: [{"id": "hello", "state": "ok", "error": None, "services": []}],
+    )
+    app = create_app()
+    with TestClient(app) as client:
+        assert client.get("/plugins/hello/api/anything").status_code == 503
+
+    stored = app.state.plugin_dispatcher.errors["hello"]
+    assert expected_fragment in stored
+    assert forbidden not in stored
+    assert forbidden not in caplog.text
 
 
 def test_plugin_tokens_are_private_stable_and_scoped(tmp_path, monkeypatch):
@@ -554,6 +830,7 @@ def test_plugin_tokens_are_private_stable_and_scoped(tmp_path, monkeypatch):
 
     from kollabor_engine import server
 
+    from kollabor_plugins import registry
     from kollabor_plugins.packages import files_sha256
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -586,6 +863,12 @@ def make_router(ctx):
 ''')
         records[plugin_id] = {"enabled": True, "files_sha256": files_sha256(root), "granted": []}
     (home / "plugins.json").write_text(json.dumps({"plugins": records, "dev": {}}))
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [{
+        "id": "hello", "kind": "built-in", "settings": [{
+            "path": "plugins.hello.mode", "type": "text_input", "editable": True,
+            "secret": False, "value": "built-in",
+        }],
+    }])
     with TestClient(create_app()) as client:
         hello_path = home / "plugin-data" / "hello" / "run" / "token"
         other_path = home / "plugin-data" / "other" / "run" / "token"
@@ -602,7 +885,16 @@ def make_router(ctx):
         with client.websocket_connect("/plugins/hello/api/socket", headers=own) as websocket:
             assert websocket.receive_json() == {"id": "hello"}
         assert client.get("/plugins/hello/settings", headers=own).status_code == 200
+        assert client.get("/plugins/hello/settings?kind=installed", headers=own).status_code == 200
         assert client.get("/plugins/hello/usage", headers=own).status_code == 200
+        protected_settings = [
+            client.get("/plugins/hello/settings?kind=built-in", headers=own),
+            client.put(
+                "/plugins/hello/settings?kind=built-in", headers=own,
+                json={"plugins.hello.mode": "changed"},
+            ),
+        ]
+        assert [response.status_code for response in protected_settings] == [401, 401]
         assert client.post("/plugins/hello/events", headers=own, json={"topic": "ready", "data": {}}).status_code == 200
         assert client.get("/plugins/other/api/who", headers=own).status_code == 401
         assert client.get("/plugins", headers=own).status_code == 401
@@ -795,14 +1087,33 @@ def test_builtin_plugin_settings_preserve_unrelated_config(tmp_path, monkeypatch
 
     monkeypatch.setattr(registry, "plugin_entries", entries)
     with TestClient(create_app()) as client:
-        assert client.put("/plugins/example/settings", json={"plugins.example.mode": "new"}).json() == {
+        assert client.put(
+            "/plugins/example/settings?kind=built-in", json={"plugins.example.mode": "new"}
+        ).json() == {
             "plugins.example.mode": "new", "plugins.example.managed": "x",
         }
         saved = json.loads(path.read_text())
         assert saved["plugins"]["example"] == {"mode": "new", "enabled": True}
         assert saved["other"] == {"keep": 7}
-        for key in ("plugins.example.enabled", "plugins.example.secret", "plugins.example.managed", "other.keep"):
-            assert client.put("/plugins/example/settings", json={key: "leak"}).status_code == 422
+        secret = client.put(
+            "/plugins/example/settings?kind=built-in",
+            json={"plugins.example.secret": "new-secret"},
+        )
+        assert secret.status_code == 200
+        assert "new-secret" not in secret.text
+        saved = json.loads(path.read_text())
+        assert saved["plugins"]["example"]["secret"] == "new-secret"
+        remote = client.put(
+            "/plugins/example/settings?kind=built-in",
+            json={"plugins.example.secret": "remote-secret"},
+            headers={"x-kollab-plugin-remote": "1"},
+        )
+        assert remote.status_code == 403
+        assert json.loads(path.read_text())["plugins"]["example"]["secret"] == "new-secret"
+        for key in ("plugins.example.enabled", "plugins.example.managed", "other.keep"):
+            assert client.put(
+                "/plugins/example/settings?kind=built-in", json={key: "leak"}
+            ).status_code == 422
         assert json.loads(path.read_text()) == saved
         assert client.post("/plugins/example/disable").json() == {"enabled": False}
         assert json.loads(path.read_text())["plugins"]["example"]["enabled"] is False

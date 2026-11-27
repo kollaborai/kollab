@@ -11,9 +11,10 @@ def test_plugin_and_service_errors_reach_terminal(tmp_path, monkeypatch):
     home = tmp_path / ".kollab"
     run = home / "plugin-data" / "hello" / "run"
     run.mkdir(parents=True)
-    (run / "worker.state").write_text(json.dumps({"status": "error", "error": "executable missing"}))
+    start_error = "Could not start this process. View Log for details."
+    (run / "worker.state").write_text(json.dumps({"status": "error", "error": start_error}))
     entries = registry._service_entries(home, "hello", {"services": {"worker": {}}})
-    assert entries[0]["error"] == "executable missing"
+    assert entries[0]["error"] == start_error
     monkeypatch.setattr(
         registry,
         "plugin_entries",
@@ -23,11 +24,11 @@ def test_plugin_and_service_errors_reach_terminal(tmp_path, monkeypatch):
                 "name": "Hello",
                 "kind": "installed",
                 "state": "error",
-                "error": "Failed to Load: missing dependency",
+                "error": "Plugin metadata could not be loaded",
                 "services": entries,
                 "settings": [],
             }
         ],
     )
-    assert "missing dependency" in ConfigWidgetDefinitions.get_available_plugins()[0]["help"]
-    assert "executable missing" in ConfigWidgetDefinitions.get_plugin_config_sections()[0]["widgets"][0]["help"]
+    assert "Plugin metadata could not be loaded" in ConfigWidgetDefinitions.get_available_plugins()[0]["help"]
+    assert start_error in ConfigWidgetDefinitions.get_plugin_config_sections()[0]["widgets"][0]["help"]

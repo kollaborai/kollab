@@ -78,6 +78,60 @@ describe("UserText render", () => {
     expect(markup).not.toContain("[image2]");
     expect(markup).not.toContain('data-ref=""');
   });
+
+  it("preserves system-row line breaks in text parts", () => {
+    stateWith(["text"], undefined);
+    const markup = renderToStaticMarkup(<UserText text={"first line\nsecond line"} />);
+    expect(markup).toContain("whitespace-pre-wrap");
+    expect(markup).toContain("first line\nsecond line");
+  });
+
+  it("replaces the whole-row placeholder with a paged content control", () => {
+    const marker = {
+      kind: "chat-stream-parts-preview",
+      session_id: "session-1",
+      row_id: "row-large",
+      part_count: 100,
+      output_bytes: 300_000,
+      output_chars: 280_000,
+      output_type: "json",
+      output_revision: "a".repeat(64),
+    };
+    stateWith(["text"], undefined);
+    const state = mocks.state.current as unknown as { message: { metadata: { custom: Record<string, unknown> } } };
+    state.message.metadata.custom.chatStreamPartsPreview = marker;
+
+    const markup = renderToStaticMarkup(<UserText text="[Large chat row. Expand to load all content.]" />);
+
+    expect(markup).toContain("chat-stream-parts-preview");
+    expect(markup).toContain("Load full row");
+    expect(markup).not.toContain("[Large chat row. Expand to load all content.]");
+  });
+
+  it("renders an individual structured-part recovery control", () => {
+    stateWith(["text"], undefined);
+    const marker = {
+      kind: "chat-stream-part-preview",
+      session_id: "session-1",
+      row_id: "row-large-part",
+      part_index: 4,
+      output_bytes: 30_000,
+      output_chars: 25_000,
+      output_type: "json",
+      output_revision: "b".repeat(64),
+      preview: "[Large part. Expand to load full content.]",
+    };
+
+    const markup = renderToStaticMarkup(
+      <UserText
+        text={marker.preview}
+        providerMetadata={{ kollab: { chat_stream_part_preview: marker } }}
+      />,
+    );
+
+    expect(markup).toContain("Expand full part");
+    expect(markup).toContain("[Large part. Expand to load full content.]");
+  });
 });
 
 describe("UserText padded-token spelling (#1140 R4)", () => {

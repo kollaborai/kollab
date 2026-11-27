@@ -342,7 +342,7 @@ jobs:
         lane: [core, learn, topics, notices]
         include:
           - lane: core
-            suites: agent-sidebar,sidebar-footer,remote-chat-lifecycle,team-launch,profile-rows,profile-copy,plugins
+            suites: agent-sidebar,sidebar-footer,remote-chat-lifecycle,team-launch,profile-rows,profile-copy,plugins,scrollbar-chrome
           - lane: learn
             suites: learn,learn-loadouts
           - lane: topics
@@ -378,13 +378,18 @@ jobs:
         working-directory: packages/kollabor-webui/frontend
         run: npx playwright-core install --with-deps chromium
 
+      - name: Install virtual display for headed browser acceptance
+        if: matrix.lane == 'core'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb xauth
+
       # The runner supports 1-4 workers and every suite gets an isolated
       # HOME/TMPDIR and its own Chromium. KOLLAB_BROWSER_SUITES names this
       # lane's slice; the runner fails fast on an unknown name.
       - name: Run web UI browser acceptance
         working-directory: packages/kollabor-webui/frontend
         env:
-          KOLLAB_BROWSER_WORKERS: "4"
+          # The core lane has seven suites; cap its concurrent Chromium load.
+          KOLLAB_BROWSER_WORKERS: ${{ matrix.lane == 'core' && '2' || '4' }}
           KOLLAB_BROWSER_SUITES: ${{ matrix.suites }}
           KOLLAB_BROWSER_RESULTS_DIR: ${{ runner.temp }}/kollab-browser-results
         run: |
@@ -394,7 +399,12 @@ jobs:
             npm run test:e2e:runner
             npm run inventory:controls -- "$KOLLAB_BROWSER_RESULTS_DIR/control-candidates.json"
           fi
-          npm run test:e2e:parallel
+          if [ "${{ matrix.lane }}" = "core" ]; then
+            KOLLAB_BROWSER_XVFB=1 xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+              sh -c 'test -n "$DISPLAY" && test -s "$XAUTHORITY" || { echo "xvfb-run did not provide DISPLAY/XAUTHORITY" >&2; exit 1; }; npm run test:e2e:parallel'
+          else
+            npm run test:e2e:parallel
+          fi
 
       - name: Upload browser acceptance evidence
         if: always()

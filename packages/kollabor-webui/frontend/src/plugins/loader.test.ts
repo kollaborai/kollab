@@ -1,14 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
+import { readFileSync } from "node:fs";
 import {
   assetUrl,
   bundlesOwnReact,
   createPluginLoader,
   isActive,
+  listedPluginEntries,
   LOAD_TIMEOUT_MS,
+  normalizePluginEntry,
   pluginsOff,
+  safePluginText,
   type LoaderDeps,
 } from "./loader";
 import { createPluginRegistry } from "./registry";
+import { pluginsByEnableOrder } from "./plugin-order";
+import { logPluginFailure, redactPluginError } from "./plugin-errors";
+import * as pluginErrors from "./plugin-errors";
+import { declaredIds } from "./plugin-declarations";
 import type { PluginApi, PluginEntry } from "./sdk";
 
 const Tab = () => null;
@@ -25,9 +34,14 @@ function entry(id: string, extra: Partial<PluginEntry> = {}): PluginEntry {
     web: { entry: "web/dist/index.js", style: "web/dist/index.css", hash: "abc" },
     contributes: {
       menu: [{ id, label: "Row", open: { page: "main" } }],
+      views: [],
       pages: [{ id: "main", title: "Main" }],
+      modals: [],
+      slash: [],
+      renderers: [],
     },
     services: [],
+    omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
     ...extra,
   };
 }
@@ -72,6 +86,21 @@ const module = (setup: Setup) => async () => ({ default: setup });
 const page = (k: PluginApi) =>
   k.page({ id: "main", title: "Main", tabs: [{ id: "one", label: "One", render: Tab }] });
 
+const inventoryResponseCases: readonly [string, () => Promise<unknown>, boolean][] = [
+  ["null", async () => null, false],
+  ["undefined", async () => undefined, false],
+  ["non-object", async () => "not an inventory", false],
+  ["top-level array", async () => [], false],
+  ["missing plugins", async () => ({ schema: 1 }), false],
+  ["non-array plugins", async () => ({ plugins: null }), false],
+  ["error body", async () => ({ detail: "Inventory unavailable" }), false],
+  ["only invalid rows", async () => ({ plugins: [null, {}] }), false],
+  ["partially invalid rows", async () => ({ plugins: [entry("replacement"), {}] }), false],
+  ["thrown JSON parse", async () => { throw new SyntaxError("Invalid JSON"); }, false],
+  ["non-2xx response", async () => { throw new Error("HTTP 503 Service Unavailable"); }, false],
+  ["valid empty inventory", async () => ({ plugins: [] }), true],
+];
+
 beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -98,7 +127,11 @@ describe("which plugins load", () => {
     expect(isActive(entry("hello", { shadowed: true }))).toBe(false);
     expect(isActive(entry("hello", { state: "changed-on-disk" }))).toBe(false);
     expect(isActive(entry("hello", { state: "skipped" }))).toBe(false);
-    expect(isActive(entry("hub", { kind: "built-in", web: null, contributes: {} }))).toBe(false);
+    expect(isActive(entry("hub", {
+      kind: "built-in",
+      web: null,
+      contributes: { menu: [], views: [], pages: [], modals: [], slash: [], renderers: [] },
+    }))).toBe(false);
     expect(isActive(entry("../x"))).toBe(false);
   });
 
@@ -113,7 +146,236 @@ describe("which plugins load", () => {
   });
 });
 
+describe("plugin inventory text redaction", () => {
+  it("preserves safe labels and provenance while rejecting credential text", () => {
+    const source = "https://github.com/acme/token-manager.git";
+    const normalized = normalizePluginEntry({
+      ...entry("hello"),
+      name: "Token-Budget",
+      source,
+      settings: [{
+        type: "text_input", path: "plugins.demo.password", label: "Password: required",
+        help: "Password: required", value: null, editable: false,
+      }],
+    });
+    expect(normalized?.name).toBe("Token-Budget");
+    expect(normalized?.source).toBe(source);
+    expect(normalized?.settings?.[0]?.label).toBe("Password: required");
+    expect(normalized?.settings?.[0]?.help).toBe("Password: required");
+  });
+
+  it.each([
+    ["underscore credential assignment", "GITHUB_TOKEN=ghp_fakecredentialvalue123"],
+    ["private key assignment", "private_key=private-secret"],
+    ["secret key assignment", "secret-key=secret-secret"],
+    ["signing key assignment", "signing_key=signing-secret"],
+    ["bearer credential", "Bearer abc123XYZ987"],
+    ["API key shape", "sk-live-abcdefghijklmnop"],
+  ])("rejects %s", (_label, value) => {
+    expect(normalizePluginEntry({ ...entry("hello"), name: value })?.name).toBe("hello");
+  });
+
+  it("redacts private-key assignments from browser plugin errors", () => {
+    const secret = "private_key=private-secret";
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    logPluginFailure("hello", "command failed", new Error(secret));
+
+    const output = logged.mock.calls.flat().join(" ");
+    expect(output).toContain("[redacted]");
+    expect(output).not.toContain("private-secret");
+  });
+
+  it("redacts cookie, session, and JWT credentials from browser plugin errors", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.payload.signature";
+    const secrets = ["cookie-canary", "set-cookie-canary", "session-canary", jwt];
+    const messages = [
+      `Cookie: sid=${secrets[0]}; theme=dark`,
+      `Set-Cookie: sid=${secrets[1]}; HttpOnly`,
+      `session=${secrets[2]}`,
+      jwt,
+    ];
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    for (const message of messages) logPluginFailure("hello", "event listener failed", new Error(message));
+
+    const output = logged.mock.calls.flat().join(" ");
+    expect(output).toContain("[redacted]");
+    for (const secret of secrets) expect(output).not.toContain(secret);
+  });
+
+  it("drops every URL query and fragment from logged errors and stacks", () => {
+    const messageUrl = "https://store.example/object?opaque=message-secret#private-fragment";
+    const stackUrl = "https://cdn.example/plugin.js?nonce=stack-secret#source-fragment";
+    const error = new Error(`request failed: ${messageUrl}`);
+    error.stack = `Error: request failed: ${messageUrl}\n    at render (${stackUrl})`;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    logPluginFailure("hello", "renderer failed", error, `    at App (${stackUrl})`);
+
+    const output = logged.mock.calls.flat().join(" ");
+    expect(output).toContain("https://store.example/object");
+    expect(output).toContain("https://cdn.example/plugin.js");
+    expect(output).not.toContain("opaque=");
+    expect(output).not.toContain("nonce=");
+    expect(output).not.toContain("message-secret");
+    expect(output).not.toContain("stack-secret");
+    expect(output).not.toContain("private-fragment");
+    expect(output).not.toContain("source-fragment");
+  });
+
+  it.each([
+    ["POSIX", "/Users/marco/.ssh/config"],
+    ["Windows", "C:\\Users\\marco\\AppData\\Roaming\\config.json"],
+  ])("redacts absolute %s filesystem paths without changing relative or URL paths", (_platform, path) => {
+    const error = redactPluginError(`Cannot read ${path}; also src/plugins/renderer.js and https://cdn.example/plugins/renderer.js?token=canary`);
+
+    expect(error).not.toContain(path);
+    expect(error).toContain("[path]");
+    expect(error).toContain("src/plugins/renderer.js");
+    expect(error).toContain("https://cdn.example/plugins/renderer.js");
+    expect(error).not.toContain("canary");
+  });
+
+  it.each([
+    "client_secret",
+    "clientSecret",
+    "oauth_client_secret",
+    "passphrase",
+    "passwd",
+    "pwd",
+    "secret_key",
+  ])(
+    "redacts JSON-quoted compound secret key %s",
+    (key) => {
+      const secret = "CSECRETVALUE123";
+      const error = redactPluginError(new Error(JSON.stringify({ [key]: secret })));
+
+      expect(error).toContain("[redacted]");
+      expect(error).not.toContain(secret);
+    },
+  );
+
+  it.each(["passphrase", "passwd", "pwd", "secret_key"])(
+    "redacts %s assignments from browser plugin errors",
+    (key) => {
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      logPluginFailure("hello", "event listener failed", new Error(`${key}=abc123`));
+
+      const output = logged.mock.calls.flat().join(" ");
+      expect(output).toContain(`${key}=[redacted]`);
+      expect(output).not.toContain("abc123");
+    },
+  );
+
+  it("redacts spaced API-key labels with Google-shaped values", () => {
+    const secret = "AIzaSyDUMMY012345678901234567890123456";
+    const text = `API key: ${secret}`;
+
+    expect(pluginErrors.containsSensitiveText(text)).toBe(true);
+    expect(safePluginText(text)).toBeNull();
+    expect(redactPluginError(text)).toBe("API key: [redacted]");
+
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    logPluginFailure("hello", "listener failed", new Error(text));
+    expect(logged.mock.calls.flat().join(" ")).not.toContain(secret);
+  });
+
+  it.each(["sk_live", "sk_test", "rk_live", "pk_live"])(
+    "detects and redacts an unlabelled Stripe %s key",
+    (prefix) => {
+      const secret = `${prefix}_${"A".repeat(24)}`;
+
+      expect(pluginErrors.containsSensitiveText(secret)).toBe(true);
+      expect(redactPluginError(secret)).toBe("[redacted]");
+    },
+  );
+
+  it("accepts status as a safe sensitive-field value", () => {
+    expect(pluginErrors.containsSensitiveText("token=status", true)).toBe(false);
+  });
+
+  it("redacts plugin and action text in the log prefix", () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    logPluginFailure(
+      "hello token=plugin-prefix-canary",
+      "listener https://service.example/events?token=action-prefix-canary",
+      new Error("safe failure"),
+    );
+
+    const output = logged.mock.calls.flat().join(" ");
+    expect(output).not.toContain("plugin-prefix-canary");
+    expect(output).not.toContain("action-prefix-canary");
+    expect(output).toContain("https://service.example/events");
+  });
+
+  it.each(["onCaughtError", "onUncaughtError", "onRecoverableError"] as const)(
+    "reports non-plugin %s errors through redacted logging",
+    (option) => {
+      type RootErrorHandler = (error: unknown, info: { componentStack: string }) => void;
+      const options = (pluginErrors as unknown as {
+        REDACTED_ROOT_ERROR_OPTIONS?: Record<string, RootErrorHandler>;
+      }).REDACTED_ROOT_ERROR_OPTIONS;
+      const handler = options?.[option];
+      expect(handler).toBeTypeOf("function");
+      if (!handler) return;
+
+      const error = new Error("unrelated failure https://app.example/path?private=value#fragment");
+      error.stack = "Error: unrelated failure https://app.example/path?stack=value#source";
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      handler(error, { componentStack: " at App (https://ui.example/view?tree=secret#component)" });
+
+      const output = logged.mock.calls.flat().join(" ");
+      expect(output).toContain("Kollab");
+      expect(output).toContain("unrelated failure");
+      expect(output).toContain("https://app.example/path");
+      expect(output).toContain("https://ui.example/view");
+      expect(output).not.toMatch(/[?#](?:private|stack|tree)=/);
+      expect(output).not.toContain("#fragment");
+      expect(output).not.toContain("#source");
+      expect(output).not.toContain("#component");
+    },
+  );
+});
+
 describe("loading", () => {
+  it.each([
+    ["missing", undefined],
+    ["tied", 1],
+  ])("keeps API order through the registry's name sort when enable order is %s", async (_case, rank) => {
+    const extra = rank === undefined ? { web: null } : { web: null, enable_order: rank };
+    const { loader, registry } = harness([[entry("beta", extra), entry("alpha", extra)]], {});
+    await loader.refresh();
+
+    expect(pluginsByEnableOrder(registry.getSnapshot().plugins).map(({ id }) => id)).toEqual(["beta", "alpha"]);
+  });
+
+  it.each(inventoryResponseCases)("handles %s plugin inventory without losing the last good page", async (_label, nextList, isValidEmpty) => {
+    const existing = entry("hello");
+    const setup = harness([[existing]], { [assetUrl(existing, "entry")!]: module(page) });
+    await setup.loader.refresh();
+    await setup.loader.idle();
+    expect(setup.plugin("hello")?.status).toBe("ready");
+
+    setup.deps.list.mockImplementationOnce(nextList as never);
+    await setup.loader.refresh();
+
+    if (isValidEmpty) {
+      expect(setup.plugin("hello")).toBeUndefined();
+      expect(listedPluginEntries()).toEqual([]);
+      expect(setup.registry.getSnapshot().listError).toBeNull();
+      expect(setup.removed).toEqual(["hello"]);
+    } else {
+      expect(setup.plugin("hello")).toMatchObject({ status: "ready", contributions: { pages: [{ id: "main" }] } });
+      expect(listedPluginEntries().map((item) => item.id)).toEqual(["hello"]);
+      expect(setup.registry.getSnapshot().listError).toBeTruthy();
+      expect(setup.removed).toEqual([]);
+    }
+  });
+
   it("imports every enabled entry in parallel and awaits each plugin function before showing it", async () => {
     const gates = { hello: deferred(), chain: deferred() };
     const { loader, deps, plugin } = harness([[entry("hello"), entry("pr-chain")]], {
@@ -152,8 +414,8 @@ describe("loading", () => {
     expect(plugin("hello")?.status).toBe("loading");
     await vi.advanceTimersByTimeAsync(1);
     await loader.idle();
-    expect(plugin("hello")).toMatchObject({ status: "failed", error: "Hello did not finish loading within 5 s." });
-    expect(plugin("pr-chain")).toMatchObject({ status: "failed", error: "PR Chain did not finish loading within 5 s." });
+    expect(plugin("hello")).toMatchObject({ status: "failed", error: "This plugin's web code failed while loading. Check the browser console for details." });
+    expect(plugin("pr-chain")).toMatchObject({ status: "failed", error: "This plugin's web code failed while loading. Check the browser console for details." });
   });
 
   it("a timed-out import that resolves later is ignored: its plugin function never runs", async () => {
@@ -195,16 +457,24 @@ describe("loading", () => {
     expect(plugin("hello")?.contributions.notices).toEqual([]);
   });
 
-  it("a plugin that throws while loading shows Failed to Load and the others still load", async () => {
+  it("keeps setup errors out of plugin UI and logs only redacted details", async () => {
+    const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz";
+    const original = new Error(secret);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const { loader, plugin } = harness([[entry("hello"), entry("pr-chain")]], {
       "/plugins/hello/web/index.js?v=abc": module(() => {
-        throw new Error("boom");
+        throw original;
       }),
       "/plugins/pr-chain/web/index.js?v=abc": module(page),
     });
     await loader.refresh();
     await loader.idle();
-    expect(plugin("hello")).toMatchObject({ status: "failed", error: "boom" });
+    expect(plugin("hello")).toMatchObject({
+      status: "failed",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
+    });
+    expect(logged).toHaveBeenCalledWith("hello web code load failed", expect.stringContaining("[redacted]"));
+    expect(logged.mock.calls.flat().join(" ")).not.toContain(secret);
     expect(plugin("pr-chain")?.status).toBe("ready");
   });
 
@@ -216,7 +486,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js does not default-export definePlugin(...).",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
   });
 
@@ -229,7 +499,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js bundles its own React: mark react as external",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
     expect(deps.importModule).not.toHaveBeenCalled();
   });
@@ -247,7 +517,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js bundles its own React: mark react as external",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
     expect(deps.importModule).not.toHaveBeenCalled();
   });
@@ -281,7 +551,7 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")).toMatchObject({
       status: "failed",
-      error: "web/dist/index.js bundles its own React: mark react as external",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
     });
     expect(deps.importModule).not.toHaveBeenCalled();
   });
@@ -302,7 +572,11 @@ describe("loading", () => {
     await loader.idle();
     expect(plugin("hello")?.status).toBe("failed");
     await loader.retry("hello");
-    expect(plugin("hello")).toMatchObject({ status: "failed", error: "second try fails", retries: 1 });
+    expect(plugin("hello")).toMatchObject({
+      status: "failed",
+      error: "This plugin's web code failed while loading. Check the browser console for details.",
+      retries: 1,
+    });
     fail = false;
     await loader.retry("hello");
     expect(plugin("hello")).toMatchObject({ status: "ready", retries: 2, error: null });
@@ -377,6 +651,372 @@ describe("plugins-changed", () => {
     expect(plugin("hello")?.contributions.pages.map((item) => item.title)).toEqual(["New"]);
   });
 
+  it("re-registers contributions when declarations change without a new web hash", async () => {
+    const declaration = (slash: string, tool: string) => ({
+      menu: [],
+      views: [],
+      pages: [],
+      modals: [],
+      slash: [slash],
+      renderers: [{ tool }],
+    });
+    const oldEntry = entry("hello", { contributes: declaration("publish", "shell") });
+    const newEntry = entry("hello", { contributes: declaration("deploy", "git") });
+    const setup: Setup = (k) => {
+      k.command({ name: "publish", description: "Old", run: () => {} });
+      k.command({ name: "deploy", description: "New", run: () => {} });
+      k.renderer({ tool: "shell", render: Tab });
+      k.renderer({ tool: "git", render: Tab });
+    };
+    const { loader, plugin, deps } = harness(
+      [[oldEntry], [newEntry]],
+      { "/plugins/hello/web/index.js?v=abc": module(setup) },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
+    expect(plugin("hello")?.contributions.renderers.map((renderer) => renderer.tool)).toEqual(["shell"]);
+
+    await loader.refresh();
+    await loader.idle();
+
+    expect(deps.importModule).toHaveBeenCalledTimes(2);
+    expect(plugin("hello")?.entry.contributes.slash).toEqual(["deploy"]);
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["deploy"]);
+    expect(plugin("hello")?.contributions.renderers.map((renderer) => renderer.tool)).toEqual(["git"]);
+  });
+
+  it("replaces live declarations when a sparse inventory removes a contribution", async () => {
+    const oldContributes: PluginEntry["contributes"] = {
+      menu: [],
+      views: [],
+      pages: [],
+      modals: [],
+      slash: ["publish"],
+      renderers: [{ tool: "shell" }],
+    };
+    const oldEntry = entry("hello", { contributes: oldContributes });
+    const sparseEntry = entry("hello", {
+      contributes: { slash: ["deploy"] } as unknown as PluginEntry["contributes"],
+    });
+    const setup: Setup = (k) => {
+      k.command({ name: "publish", description: "Old", run: () => {} });
+      k.command({ name: "deploy", description: "New", run: () => {} });
+      k.renderer({ tool: "shell", render: Tab });
+    };
+    const { loader, plugin, deps } = harness(
+      [[oldEntry], [sparseEntry]],
+      { "/plugins/hello/web/index.js?v=abc": module(setup) },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
+
+    await loader.refresh();
+    await loader.idle();
+
+    expect(deps.importModule).toHaveBeenCalledTimes(2);
+    expect(plugin("hello")?.entry.contributes.slash).toEqual(["deploy"]);
+    expect(plugin("hello")?.entry.contributes.renderers).toEqual([]);
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["deploy"]);
+    expect(plugin("hello")?.contributions.renderers).toEqual([]);
+  });
+
+  it("retains the last good contribution declarations when a refresh row omits them", async () => {
+    const declared = entry("hello", {
+      contributes: {
+        menu: [],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: ["publish"],
+        renderers: [{ tool: "shell" }],
+      },
+    });
+    const partial = { ...declared } as Partial<PluginEntry>;
+    delete partial.contributes;
+    const { loader, plugin, deps } = harness(
+      [[declared], [partial as PluginEntry]],
+      {
+        "/plugins/hello/web/index.js?v=abc": module((k) => {
+          k.command({ name: "publish", description: "Publish", run: () => {} });
+          k.renderer({ tool: "shell", render: Tab });
+        }),
+      },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    await loader.refresh();
+    await loader.idle();
+
+    expect(plugin("hello")?.entry.contributes.slash).toEqual(["publish"]);
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
+    expect(plugin("hello")?.contributions.renderers.map((renderer) => renderer.tool)).toEqual(["shell"]);
+    expect(deps.importModule).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains last-good declarations when the backend reports omitted contribution rows", async () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [],
+      views: [],
+      pages: [],
+      modals: [],
+      slash: ["publish"],
+      renderers: [{ tool: "shell" }],
+    };
+    const declared = entry("hello", { contributes });
+    const partial = entry("hello", {
+      contributes: { ...contributes, renderers: [] },
+      omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 1 },
+    });
+    const { loader, plugin, deps } = harness(
+      [[declared], [partial]],
+      {
+        "/plugins/hello/web/index.js?v=abc": module((k) => {
+          k.command({ name: "publish", description: "Publish", run: () => {} });
+          k.renderer({ tool: "shell", render: Tab });
+        }),
+      },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    await loader.refresh();
+    await loader.idle();
+
+    expect(plugin("hello")?.entry.contributes).toEqual(contributes);
+    expect(plugin("hello")?.contributions.renderers.map(({ tool }) => tool)).toEqual(["shell"]);
+    expect(deps.importModule).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects contribution rows with multiple identity fields", () => {
+    const normalized = normalizePluginEntry(entry("hello", {
+      contributes: {
+        menu: [],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: [{ id: "deploy", name: "review" }],
+        renderers: [{ tool: "shell", tag: "card" }],
+      },
+    }));
+
+    expect(normalized?.contributes.slash).toEqual([]);
+    expect(normalized?.contributes.renderers).toEqual([]);
+    expect(normalized?.omitted.contributions).toBe(2);
+    expect(declaredIds([{ id: "deploy", name: "review" }, { tool: "shell", tag: "card" }])).toEqual(new Set());
+  });
+
+  it("drops duplicate contribution identities and counts them as omissions", () => {
+    const contributes = {
+      menu: [
+        { id: "home", label: "Home", open: { page: "main" } },
+        { id: "home", label: "Home again", open: { page: "main" } },
+      ],
+      views: [{ id: "peek" }, { id: "peek" }],
+      pages: [{ id: "main" }, { id: "main" }],
+      modals: [{ id: "confirm" }, { id: "confirm" }],
+      slash: ["deploy", { name: "DEPLOY" }],
+      renderers: [{ tool: "shell" }, { tool: "shell" }, { tag: "shell" }],
+    } as PluginEntry["contributes"];
+    const normalized = normalizePluginEntry(entry("hello", { contributes }));
+
+    expect(normalized?.contributes.menu).toHaveLength(1);
+    expect(normalized?.contributes.views).toHaveLength(1);
+    expect(normalized?.contributes.pages).toHaveLength(1);
+    expect(normalized?.contributes.modals).toHaveLength(1);
+    expect(normalized?.contributes.slash).toEqual(["deploy"]);
+    expect(normalized?.contributes.renderers).toEqual([{ tool: "shell" }, { tag: "shell" }]);
+    expect(normalized?.omitted.contributions).toBe(6);
+  });
+
+  it("keeps documented underscores in renderer names through inventory normalization", () => {
+    const normalized = normalizePluginEntry(entry("hello", {
+      contributes: {
+        menu: [],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: [],
+        renderers: [{ tool: "todo_write" }, { tag: "status_card" }],
+      },
+    }));
+
+    expect(normalized?.contributes.renderers).toEqual([{ tool: "todo_write" }, { tag: "status_card" }]);
+    expect(normalized?.omitted.contributions).toBe(0);
+  });
+
+  it("treats an explicit null menu icon as an absent optional icon", () => {
+    const normalized = normalizePluginEntry({
+      ...entry("hello"),
+      contributes: {
+        menu: [{ id: "settings", label: "Settings", open: { view: "settings" }, icon: null }],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: [],
+        renderers: [],
+      },
+    });
+
+    expect(normalized?.contributes.menu).toEqual([
+      { id: "settings", label: "Settings", open: { view: "settings" } },
+    ]);
+    expect(normalized?.omitted.contributions).toBe(0);
+  });
+
+  it("marks an inventory row with no contributes field incomplete", () => {
+    const normalized = normalizePluginEntry({ id: "hello" });
+
+    expect(normalized?.omitted.contributions).toBeGreaterThan(0);
+  });
+
+  it("uses returned sanitized contributions when the backend reports omissions", () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [], views: [], pages: [], modals: [], slash: ["publish"], renderers: [],
+    };
+    const previous = entry("hello", { contributes });
+    const updated = normalizePluginEntry({
+      ...previous,
+      contributes: { ...contributes, slash: ["deploy"] },
+      omitted: { ...previous.omitted, contributions: 1 },
+    }, previous);
+
+    expect(updated?.contributes.slash).toEqual(["deploy"]);
+    expect(updated?.omitted.contributions).toBe(1);
+  });
+
+  it("uses a sanitized slash update when casing duplicates account for an omission", () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [], views: [], pages: [], modals: [], slash: ["publish"], renderers: [],
+    };
+    const previous = entry("hello", { contributes });
+    const updated = normalizePluginEntry({
+      ...previous,
+      contributes: { ...contributes, slash: ["deploy", "DEPLOY"] },
+      omitted: { ...previous.omitted, contributions: 1 },
+    }, previous);
+
+    expect(updated?.contributes.slash).toEqual(["deploy"]);
+  });
+
+  it("retains last-good contributions when the current row omits the contribution field", () => {
+    const previous = entry("hello", {
+      contributes: {
+        menu: [], views: [], pages: [], modals: [], slash: ["publish"], renderers: [],
+      },
+    });
+
+    const normalized = normalizePluginEntry({ id: "hello", name: "Hello" }, previous);
+
+    expect(normalized?.contributes).toEqual(previous.contributes);
+  });
+
+  it("retains the last-good declarations when rows over the limit are cut locally", () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [], views: [], pages: [], modals: [], slash: ["publish"], renderers: [],
+    };
+    const previous = entry("hello", { contributes });
+    const slash = [...Array.from({ length: 256 }, (_, index) => `cmd${index}`), "publish"];
+
+    const normalized = normalizePluginEntry({ ...previous, contributes: { ...contributes, slash } }, previous);
+
+    expect(normalized?.contributes).toEqual(contributes);
+    expect(normalized?.omitted.contributions).toBeGreaterThan(0);
+  });
+
+  it("treats an absent contribution kind as an empty declaration list", () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [],
+      views: [],
+      pages: [],
+      modals: [],
+      slash: ["publish"],
+      renderers: [{ tool: "shell" }],
+    };
+    const previous = entry("hello", { contributes });
+    const partial = {
+      ...previous,
+      contributes: {
+        menu: [],
+        views: [],
+        pages: [],
+        modals: [],
+        slash: ["publish"],
+      },
+    };
+
+    const normalized = normalizePluginEntry(partial, previous);
+
+    expect(normalized?.contributes).toEqual({ ...contributes, renderers: [] });
+    expect(normalized?.omitted.contributions).toBe(0);
+  });
+
+  it.each(["menu", "views", "pages", "modals", "slash", "renderers"] as const)(
+    "retains last-good declarations when the %s contribution is malformed",
+    (kind) => {
+      const contributes: PluginEntry["contributes"] = {
+        menu: [{ id: "main-menu", label: "Main", open: { page: "main" } }],
+        views: ["peek"],
+        pages: ["main"],
+        modals: ["about"],
+        slash: ["publish"],
+        renderers: [{ tool: "shell" }],
+      };
+      const previous = entry("hello", { contributes });
+
+      for (const malformedValue of ["not-an-array", [null]]) {
+        const malformed = {
+          ...previous,
+          contributes: { ...contributes, [kind]: malformedValue },
+        } as unknown as PluginEntry;
+        const normalized = normalizePluginEntry(malformed, previous);
+
+        expect(normalized?.contributes, `${kind}: ${JSON.stringify(malformedValue)}`).toEqual(contributes);
+        expect(normalized?.omitted.contributions).toBe(1);
+      }
+    },
+  );
+
+  it("does not reload a plugin when malformed-present declarations follow a valid inventory row", async () => {
+    const contributes: PluginEntry["contributes"] = {
+      menu: [{ id: "main-menu", label: "Main", open: { page: "main" } }],
+      views: ["peek"],
+      pages: ["main"],
+      modals: ["about"],
+      slash: ["publish"],
+      renderers: [{ tool: "shell" }],
+    };
+    const declared = entry("hello", { contributes });
+    const malformed = {
+      ...declared,
+      contributes: { ...contributes, slash: "publish" },
+    } as unknown as PluginEntry;
+    const { loader, plugin, deps } = harness(
+      [[declared], [malformed]],
+      {
+        "/plugins/hello/web/index.js?v=abc": module((k) => {
+          k.command({ name: "publish", description: "Publish", run: () => {} });
+          k.renderer({ tool: "shell", render: Tab });
+        }),
+      },
+    );
+
+    await loader.refresh();
+    await loader.idle();
+    await loader.refresh();
+    await loader.idle();
+
+    expect(plugin("hello")?.entry.contributes).toEqual(contributes);
+    expect(plugin("hello")?.contributions.commands.map(({ name }) => name)).toEqual(["publish"]);
+    expect(plugin("hello")?.contributions.renderers.map(({ tool }) => tool)).toEqual(["shell"]);
+    expect(plugin("hello")?.entry.omitted.contributions).toBe(1);
+    expect(deps.importModule).toHaveBeenCalledTimes(1);
+  });
+
   it("a plugin turned off while it loads never shows", async () => {
     const gate = deferred();
     const { loader, plugin } = harness([[entry("hello")], []], {
@@ -389,6 +1029,24 @@ describe("plugins-changed", () => {
     await loader.refresh();
     gate.resolve();
     await loader.idle();
+    expect(plugin("hello")).toBeUndefined();
+  });
+
+  it("does not load a listing that finishes after the loader stops", async () => {
+    const gate = deferred<{ plugins: PluginEntry[] }>();
+    const setup = vi.fn(page);
+    const { loader, deps, plugin } = harness([[entry("hello")]], {
+      "/plugins/hello/web/index.js?v=abc": module(setup),
+    });
+    deps.list.mockImplementationOnce(() => gate.promise);
+
+    const refresh = loader.refresh();
+    loader.stop();
+    gate.resolve({ plugins: [entry("hello")] });
+    await refresh;
+    await loader.idle();
+
+    expect(setup).not.toHaveBeenCalled();
     expect(plugin("hello")).toBeUndefined();
   });
 
@@ -414,5 +1072,34 @@ describe("own React detection", () => {
     expect(bundlesOwnReact('import{useState as e}from"react";export default function(){}')).toBe(false);
     expect(bundlesOwnReact("var s=r.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;s.H")).toBe(false);
     expect(bundlesOwnReact("if(r.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE===void 0)x()")).toBe(false);
+  });
+});
+
+describe("PhoneLink lists plugins and loads no code", () => {
+  it("fills the list, imports nothing and keeps the registry empty when loadCode is false", async () => {
+    const runtimeSource = readFileSync(new URL("./loader.ts", import.meta.url), "utf8");
+    const { registry, deps } = harness([[entry("hello"), entry("pr-chain")]], {});
+    const phone = { ...deps, loadCode: false };
+    const loader = createPluginLoader(registry, phone);
+    await loader.refresh();
+    await loader.idle();
+    expect(deps.importModule).not.toHaveBeenCalled();
+    expect(deps.fetchText).not.toHaveBeenCalled();
+    expect(deps.addStyle).not.toHaveBeenCalled();
+    expect(runtimeSource).toContain("loadCode: !inPhoneApp(where.pathname)");
+    expect(listedPluginEntries().map((item) => item.id)).toEqual(["hello", "pr-chain"]);
+    expect(registry.getSnapshot()).toMatchObject({ listed: true, plugins: [] });
+  });
+});
+
+describe("fixed plugin inventory errors", () => {
+  it("preserves the development manifest error", () => {
+    const normalized = normalizePluginEntry(entry("hello@dev", {
+      kind: "dev",
+      state: "error",
+      error: "Development plugin metadata could not be loaded",
+    }));
+
+    expect(normalized?.error).toBe("Development plugin metadata could not be loaded");
   });
 });

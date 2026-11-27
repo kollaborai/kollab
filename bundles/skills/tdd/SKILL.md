@@ -78,7 +78,7 @@ if not installed:
 
 check existing test patterns in codebase
 
-  <terminal>find . -name "test_*.py" -type f | head -10</terminal>
+  <file-find><pattern>test_*.py</pattern></file-find>
   <terminal>grep -r "def test_" tests/ 2>/dev/null | head -20</terminal>
   <terminal>grep -r "import pytest\|from pytest" tests/ 2>/dev/null | head -5</terminal>
 
