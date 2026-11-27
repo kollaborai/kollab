@@ -40,5 +40,10 @@ jobs:
         run: |
           python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_private_fs.py tests/unit/test_proc_ctl.py tests/unit/test_local_ipc.py -m "not quarantine"
           if ($LASTEXITCODE -eq 5) { exit 0 }
+      - name: Quarantined Windows tests (non-blocking)
+        continue-on-error: true
+        run: |
+          python -m pytest -m quarantine -q -rs -p no:cacheprovider --noconftest tests/unit/test_file_lock.py tests/unit/test_hub_file_lock.py tests/unit/test_private_fs.py tests/unit/test_proc_ctl.py tests/unit/test_local_ipc.py
+          if ($LASTEXITCODE -eq 5) { exit 0 }
       - name: Kill switch module loads
         run: python -c "import plugins.hub.halt_runtime"

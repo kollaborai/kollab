@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 # The Python suites CI runs with the root environment. The voice suite needs its own
 # pinned environment (ci.yml support_voice_tests); the repeat job runs it with --suites there.
-ROOT_SUITE = "tests"
+ROOT_SUITE = "tests/unit"
 PACKAGE_SUITES = ("packages/kollabor-engine/tests", "packages/kollabor-rpc/tests")
 DEFAULT_SUITES = (ROOT_SUITE, *PACKAGE_SUITES)
 
