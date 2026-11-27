@@ -709,6 +709,8 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
                 "thread_id": params.get("thread_id"),
                 "origin_context": params.get("origin_context"),
             }
+            if params.get("input_source") is not None:
+                kwargs["input_source"] = params["input_source"]
             if params.get("private_goal_reply") is True:
                 kwargs["private_goal_reply"] = True
                 kwargs["private_goal_reply_id"] = params.get("private_goal_reply_id")

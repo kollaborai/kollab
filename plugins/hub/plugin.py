@@ -14547,6 +14547,7 @@ class HubPlugin(BasePlugin):
             args_str = " ".join(command_or_args.args) if command_or_args.args else ""
         else:
             args_str = str(command_or_args)
+        input_source = getattr(command_or_args, "_input_source", None)
 
         parts = args_str.strip().split(maxsplit=1)
         subcmd = parts[0] if parts else "status"
@@ -14629,7 +14630,7 @@ class HubPlugin(BasePlugin):
         elif subcmd == "vaults":
             return self._format_all_vaults()
         elif subcmd == "org":
-            return await self._handle_org_command(rest)
+            return await self._handle_org_command(rest, input_source=input_source)
         elif subcmd == "orgs":
             return self._format_orgs()
         elif subcmd == "feed":
@@ -14642,7 +14643,9 @@ class HubPlugin(BasePlugin):
             return await self._handle_capture_command(rest)
         elif subcmd == "stop":
             # Typed in this session's chat, so the operator (#1408).
-            return await self._handle_stop_command(rest, operator=True)
+            return await self._handle_stop_command(
+                rest, operator=True, input_source=input_source
+            )
         elif subcmd == "agents":
             return await self._handle_agents_command()
         elif subcmd == "cron":
@@ -14664,20 +14667,20 @@ class HubPlugin(BasePlugin):
         elif subcmd == "metrics":
             return self._format_metrics()
         elif subcmd == "dns":
-            return await self._handle_dns_command(rest)
+            return await self._handle_dns_command(rest, input_source=input_source)
         else:
             return self._format_status()
 
     @staticmethod
-    def _surface_copy(cli_text: str, webui_text: str) -> str:
-        """Keep CLI guidance in terminal sessions and use page guidance in WebUI."""
-        return (
-            webui_text
-            if os.environ.get("KOLLAB_WEBUI_SESSION") == "1"
-            else cli_text
-        )
+    def _surface_copy(
+        cli_text: str, webui_text: str, *, input_source: str | None = None
+    ) -> str:
+        """Choose guidance from the input request's surface."""
+        return webui_text if input_source == UserInputSource.WEBUI.value else cli_text
 
-    async def _handle_dns_command(self, args: str) -> str:
+    async def _handle_dns_command(
+        self, args: str, *, input_source: str | None = None
+    ) -> str:
         """Handle /hub dns subcommands: resolve, find, trust, leaderboard, endorse, keys, endpoint, connect."""
         parts = args.strip().split(maxsplit=1)
         if parts and parts[0] == "connect":
@@ -14689,6 +14692,7 @@ class HubPlugin(BasePlugin):
                 "dns: PyNaCl not installed\nrun: pip install pynacl",
                 "Agent DNS is unavailable because this engine is missing a required "
                 "dependency. Other Hub controls remain available.",
+                input_source=input_source,
             )
         if not self._dns_registry:
             return "dns: not initialized (hub not started as agent)"
@@ -15812,7 +15816,9 @@ class HubPlugin(BasePlugin):
 
         return {process.pid for process in psutil.Process().parents()}
 
-    async def _operator_stop_all(self) -> str:
+    async def _operator_stop_all(
+        self, *, input_source: str | None = None
+    ) -> str:
         """`/hub stop all` typed by the operator (#1408).
 
         Stops every live agent in this folder's hub through the same per-agent
@@ -15897,11 +15903,18 @@ class HubPlugin(BasePlugin):
                         cli_instruction,
                         f"    Agents in {folder} remain active. Review that folder "
                         "in the sidebar to stop them.",
+                        input_source=input_source,
                     )
                 )
         return "\n".join(lines)
 
-    async def _handle_stop_command(self, rest: str, operator: bool = False) -> str:
+    async def _handle_stop_command(
+        self,
+        rest: str,
+        operator: bool = False,
+        *,
+        input_source: str | None = None,
+    ) -> str:
         """Handle /hub stop <name|all>.
 
         Sends shutdown signals via hub sockets. ``operator`` is the person
@@ -15922,7 +15935,7 @@ class HubPlugin(BasePlugin):
             return "hub not active"
 
         if target.lower() == "all" and operator and not self._under_hub_agent():
-            return await self._operator_stop_all()
+            return await self._operator_stop_all(input_source=input_source)
 
         if target.lower() == "all":
             # Scan machine-wide so owned agents are found even if they're
@@ -17968,7 +17981,9 @@ class HubPlugin(BasePlugin):
             )
         return "\n".join(lines)
 
-    async def _handle_org_command(self, args: str) -> str:
+    async def _handle_org_command(
+        self, args: str, *, input_source: str | None = None
+    ) -> str:
         """Open the roster picker and launch the selected effective team."""
         from .org_launcher import OrgLauncher, list_organizations, load_organization
         from .rosters import LibraryError, effective_team, team_launch_order
@@ -18006,6 +18021,7 @@ class HubPlugin(BasePlugin):
                 "team picker requires an interactive terminal; use `kollab --hub org`",
                 "The team picker is unavailable here. Open Team Launch in the "
                 "sidebar to choose a team.",
+                input_source=input_source,
             )
         except Exception as exc:
             logger.exception("Failed to open the team picker")
@@ -18062,6 +18078,7 @@ class HubPlugin(BasePlugin):
                     note,
                     f"The mission was not sent because {team.lead} is already "
                     f"online. Open {team.lead}'s chat to send it.",
+                    input_source=input_source,
                 )
             elif "did not come online, so the launch stopped there" in note:
                 failed = note.split(" did not come online", 1)[0]
@@ -18069,6 +18086,7 @@ class HubPlugin(BasePlugin):
                     note,
                     f"The team launch stopped because {failed} did not come online. "
                     "Agents that started remain active.",
+                    input_source=input_source,
                 )
         lines.extend(notes)
         return "\n".join(lines)
@@ -18508,6 +18526,7 @@ class HubPlugin(BasePlugin):
                 cli_line,
                 f"{self._identity.identity} is waiting for your approval: {title}. "
                 "Review the pending request in this chat.",
+                input_source=payload.get("_kollab_input_source"),
             )
             message = HubMessage(action="message", from_agent=self._identity.agent_id,
                 from_identity=self._identity.identity, to=turn.handle, content=line,

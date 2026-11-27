@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not
 from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
 
 from kollabor.panels import PanelError
+from kollabor.user_input_source import UserInputSource
 
 from ..server import get_session_registry
 from ..session import EngineSession
@@ -171,6 +172,8 @@ async def panel_action(session_id: str, name: str, action: str, request: Request
     session = _live_session(session_id)
     try:
         payload = await _json_body(request)
+        if name == "connect-join":
+            payload["_kollab_input_source"] = UserInputSource.WEBUI.value
         target = session
         if _network_panel(name):
             owner = await _network_owner(session)
@@ -223,6 +226,7 @@ async def halt_panel_action(name: str, action: str, request: Request):
     try:
         panel, ctx = _halt_target(name, request)
         payload = await _json_body(request)
+        payload["_kollab_input_source"] = UserInputSource.WEBUI.value
         outcome = await panel.act(ctx, action, payload)
     except Exception as exc:
         return _failure("network", exc)

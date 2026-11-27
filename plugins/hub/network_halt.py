@@ -84,9 +84,9 @@ WEBUI_PANEL_REFUSALS = {
 }
 
 
-def panel_error_message(message: str) -> str:
-    """Use page guidance for WebUI-owned sessions; keep terminal refusals intact."""
-    if os.environ.get("KOLLAB_WEBUI_SESSION") != "1":
+def panel_error_message(message: str, *, input_source: str | None = None) -> str:
+    """Use page guidance for WebUI requests and keep terminal refusals intact."""
+    if input_source != "webui":
         return message
     return WEBUI_PANEL_REFUSALS.get(message, message)
 

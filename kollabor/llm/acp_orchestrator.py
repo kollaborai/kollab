@@ -2219,7 +2219,11 @@ class ACPOrchestrator:
             if self.hub_plugin is not None:
                 callback = getattr(self.hub_plugin, "on_acp_waiting", None)
                 if callback is not None:
-                    callback(str(owner_request_id or ""), True, payload)
+                    callback_payload = dict(payload)
+                    input_source = update.get("source")
+                    if isinstance(input_source, str):
+                        callback_payload["_kollab_input_source"] = input_source
+                    callback(str(owner_request_id or ""), True, callback_payload)
         elif kind in {"permission_resolved", "turn_finished"}:
             # A stopped prompt can finish before its SDK permission callback
             # resumes. Clear its waiting state at this still-owned turn boundary.

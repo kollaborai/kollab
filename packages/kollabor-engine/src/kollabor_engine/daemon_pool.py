@@ -88,14 +88,6 @@ SPAWN_TIMEOUT_SECONDS = 45.0
 REMOTE_STATE_TIMEOUT_SECONDS = 60.0
 
 
-def _set_webui_session_env(env: Dict[str, str], webui_owned: bool) -> None:
-    """Mark WebUI-owned agents so Hub replies can use browser-safe wording."""
-    if webui_owned:
-        env["KOLLAB_WEBUI_SESSION"] = "1"
-    else:
-        env.pop("KOLLAB_WEBUI_SESSION", None)
-
-
 # Events the daemon publishes for terminal windows only. Most are rendered ANSI
 # rather than structured data: web clients cannot use them, and forwarding them
 # would double every message. ``daemon_restarting`` tells a window a restart in
@@ -1015,7 +1007,6 @@ class DaemonPool:
                 env.pop("KOLLAB_HUB_SOLO", None)
             # An inline profile (request credentials) exists only in these vars.
             env.update(profile_env or {})
-            _set_webui_session_env(env, webui_owned)
             if resume_conversation_id:
                 from kollabor.daemon import restart_env
 

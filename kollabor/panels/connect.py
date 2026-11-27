@@ -13,7 +13,6 @@ Join codes: an issued code leaves only in the ``new_code`` action's ``reveal``;
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
 from typing import Any, Optional
@@ -336,7 +335,9 @@ class ConnectJoinPanel:
             outcome = {"error": "connect request could not be submitted"}
         if outcome.get("error"):
             return error_result("The join request could not be submitted.")
-        return self._outcome(outcome, domain)
+        return self._outcome(
+            outcome, domain, input_source=payload.get("_kollab_input_source")
+        )
 
     async def _status(self, ctx: Any, payload: dict) -> dict:
         receipt = str(payload.get("receipt_id") or "")
@@ -350,10 +351,14 @@ class ConnectJoinPanel:
                 "Still waiting for approval on another device; check /connect status.",
                 poll=make_poll("join_status", {"receipt_id": receipt, "domain": domain}, POLL_SECONDS),
             )
-        return self._outcome(outcome, domain)
+        return self._outcome(
+            outcome, domain, input_source=payload.get("_kollab_input_source")
+        )
 
     @staticmethod
-    def _outcome(outcome: dict, domain: str) -> dict:
+    def _outcome(
+        outcome: dict, domain: str, *, input_source: str | None = None
+    ) -> dict:
         status = outcome.get("status")
         if status == "pending":
             receipt = outcome.get("receipt_id", "")
@@ -370,7 +375,7 @@ class ConnectJoinPanel:
             return error_result("The other device rejected this join request.")
         reason = outcome.get("reason") or ""
         message = JOIN_FAILURE_REASONS.get(reason, reason)
-        if os.environ.get("KOLLAB_WEBUI_SESSION") == "1" and isinstance(reason, str):
+        if input_source == "webui" and isinstance(reason, str):
             message = WEBUI_JOIN_FAILURE_REASONS.get(reason, message)
         return error_result(message or "The join request failed.")
 
@@ -734,6 +739,7 @@ class ConnectHaltPanel:
     _TOOLBAR = ("propose_resume", "no_count", "count", "resume_local")
 
     async def act(self, ctx: Any, action: str, payload: dict) -> dict:
+        input_source = payload.get("_kollab_input_source")
         if action == "halt_new":
             return ok_result(open=await PANELS["connect-halt-new"].describe(ctx, {}))
         if action in self._TOOLBAR:
@@ -745,12 +751,19 @@ class ConnectHaltPanel:
             args = {self._PAYLOAD_KEY[kind]: key} if kind in self._PAYLOAD_KEY else {}
         if action in CONFIRMED_ACTIONS:
             if payload.get("confirmed") is not True:  # the client sends it after the person confirms
-                return error_result(panel_error_message(CONFIRM_REFUSAL))
+                return error_result(
+                    panel_error_message(CONFIRM_REFUSAL, input_source=input_source)
+                )
             args["confirmed"] = True
         try:
             outcome = await ctx.hub_halt_act(action, args)
         except Exception as exc:  # noqa: BLE001 - halt errors are operator-safe text
-            return error_result(_sentence(panel_error_message(str(exc))), panel=await self.describe(ctx, {}))
+            return error_result(
+                _sentence(
+                    panel_error_message(str(exc), input_source=input_source)
+                ),
+                panel=await self.describe(ctx, {}),
+            )
         return ok_result(_halt_message(action, outcome or {}), panel=await self.describe(ctx, {}))
 
 
@@ -829,6 +842,7 @@ class ConnectHaltNewPanel:
         return form
 
     async def act(self, ctx: Any, action: str, payload: dict) -> dict:
+        input_source = payload.get("_kollab_input_source")
         if action != "halt":
             raise unknown_action(self.name, action)
         changes = payload.get("changes") if isinstance(payload.get("changes"), dict) else payload
@@ -838,12 +852,16 @@ class ConnectHaltNewPanel:
         if revoke != "none":
             args["revoke"] = [revoke]
         if payload.get("confirmed") is not True:  # the client sends it after the person confirms
-            return error_result(panel_error_message(CONFIRM_REFUSAL))
+            return error_result(
+                panel_error_message(CONFIRM_REFUSAL, input_source=input_source)
+            )
         args["confirmed"] = True
         try:
             await ctx.hub_halt_act("halt", args)
         except Exception as exc:  # noqa: BLE001
-            return error_result(_sentence(panel_error_message(str(exc))))
+            return error_result(
+                _sentence(panel_error_message(str(exc), input_source=input_source))
+            )
         return ok_result("Network halted.", open=await PANELS["connect-halt"].describe(ctx, {}))
 
 

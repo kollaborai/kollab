@@ -1162,6 +1162,7 @@ class EngineSession:
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: Dict[str, Any] | None = None,
+        input_source: str | None = None,
         private_goal_reply: bool = False,
         private_goal_reply_id: str | None = None,
         goal_conversation_uid: str | None = None,
@@ -1191,7 +1192,13 @@ class EngineSession:
             if admitted.get("admitted") is not True:
                 return {"accepted": False, "reason": "invalid voice admission capability"}
         try:
-            kwargs = {"request_id": request_id, "thread_id": thread_id, "origin_context": origin_context}
+            kwargs = {
+                "request_id": request_id,
+                "thread_id": thread_id,
+                "origin_context": origin_context,
+            }
+            if input_source is not None:
+                kwargs["input_source"] = input_source
             if private_goal_reply:
                 kwargs["private_goal_reply"] = True
                 kwargs["private_goal_reply_id"] = private_goal_reply_id
@@ -1278,6 +1285,7 @@ class EngineSession:
         messages: list[Dict[str, Any]],
         *,
         expected_active_request_ids: tuple[str, ...],
+        input_source: str | None = None,
         on_attempt: Any = None,
         on_admission: Any = None,
     ) -> Dict[str, Any]:
@@ -1299,12 +1307,14 @@ class EngineSession:
                 "reason": "force_send_unavailable",
                 "results": [],
             }
-        result = await submit(
-            messages,
-            expected_active_request_ids=expected_active_request_ids,
-            on_attempt=on_attempt,
-            on_admission=on_admission,
-        )
+        batch_kwargs = {
+            "expected_active_request_ids": expected_active_request_ids,
+            "on_attempt": on_attempt,
+            "on_admission": on_admission,
+        }
+        if input_source is not None:
+            batch_kwargs["input_source"] = input_source
+        result = await submit(messages, **batch_kwargs)
         if not isinstance(result, dict):
             raise TypeError("state.send_message_batch expected a result dict")
         return result
