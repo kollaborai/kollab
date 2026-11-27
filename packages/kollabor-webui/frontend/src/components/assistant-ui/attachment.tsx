@@ -41,6 +41,7 @@ import {
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 import { synchronizeComposerImageTokens } from "./managed-tokens";
+import { useAuthenticatedImage } from "@/components/media/media-view";
 
 const useFileSrc = (file: File | undefined) => {
   const [src, setSrc] = useState<string | undefined>(undefined);
@@ -74,7 +75,8 @@ const useAttachmentSrc = () => {
     }),
   );
 
-  return useFileSrc(file) ?? src;
+  const protectedSrc = useAuthenticatedImage(src?.startsWith("/") ? src : null);
+  return useFileSrc(file) ?? (src?.startsWith("/") ? protectedSrc ?? undefined : src);
 };
 
 type AttachmentPreviewProps = {

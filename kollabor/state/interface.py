@@ -215,6 +215,10 @@ class StateService(Protocol):
         """
         ...
 
+    async def get_goal_state(self) -> dict[str, Any]:
+        """Return persisted goal identity for the current conversation."""
+        ...
+
     # === Processing ===
 
     async def get_processing_state(self) -> ProcessingSnapshot:

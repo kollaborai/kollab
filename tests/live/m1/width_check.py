@@ -7,12 +7,13 @@ screen can hold the join code). "New" is a multiset difference of the after
 lines against the before lines. Prints counts and the first 60 characters of
 each offending line.
 """
+
 import collections
 import sys
 
 width = int(sys.argv[1])
 before_text, _, after_text = sys.stdin.read().partition("=====SPLIT=====\n")
-seen = collections.Counter(l.rstrip() for l in before_text.split("\n"))
+seen = collections.Counter(line.rstrip() for line in before_text.split("\n"))
 new = []
 for line in after_text.split("\n"):
     line = line.rstrip()
@@ -20,8 +21,8 @@ for line in after_text.split("\n"):
         seen[line] -= 1
     elif line:
         new.append(line)
-wide = [l for l in new if len(l) > width]
-print(f"new_lines={len(new)} wide={len(wide)} max={max((len(l) for l in new), default=0)}")
-for l in wide[:10]:
-    print(f"WIDE({len(l)}) {l[:60]}")
+wide = [line for line in new if len(line) > width]
+print(f"new_lines={len(new)} wide={len(wide)} max={max((len(line) for line in new), default=0)}")
+for line in wide[:10]:
+    print(f"WIDE({len(line)}) {line[:60]}")
 sys.exit(1 if wide else 0)

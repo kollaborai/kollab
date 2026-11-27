@@ -32,7 +32,6 @@ from kollabor.state.web_message_queue_rpc import (
 )
 from kollabor_rpc import RpcCallerContext, RpcServer
 
-
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 

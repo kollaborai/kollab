@@ -14,8 +14,6 @@ import hashlib
 import json
 from pathlib import Path
 
-import pytest
-
 NET = "c803f244ad84863c9b797f6d399b44b9c0567e3d6385f02d47f297c89b0c1929"
 ROOM = "4f" * 32  # a room is an Ed25519 public key in hex
 

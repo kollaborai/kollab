@@ -981,6 +981,19 @@ async def get_session_state(session_id: str):
     }
 
 
+@router.get("/{session_id}/goal")
+async def get_session_goal(session_id: str):
+    """Return the daemon's persisted goal binding for its current conversation."""
+    session = get_session_registry().get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        return await session.state.get_goal_state()
+    except Exception:
+        logger.exception("Session %s goal state unavailable", session_id)
+        raise HTTPException(status_code=502, detail="Goal state unavailable")
+
+
 @router.get("/{session_id}/commands")
 async def list_session_commands(session_id: str):
     """Return the daemon-owned visible slash-command catalog."""

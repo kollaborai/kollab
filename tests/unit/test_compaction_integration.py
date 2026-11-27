@@ -9,11 +9,14 @@ Run via pytest for CI:           pytest tests/unit/test_compaction_integration.p
 """
 
 import asyncio
+import copy
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import List
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from kollabor.state.chat_stream import ChatStreamService
 from kollabor_events.data_models import ConversationMessage
 from plugins.context_compaction_plugin import ContextCompactionPlugin
 
@@ -334,6 +337,111 @@ class TestCompactionIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             violations, [], "violations at keep_recent=4:\n" + "\n".join(violations)
         )
+
+    async def test_background_compaction_retains_rows_by_snapshot_positions(self):
+        """Retained and concurrent Hub rows survive despite older timestamps."""
+        history = _build_realistic_history()
+        base = datetime(2020, 1, 1)
+        for index, message in enumerate(history):
+            message.timestamp = base + timedelta(seconds=index)
+
+        def hub_row(row_id, history_index, created_at):
+            return {
+                "id": row_id,
+                "seq": 0,
+                "kind": "note",
+                "role": "system",
+                "turn_id": None,
+                "status": "done",
+                "parts": [
+                    {
+                        "type": "hub-note",
+                        "from": "peer",
+                        "to": "koordinator",
+                        "text": row_id,
+                        "observed": True,
+                    }
+                ],
+                "created_at": created_at,
+                "_history_index": history_index,
+            }
+
+        old_row = hub_row("old-hub-row", 4, "2020-01-01T00:00:04Z")
+        retained_row = hub_row("retained-prefix-row", 19, "2020-01-01T00:00:19Z")
+        manager = SimpleNamespace(
+            messages=history,
+            chat_stream_rows=[old_row, retained_row],
+            _update_context_window=MagicMock(),
+        )
+        plugin = _make_plugin_with_history(history, keep_recent=6)
+        plugin._llm_service.conversation_manager = manager
+        plugin._conversation_manager = manager
+
+        state = SimpleNamespace(
+            _llm_service=plugin._llm_service,
+            get_conversation_uid=lambda: "compaction-position-test",
+            chat_stream_snapshot=lambda: {"rows": [], "turns": [], "inputs": []},
+        )
+        stream = ChatStreamService(state)
+        stream._rows["compaction-position-test"] = {
+            row["id"]: copy.deepcopy(row) for row in (old_row, retained_row)
+        }
+        plugin.event_bus.get_service = lambda name: (
+            stream if name == "chat_stream" else None
+        )
+
+        summarizer_started = asyncio.Event()
+        release_summarizer = asyncio.Event()
+
+        async def wait_for_concurrent_arrival(*_args, **_kwargs):
+            summarizer_started.set()
+            await release_summarizer.wait()
+            return FAKE_SUMMARY
+
+        with patch.object(
+            plugin,
+            "_call_summarization_llm",
+            side_effect=wait_for_concurrent_arrival,
+        ):
+            compaction_task = asyncio.create_task(plugin._run_compaction())
+            await summarizer_started.wait()
+
+            concurrent_message = _msg("user", "arrived during summarization")
+            concurrent_message.timestamp = datetime.now()
+            history.append(concurrent_message)
+            concurrent_row = hub_row(
+                "concurrent-hub-row",
+                len(history),
+                datetime.now().isoformat().replace("+00:00", "Z"),
+            )
+            manager.chat_stream_rows.append(concurrent_row)
+            stream._rows["compaction-position-test"][concurrent_row["id"]] = copy.deepcopy(
+                concurrent_row
+            )
+
+            release_summarizer.set()
+            await compaction_task
+            await plugin._apply_pending_compaction({}, MagicMock())
+
+        summary = next(
+            message
+            for message in history
+            if message.metadata.get("context_compaction")
+        )
+        self.assertEqual(summary.metadata.get("compaction_snapshot_count"), 20)
+        self.assertIn(18, summary.metadata.get("compaction_retained_positions", []))
+        self.assertIn(19, summary.metadata.get("compaction_retained_positions", []))
+        self.assertEqual(
+            {row["id"] for row in manager.chat_stream_rows},
+            {"retained-prefix-row", "concurrent-hub-row"},
+        )
+        replacement_rows = stream._logs["compaction-position-test"]._events[-1][
+            "data"
+        ]["rows"]
+        self.assertNotIn("old-hub-row", {row["id"] for row in replacement_rows})
+        self.assertIn("retained-prefix-row", {row["id"] for row in replacement_rows})
+        self.assertIn("concurrent-hub-row", {row["id"] for row in replacement_rows})
+        self.assertNotIn("old-hub-row", stream._rows["compaction-position-test"])
 
 
 # ---------------------------------------------------------------------------

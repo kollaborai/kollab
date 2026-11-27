@@ -27,7 +27,8 @@
     }
   },
   "include": [
-    "src"
+    "src",
+    "tests/chat-stream-nullable-types.ts"
   ],
   "exclude": [
     "src/plugins/hello-template.test.ts"

@@ -9,11 +9,13 @@ import pytest
 from kollabor_voice.voice_context import VOICE_NUDGE, VOICE_RULES_MARK, voice_preamble
 
 from kollabor.llm import acp_orchestrator as mod
+from kollabor.state.chat_stream import ChatStreamService
 from kollabor.state.local import LocalStateService
 from kollabor_agent.voice_admission import issue_voice_admission_context
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_ai.profile_manager import LLMProfile
+from kollabor_events.chat_stream import sequence_problems
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.models import HubMessage
@@ -25,9 +27,7 @@ def isolated_bindings(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_operator_input_provenance_is_persisted_only_for_trusted_sources(
-    tmp_path, monkeypatch
-):
+async def test_operator_input_provenance_is_persisted_only_for_trusted_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
@@ -53,31 +53,114 @@ async def test_operator_input_provenance_is_persisted_only_for_trusted_sources(
     forged_peer_record = {**record, "source": "agent", "text": "peer claim"}
     try:
         human = orchestrator.admit(
-            record["text"], request_id="human-words", source="user",
+            record["text"],
+            request_id="human-words",
+            source="user",
             operator_inputs=(record, forged_peer_record),
         )
         peer = orchestrator.admit(
-            "peer message", request_id="peer-words", source="agent",
+            "peer message",
+            request_id="peer-words",
+            source="agent",
             operator_inputs=(record,),
         )
         await asyncio.gather(human.future, peer.future)
 
-        user_rows = [
-            message for message in manager.messages if message["role"] == "user"
-        ]
-        human_row = next(
-            message
-            for message in user_rows
-            if message["metadata"]["request_id"] == "human-words"
-        )
-        peer_row = next(
-            message
-            for message in user_rows
-            if message["metadata"]["request_id"] == "peer-words"
-        )
+        user_rows = [message for message in manager.messages if message["role"] == "user"]
+        human_row = next(message for message in user_rows if message["metadata"]["request_id"] == "human-words")
+        peer_row = next(message for message in user_rows if message["metadata"]["request_id"] == "peer-words")
         assert human_row["metadata"]["operator_inputs"] == [record]
         assert "operator_inputs" not in peer_row["metadata"]
         assert llm.conversation_history[0].metadata["operator_inputs"] == [record]
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "outcome"),
+    [("ACP turn cancelled", "cancelled"), ("provider failed", "failed")],
+)
+async def test_no_result_acp_failure_persists_ended_lifecycle_for_resume(
+    tmp_path, monkeypatch, failure, outcome
+):
+    class InterruptedRunner(FakeRunner):
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None):
+            future = asyncio.get_running_loop().create_future()
+            return mod.ACPAdmission(
+                request_id,
+                source,
+                thread_id,
+                1,
+                9,
+                text,
+                future,
+                origin or {},
+                history_key="no-result-turn-key",
+            )
+
+    monkeypatch.setattr(mod, "ACPRunner", InterruptedRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
+    )
+    logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, logger)
+    history = []
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=logger,
+        conversation_history=history,
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        admission = orchestrator.admit(
+            "cancel before output", request_id="no-result-request", source="rpc"
+        )
+        await asyncio.gather(*tuple(orchestrator._history_tasks))
+        admission.future.set_exception(mod.ACPError(failure))
+        await asyncio.gather(*tuple(orchestrator._completion_tasks))
+
+        resumed_manager = ConversationManager(configuration)
+        assert resumed_manager.load_session(logger.session_id)
+        resumed_history = [
+            ConversationMessage(
+                role=message["role"],
+                content=message["content"],
+                metadata=message["metadata"],
+            )
+            for message in resumed_manager.messages
+        ]
+        resumed_llm = SimpleNamespace(
+            conversation_manager=resumed_manager,
+            conversation_history=resumed_history,
+        )
+        resumed_state = SimpleNamespace(
+            _event_bus=bus,
+            _llm_service=resumed_llm,
+            get_conversation_uid=lambda: logger.session_id,
+        )
+        snapshot = ChatStreamService(resumed_state).subscribe(
+            {"after": None, "conversation_uid": None}
+        )["events"][0]
+
+        assert sequence_problems([snapshot]) == []
+        assert snapshot["data"]["inputs"] == [
+            {
+                "id": "no-result-request",
+                "state": "ended",
+                "turn_id": "9",
+                "outcome": outcome,
+            }
+        ]
+        assert snapshot["data"]["turns"] == [
+            {"turn_id": "9", "state": "ended", "input_ids": ["no-result-request"]}
+        ]
+        user = next(message for message in resumed_manager.messages if message["role"] == "user")
+        assert user["metadata"]["chat_stream_outcome"] == outcome
     finally:
         await orchestrator.close()
 
@@ -140,7 +223,6 @@ async def test_voice_preamble_is_sent_to_harness_but_not_persisted_as_user_text(
         await orchestrator.close()
 
 
-
 @pytest.mark.asyncio
 async def test_peer_observations_keep_hub_history_without_echoing_as_human_input(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
@@ -152,8 +234,10 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
     manager = ConversationManager(configuration, conversation_logger)
     display = MagicMock()
     llm = SimpleNamespace(
-        conversation_manager=manager, conversation_logger=conversation_logger,
-        conversation_history=[], message_display_service=display,
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=display,
     )
     bus = Bus()
     bus.services["llm_service"] = llm
@@ -163,9 +247,12 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         # Replies and broadcasts that arrive during a turn share one bounded
         # model prompt. Each was already rendered by Hub on arrival.
         orchestrator.runner.is_processing = True
+        observation_ids = []
         for index in range(22):
+            message_id = f"peer-note-{index}"
+            observation_ids.append(message_id)
             orchestrator.observe_notification(HubMessage(
-                action="message", from_agent=f"peer-id-{index}",
+                id=message_id, action="message", from_agent=f"peer-id-{index}",
                 from_identity=f"peer-{index}", to="receiver" if index % 2 else "*",
                 content=f"PEER_NOTE_{index}\n\nDetails {index}",
                 thread_id=f"thread-{index}", reply_to=f"request-{index}" if index % 2 else "",
@@ -186,7 +273,7 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         context = next(
             update["text"]
             for update in orchestrator.runner._updates
-            if str(update["request_id"]).startswith("observations-")
+            if update["request_id"] == observation_ids[-1]
         )
         assert context.startswith("<agent_hud>\n") and context.endswith("\n</agent_hud>")
         assert "2 older observations omitted." in context
@@ -209,6 +296,38 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         assert restored.load_session(conversation_logger.session_id)
         restored_inputs = [message["content"] for message in restored.messages if message["role"] == "user"]
         assert restored_inputs == [row.content for row in inputs] + [human]
+
+        resumed_history = [
+            ConversationMessage(
+                role=message["role"],
+                content=message["content"],
+                metadata=message.get("metadata", {}),
+            )
+            for message in restored.messages
+        ]
+        resumed_llm = SimpleNamespace(
+            conversation_manager=restored,
+            conversation_history=resumed_history,
+        )
+        resumed_state = SimpleNamespace(
+            _event_bus=bus,
+            _llm_service=resumed_llm,
+            get_conversation_uid=lambda: conversation_logger.session_id,
+        )
+        resumed_snapshot = ChatStreamService(resumed_state).subscribe(
+            {"after": None, "conversation_uid": None}
+        )["events"][0]["data"]
+        note = next(row for row in resumed_snapshot["rows"] if row["id"] == observation_ids[0])
+        assert note["kind"] == "note"
+        assert note["role"] == "system"
+        assert note["parts"][0]["type"] == "hub-note"
+        assert note["parts"][0]["text"] == "PEER_NOTE_0\n\nDetails 0"
+        restored_note = next(
+            message
+            for message in restored.messages
+            if message["metadata"].get("hub_message_id") == observation_ids[0]
+        )
+        assert restored_note["metadata"]["hub_admission"] == "note"
     finally:
         await orchestrator.close()
 
@@ -221,9 +340,7 @@ async def test_a_restart_hands_the_new_harness_what_the_old_one_never_heard(tmp_
     monkeypatch.setattr(mod, "publish_semantic", lambda bus, name, *args, **fields: None)
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
-        get=lambda key, default=None: (
-            False if key == "kollabor.llm.save_conversations" else default
-        ),
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
     )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     llm = SimpleNamespace(
@@ -264,9 +381,7 @@ def _observing(tmp_path):
     """An orchestrator writing into a real conversation, and a peer's message."""
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
-        get=lambda key, default=None: (
-            False if key == "kollabor.llm.save_conversations" else default
-        ),
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
     )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     llm = SimpleNamespace(
@@ -280,8 +395,13 @@ def _observing(tmp_path):
 
     def peer(content):
         return HubMessage(
-            action="message", from_agent="peer-id-1", from_identity="peer-1",
-            to="*", content=content, thread_id=None, reply_to="",
+            action="message",
+            from_agent="peer-id-1",
+            from_identity="peer-1",
+            to="*",
+            content=content,
+            thread_id=None,
+            reply_to="",
         )
 
     return mod.ACPOrchestrator(bus), llm, peer
@@ -358,9 +478,7 @@ async def test_peer_messages_kept_for_a_switch_wait_or_go_to_a_native_profile(tm
 
 
 @pytest.mark.asyncio
-async def test_native_handover_keeps_an_observation_when_its_history_retry_fails(
-    tmp_path, monkeypatch
-):
+async def test_native_handover_keeps_an_observation_when_its_history_retry_fails(tmp_path, monkeypatch):
     # Round 7: a failed retry leaves the native continuation with no copy.
     orchestrator, llm, peer = _observing(tmp_path)
 
@@ -381,9 +499,7 @@ async def test_native_handover_keeps_an_observation_when_its_history_retry_fails
 
 
 @pytest.mark.asyncio
-async def test_busy_observation_is_written_on_arrival_and_sent_once(
-    tmp_path, monkeypatch
-):
+async def test_busy_observation_is_written_on_arrival_and_sent_once(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
     semantic = []
 
@@ -393,9 +509,7 @@ async def test_busy_observation_is_written_on_arrival_and_sent_once(
     monkeypatch.setattr(mod, "publish_semantic", spy_publish)
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
-        get=lambda key, default=None: (
-            False if key == "kollabor.llm.save_conversations" else default
-        ),
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
     )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
@@ -477,6 +591,7 @@ async def test_provider_refusal_keeps_one_correlated_terminal_and_rpc_code(monke
             future = asyncio.get_running_loop().create_future()
             future.set_exception(mod.ACPError("claude-code: You've hit your weekly limit", code=-32603))
             return mod.ACPAdmission(request_id, source, thread_id, 1, 1, text, future, origin or {})
+
     monkeypatch.setattr(mod, "ACPRunner", RefusingRunner)
     bus = Bus()
     orchestrator = mod.ACPOrchestrator(bus)
@@ -498,7 +613,9 @@ async def test_provider_refusal_keeps_one_correlated_terminal_and_rpc_code(monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop_reason, tool_status", [("end_turn", "completed"), ("cancelled", "in_progress")])
-async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_and_merged_cards(tmp_path, stop_reason, tool_status):
+async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_and_merged_cards(
+    tmp_path, stop_reason, tool_status
+):
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
         get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
@@ -506,7 +623,9 @@ async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_a
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
     history = []
-    llm = SimpleNamespace(conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=history)
+    llm = SimpleNamespace(
+        conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=history
+    )
     bus = Bus()
     bus.services["llm_service"] = llm
     orchestrator = mod.ACPOrchestrator(bus)
@@ -521,14 +640,27 @@ async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_a
         updates = (
             {"kind": "text", "text": "Checking the fixture.\n"},
             {"kind": "agent_thought_chunk", "payload": {"content": {"type": "text", "text": "Owned reasoning."}}},
-            {"kind": "tool_call", "payload": {
-                "toolCallId": "owned-card", "title": "Original title", "kind": "edit", "status": "in_progress",
-                "rawInput": {"path": "owned_fixture.txt"},
-            }},
-            {"kind": "tool_call_update", "payload": {
-                "toolCallId": "owned-card", "title": "Updated title", "status": tool_status,
-                "rawInput": None, "rawOutput": 0, "content": [diff],
-            }},
+            {
+                "kind": "tool_call",
+                "payload": {
+                    "toolCallId": "owned-card",
+                    "title": "Original title",
+                    "kind": "edit",
+                    "status": "in_progress",
+                    "rawInput": {"path": "owned_fixture.txt"},
+                },
+            },
+            {
+                "kind": "tool_call_update",
+                "payload": {
+                    "toolCallId": "owned-card",
+                    "title": "Updated title",
+                    "status": tool_status,
+                    "rawInput": None,
+                    "rawOutput": 0,
+                    "content": [diff],
+                },
+            },
             {"kind": "text", "text": "Turn ended."},
         )
         result = mod.ACPResult(1, "owned-session", "Turn ended.", stop_reason, updates, {}, 1, "owned-request", "rpc")
@@ -553,7 +685,12 @@ async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_a
         assert restored_manager.load_session(conversation_logger.session_id)
         assistant = next(message for message in restored_manager.messages if message["role"] == "assistant")
         assert set(assistant["metadata"]) == {
-            "provider", "request_id", "turn_id", "acp_updates", "tool_calls", "stop_reason"
+            "provider",
+            "request_id",
+            "turn_id",
+            "acp_updates",
+            "tool_calls",
+            "stop_reason",
         }
         assert assistant["metadata"]["provider"] == "acp"
         assert assistant["metadata"]["request_id"] == "owned-request"
@@ -561,10 +698,13 @@ async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_a
         assert assistant["metadata"]["stop_reason"] == stop_reason
         assert assistant["metadata"]["tool_calls"] == metadata["tool_calls"]
         assert assistant["metadata"]["acp_updates"] == list(updates)
-        restored_history = [ConversationMessage(role=message["role"], content=message["content"], metadata=message["metadata"])
-                            for message in restored_manager.messages]
-        restored = await LocalStateService(SimpleNamespace(conversation_history=restored_history,
-                                                          conversation_manager=restored_manager), None).get_conversation()
+        restored_history = [
+            ConversationMessage(role=message["role"], content=message["content"], metadata=message["metadata"])
+            for message in restored_manager.messages
+        ]
+        restored = await LocalStateService(
+            SimpleNamespace(conversation_history=restored_history, conversation_manager=restored_manager), None
+        ).get_conversation()
         assert [message.role for message in restored.messages] == ["user", "assistant"]
         assert restored.messages[1].content == live.messages[1].content
         assert restored.messages[1].metadata["tool_calls"] == metadata["tool_calls"]
@@ -633,18 +773,29 @@ asyncio.run(acp.run_agent(Agent()))
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", ["cancel", "forced-cancel", "refusal"])
-async def test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_replacement_updates(tmp_path, monkeypatch, scenario):
+async def test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_replacement_updates(
+    tmp_path, monkeypatch, scenario
+):
     monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
-    configuration = SimpleNamespace(_conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default
+    )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
-    llm = SimpleNamespace(conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=[])
+    llm = SimpleNamespace(
+        conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=[]
+    )
     bus = Bus()
     bus.services["llm_service"] = llm
     orchestrator = mod.ACPOrchestrator(bus)
     (tmp_path / "home").mkdir()
-    profile = LLMProfile(name="owned-interrupted", provider="acp", command=(sys.executable, "-c", INTERRUPTED_AGENT),
-                         cwd=str(tmp_path), env={"HOME": str(tmp_path / "home")})
+    profile = LLMProfile(
+        name="owned-interrupted",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+        env={"HOME": str(tmp_path / "home")},
+    )
     runner = None
     try:
         await orchestrator.start(profile)
@@ -655,8 +806,10 @@ async def test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_re
         assert set(runner._owned_processes) == {runner._adapter_pid}
         admission = orchestrator.admit(scenario, request_id="stopped-request", source="rpc", thread_id="stopped-thread")
         async with asyncio.timeout(5):
-            while not any(event.get("type") == "acp_update" and event.get("update", {}).get("title") == "Waiting fixture"
-                          for event in bus.services["display_tap"].events):
+            while not any(
+                event.get("type") == "acp_update" and event.get("update", {}).get("title") == "Waiting fixture"
+                for event in bus.services["display_tap"].events
+            ):
                 await asyncio.sleep(0.01)
         stopped_generation = runner.generation
         queued = orchestrator.admit("must not run", request_id="queued-cancel", source="rpc")
@@ -695,8 +848,11 @@ async def test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_re
         assert next_turn["metadata"]["stop_reason"] == "end_turn"
         assert next_turn["metadata"]["tool_calls"][0]["status"] == "pending"
         assert all(update["request_id"] == "stopped-request" for update in stopped["metadata"]["acp_updates"])
-        terminal_events = [event for event in bus.services["display_tap"].events
-                           if event.get("request_id") == "stopped-request" and event.get("type") in {"turn_complete", "turn_end"}]
+        terminal_events = [
+            event
+            for event in bus.services["display_tap"].events
+            if event.get("request_id") == "stopped-request" and event.get("type") in {"turn_complete", "turn_end"}
+        ]
         assert len(terminal_events) == 2
         assert all(event["generation"] == stopped_generation for event in terminal_events)
         assert all(event["thread_id"] == "stopped-thread" for event in terminal_events)
@@ -706,13 +862,18 @@ async def test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_re
 
         restored_manager = ConversationManager(configuration)
         assert restored_manager.load_session(conversation_logger.session_id)
-        restored_history = [ConversationMessage(role=message["role"], content=message["content"], metadata=message["metadata"])
-                            for message in restored_manager.messages]
-        restored = await LocalStateService(SimpleNamespace(conversation_manager=restored_manager,
-                                                          conversation_history=restored_history), None).get_conversation()
+        restored_history = [
+            ConversationMessage(role=message["role"], content=message["content"], metadata=message["metadata"])
+            for message in restored_manager.messages
+        ]
+        restored = await LocalStateService(
+            SimpleNamespace(conversation_manager=restored_manager, conversation_history=restored_history), None
+        ).get_conversation()
         restored_assistants = [message for message in restored.messages if message.role == "assistant"]
         assert len(restored_assistants) == 2
-        restored_stopped = next(message for message in restored_assistants if message.metadata["stop_reason"] == expected_reason)
+        restored_stopped = next(
+            message for message in restored_assistants if message.metadata["stop_reason"] == expected_reason
+        )
         assert restored_stopped.content == stopped["content"]
         assert restored_stopped.metadata["tool_calls"] == stopped["metadata"]["tool_calls"]
         assert restored_stopped.metadata["acp_updates"] == stopped["metadata"]["acp_updates"]
@@ -724,10 +885,14 @@ async def test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_re
 
 @pytest.mark.asyncio
 async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_terminal(tmp_path, monkeypatch):
-    configuration = SimpleNamespace(_conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default
+    )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
-    llm = SimpleNamespace(conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=[])
+    llm = SimpleNamespace(
+        conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=[]
+    )
     bus = Bus()
     bus.services["llm_service"] = llm
     orchestrator = mod.ACPOrchestrator(bus)
@@ -741,7 +906,9 @@ async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_t
         raise OSError("Owned history write failed after append")
 
     monkeypatch.setattr(conversation_logger, "log_assistant_message", fail_after_write)
-    profile = LLMProfile(name="owned-write", provider="acp", command=(sys.executable, "-c", INTERRUPTED_AGENT), cwd=str(tmp_path))
+    profile = LLMProfile(
+        name="owned-write", provider="acp", command=(sys.executable, "-c", INTERRUPTED_AGENT), cwd=str(tmp_path)
+    )
     runner = None
     try:
         await orchestrator.start(profile)
@@ -971,7 +1138,9 @@ class Bus:
 
 
 class FakeRunner:
-    def __init__(self, profile, update_callback=None, permission_decider=None, permission_bridge=None, lifecycle_callback=None):
+    def __init__(
+        self, profile, update_callback=None, permission_decider=None, permission_bridge=None, lifecycle_callback=None
+    ):
         self.profile = profile
         self.update_callback = update_callback
         self.lifecycle_callback = lifecycle_callback
@@ -1000,14 +1169,22 @@ class FakeRunner:
             self.update_callback(update)
         future.set_result(
             mod.ACPResult(
-                1, "s1", text, "end_turn", tuple(self._updates),
-                {"type": "turn_end"}, 1, request_id, source, thread_id,
+                1,
+                "s1",
+                text,
+                "end_turn",
+                tuple(self._updates),
+                {"type": "turn_end"},
+                1,
+                request_id,
+                source,
+                thread_id,
             )
         )
         return mod.ACPAdmission(request_id, source, thread_id, 1, 1, text, future, origin or {})
 
     async def prompt(self, text):
-        return (await self.admit(text, request_id="legacy", source="rpc").future)
+        return await self.admit(text, request_id="legacy", source="rpc").future
 
     async def cancel(self):
         pass
@@ -1020,7 +1197,8 @@ class FakeRunner:
 async def test_orchestrator_owns_runner_and_publishes_semantic(monkeypatch):
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
     monkeypatch.setattr(
-        mod, "publish_semantic",
+        mod,
+        "publish_semantic",
         lambda bus, event_type, **fields: bus.get_service("display_tap").publish_semantic(
             {"type": event_type, **fields}
         ),
@@ -1036,8 +1214,7 @@ async def test_orchestrator_owns_runner_and_publishes_semantic(monkeypatch):
     assert bus.services["acp_orchestrator"] is orchestrator
     assert any(event.get("type") == "turn_complete" for event in bus.services["display_tap"].events)
     assert any(
-        event.get("type") == "token" and event.get("text") == "hello"
-        for event in bus.services["display_tap"].events
+        event.get("type") == "token" and event.get("text") == "hello" for event in bus.services["display_tap"].events
     )
     assert any(event.get("type") == "turn_end" and event.get("hidden") for event in bus.services["display_tap"].events)
     await orchestrator.close()
@@ -1052,14 +1229,16 @@ async def test_runner_update_publishes_contextual_metadata_to_real_display_tap()
     bus.services["display_tap"] = tap
     orchestrator = mod.ACPOrchestrator(bus)
 
-    orchestrator._on_runner_update({
-        "kind": "text",
-        "text": "chunk",
-        "request_id": "req-1",
-        "turn_id": 7,
-        "source": "hub",
-        "thread_id": "thread-1",
-    })
+    orchestrator._on_runner_update(
+        {
+            "kind": "text",
+            "text": "chunk",
+            "request_id": "req-1",
+            "turn_id": 7,
+            "source": "hub",
+            "thread_id": "thread-1",
+        }
+    )
 
     event = tap.get_snapshot()[-1]
     assert event["type"] == "token"
@@ -1081,9 +1260,7 @@ async def test_selected_profile_has_one_runner_fifo_and_cleanup(monkeypatch):
     bus = Bus()
     hub = Hub()
     profile_manager = SimpleNamespace(
-        get_active_profile=lambda: LLMProfile(
-            name="claude-code", provider="acp", command=("fake",)
-        )
+        get_active_profile=lambda: LLMProfile(name="claude-code", provider="acp", command=("fake",))
     )
     orchestrator = mod.ACPOrchestrator(bus, identity="daemon-1", hub_plugin=hub)
     await orchestrator.start(profile_manager.get_active_profile())
@@ -1103,8 +1280,17 @@ async def test_restart_start_failure_closes_replacement_and_clears_state(monkeyp
     created = []
 
     class RestartRunner(FakeRunner):
-        def __init__(self, profile, update_callback=None, permission_decider=None, permission_bridge=None, lifecycle_callback=None):
-            super().__init__(profile, update_callback, permission_bridge=permission_bridge, lifecycle_callback=lifecycle_callback)
+        def __init__(
+            self,
+            profile,
+            update_callback=None,
+            permission_decider=None,
+            permission_bridge=None,
+            lifecycle_callback=None,
+        ):
+            super().__init__(
+                profile, update_callback, permission_bridge=permission_bridge, lifecycle_callback=lifecycle_callback
+            )
             self.start_count = 0
             created.append(self)
 
@@ -1138,9 +1324,7 @@ async def test_an_arrival_row_that_fails_is_written_at_the_flush(tmp_path, monke
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
-        get=lambda key, default=None: (
-            False if key == "kollabor.llm.save_conversations" else default
-        ),
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
     )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
@@ -1165,9 +1349,13 @@ async def test_an_arrival_row_that_fails_is_written_at_the_flush(tmp_path, monke
 
         monkeypatch.setattr(orchestrator, "_record_user", flaky_record)
         orchestrator.runner.is_processing = True
-        for note in ("FIRST_NOTE", "SECOND_NOTE"):
+        for message_id, note in (
+            ("arrival-first", "FIRST_NOTE"),
+            ("arrival-second", "SECOND_NOTE"),
+        ):
             orchestrator.observe_notification(
                 HubMessage(
+                    id=message_id,
                     action="message",
                     from_agent="peer-id-1",
                     from_identity="peer-1",
@@ -1177,44 +1365,34 @@ async def test_an_arrival_row_that_fails_is_written_at_the_flush(tmp_path, monke
                     reply_to="",
                 )
             )
-        rows = [
-            m
-            for m in llm.conversation_history
-            if m.metadata.get("source") == "observation"
-        ]
+        rows = [m for m in llm.conversation_history if m.metadata.get("source") == "observation"]
         assert [("SECOND_NOTE" in m.content) for m in rows] == [True]
         orchestrator.runner.is_processing = False
         orchestrator._flush_observations()
         await asyncio.gather(*orchestrator._completion_tasks)
 
-        rows = [
-            m
-            for m in llm.conversation_history
-            if m.metadata.get("source") == "observation"
-        ]
+        rows = [m for m in llm.conversation_history if m.metadata.get("source") == "observation"]
         assert len(rows) == 2
         assert sum("FIRST_NOTE" in m.content for m in rows) == 1
         assert sum("SECOND_NOTE" in m.content for m in rows) == 1
         batches = [
-            update["text"]
+            update
             for update in orchestrator.runner._updates
-            if str(update["request_id"]).startswith("observations-")
+            if update["request_id"] in {"arrival-first", "arrival-second"}
         ]
-        assert len(batches) == 1 and "FIRST_NOTE" in batches[0]
+        assert len(batches) == 1
+        assert batches[0]["request_id"] == "arrival-second"
+        assert "FIRST_NOTE" in batches[0]["text"]
     finally:
         await orchestrator.close()
 
 
 @pytest.mark.asyncio
-async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
-    tmp_path, monkeypatch
-):
+async def test_a_row_that_fails_twice_is_written_once_by_the_batch(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
-        get=lambda key, default=None: (
-            False if key == "kollabor.llm.save_conversations" else default
-        ),
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
     )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
@@ -1237,9 +1415,10 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
                 raise failures.pop()
             return real_record(*args, **kwargs)
 
-        def note(content):
+        def note(message_id, content):
             orchestrator.observe_notification(
                 HubMessage(
+                    id=message_id,
                     action="message",
                     from_agent="peer-id-1",
                     from_identity="peer-1",
@@ -1252,39 +1431,31 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
 
         monkeypatch.setattr(orchestrator, "_record_user", flaky_record)
         orchestrator.runner.is_processing = True
-        note("FIRST_NOTE")  # the arrival row fails
+        note("arrival-first", "FIRST_NOTE")  # the arrival row fails
         orchestrator.runner.is_processing = False
         orchestrator._flush_observations()  # the retry fails, the batch row lands
-        note("LATER_NOTE")  # idle: its own row, sent at once
+        note("arrival-later", "LATER_NOTE")  # idle: its own row, sent at once
         await asyncio.gather(*orchestrator._completion_tasks)
 
-        rows = [
-            m
-            for m in llm.conversation_history
-            if m.metadata.get("source") == "observation"
-        ]
+        rows = [m for m in llm.conversation_history if m.metadata.get("source") == "observation"]
         assert sum("FIRST_NOTE" in m.content for m in rows) == 1
         assert sum("LATER_NOTE" in m.content for m in rows) == 1
-        batches = [
-            update["text"]
-            for update in orchestrator.runner._updates
-            if str(update["request_id"]).startswith("observations-")
-        ]
-        assert len(batches) == 2 and "FIRST_NOTE" not in batches[1]
+        batches = orchestrator.runner._updates
+        assert len(batches) == 2
+        assert batches[0]["request_id"] == "arrival-first"
+        assert "FIRST_NOTE" in batches[0]["text"]
+        assert batches[1]["request_id"] == "arrival-later"
+        assert "FIRST_NOTE" not in batches[1]["text"]
     finally:
         await orchestrator.close()
 
 
 @pytest.mark.asyncio
-async def test_a_row_that_landed_before_its_write_raised_is_not_written_again(
-    tmp_path, monkeypatch
-):
+async def test_a_row_that_landed_before_its_write_raised_is_not_written_again(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
-        get=lambda key, default=None: (
-            False if key == "kollabor.llm.save_conversations" else default
-        ),
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
     )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
@@ -1327,26 +1498,18 @@ async def test_a_row_that_landed_before_its_write_raised_is_not_written_again(
         orchestrator._flush_observations()  # the retry must not append a second row
         await asyncio.gather(*orchestrator._completion_tasks)
 
-        rows = [
-            m
-            for m in manager.messages
-            if m["metadata"].get("source") == "observation"
-        ]
+        rows = [m for m in manager.messages if m["metadata"].get("source") == "observation"]
         assert sum("FIRST_NOTE" in m["content"] for m in rows) == 1
     finally:
         await orchestrator.close()
 
 
 @pytest.mark.asyncio
-async def test_a_landed_row_still_reaches_the_history_mirror_at_the_retry(
-    tmp_path, monkeypatch
-):
+async def test_a_landed_row_still_reaches_the_history_mirror_at_the_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
-        get=lambda key, default=None: (
-            False if key == "kollabor.llm.save_conversations" else default
-        ),
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
     )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
@@ -1389,11 +1552,7 @@ async def test_a_landed_row_still_reaches_the_history_mirror_at_the_retry(
         await asyncio.gather(*orchestrator._completion_tasks)
 
         # The row is not appended twice, and the retry still mirrors it once.
-        mirrored = [
-            m
-            for m in llm.conversation_history
-            if m.metadata.get("source") == "observation"
-        ]
+        mirrored = [m for m in llm.conversation_history if m.metadata.get("source") == "observation"]
         assert [("FIRST_NOTE" in m.content) for m in mirrored] == [True]
     finally:
         await orchestrator.close()
@@ -1432,8 +1591,13 @@ def test_a_full_retry_queue_refuses_the_new_message_instead_of_evicting(monkeypa
 
 def _observation(content):
     return HubMessage(
-        action="message", from_agent="peer-id-1", from_identity="peer-1",
-        to="*", content=content, thread_id=None, reply_to="",
+        action="message",
+        from_agent="peer-id-1",
+        from_identity="peer-1",
+        to="*",
+        content=content,
+        thread_id=None,
+        reply_to="",
     )
 
 
@@ -1456,9 +1620,7 @@ async def _started_orchestrator(tmp_path, monkeypatch, runner_cls=FakeRunner):
     monkeypatch.setattr(mod, "ACPRunner", runner_cls)
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
-        get=lambda key, default=None: (
-            False if key == "kollabor.llm.save_conversations" else default
-        ),
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
     )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
@@ -1514,15 +1676,11 @@ async def test_an_accepted_observation_is_not_evicted_by_a_history_outage(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_an_observation_whose_retry_fails_in_a_flush_is_kept_until_it_persists(
-    tmp_path, monkeypatch
-):
+async def test_an_observation_whose_retry_fails_in_a_flush_is_kept_until_it_persists(tmp_path, monkeypatch):
     # #581: a turn ends while history is still down, so the retry fails again.
     # The message must stay owned by the retry queue, not be dropped when the
     # batch turn runs, and must reach history after recovery.
-    orchestrator, llm = await _started_orchestrator(
-        tmp_path, monkeypatch, _CancellableRunner
-    )
+    orchestrator, llm = await _started_orchestrator(tmp_path, monkeypatch, _CancellableRunner)
     try:
         storage_down = _storage_outage(orchestrator, monkeypatch)
         orchestrator.runner.is_processing = True
@@ -1549,9 +1707,7 @@ async def test_a_later_batch_threads_under_a_row_of_its_own_message(tmp_path, mo
     # recovers, NEW_NOTE's flush retries OLD_NOTE's row too. The reply to
     # NEW_NOTE's batch must thread under NEW_NOTE's row, not under the retried
     # row of a message an earlier turn already answered.
-    orchestrator, llm = await _started_orchestrator(
-        tmp_path, monkeypatch, _CancellableRunner
-    )
+    orchestrator, llm = await _started_orchestrator(tmp_path, monkeypatch, _CancellableRunner)
     try:
         storage_down = _storage_outage(orchestrator, monkeypatch)
         orchestrator.observe_notification(_observation("OLD_NOTE"))
@@ -1564,10 +1720,7 @@ async def test_a_later_batch_threads_under_a_row_of_its_own_message(tmp_path, mo
             for message in llm.conversation_manager.messages
             if message["role"] == "user"
         }
-        batch = next(
-            update for update in reversed(orchestrator.runner._updates)
-            if "NEW_NOTE" in update["text"]
-        )
+        batch = next(update for update in reversed(orchestrator.runner._updates) if "NEW_NOTE" in update["text"])
         assert "NEW_NOTE" in rows.get(batch["request_id"], "")
         # OLD_NOTE still reaches history once, from the retry.
         assert sum("OLD_NOTE" in content for content in rows.values()) == 1
@@ -1576,9 +1729,7 @@ async def test_a_later_batch_threads_under_a_row_of_its_own_message(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_a_refused_observation_leaves_no_history_row_however_often_it_is_offered(
-    tmp_path, monkeypatch
-):
+async def test_a_refused_observation_leaves_no_history_row_however_often_it_is_offered(tmp_path, monkeypatch):
     # #581: with the retry queue full, a refused message is offered again on
     # every mailbox or relay tick. ConversationManager.add_message appends the
     # row before its autosave can raise, so writing the row before deciding on
@@ -1599,11 +1750,7 @@ async def test_a_refused_observation_leaves_no_history_row_however_often_it_is_o
             assert orchestrator.observe_notification(_observation(f"NOTE_{index}")) is True
 
         def target_rows():
-            return sum(
-                "TARGET_NOTE" in message["content"]
-                for message in manager.messages
-                if message["role"] == "user"
-            )
+            return sum("TARGET_NOTE" in message["content"] for message in manager.messages if message["role"] == "user")
 
         for _ in range(13):
             assert orchestrator.observe_notification(_observation("TARGET_NOTE")) is False

@@ -1433,7 +1433,7 @@ class EngineSession:
                     # is still persisting. Never display that prior turn as the
                     # new turn's usage if its completion arrives late.
                     self._acp_usage_display_turn = (
-                        str(event.get("request_id") or ""), int(event.get("turn_id") or 0)
+                        str(event.get("request_id") or ""), str(event.get("turn_id") or "")
                     )
                     self.acp_turn_usage = {}
 
@@ -1449,7 +1449,8 @@ class EngineSession:
                     # Reconciled per-prompt totals when the adapter reports
                     # them on the response; cleared each turn so a
                     # stale total never lingers on adapters without it (#495).
-                    usage_turn = (str(event.get("request_id") or ""), int(event.get("turn_id") or 0))
+                    # Native turn ids are strings (native-<hex>, #1451); compare as text.
+                    usage_turn = (str(event.get("request_id") or ""), str(event.get("turn_id") or ""))
                     if self._acp_usage_display_turn in (None, usage_turn):
                         self.acp_turn_usage = dict(event.get("turn_usage") or {})
                     # This awaited completion refresh may be queued behind an

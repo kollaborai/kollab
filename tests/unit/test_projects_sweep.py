@@ -35,9 +35,7 @@ def tree(tmp_path, monkeypatch):
     root.mkdir()
     workspaces = tmp_path / "workspaces"
     workspaces.mkdir()
-    monkeypatch.setattr(
-        projects_sweep.tempfile, "gettempdir", lambda: str(workspaces)
-    )
+    monkeypatch.setattr(projects_sweep.tempfile, "gettempdir", lambda: str(workspaces))
     return root, workspaces
 
 
@@ -81,9 +79,7 @@ def test_dry_run_default_never_mutates(tree):
     plan, report = run_projects_sweep(root, mode="dry-run", own_project=None)
     assert orphan.is_dir() and shell.is_dir()
     assert not (root / TRASH_DIR_NAME).exists()
-    assert {d.name: d.category for d in plan.decisions}[
-        "private_tmp_claude-dead-lane"
-    ] == "orphan"
+    assert {d.name: d.category for d in plan.decisions}["private_tmp_claude-dead-lane"] == "orphan"
     assert any(line.startswith("would quarantine") for line in report)
     assert any(line.startswith("would remove empty shell") for line in report)
 
@@ -140,9 +136,7 @@ def test_sibling_prefix_workspaces_survive_boot():
 
         plan, _ = run_projects_sweep(root, mode="boot", active_window_hours=0)
 
-        assert {d.name: d.category for d in plan.decisions} == {
-            slug: "live" for slug in slugs
-        }
+        assert {d.name: d.category for d in plan.decisions} == {slug: "live" for slug in slugs}
         assert not plan.quarantines
         assert all(entry.is_dir() for entry in entries)
         assert not (root / TRASH_DIR_NAME).exists()
@@ -274,9 +268,7 @@ def test_open_conversation_is_never_touched(tree):
     (entry / "conversations" / "session_now.jsonl").write_text("live")
     plan, _ = run_projects_sweep(root, mode="execute")
     assert entry.is_dir()
-    assert {d.name: d.category for d in plan.decisions}[
-        "private_tmp_live-lane"
-    ] == "active"
+    assert {d.name: d.category for d in plan.decisions}["private_tmp_live-lane"] == "active"
     assert not plan.quarantines
 
 
@@ -327,9 +319,7 @@ def test_file_entries_are_untouched(tree):
     (root / "stray-file").write_text("not a session dir")
     plan, _ = run_projects_sweep(root, mode="execute")
     assert (root / "stray-file").is_file()
-    assert {d.name: d.category for d in plan.decisions}[
-        "stray-file"
-    ] == "reserved"
+    assert {d.name: d.category for d in plan.decisions}["stray-file"] == "reserved"
 
 
 def test_trash_purge_requires_execute_and_retention(tree):
@@ -395,7 +385,7 @@ def test_trash_without_meta_is_never_purged(tree):
 
 def test_report_includes_sizes(tree):
     root, _ = tree
-    entry = _orphan(root, "private_tmp_sized", content="x" * 2048)
+    _orphan(root, "private_tmp_sized", content="x" * 2048)
     _plan, report = run_projects_sweep(root, mode="dry-run")
     sized = [line for line in report if "private_tmp_sized" in line]
     assert sized and "KB" in sized[0]
@@ -487,9 +477,7 @@ def test_purge_rechecks_provenance_for_lossy_recreation(tree):
     recreated = base / "marcoverse_notes"
     recreated.mkdir(parents=True)
     run_projects_sweep(root, mode="execute")
-    assert trash_entry.is_dir(), (
-        "a recreated same-slug workspace must keep its quarantine copy"
-    )
+    assert trash_entry.is_dir(), "a recreated same-slug workspace must keep its quarantine copy"
 
 
 def test_purge_keeps_copy_when_provenance_is_inconclusive(tree, monkeypatch):
@@ -513,9 +501,7 @@ def test_symlinked_trash_root_refuses_quarantine(tree, tmp_path):
     (root / TRASH_DIR_NAME).symlink_to(external)
     orphan = _orphan(root, "private_tmp_sealed-lane")
     plan, report = run_projects_sweep(root, mode="execute", active_window_hours=0)
-    assert orphan.is_dir(), (
-        "a symlinked trash root must not receive quarantine moves"
-    )
+    assert orphan.is_dir(), "a symlinked trash root must not receive quarantine moves"
     assert not (external / "private_tmp_sealed-lane").exists()
     assert any("FAILED to quarantine" in line for line in report)
 
@@ -534,9 +520,7 @@ def test_symlinked_trash_root_never_purges(tree):
     trash_dir.symlink_to(external)
     plan, report = run_projects_sweep(root, mode="execute")
     assert plan.purges == [], "a symlinked trash root must not plan purges"
-    assert (external / slug).is_dir(), (
-        "execute must not rmtree through a symlinked trash root"
-    )
+    assert (external / slug).is_dir(), "execute must not rmtree through a symlinked trash root"
 
 
 def test_dry_run_previews_pending_purges(tree):
@@ -599,9 +583,7 @@ def test_symlinked_trash_metadata_blocks_quarantine(tree, tmp_path):
     orphan = _orphan(root, "private_tmp_meta-lane")
     plan, report = run_projects_sweep(root, mode="execute", active_window_hours=0)
     assert orphan.is_dir(), "symlinked metadata must block the quarantine move"
-    assert json.loads(external.read_text()) == {}, (
-        "an external metadata file must not receive trash records"
-    )
+    assert json.loads(external.read_text()) == {}, "an external metadata file must not receive trash records"
     assert any("FAILED to quarantine" in line for line in report)
 
 

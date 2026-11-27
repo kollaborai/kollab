@@ -39,6 +39,16 @@ export type AgentVersionNoticeState = {
 };
 
 /**
+ * The dismiss key for one chat's notice: per session, so dismissing one chat hides nothing elsewhere, and a
+ * notice raised by the chat stream's 426 apart from an earlier, dismissed version notice. Empty with no chat.
+ */
+export function versionNoticeKey(sessionId: string | undefined, agentId: string | undefined, chatOutdated: boolean): string {
+  if (!sessionId) return "";
+  const base = `${sessionId}|${agentId ?? ""}`;
+  return chatOutdated ? `${base}|outdated` : base;
+}
+
+/**
  * The notice for one chat, or null while its agent runs the engine's version. An agent that publishes
  * no version started before agents did, so it counts as older even while the engine version loads.
  * A versioned agent waits for the engine version; every mismatch then offers an in-page restart.
@@ -47,12 +57,28 @@ export type AgentVersionNoticeState = {
 export function agentVersionNotice({
   engineVersion,
   agent,
+  restartAgents,
+  chatOutdated = false,
+  chatName = "",
 }: {
   engineVersion: string;
   agent: LiveAgent | undefined;
   /** This setting does not disable a user-requested restart through the engine route. */
   restartAgents: boolean;
+  /**
+   * The chat stream answered 426: the agent predates it, so a typed /restart can never reach it (#1451).
+   * Such a chat always gets a notice, whatever the versions say or whether its agent row is known.
+   */
+  chatOutdated?: boolean;
+  /** The chat's agent name for the stop-and-start line when no live agent row matches it. */
+  chatName?: string;
 }): AgentVersionNoticeState | null {
+  if (chatOutdated) {
+    const detail = `Agent ${agent?.version || "(version unknown)"} · engine ${engineVersion || "(loading)"}`;
+    // Restart Agent needs a versioned agent: one with no version cannot restart itself.
+    if (agent && restartAgents && agent.version) return { kind: "button", detail, name: agent.name };
+    return { kind: "unknown", detail, name: agent?.name ?? chatName };
+  }
   if (!agent) return null;
   const running = agent.version ?? "";
   if (!engineVersion) {
