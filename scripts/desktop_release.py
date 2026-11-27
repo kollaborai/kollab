@@ -34,6 +34,14 @@ import sys
 import tomllib
 from pathlib import Path
 
+if __package__:
+    from .build_binary import run_with_retry
+else:
+    try:
+        from build_binary import run_with_retry
+    except ModuleNotFoundError:
+        from scripts.build_binary import run_with_retry
+
 ROOT = Path(__file__).resolve().parent.parent
 CLI_PLATFORMS = ("macos-aarch64", "macos-x86_64", "linux-x86_64", "linux-aarch64")
 # kollabor/binary.py reads this marker in sys.prefix: the app's runtime starts
@@ -203,10 +211,19 @@ def unpack_runtime(scie: Path, destination: Path) -> Path:
     # an inherited __PEX_EXE__ then runs the kollab app, which exits 0 on the
     # unknown flag and hides the failure until copytree finds no venv.
     venv_dir = work / "venv"
-    result = subprocess.run(
-        [*PEX_TOOLS_CMD, str(work / "split/pex"), "venv", "--site-packages-copies", str(venv_dir)],
-        env=scie_env(),
-    )
+    try:
+        result = run_with_retry(
+            [
+                *PEX_TOOLS_CMD,
+                str(work / "split/pex"),
+                "venv",
+                "--site-packages-copies",
+                str(venv_dir),
+            ],
+            env=scie_env(),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"pex-tools venv failed with exit code {exc.returncode}") from exc
     if result.returncode != 0:
         raise ValueError(f"pex-tools venv failed with exit code {result.returncode}")
     if not (venv_dir / "lib" / RUNTIME_PYTHON / "site-packages").is_dir():

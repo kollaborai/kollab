@@ -176,7 +176,7 @@ EXPECTED_CI_ENVIRONMENT = {
     "RUNNER_OS": "Linux",
     "RUNNER_ENVIRONMENT": "github-hosted",
 }
-ALLOWED_GITHUB_JOBS = frozenset({"tests", "supporting_tests"})
+ALLOWED_GITHUB_JOBS = frozenset({"tests", "supporting_tests", "repeat_changed_tests"})
 ALLOWED_GITHUB_EVENTS = frozenset({"pull_request", "push", "workflow_dispatch", "merge_group"})
 EXPECTED_WORKFLOW_REF_PREFIX = "kollaborai/kollab/.github/workflows/ci.yml@"
 

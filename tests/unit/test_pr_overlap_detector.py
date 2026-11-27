@@ -58,6 +58,42 @@ def test_same_branch_name_from_different_forks_is_not_a_branch_overlap():
     assert detector.find_overlaps(current, [candidate]) == []
 
 
+def test_merge_flow_window_and_source_pr_are_not_reported_as_overlapping():
+    source = _pr(
+        1,
+        files=[{"filename": "src/a.py", "patch": "@@ -10,3 +10,3 @@\n changed"}],
+    )
+    window = _pr(
+        2,
+        head="merge-flow/window-abc",
+        files=[{"filename": "src/a.py", "patch": "@@ -10,3 +10,3 @@\n changed"}],
+    )
+    another_window = _pr(
+        3,
+        head="merge-flow/window-def",
+        files=[{"filename": "src/a.py", "patch": "@@ -10,3 +10,3 @@\n merged"}],
+    )
+
+    assert detector.find_overlaps(window, [source, another_window]) == []
+    assert detector.find_overlaps(source, [window]) == []
+    assert detector.find_overlaps(another_window, [window]) == []
+
+
+def test_ordinary_prs_with_overlapping_hunks_are_reported():
+    current = _pr(
+        2,
+        files=[{"filename": "src/a.py", "patch": "@@ -10,3 +10,3 @@\n changed"}],
+    )
+    candidate = _pr(
+        1,
+        files=[{"filename": "src/a.py", "patch": "@@ -11,2 +11,2 @@\n other"}],
+    )
+
+    assert [match.number for match in detector.find_overlaps(current, [candidate])] == [
+        1
+    ]
+
+
 def test_overlapping_hunks_and_multiple_shared_files_are_reported():
     current = _pr(
         2,

@@ -58,6 +58,7 @@ def test_host_process_scans_require_explicit_option_and_sanctioned_ci_metadata()
         ("tests", "merge_group"),
         ("supporting_tests", "pull_request"),
         ("supporting_tests", "merge_group"),
+        ("repeat_changed_tests", "pull_request"),
     ],
 )
 def test_host_process_scans_allow_guarded_tests_in_each_ci_job(job, event):
