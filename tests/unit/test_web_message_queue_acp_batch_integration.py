@@ -672,3 +672,208 @@ async def test_acp_turn_start_waits_for_durable_dispatch_identity(tmp_path):
         if not admission.future.done():
             admission.future.cancel()
         await acp.close()
+
+
+@pytest.mark.asyncio
+async def test_acp_send_now_waits_when_rpc_finished_before_history_settles(tmp_path):
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    batch_id = queue.new_batch_id()
+    send_now_id = queue.new_request_id()
+    await queue.enqueue_batch(
+        queue.new_operation_id(),
+        batch_id,
+        (WebMessage(send_now_id, json.dumps({"text": "next input"}).encode()),),
+    )
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, _request_id: True,
+    )
+    state, llm, logger, acp, runner = await _real_acp_state(
+        tmp_path, start_completions=True
+    )
+    cut_started = asyncio.Event()
+    history_write_started = asyncio.Event()
+    release_history_write = asyncio.Event()
+    batch_token_returned = asyncio.Event()
+    send_now_user_written = asyncio.Event()
+    captured_tokens = []
+
+    async def run_prompt(admission, generation):
+        updates = []
+
+        async def update(kind, **values):
+            payload = {
+                "kind": kind,
+                "request_id": admission.request_id,
+                "turn_id": admission.turn_id,
+                "source": admission.source,
+                "thread_id": admission.thread_id,
+                "generation": generation,
+                "acp_turn_key": admission.history_key,
+                **values,
+            }
+            updates.append(payload)
+            result = runner.update_callback(payload)
+            if hasattr(result, "__await__"):
+                await result
+
+        await update("turn_start")
+        if admission.request_id == "cut-turn":
+            cut_started.set()
+            await update("text", text="completed reply")
+            await update(
+                "tool_call",
+                payload={
+                    "toolCallId": "cut-tool",
+                    "title": "Read file",
+                    "kind": "read",
+                    "rawInput": {"path": "notes.txt"},
+                    "status": "completed",
+                    "rawOutput": "tool output",
+                },
+            )
+        await update("turn_finished")
+        return ACPResult(
+            generation=generation,
+            session_id="session-acp",
+            text="completed reply",
+            stop_reason="end_turn",
+            updates=tuple(updates),
+            end_frame={"stopReason": "end_turn"},
+            turn_id=admission.turn_id,
+            request_id=admission.request_id,
+            source=admission.source,
+            thread_id=admission.thread_id,
+            history_key=admission.history_key,
+        )
+
+    runner._run_prompt = run_prompt
+    cut = acp.admit("original input", request_id="cut-turn", source="web")
+    await asyncio.gather(*tuple(acp._history_tasks))
+
+    original_record_result = acp._record_result
+
+    async def hold_history_write(result, turn_key):
+        if turn_key == (cut.generation, cut.turn_id):
+            history_write_started.set()
+            await release_history_write.wait()
+        await original_record_result(result, turn_key)
+
+    acp._record_result = hold_history_write
+    original_begin_batch = runner.begin_queue_handoff_batch
+
+    async def capture_batch_token(request_ids):
+        token = await original_begin_batch(request_ids)
+        if token is not None:
+            captured_tokens.append(token)
+            batch_token_returned.set()
+        return token
+
+    runner.begin_queue_handoff_batch = capture_batch_token
+    original_log_user_message = logger.log_user_message
+
+    async def record_send_now_user(text, **kwargs):
+        result = await original_log_user_message(text, **kwargs)
+        metadata = kwargs.get("message_metadata") or {}
+        if metadata.get("request_id") == send_now_id:
+            send_now_user_written.set()
+        return result
+
+    logger.log_user_message = record_send_now_user
+    original_add_message = llm.conversation_manager.add_message
+
+    def record_send_now_manager_message(role, text, **kwargs):
+        result = original_add_message(role, text, **kwargs)
+        metadata = kwargs.get("metadata") or {}
+        if role == "user" and metadata.get("request_id") == send_now_id:
+            send_now_user_written.set()
+        return result
+
+    llm.conversation_manager.add_message = record_send_now_manager_message
+    cut_history_settled = acp._history_settled_by_turn[
+        (cut.generation, cut.turn_id)
+    ]
+    identity = ConversationIdentity(
+        llm._current_conversation_uid(), llm.get_conversation_revision()
+    )
+    worker = WebMessageQueueWorker(
+        queue,
+        identity,
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+    drain = asyncio.create_task(runner._drain_queue())
+    dispatch = None
+    try:
+        await asyncio.wait_for(cut_started.wait(), timeout=1)
+        await asyncio.wait_for(history_write_started.wait(), timeout=1)
+        assert runner._active_context is None
+        assert runner._active_rpc_task is None or runner._active_rpc_task.done()
+        assert not cut_history_settled.is_set()
+
+        dispatch = asyncio.create_task(worker.dispatch_batch(batch_id, send_now=True))
+        await asyncio.wait_for(batch_token_returned.wait(), timeout=1)
+        assert captured_tokens[0].active_admission is None
+        assert runner._active_context is None
+        assert not cut_history_settled.is_set()
+
+        completed, _pending = await asyncio.wait({dispatch}, timeout=1)
+        assert not completed, (
+            "Send Now returned its batch while the prior ACP history write was pending"
+        )
+        assert not send_now_user_written.is_set()
+
+        release_history_write.set()
+        result = await asyncio.wait_for(dispatch, timeout=2)
+        assert result.status is WorkerStatus.ADMITTED
+        await asyncio.wait_for(asyncio.gather(*tuple(acp._completion_tasks)), timeout=2)
+
+        records = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+        cut_assistant_index = next(
+            index
+            for index, row in enumerate(records)
+            if row.get("type") == "assistant"
+            and row.get("display_metadata", {}).get("request_id") == "cut-turn"
+        )
+        send_now_user_index = next(
+            index
+            for index, row in enumerate(records)
+            if row.get("type") == "user"
+            and row.get("message", {}).get("metadata", {}).get("request_id")
+            == send_now_id
+        )
+        assert cut_assistant_index < send_now_user_index
+        assert any(
+            part.get("type") == "tool_use" and part.get("id") == "cut-tool"
+            for part in records[cut_assistant_index]["message"]["content"]
+        )
+
+        messages = llm.conversation_manager.messages
+        cut_assistant_position = next(
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "assistant"
+            and (message.get("metadata") or {}).get("request_id") == "cut-turn"
+        )
+        send_now_user_position = next(
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "user"
+            and (message.get("metadata") or {}).get("request_id") == send_now_id
+        )
+        assert cut_assistant_position < send_now_user_position
+    finally:
+        release_history_write.set()
+        if dispatch is not None:
+            await asyncio.gather(dispatch, return_exceptions=True)
+        runner._closing = True
+        runner._queue_release.set()
+        runner._queue_changed.set()
+        active_rpc_task = runner._active_rpc_task
+        if active_rpc_task is not None:
+            await asyncio.gather(active_rpc_task, return_exceptions=True)
+        drain.cancel()
+        await asyncio.gather(drain, return_exceptions=True)
+        await acp.close()
