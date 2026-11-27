@@ -319,6 +319,7 @@ class EngineSession:
     async def initialize(
         self,
         on_spawned: Optional[Callable[["EngineSession"], Awaitable[None]]] = None,
+        resume_conversation_id: Optional[str] = None,
     ) -> None:
         """Spawn the daemon, persist its owner record, then initialize it.
 
@@ -351,6 +352,7 @@ class EngineSession:
             profile_env=inline_profile_env(self.profile),
             stop_on_owner_exit=self.stop_on_owner_exit,
             webui_owned=self.webui_owned,
+            resume_conversation_id=resume_conversation_id,
         )
         if on_spawned is not None:
             await on_spawned(self)
@@ -468,7 +470,7 @@ class EngineSession:
         try:
             # initialize() uses DaemonPool.spawn(), the same kollab_argv()-based
             # launcher used for an Offline row in the sidebar.
-            await self.initialize()
+            await self.initialize(resume_conversation_id=self.conversation_id)
         except Exception as exc:
             logger.warning(
                 "session %s stopped its old agent but could not restart it (%s)",
