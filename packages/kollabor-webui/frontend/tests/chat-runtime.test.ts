@@ -475,6 +475,17 @@ describe("toRepository", () => {
     expect(statusOf([tool("a", "complete"), tool("b", "failed")])).not.toBe("incomplete");
   });
 
+  it("leaves out a message removed from the queue before any turn took it (#1451)", () => {
+    const input = (id: string, status: string, turn: string | null) =>
+      ({ ...row(id, [{ type: "text" as const, text: id }], "user"), kind: "input" as const, status, turn_id: turn }) as ChatRow;
+    const ids = toRepository([
+      input("removed", "cancelled", null),
+      input("cut-off", "cancelled", "t1"),
+      input("sent", "completed", "t2"),
+    ]).messages.map((m) => m.message.id);
+    expect(ids).toEqual(["cut-off", "sent"]);
+  });
+
   it("a failed reply row still marks its message as an error", () => {
     const failedReply = { ...row("reply-x", [{ type: "text" as const, text: "partial" }]), status: "failed" } as ChatRow;
     expect(toRepository([failedReply]).messages[0].message.status.type).toBe("incomplete");
