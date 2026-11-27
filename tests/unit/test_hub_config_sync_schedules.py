@@ -120,6 +120,18 @@ def test_snapshot_refuses_schedule_rows_with_non_list_agents(tmp_path):
         builder.build()
 
 
+def test_snapshot_refuses_schedule_rows_with_non_string_agent_names(tmp_path):
+    root = tmp_path / ".kollab"
+    root.mkdir()
+    root.joinpath("schedules.json").write_text(
+        json.dumps([_row_dict(agents=[None])]), encoding="utf-8"
+    )
+    builder = SnapshotBuilder(root=root)
+
+    with pytest.raises(ConfigSyncError, match="unreadable"):
+        builder.build()
+
+
 def test_snapshot_keeps_cached_roster_until_schedule_file_is_readable(tmp_path):
     root = tmp_path / ".kollab"
     root.mkdir()
