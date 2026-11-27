@@ -14616,7 +14616,9 @@ class HubPlugin(BasePlugin):
                 return text
             return self._format_whoami()
         elif subcmd == "msg":
-            text = await self._write_hub_via_state_service("hub_send_msg", rest)
+            text = await self._write_hub_via_state_service(
+                "hub_send_msg", rest, input_source=input_source
+            )
             if text is not None:
                 return text
             return await self._handle_msg_command(rest, input_source=input_source)
@@ -17174,7 +17176,11 @@ class HubPlugin(BasePlugin):
         return str(result)
 
     async def _write_hub_via_state_service(
-        self, method_name: str, args_str: str
+        self,
+        method_name: str,
+        args_str: str,
+        *,
+        input_source: str | None = None,
     ) -> Optional[str]:
         """Try a state_service hub-write rpc; return None if unavailable.
 
@@ -17201,7 +17207,12 @@ class HubPlugin(BasePlugin):
                 parts = args_str.split(maxsplit=1)
                 if len(parts) < 2:
                     return "usage: /hub msg <agent> <message>"
-                result = await fn(parts[0], parts[1])
+                kwargs = (
+                    {"input_source": input_source}
+                    if input_source is not None
+                    else {}
+                )
+                result = await fn(parts[0], parts[1], **kwargs)
             elif method_name == "hub_broadcast":
                 if not args_str.strip():
                     return "usage: /hub broadcast <message>"

@@ -3615,7 +3615,9 @@ class LocalStateService(StateService):
             return "beacon: update the daemon to use /connect"
         return str(await handler(command))
 
-    async def hub_send_msg(self, target: str, content: str) -> str:
+    async def hub_send_msg(
+        self, target: str, content: str, *, input_source: str | None = None
+    ) -> str:
         """Delegate to HubPlugin._handle_msg_command."""
         hub = self._resolve_hub_plugin()
         if hub is None:
@@ -3624,7 +3626,12 @@ class LocalStateService(StateService):
         if fn is None:
             return "hub: msg handler not available"
         try:
-            return str(await fn(f"{target} {content}"))
+            kwargs = (
+                {"input_source": input_source}
+                if input_source is not None
+                else {}
+            )
+            return str(await fn(f"{target} {content}", **kwargs))
         except Exception as e:
             logger.debug(f"hub _handle_msg_command error: {e}")
             return f"hub msg error: {e}"

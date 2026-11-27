@@ -1080,12 +1080,18 @@ class RemoteStateService(StateService):
             raise ValueError(detail)
         return str(result.get("text", ""))
 
-    async def hub_send_msg(self, target: str, content: str) -> str:
+    async def hub_send_msg(
+        self, target: str, content: str, *, input_source: str | None = None
+    ) -> str:
         """Ask the daemon to send a hub message to a specific agent."""
         logger.debug("state rpc: hub_send_msg target=%r", target)
         result = await self._rpc.call(
             "state.hub_send_msg",
-            {"target": target, "content": content},
+            {
+                "target": target,
+                "content": content,
+                **({"input_source": input_source} if input_source is not None else {}),
+            },
             timeout=self._timeout,
         )
         if not isinstance(result, dict):

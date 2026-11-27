@@ -650,7 +650,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         if not target or not content:
             return {"error": "target and content are required"}
         try:
-            text = await state_service.hub_send_msg(target, content)
+            input_source = params.get("input_source")
+            kwargs = {"input_source": input_source} if input_source is not None else {}
+            text = await state_service.hub_send_msg(target, content, **kwargs)
         except (ValueError, Exception) as e:
             return _error_result(e)
         return {"text": text}
