@@ -72,7 +72,7 @@ import { usePendingPermissionCancellation } from "@/permission-cancellation";
 import { imageAttachmentAdapter, toInputAttachments } from "@/image-attachment";
 import { useChatStore, WEB_INPUT_PREFIX, type ConnectionState } from "@/chat-store";
 import { isGoalText, newGoalReplyId } from "@/utils/goal-cancel";
-import { initialHistoryBanner, useOlderBanner } from "@/history-banner";
+import { threadBanner, useOlderBanner } from "@/history-banner";
 import { newInputId, type ChatRow, type InputRequest } from "@/chat-stream";
 import { composerAction, isWaitingRow } from "@/queue-state";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
@@ -298,8 +298,9 @@ const ThreadRoot: FC<{
   const viewportRef = useRef<HTMLDivElement>(null);
   const store = useChatStore();
   const olderBanner = useOlderBanner(store.olderStatus);
-  // Before the first snapshot nothing is on screen: the conversation's load line, or its failure, stands in for the banner.
-  const banner = olderBanner ?? initialHistoryBanner(store.connection, store.rows.length, store.saved);
+  // Before the first snapshot nothing is on screen: the conversation's load line, or its failure, stands in for the
+  // banner. A failed stream's line outranks a failed page of older rows.
+  const banner = threadBanner(olderBanner, store.connection, store.rows.length, store.saved);
   // Retry: a failed connection reconnects; a failed page of older rows loads again.
   const retryBanner = () => {
     if (banner?.retry === "reconnect") store.retry();

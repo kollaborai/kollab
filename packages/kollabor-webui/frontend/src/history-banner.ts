@@ -47,6 +47,21 @@ export function initialHistoryBanner(connection: ConnectionState, rowCount: numb
 }
 
 /**
+ * The one line the thread shows. A failed stream outranks a failed page of older rows: the stream line says
+ * what is wrong now, and its Retry reconnects instead of loading older rows (#1451).
+ */
+export function threadBanner(
+  older: HistoryBanner | null,
+  connection: ConnectionState,
+  rowCount: number,
+  saved = false,
+): HistoryBanner | null {
+  const stream = initialHistoryBanner(connection, rowCount, saved);
+  if (connection === "failed" && stream) return stream;
+  return older ?? stream;
+}
+
+/**
  * The banner for the store's olderStatus, given the banner already shown. A failed
  * load stays on screen while a scroll tries again: swapping the failure for the
  * loading line and back on every try makes the red strip blink. Returns `shown`
