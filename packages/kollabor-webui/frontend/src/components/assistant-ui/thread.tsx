@@ -9,7 +9,18 @@ import {
   ComposerPalette,
   type ComposerPaletteItem,
 } from "@/components/assistant-ui/composer-palette";
-import { ThreadFollowupSuggestions } from "@/components/assistant-ui/follow-up-suggestions";
+import {
+  ChatStreamContentPreview,
+  ChatStreamStreamingContent,
+  chatStreamContentIdentity,
+  chatStreamContentPreviewFromMetadata,
+  chatStreamTextFromMetadata,
+  chatStreamPartPreviewFromMetadata,
+  chatStreamPartsPreviewFromCustom,
+  canExportChatStreamMarkdown,
+  messageHasRecoverableChatStreamPreview,
+} from "@/chat-stream-content";
+import { ChatStreamPartPreview, ChatStreamPartsPreview } from "@/chat-stream-parts";
 import { MessageTimingBadge } from "@/components/assistant-ui/message-timing";
 import {
   Reasoning,
@@ -27,7 +38,12 @@ import {
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { resolveMediaSegment, splitMediaSegments } from "@/components/media/media-tokens";
-import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
+import {
+  MediaThumb,
+  MessageImage,
+  useMediaViewer,
+  useSessionMedia,
+} from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -35,7 +51,6 @@ import {
   loadComposerAttachments,
   loadComposerDraft,
   loadPersistedComposerAttachments,
-  queueComposerDraftSubmission,
   saveComposerAttachments,
   saveComposerDraft,
 } from "@/composer-draft";
@@ -44,14 +59,7 @@ import {
   orphanImageNotice,
   stripImageTokens,
   stripLeadingImageTokens,
-  type ComposerAttachmentLike,
 } from "@/composer-restore";
-import {
-  acknowledgeBusyWebMessage,
-  hasUnresolvedBusyWebMessage,
-  type BusyWebMessageComposerRequest,
-  type BusyWebMessageResult,
-} from "@/components/web-queue/submit";
 import { useShallow } from "zustand/shallow";
 import type { ThreadUserMessagePart } from "@assistant-ui/core";
 import {
@@ -60,17 +68,14 @@ import {
   type VoiceMode,
 } from "@/voice-mode";
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
-import {
-  imageAttachmentAdapter,
-  usePendingPermissionCancellation,
-  useSendWaitingNow,
-} from "@/runtime";
-import {
-  type AgentPoolEntry,
-  type MediaEntry,
-  type NetworkAgent,
-  type SlashCommand,
-} from "@/api";
+import { usePendingPermissionCancellation } from "@/permission-cancellation";
+import { imageAttachmentAdapter, toInputAttachments } from "@/image-attachment";
+import { useChatStore, WEB_INPUT_PREFIX, type ConnectionState } from "@/chat-store";
+import { isGoalText, newGoalReplyId } from "@/utils/goal-cancel";
+import { threadBanner, useOlderBanner } from "@/history-banner";
+import { newInputId, type ChatRow, type InputRequest } from "@/chat-stream";
+import { composerAction, isWaitingRow } from "@/queue-state";
+import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   matchPluginCommand,
   pluginCommandCatalogReady,
@@ -95,17 +100,17 @@ import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
   AuiIf,
-  type AssistantState,
   ComposerPrimitive,
   ErrorPrimitive,
   groupPartByType,
   MessagePrimitive,
-  SuggestionPrimitive,
   ThreadPrimitive,
   type PendingAttachment,
+  type ImageMessagePartProps,
   type ToolCallMessagePartComponent,
   useAui,
   useAuiState,
+  TextMessagePartProvider,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -115,8 +120,6 @@ import {
   DownloadIcon,
   MicIcon,
   MoreHorizontalIcon,
-  PencilIcon,
-  RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
 import {
@@ -139,7 +142,6 @@ const PLUGIN_COMMAND_SUBMISSION_WAIT_MS = 2_000;
 type PendingPluginSubmission = {
   text: string;
   session: string | null;
-  queueSessionId: string | null;
   timer: number;
   sendsNow: boolean;
 };
@@ -158,6 +160,8 @@ export type ThreadComponents = {
   ComposerLeading?: ComponentType | undefined;
   AssistantMessage?: ComponentType | undefined;
   Welcome?: ComponentType | undefined;
+  /** A user message, including an input row carrying structured hub data. */
+  UserMessage?: ComponentType | undefined;
   ToolFallback?: ToolCallMessagePartComponent | undefined;
   ToolGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
@@ -180,28 +184,18 @@ export type ThreadProps = {
   onOpenWelcome?: (() => void) | undefined;
   /** Offer image attachments; false hides the paperclip and refuses drops and pastes. */
   attachmentsEnabled?: boolean | undefined;
-  /** Visible status while a bounded history page is being fetched. */
-  historyStatus?: { kind: string; message: string } | undefined;
-  /** Loads the page immediately older than the current window. */
-  onLoadOlder?: (() => Promise<boolean | void>) | undefined;
-  onRetryHistory?: (() => void) | undefined;
-  historyStartIndex?: number | undefined;
   /** Per-agent/conversation localStorage key for the unsent composer text. */
   draftKey?: string | null | undefined;
-  /** Engine session owning this daemon queue submission plan. */
-  queueSessionId?: string | null | undefined;
-  /** Current canonical conversation for local queue retry ownership. */
-  queueConversationUid?: string | null | undefined;
   /** Daemon-backed queue shown in the sticky composer footer. */
   queuePanel?: ReactNode | undefined;
-  /** Queue a busy-composer message through the authenticated daemon route. */
-  onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
+  /** A harness session takes no Send Now: it steers a message into its running turn. */
+  harness?: boolean | undefined;
 };
+
 
 function composerRevisionSignature(text: string, attachments: readonly { id: string }[]): string {
   return JSON.stringify([text, attachments.map(({ id }) => id)]);
 }
-
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
 
@@ -220,11 +214,19 @@ export const ComposerHubContext = createContext<{ workspace: string; remote: rea
   remote: [],
 });
 
-// Startup exposes a loading placeholder thread; treat it as a new chat so
-// the composer mounts centered. Loads after startup keep the docked layout.
-const isNewChatView = (s: AssistantState) =>
-  s.thread.messages.length === 0 &&
-  (!s.thread.isLoading || s.threads.isLoading);
+/** Whether the session takes Send Now. A harness session does not. */
+const SendNowAllowedContext = createContext(true);
+
+/** The ids of the input rows the chat store has queued and not yet started or joined. */
+const QueuedIdsContext = createContext<ReadonlySet<string>>(new Set());
+
+/**
+ * The new-chat layout (a centered composer and the welcome) shows for an empty chat whose stream
+ * is open. While the stream connects the rows are not known yet, so the chat keeps the docked
+ * layout until they are (#1451).
+ */
+export const isNewChatView = (rows: readonly ChatRow[], connection: ConnectionState): boolean =>
+  rows.length === 0 && connection === "live";
 
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
@@ -235,40 +237,37 @@ export const Thread: FC<ThreadProps> = ({
   onOpenPanel,
   onOpenWelcome,
   attachmentsEnabled = true,
-  historyStatus,
-  onLoadOlder,
-  onRetryHistory,
-  historyStartIndex = 0,
   draftKey,
-  queueSessionId,
-  queueConversationUid,
   queuePanel,
-  onQueueBusyMessage,
+  harness = false,
 }) => {
-  const isEmpty = useAuiState(isNewChatView);
+  const store = useChatStore();
+  // The queued input rows by id, so each user row finds its queued note in O(1).
+  const queuedIds = useMemo(
+    () => new Set(store.rows.filter((row) => isWaitingRow(row, store.inputs)).map((row) => row.id)),
+    [store.rows, store.inputs],
+  );
+  const isEmpty = isNewChatView(store.rows, store.connection);
 
   return (
-    <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot
-        isEmpty={isEmpty}
-        agents={agents}
-        commands={commands}
-        commandCatalogStatus={commandCatalogStatus}
-        onRetryCommands={onRetryCommands}
-        onOpenPanel={onOpenPanel}
-        onOpenWelcome={onOpenWelcome}
-        attachmentsEnabled={attachmentsEnabled}
-        historyStatus={historyStatus}
-        onLoadOlder={onLoadOlder}
-        onRetryHistory={onRetryHistory}
-        historyStartIndex={historyStartIndex}
-        draftKey={draftKey}
-        queueSessionId={queueSessionId}
-        queueConversationUid={queueConversationUid}
-        queuePanel={queuePanel}
-        onQueueBusyMessage={onQueueBusyMessage}
-      />
-    </ThreadComponentsContext.Provider>
+    <SendNowAllowedContext.Provider value={!harness}>
+      <QueuedIdsContext.Provider value={queuedIds}>
+        <ThreadComponentsContext.Provider value={components}>
+          <ThreadRoot
+            isEmpty={isEmpty}
+            agents={agents}
+            commands={commands}
+            commandCatalogStatus={commandCatalogStatus}
+            onRetryCommands={onRetryCommands}
+            onOpenPanel={onOpenPanel}
+            onOpenWelcome={onOpenWelcome}
+            attachmentsEnabled={attachmentsEnabled}
+            draftKey={draftKey}
+            queuePanel={queuePanel}
+          />
+        </ThreadComponentsContext.Provider>
+      </QueuedIdsContext.Provider>
+    </SendNowAllowedContext.Provider>
   );
 };
 
@@ -281,15 +280,8 @@ const ThreadRoot: FC<{
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
   onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
-  historyStatus: ThreadProps["historyStatus"];
-  onLoadOlder: ThreadProps["onLoadOlder"];
-  onRetryHistory: ThreadProps["onRetryHistory"];
-  historyStartIndex: number;
   draftKey: ThreadProps["draftKey"];
-  queueSessionId: ThreadProps["queueSessionId"];
-  queueConversationUid: ThreadProps["queueConversationUid"];
   queuePanel: ThreadProps["queuePanel"];
-  onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
 }> = ({
   isEmpty,
   agents,
@@ -299,19 +291,22 @@ const ThreadRoot: FC<{
   onOpenPanel,
   onOpenWelcome,
   attachmentsEnabled,
-  historyStatus,
-  onLoadOlder,
-  onRetryHistory,
-  historyStartIndex,
   draftKey,
-  queueSessionId,
-  queueConversationUid,
   queuePanel,
-  onQueueBusyMessage,
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const scrollAnchorRef = useRef<{ start: number } | null>(null);
+  const store = useChatStore();
+  const olderBanner = useOlderBanner(store.olderStatus);
+  // Before the first snapshot nothing is on screen: the conversation's load line, or its failure, stands in for the
+  // banner. A failed stream's line outranks a failed page of older rows.
+  const banner = threadBanner(olderBanner, store.connection, store.rows.length, store.saved);
+  // Retry: a failed connection reconnects; a failed page of older rows loads again.
+  const retryBanner = () => {
+    if (banner?.retry === "reconnect") store.retry();
+    else void store.loadOlder().catch(() => {});
+  };
+  const scrollAnchorRef = useRef<object | null>(null);
 
   const userScrollRef = useRef(false);
   const touchStartYRef = useRef<number | null>(null);
@@ -326,61 +321,27 @@ const ThreadRoot: FC<{
   }, [voiceLive]);
 
   // Shared load-older trigger: only real user scroll intent, only at (or
-  // near) the top of the viewport, and only when no older load is already
-  // anchored or in flight.
+  // near) the top of the viewport, and only when no older load is already in
+  // flight or nothing is older. The store loads the page and extends the rows.
   const requestLoadOlder = (viewport: HTMLElement) => {
     if (
       viewport.scrollTop > 64 ||
       !userScrollRef.current ||
-      !onLoadOlder ||
       scrollAnchorRef.current ||
-      historyStatus?.kind === "loading" ||
-      historyStatus?.kind === "loading-older"
+      store.olderStatus === "loading" ||
+      store.olderStatus === "complete"
     ) {
       return;
     }
-    const anchor = { start: historyStartIndex };
+    const anchor = {};
     scrollAnchorRef.current = anchor;
-    void onLoadOlder()
-      .then((merged) => {
-        // A load that did not extend this window — a no-op because no older
-        // history exists, a merge dropped because a refresh replaced the
-        // window mid-flight, or a cursor-rejected rebuild — must not leave
-        // the anchor set. A dangling anchor would block every later trigger,
-        // stranding the view at the top of a window whose older history
-        // becomes available again (e.g. a byte-capped refresh replacing an
-        // exhausted window with one that has older pages).
-        if (!merged) {
-          if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
-        } else {
-          // A concurrent refresh can replace the extended window before
-          // React publishes its start index. In that case the layout effect
-          // cannot consume the anchor; release it so the next up gesture
-          // can retry instead of leaving paging blocked indefinitely.
-          window.setTimeout(() => {
-            if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
-          }, 600);
-        }
-      })
-      .catch(() => {
-        if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
-      })
+    void store.loadOlder()
+      .catch(() => {})
       .finally(() => {
+        if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
         userScrollRef.current = false;
       });
   };
-
-  useLayoutEffect(() => {
-    const anchor = scrollAnchorRef.current;
-    if (!anchor) return;
-    if (historyStatus?.kind === "error" || (
-      historyStatus?.kind === "ready" && historyStartIndex === anchor.start
-    )) {
-      scrollAnchorRef.current = null;
-      return;
-    }
-    if (historyStartIndex < anchor.start) scrollAnchorRef.current = null;
-  }, [historyStartIndex, historyStatus?.kind]);
 
   return (
     <ThreadPrimitive.Root
@@ -439,15 +400,21 @@ const ThreadRoot: FC<{
           {/* Auto margins on the welcome and the footer center them together
               while the thread is empty, and unlike justify-center they never
               push the top out of reach when a tall hero overflows. */}
-          <AuiIf condition={isNewChatView}>
+          {isEmpty ? (
             <div className="mt-auto">
               <Welcome />
             </div>
-          </AuiIf>
+          ) : null}
 
           <div
             data-slot="aui_message-group"
-            className="mb-14 flex flex-col gap-y-6 empty:hidden"
+            // A reply streams as several rows (text, tool steps, more text). Pieces that follow one
+            // another read as one reply: tighter spacing, and only the last piece keeps the action row.
+            className={cn(
+              "mb-14 flex flex-col gap-y-6 empty:hidden",
+              "[&>[data-role=assistant]+[data-role=assistant]]:-mt-3.5",
+              "[&>[data-role=assistant]:has(+[data-role=assistant])_[data-slot$=assistant-message-footer]]:hidden",
+            )}
           >
             <ThreadPrimitive.Messages>
               {() => <ThreadMessage />}
@@ -465,28 +432,27 @@ const ThreadRoot: FC<{
             {queuePanel}
             {/* Keep transient status in the sticky footer so its mount/unmount
                 does not change the positions of transcript rows above it. */}
-            {historyStatus ? (
+            {banner ? (
               <div
                 data-slot="history-status"
-                role={historyStatus.kind === "error" ? "alert" : "status"}
-                aria-live={historyStatus.kind === "error" ? "assertive" : "polite"}
+                role={banner.kind === "error" ? "alert" : "status"}
+                aria-live={banner.kind === "error" ? "assertive" : "polite"}
                 className={cn(
                   "mx-auto flex w-full max-w-(--thread-max-width) items-center justify-between gap-3 rounded-md px-3 py-2 text-xs",
-                  historyStatus.kind === "error"
+                  banner.kind === "error"
                     ? "bg-destructive/10 text-destructive"
                     : "text-muted-foreground bg-muted/50",
                 )}
               >
-                <span>{historyStatus.message}</span>
-                {historyStatus.kind === "error" && onRetryHistory ? (
-                  <Button type="button" size="sm" variant="outline" onClick={onRetryHistory}>
+                <span>{banner.message}</span>
+                {banner.kind === "error" ? (
+                  <Button type="button" size="sm" variant="outline" onClick={retryBanner}>
                     Retry
                   </Button>
                 ) : null}
               </div>
             ) : null}
             <ThreadScrollToBottom />
-            <ThreadFollowupSuggestions />
             <div data-slot="aui_composer-dock" className="flex min-w-0 items-end gap-2 sm:gap-3">
               {!isEmpty && ComposerLeading ? <ComposerLeading /> : null}
               <Composer
@@ -498,14 +464,8 @@ const ThreadRoot: FC<{
                 onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={attachmentsEnabled}
                 draftKey={draftKey}
-                queueSessionId={queueSessionId}
-                queueConversationUid={queueConversationUid}
-                onQueueBusyMessage={onQueueBusyMessage}
               />
             </div>
-            <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
-              <ThreadSuggestions />
-            </AuiIf>
           </ThreadPrimitive.ViewportFooter>
         </div>
       </ThreadPrimitive.Viewport>
@@ -517,23 +477,24 @@ const ThreadMessage: FC = () => {
   const {
     AssistantMessage: AssistantMessageComponent = AssistantMessage,
     SystemMessage: SystemMessageComponent = SystemMessage,
+    UserMessage: UserMessageComponent = UserMessage,
   } = useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
-  const isEditing = useAuiState((s) => s.message.composer.isEditing);
-
-  if (isEditing) return <EditComposer />;
-  if (role === "user") return <UserMessage />;
-  if (role === "system") return <SystemMessageComponent />;
+  const chatRowRole = useAuiState((s) => s.message.metadata.custom.chatRowRole);
+  if (role === "user") return <UserMessageComponent />;
+  if (role === "system" || chatRowRole === "system") return <SystemMessageComponent />;
   return <AssistantMessageComponent />;
 };
 
-const SystemMessage: FC = () => (
+const AuthenticatedMessageImage: FC<ImageMessagePartProps> = ({ image }) => <MessageImage image={image} />;
+
+export const SystemMessage: FC = () => (
   <MessagePrimitive.Root
     data-slot="aui_system-message-root"
     data-role="system"
     className="fade-in slide-in-from-bottom-1 animate-in text-muted-foreground px-2 text-center text-sm duration-150"
   >
-    <MessagePrimitive.Parts />
+    <MessagePrimitive.Parts components={{ Text: UserText, Image: AuthenticatedMessageImage }} />
   </MessagePrimitive.Root>
 );
 
@@ -561,32 +522,6 @@ const ThreadWelcome: FC = () => {
   );
 };
 
-const ThreadSuggestions: FC = () => {
-  return (
-    <div className="aui-thread-welcome-suggestions flex w-full flex-wrap items-center justify-center gap-2 px-4">
-      <ThreadPrimitive.Suggestions>
-        {() => <ThreadSuggestionItem />}
-      </ThreadPrimitive.Suggestions>
-    </div>
-  );
-};
-
-const ThreadSuggestionItem: FC = () => {
-  return (
-    <div className="aui-thread-welcome-suggestion-display fade-in slide-in-from-bottom-2 animate-in fill-mode-both duration-200">
-      <SuggestionPrimitive.Trigger send asChild>
-        <Button
-          variant="ghost"
-          className="aui-thread-welcome-suggestion text-muted-foreground hover:text-foreground hover:bg-muted/50 h-auto gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-normal whitespace-nowrap transition-colors"
-        >
-          <SuggestionPrimitive.Title className="aui-thread-welcome-suggestion-text-1" />
-          <SuggestionPrimitive.Description className="aui-thread-welcome-suggestion-text-2 empty:hidden" />
-        </Button>
-      </SuggestionPrimitive.Trigger>
-    </div>
-  );
-};
-
 const Composer: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
@@ -596,10 +531,7 @@ const Composer: FC<{
   onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
-  queueSessionId: ThreadProps["queueSessionId"];
-  queueConversationUid: ThreadProps["queueConversationUid"];
-  onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
-}> = ({ agents, commands, commandCatalogStatus, onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey, queueSessionId, queueConversationUid, onQueueBusyMessage }) => {
+}> = ({ agents, commands, commandCatalogStatus, onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey }) => {
   const aui = useAui();
   // The mic starts the LiveKit room in this browser; /voice (the computer
   // running the agent listens) stays a typed command, and its status line shows.
@@ -618,12 +550,15 @@ const Composer: FC<{
     (command) => command.name === "voice" && command.enabled !== false,
   );
   const permissionStop = usePendingPermissionCancellation();
+  const store = useChatStore();
+  const sendNowAllowed = useContext(SendNowAllowedContext);
+  // The store always exposes sendNow; only a harness session turns Send Now off.
+  const sendsNowAvailable = typeof store.sendNow === "function" && sendNowAllowed;
   // The submit under way came from Cmd/Ctrl+Enter: the message goes at once.
   const submitSendsNow = useRef(false);
-  const slotMode = useAuiState((s) =>
-    composerSlotMode(s, voiceAvailable ? voice : null, Boolean(permissionStop)),
-  );
-  const isRunning = useAuiState((s) => s.thread.isRunning);
+  const composerEmpty = useAuiState((s) => s.composer.isEmpty);
+  const slotMode = composerSlotMode(composerEmpty, store.running, voiceAvailable ? voice : null, Boolean(permissionStop));
+  const isRunning = store.running;
   const composerText = useAuiState((s) => s.composer.text);
   const composerRevisionKey = useAuiState((s) =>
     composerRevisionSignature(s.composer.text, s.composer.attachments),
@@ -642,12 +577,6 @@ const Composer: FC<{
   const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
   const skipEmptyDraftPersist = useRef<{ key: string } | null>(null);
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
-  const [queueAdmissionLock, setQueueAdmissionLock] = useState<{
-    draftKey: string | null;
-    locked: boolean;
-  } | null>(null);
-  const queueAdmissionLocked = hasUnresolvedBusyWebMessage(queueSessionId, draftKey, undefined, queueConversationUid) ||
-    (queueAdmissionLock?.locked === true && queueAdmissionLock.draftKey === (draftKey ?? null));
 
   useLayoutEffect(() => {
     let cancelled = false;
@@ -772,8 +701,6 @@ const Composer: FC<{
   }
   const currentDraftKeyRef = useRef(draftKey ?? null);
   currentDraftKeyRef.current = draftKey ?? null;
-  const currentQueueSessionIdRef = useRef(queueSessionId ?? null);
-  currentQueueSessionIdRef.current = queueSessionId ?? null;
   const composerFormId = useId();
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const pendingPluginSubmitRef = useRef<PendingPluginSubmission | null>(null);
@@ -791,7 +718,6 @@ const Composer: FC<{
     if (
       lockRef.current ||
       currentDraftKeyRef.current !== pending.session ||
-      currentQueueSessionIdRef.current !== pending.queueSessionId ||
       aui.composer.getState().text !== pending.text
     ) return;
     if (normalFallback) normalPluginFallbackRef.current = pending;
@@ -823,12 +749,6 @@ const Composer: FC<{
       unsubscribeComposer?.();
     };
   }, [aui, aui.composer]);
-
-  const lastBusySubmit = useRef<{
-    fingerprint: string;
-    at: number;
-    inFlight: Set<string>;
-  } | null>(null);
 
   // A bare /welcome opens the local guide; panel commands open Settings and post
   // no text. Any other line is sent exactly as typed. Runs on form submit and Send.
@@ -891,16 +811,11 @@ const Composer: FC<{
     if (state.attachments.length > 0) return false;
     const draft = state.text;
     const commandSession = draftKey ?? null;
-    const commandQueueSessionId = queueSessionId ?? null;
     const normalFallback = normalPluginFallbackRef.current;
     if (normalFallback?.session === commandSession && normalFallback.text === draft) return false;
     if (normalFallback) normalPluginFallbackRef.current = null;
     const pending = pendingPluginSubmitRef.current;
-    if (pending && (
-      pending.session !== commandSession ||
-      pending.queueSessionId !== commandQueueSessionId ||
-      pending.text !== draft
-    )) {
+    if (pending && (pending.session !== commandSession || pending.text !== draft)) {
       cancelPendingPluginSubmit();
     }
     if (pluginCommandSubmissionPending(draft, commandCatalogStatus, pluginSnapshot, reserved, Boolean(draftKey))) {
@@ -914,7 +829,6 @@ const Composer: FC<{
         pendingPluginSubmitRef.current = {
           text: draft,
           session: commandSession,
-          queueSessionId: commandQueueSessionId,
           timer,
           sendsNow: submitSendsNow.current,
         };
@@ -979,153 +893,119 @@ const Composer: FC<{
     const pending = pendingPluginSubmitRef.current;
     if (!pending) return;
     const state = aui.composer.getState();
-    if (
-      pending.session !== (draftKey ?? null) ||
-      pending.queueSessionId !== (queueSessionId ?? null) ||
-      pending.text !== state.text
-    ) {
+    if (pending.session !== (draftKey ?? null) || pending.text !== state.text) {
       cancelPendingPluginSubmit();
       return;
     }
     if (!pluginCommandSubmissionPending(pending.text, commandCatalogStatus, pluginSnapshot, reserved, Boolean(draftKey))) {
       replayPendingPluginSubmit(false);
     }
-  }, [aui, commandCatalogStatus, composerText, draftKey, pluginSnapshot, queueSessionId, reserved]);
+  }, [aui, commandCatalogStatus, composerText, draftKey, pluginSnapshot, reserved]);
 
   useEffect(() => () => {
     const pending = pendingPluginSubmitRef.current;
     if (pending) window.clearTimeout(pending.timer);
   }, []);
 
-  // Picking a panel command in the slash menu (Enter or click) opens its tab
-  // instead of leaving "/config" in the box for a second Enter.
-  const sendBusyMessage = async (event: {
+  const submitBusyMessage = (event: {
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
-    if (!isRunning || event.defaultPrevented) return;
-    const sendsNow = submitSendsNow.current;
-    const state = aui.composer.getState();
-    if (!state.text.trim() && state.attachments.length === 0) return;
+    sendFromComposer(event);
+  };
 
-    const fingerprint = `${state.text}\u0000${state.attachments
-      .map((attachment) => attachment.id)
-      .join(",")}`;
-    const previous = lastBusySubmit.current;
-    const inFlight = previous?.inFlight ?? new Set();
-    if (inFlight.has(fingerprint)) {
-      event.preventDefault();
-      return;
-    }
-    const now = Date.now();
-    if (
-      previous &&
-      previous.fingerprint === fingerprint &&
-      now - previous.at < 450
-    ) {
-      event.preventDefault();
-      return;
-    }
-    lastBusySubmit.current = { fingerprint, at: now, inFlight };
-    inFlight.add(fingerprint);
-    event.preventDefault();
+  // Each composer send is one input under a new web id, sent to the chat store.
+  // The composer keeps its text until the store accepts the send, so a failed
+  // send leaves the draft in place. While a turn runs the daemon queues the
+  // input. Cmd/Ctrl+Enter also asks for Send Now; the flag is read before the
+  // first await, while the submit handler is still running.
+  const sendInFlight = useRef(false);
+  // Keep the active draft's exact body and ID through an ambiguous POST
+  // failure. A changed text/attachment fingerprint gets its own ID; confirmed
+  // sends release the cached body so a later intentional duplicate is new.
+  const retryInput = useRef<{ fingerprint: string; input: InputRequest } | null>(null);
+  const sendThroughStore = async (wantsSendNow: boolean) => {
+    if (sendInFlight.current) return;
+    const state = aui.composer.getState();
+    const hasContent = state.text.trim().length > 0 || state.attachments.length > 0;
+    const action = composerAction({ running: store.running, hasContent });
+    if (action !== "send" && action !== "queue") return;
+    const fingerprint = JSON.stringify({
+      text: state.text,
+      attachmentIds: state.attachments.map((attachment) => attachment.id),
+    });
+    sendInFlight.current = true;
     setBusySubmitError(null);
-    setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: true });
-    let admissionConfirmed = false;
-    let exactDraftStillVisible = true;
     try {
-      const attachments = await Promise.all(
-        state.attachments.map(async (attachment) => {
-          if (attachment.content) return attachment;
-          if (
-            attachment.type === "image" &&
-            attachment.status.type === "requires-action"
-          ) {
-            return imageAttachmentAdapter.send(attachment as PendingAttachment);
-          }
-          throw new Error("Attachment is not ready to send");
-        }),
-      );
-      if (!onQueueBusyMessage) throw new Error("The daemon message queue is unavailable.");
-      const result = await onQueueBusyMessage({
-        draftKey,
-        text: state.text,
-        attachments: attachments as ComposerAttachmentLike[],
-        sendNow: sendsNow,
-      });
-      if (!result.admitted) throw new Error("The daemon did not confirm queue admission.");
-      admissionConfirmed = true;
-      const currentState = aui.composer.getState();
-      const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
-        .map((attachment) => attachment.id)
-        .join(",")}`;
-      exactDraftStillVisible = currentFingerprint === fingerprint;
-      if (currentFingerprint === fingerprint) {
-        if (state.text.length > 0 && draftKey) skipEmptyDraftPersist.current = { key: draftKey };
-        await aui.composer.reset();
-        if (state.text.length > 0) saveComposerDraft(draftKey, "");
-        if (!await acknowledgeBusyWebMessage(result)) {
-          setBusySubmitError("Message was queued, but the local retry guard could not be cleared. Check the queue before reusing this draft.");
-        } else if (sendsNow && result.sendNowStatus !== "accepted") {
-          setBusySubmitError(result.sendNowStatus === "unknown"
-            ? "Message is queued, but Send Now could not be confirmed. Check the queue before retrying."
-            : "Message is queued, but Send Now was not accepted. It remains in the queue.");
-        }
-      }
-      setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: false });
-    } catch (error) {
-      if (lastBusySubmit.current?.fingerprint === fingerprint) {
-        lastBusySubmit.current = {
-          ...lastBusySubmit.current,
-          at: Number.NEGATIVE_INFINITY,
+      let input = retryInput.current?.fingerprint === fingerprint
+        ? retryInput.current.input
+        : undefined;
+      if (!input) {
+        const attachments = await Promise.all(
+          state.attachments.map(async (attachment) => {
+            if (attachment.content) return attachment;
+            if (attachment.type === "image" && attachment.status.type === "requires-action") {
+              return imageAttachmentAdapter.send(attachment as PendingAttachment);
+            }
+            throw new Error("Attachment is not ready to send");
+          }),
+        );
+        input = {
+          id: newInputId(WEB_INPUT_PREFIX),
+          text: state.text,
+          attachments: toInputAttachments(attachments),
+          ...(isGoalText(state.text) ? { goal_reply_id: newGoalReplyId() } : {}),
         };
+        retryInput.current = { fingerprint, input };
       }
-      const unresolved = typeof error === "object" && error !== null &&
-        "requiresExactRetry" in error && error.requiresExactRetry === true;
-      const rejected = typeof error === "object" && error !== null &&
-        "definitelyNotAdmitted" in error && error.definitelyNotAdmitted === true;
-      const keepExactDraft = unresolved || (admissionConfirmed && exactDraftStillVisible);
-      setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: keepExactDraft });
-      setBusySubmitError(unresolved
-        ? "Queue admission may have succeeded. Keep this exact message unchanged and retry to reconcile it safely."
-        : rejected && error instanceof Error
-          ? error.message
-          : "Could not queue this message. Keep it in the composer and retry.");
+      await store.send(input);
+      retryInput.current = null;
+      const current = aui.composer.getState();
+      const currentFingerprint = JSON.stringify({
+        text: current.text,
+        attachmentIds: current.attachments.map((attachment) => attachment.id),
+      });
+      if (currentFingerprint === fingerprint) await aui.composer.reset();
+      if (wantsSendNow && sendsNowAvailable) {
+        await store.sendNow(input.id).catch(() => {
+          setBusySubmitError("Message is queued, but Send Now could not be confirmed. Check the queue before retrying.");
+        });
+      }
+    } catch {
+      setBusySubmitError("Could not send this message. Keep it in the composer and retry.");
     } finally {
-      inFlight.delete(fingerprint);
+      sendInFlight.current = false;
     }
   };
 
-  const submitBusyMessage = (event: {
+  // A panel command or /welcome opens its panel and is not sent. Anything else is
+  // sent through the store; assistant-ui's own send must not also run, so the event is prevented.
+  const sendFromComposer = (event: {
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
     if (runPluginCommand(event)) return;
     openPanelFromComposer(event);
-    sendBusyMessage(event);
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    void sendThroughStore(submitSendsNow.current && sendNowAllowed);
+  };
+
+  const stopRun = () => {
+    store.stop().catch(() => {
+      setBusySubmitError("Could not stop the run. Try again.");
+    });
   };
 
   const handleComposerSubmit = (event: {
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
-    if (runPluginCommand(event)) return;
-    // Keep panel commands on their existing path, then bypass assistant-ui's
-    // disabled-send predicate while a turn is running. Busy text is admitted
-    // through the daemon-owned queue instead of creating a transient stream row.
-    openPanelFromComposer(event);
-    if (event.defaultPrevented) return;
-    if (isRunning) {
-      sendBusyMessage(event);
-      return;
-    }
-    const text = aui.composer.getState().text;
-    if (text.length > 0) {
-      queueComposerDraftSubmission(draftKey, text);
-      if (draftKey) skipEmptyDraftPersist.current = { key: draftKey };
-    }
+    sendFromComposer(event);
   };
 
+  // Picking a panel command in the slash menu (Enter or click) opens its tab
+  // instead of leaving "/config" in the box for a second Enter.
   const openPanelForItem = (item: {
     id: string;
     metadata?: Record<string, unknown> | undefined;
@@ -1453,6 +1333,11 @@ const Composer: FC<{
           emptyMessage="No online agents"
           emptyHint="Try @broadcast to reach every agent in this project."
         />
+        {voiceAvailable && terminalVoice.error ? (
+          <p role="alert" className="text-destructive px-2 text-xs">
+            {terminalVoice.error}
+          </p>
+        ) : null}
         {busySubmitError ? (
           <p role="alert" className="text-destructive px-2 text-xs">
             {busySubmitError}
@@ -1460,7 +1345,7 @@ const Composer: FC<{
         ) : null}
         <ComposerPrimitive.AttachmentDropzone
           asChild
-          disabled={!attachmentsEnabled || queueAdmissionLocked}
+          disabled={!attachmentsEnabled}
         >
           <div
             data-slot="aui_composer-shell"
@@ -1474,7 +1359,7 @@ const Composer: FC<{
                 {orphanTokenNotice}
               </p>
             ) : null}
-            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} disabled={queueAdmissionLocked} />
+            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
@@ -1483,27 +1368,26 @@ const Composer: FC<{
               className="aui-composer-row flex items-end gap-1.5"
               onKeyDown={handleBusyEnter}
             >
-              {attachmentsEnabled ? <ComposerAddAttachment disabled={queueAdmissionLocked} /> : null}
+              {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
                 placeholder={lock || placeholder}
-                disabled={Boolean(lock) || queueAdmissionLocked}
+                disabled={Boolean(lock)}
                 className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-base leading-6 outline-none pointer-fine:text-sm"
                 rows={1}
                 autoFocus
                 enterKeyHint="send"
                 aria-label="Message input"
-                addAttachmentOnPaste={attachmentsEnabled && !queueAdmissionLocked}
+                addAttachmentOnPaste={attachmentsEnabled}
                 onKeyDown={handleComposerKeyDown}
               />
               <ComposerSlot
                 voice={voiceAvailable ? voice : null}
                 running={isRunning}
                 permissionStop={permissionStop}
-                onBeforeSend={(event) => {
-                  if (runPluginCommand(event)) return;
-                  openPanelFromComposer(event);
-                }}
+                onBeforeSend={sendFromComposer}
                 onSteer={submitBusyMessage}
+                onStop={stopRun}
+                sendsNow={sendsNowAvailable}
               />
             </div>
           </div>
@@ -1539,16 +1423,18 @@ const SEND_NOW_KEYS = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test
 // One trailing button slot that morphs: stop while a run is going, send once
 // there is something to send, otherwise the voice mic (a mic, or the
 // pulsing listening button while the voice room is up) where the session offers it.
-const composerSlotMode = (
-  s: AssistantState,
+// `running` is the chat store's: the turn runs (#1451).
+export const composerSlotMode = (
+  composerEmpty: boolean,
+  running: boolean,
   voice: VoiceMode | null,
   awaitingPermission = false,
 ): ComposerSlotMode => {
   // A room starting or stopping (or a /voice command run); hold the mic still through it
   // rather than flashing stop.
   if (voice?.pending) return voice.on ? "listening" : "mic";
-  if (!s.composer.isEmpty || !voice) return "send";
-  if (s.thread.isRunning || awaitingPermission) return "stop";
+  if (!composerEmpty || !voice) return "send";
+  if (running || awaitingPermission) return "stop";
   return voice.on ? "listening" : "mic";
 };
 
@@ -1599,11 +1485,12 @@ const VoiceStatus: FC<{ activity: VoiceActivity | null }> = ({ activity }) => {
 const ComposerSlot: FC<{
   voice: VoiceMode | null;
   running: boolean;
-  permissionStop: { cancel: () => Promise<void>; cancelling: boolean } | null;
+  permissionStop: { cancel: () => Promise<void>; cancelling: boolean; error: string | null } | null;
   onBeforeSend: (event: { preventDefault: () => void }) => void;
   onSteer: (event: { preventDefault: () => void }) => void;
-}> = ({ voice, running, permissionStop, onBeforeSend, onSteer }) => {
-  const sendsNow = useSendWaitingNow() !== null;
+  onStop: () => void;
+  sendsNow: boolean;
+}> = ({ voice, running, permissionStop, onBeforeSend, onSteer, onStop, sendsNow }) => {
   return (
     <div
       className={cn(
@@ -1666,21 +1553,22 @@ const ComposerSlot: FC<{
         </ComposerPrimitive.Send>
       )}
       {running ? (
-        <ComposerPrimitive.Cancel asChild>
-          <TooltipIconButton
-            tooltip="Stop Generating"
-            side="top"
-            type="button"
-            variant="default"
-            className={cn(
-              SLOT_BUTTON,
-              "!left-auto !right-1 scale-100 opacity-100 visible",
-            )}
-            aria-label="Stop generating"
-          >
-            <SquareIcon className="size-3.5 fill-current" />
-          </TooltipIconButton>
-        </ComposerPrimitive.Cancel>
+        <TooltipIconButton
+          tooltip="Stop Generating"
+          side="top"
+          type="button"
+          variant="default"
+          className={cn(
+            SLOT_BUTTON,
+            "!left-auto !right-1 scale-100 opacity-100 visible",
+          )}
+          aria-label="Stop generating"
+          onClick={() => {
+            onStop();
+          }}
+        >
+          <SquareIcon className="size-3.5 fill-current" />
+        </TooltipIconButton>
       ) : permissionStop ? (
         <TooltipIconButton
           tooltip="Stop Generating"
@@ -1697,6 +1585,14 @@ const ComposerSlot: FC<{
         >
           <SquareIcon className="size-3.5 fill-current" />
         </TooltipIconButton>
+      ) : null}
+      {permissionStop?.error ? (
+        <span
+          role="alert"
+          className="absolute right-0 bottom-full mb-1 max-w-64 rounded-md bg-background px-2 py-1 text-left text-xs text-destructive shadow-md"
+        >
+          {permissionStop.error}
+        </span>
       ) : null}
     </div>
   );
@@ -1718,6 +1614,15 @@ const AssistantMessage: FC = () => {
     ToolGroup,
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
+  const rowId = useAuiState((s) => s.message.id);
+  const turnId = useAuiState((s) => {
+    const value = s.message.metadata.custom.chatTurnId;
+    return typeof value === "string" ? value : undefined;
+  });
+  const rowStatus = useAuiState((s) => s.message.metadata.custom.chatRowStatus);
+  const partsPreview = chatStreamPartsPreviewFromCustom(
+    useAuiState((s) => s.message.metadata.custom),
+  );
 
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
@@ -1729,6 +1634,8 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
+      data-chat-row-id={rowId}
+      data-chat-turn-id={turnId}
       className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
     >
       <div
@@ -1775,17 +1682,80 @@ const AssistantMessage: FC = () => {
                   </ReasoningRoot>
                 );
               }
-              case "text":
-                return <PluginTaggedText text={part.text} />;
-              case "reasoning":
-                return <Reasoning {...part} />;
+              case "text": {
+                if (partsPreview) {
+                  return (
+                    <ChatStreamPartsPreview
+                      key={`${partsPreview.row_id}:${partsPreview.output_revision}`}
+                      marker={partsPreview}
+                    />
+                  );
+                }
+                const partPreview = chatStreamPartPreviewFromMetadata(part.providerMetadata);
+                if (partPreview) {
+                  return (
+                    <ChatStreamPartPreview
+                      key={`${partPreview.row_id}:${partPreview.part_index}:${partPreview.output_revision}`}
+                      marker={partPreview}
+                    />
+                  );
+                }
+                const preview = chatStreamContentPreviewFromMetadata(part.providerMetadata, "text");
+                const renderText = (text: string) => (
+                  <TextMessagePartProvider text={text}>
+                    <PluginTaggedText text={text} />
+                  </TextMessagePartProvider>
+                );
+                return preview && rowStatus === "streaming" ? (
+                  <ChatStreamStreamingContent
+                    marker={preview}
+                    text={chatStreamTextFromMetadata(part.providerMetadata, part.text)}
+                  >
+                    {renderText}
+                  </ChatStreamStreamingContent>
+                ) : preview ? (
+                  <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+                    {renderText}
+                  </ChatStreamContentPreview>
+                ) : <PluginTaggedText text={part.text} />;
+              }
+              case "reasoning": {
+                const preview = chatStreamContentPreviewFromMetadata(part.providerMetadata, "reasoning");
+                const renderReasoning = (text: string) => (
+                  <TextMessagePartProvider text={text}>
+                    <Reasoning {...part} text={text} />
+                  </TextMessagePartProvider>
+                );
+                return preview && rowStatus === "streaming" ? (
+                  <ChatStreamStreamingContent
+                    marker={preview}
+                    text={chatStreamTextFromMetadata(part.providerMetadata, part.text)}
+                  >
+                    {renderReasoning}
+                  </ChatStreamStreamingContent>
+                ) : preview ? (
+                  <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+                    {renderReasoning}
+                  </ChatStreamContentPreview>
+                ) : <Reasoning {...part} />;
+              }
               case "tool-call":
                 return (
-                  <PluginToolPart
-                    part={part}
-                    fallback={part.toolUI ?? <ToolFallbackComponent {...part} />}
-                  />
+                  <div
+                    className="contents"
+                    data-chat-row-id={rowId}
+                    data-chat-turn-id={turnId}
+                    data-chat-tool-call-id={part.toolCallId}
+                    data-chat-tool-name={part.toolName}
+                  >
+                    <PluginToolPart
+                      part={part}
+                      fallback={part.toolUI ?? <ToolFallbackComponent {...part} />}
+                    />
+                  </div>
                 );
+              case "image":
+                return <AuthenticatedMessageImage {...part} />;
               case "data":
                 return part.dataRendererUI;
               case "indicator":
@@ -1817,31 +1787,28 @@ const AssistantMessage: FC = () => {
 };
 
 const AssistantActionBar: FC = () => {
+  const canUseCompleteTextActions = useAuiState((s) => canExportChatStreamMarkdown(
+    s.message.metadata.custom,
+    s.message.parts,
+  ));
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
       autohide="not-last"
       className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in col-start-3 row-start-2 -ms-1 flex gap-1 duration-200"
     >
-      <ActionBarPrimitive.Copy asChild>
-        <TooltipIconButton tooltip="Copy">
-          <AuiIf condition={(s) => s.message.isCopied}>
-            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
-          </AuiIf>
-          <AuiIf condition={(s) => !s.message.isCopied}>
-            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
-          </AuiIf>
-        </TooltipIconButton>
-      </ActionBarPrimitive.Copy>
-      {/* Reload and Edit throw "Runtime does not support ..." when the runtime
-          has no handler, so they render only when the runtime reports it. */}
-      <AuiIf condition={(s) => s.thread.capabilities.reload}>
-        <ActionBarPrimitive.Reload asChild>
-          <TooltipIconButton tooltip="Reload">
-            <RefreshCwIcon />
+      {canUseCompleteTextActions ? (
+        <ActionBarPrimitive.Copy asChild>
+          <TooltipIconButton tooltip="Copy">
+            <AuiIf condition={(s) => s.message.isCopied}>
+              <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+            </AuiIf>
+            <AuiIf condition={(s) => !s.message.isCopied}>
+              <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+            </AuiIf>
           </TooltipIconButton>
-        </ActionBarPrimitive.Reload>
-      </AuiIf>
+        </ActionBarPrimitive.Copy>
+      ) : null}
       <MessageTimingBadge />
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
@@ -1858,12 +1825,14 @@ const AssistantActionBar: FC = () => {
           sideOffset={6}
           className="aui-action-bar-more-content bg-popover/95 text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-xl border p-1.5 shadow-lg backdrop-blur-sm"
         >
-          <ActionBarPrimitive.ExportMarkdown asChild>
-            <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
-              <DownloadIcon className="size-4" />
-              Export as Markdown
-            </ActionBarMorePrimitive.Item>
-          </ActionBarPrimitive.ExportMarkdown>
+          {canUseCompleteTextActions ? (
+            <ActionBarPrimitive.ExportMarkdown asChild>
+              <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
+                <DownloadIcon className="size-4" />
+                Export as Markdown
+              </ActionBarMorePrimitive.Item>
+            </ActionBarPrimitive.ExportMarkdown>
+          ) : null}
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
     </ActionBarPrimitive.Root>
@@ -1877,7 +1846,50 @@ const AssistantActionBar: FC = () => {
  * A live row carries its pictures as image parts, so there the tokens render
  * as nothing instead of duplicating the picture next to them.
  */
-export const UserText: FC<{ text?: string }> = ({ text }) => {
+export const UserText: FC<{ text?: string; providerMetadata?: unknown }> = ({ text, providerMetadata }) => {
+  const rowStatus = useAuiState((s) => s.message.metadata.custom.chatRowStatus);
+  const partsPreview = chatStreamPartsPreviewFromCustom(
+    useAuiState((s) => s.message.metadata.custom),
+  );
+  if (partsPreview) {
+    return (
+      <ChatStreamPartsPreview
+        key={`${partsPreview.row_id}:${partsPreview.output_revision}`}
+        marker={partsPreview}
+      />
+    );
+  }
+  const partPreview = chatStreamPartPreviewFromMetadata(providerMetadata);
+  if (partPreview) {
+    return (
+      <ChatStreamPartPreview
+        key={`${partPreview.row_id}:${partPreview.part_index}:${partPreview.output_revision}`}
+        marker={partPreview}
+      />
+    );
+  }
+  const preview = chatStreamContentPreviewFromMetadata(providerMetadata, "text");
+  if (preview && rowStatus === "streaming") {
+    return (
+      <ChatStreamStreamingContent
+        marker={preview}
+        text={chatStreamTextFromMetadata(providerMetadata, text ?? "")}
+      >
+        {(fullText) => <UserTextBody text={fullText} />}
+      </ChatStreamStreamingContent>
+    );
+  }
+  if (preview) {
+    return (
+      <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
+        {(fullText) => <UserTextBody text={fullText} />}
+      </ChatStreamContentPreview>
+    );
+  }
+  return <UserTextBody text={text} />;
+};
+
+const UserTextBody: FC<{ text?: string }> = ({ text }) => {
   const media = useAuiState(
     (s) => s.message.metadata?.custom?.media,
   ) as MediaEntry[] | undefined;
@@ -1898,11 +1910,23 @@ export const UserText: FC<{ text?: string }> = ({ text }) => {
         // row carries no media list, so resolving would misclassify.
         if (imageParts > 0 && segment.kind === "token") return null;
         const resolved = resolveMediaSegment(segment, media);
-        if (resolved.kind === "text") return <span key={index}>{resolved.text}</span>;
+        if (resolved.kind === "text") {
+          return (
+            <span key={index} className="whitespace-pre-wrap">
+              {resolved.text}
+            </span>
+          );
+        }
         // Literal [imageN] text: the escaped form, or a slot whose picture
         // is missing or failed - it never requests a ref and never opens
         // the viewer (#1124 P2a).
-        if (resolved.kind === "literal") return <span key={index}>{resolved.text}</span>;
+        if (resolved.kind === "literal") {
+          return (
+            <span key={index} className="whitespace-pre-wrap">
+              {resolved.text}
+            </span>
+          );
+        }
         const { entry } = resolved;
         // The session list may lag behind a new message. Include valid refs
         // from this row so selection and navigation resolve by identity.
@@ -1935,8 +1959,10 @@ const QUEUED_NOTE_ROW = "col-start-2 h-4 any-pointer-coarse:h-[30px]";
 // What the message is waiting for, and the way to send it into the turn at
 // once (#1102). A session that cannot take a message that way (a harness
 // session) gets the word alone.
-const QueuedMessageNote: FC = () => {
-  const sendWaitingNow = useSendWaitingNow();
+const QueuedMessageNote: FC<{ inputId: string }> = ({ inputId }) => {
+  const store = useChatStore();
+  const sendNowAllowed = useContext(SendNowAllowedContext);
+  const [sendNowFailed, setSendNowFailed] = useState(false);
   return (
     <TooltipProvider delayDuration={600}>
       <div className={cn("aui-user-message-queued text-muted-foreground flex items-start justify-end gap-2 text-xs leading-4", QUEUED_NOTE_ROW)}>
@@ -1946,14 +1972,17 @@ const QueuedMessageNote: FC = () => {
           </TooltipTrigger>
           <TooltipContent side="bottom">Sent when the agent finishes this turn</TooltipContent>
         </Tooltip>
-        {sendWaitingNow ? (
+        {sendNowAllowed ? (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 type="button"
                 variant="link"
                 className="text-foreground h-4 p-0 text-xs leading-4 any-pointer-coarse:-mt-[14px] any-pointer-coarse:h-[44px] any-pointer-coarse:min-w-[44px]"
-                onClick={sendWaitingNow}
+                onClick={() => {
+                  setSendNowFailed(false);
+                  store.sendNow(inputId).catch(() => setSendNowFailed(true));
+                }}
               >
                 Send Now
               </Button>
@@ -1961,13 +1990,18 @@ const QueuedMessageNote: FC = () => {
             <TooltipContent side="bottom">The agent reads it at its next step</TooltipContent>
           </Tooltip>
         ) : null}
+        {sendNowFailed ? <span role="alert">Send Now failed. Try again.</span> : null}
       </div>
     </TooltipProvider>
   );
 };
 
-const UserMessage: FC = () => {
-  const queued = useAuiState((s) => s.message.metadata.custom?.queued === true);
+export const UserMessage: FC = () => {
+  const id = useAuiState((s) => s.message.id);
+  const failed = useAuiState((s) => s.message.metadata.custom.chatRowStatus === "failed");
+  const queued = useContext(QueuedIdsContext).has(id);
+  const chat = useChatStore();
+  const goalReply = chat.goalReplies[id];
   // A message that was queued keeps the note's row, empty, once it is sent:
   // the rows under it stay where they are.
   const [wasQueued, setWasQueued] = useState(queued);
@@ -1975,6 +2009,7 @@ const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
+      data-chat-row-id={id}
       className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
       data-role="user"
     >
@@ -1982,73 +2017,79 @@ const UserMessage: FC = () => {
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 whitespace-pre-wrap wrap-break-word empty:hidden pointer-fine:text-sm">
-          <MessagePrimitive.Parts components={{ Text: UserText }} />
+          <MessagePrimitive.Parts
+            components={{ Text: UserText, Image: AuthenticatedMessageImage }}
+          />
         </div>
+        {failed ? (
+          <p data-slot="aui_user-send-failure" role="alert" className="text-destructive mt-1 text-xs">
+            Send was not confirmed. Retry this draft to avoid a duplicate.
+          </p>
+        ) : null}
+        {goalReply?.state === "pending" ? (
+          <p data-slot="kollab_goal-reply" role="status" className="mt-1 text-xs text-muted-foreground">
+            Goal is running…
+          </p>
+        ) : goalReply?.state === "uncertain" ? (
+          <div data-slot="kollab_goal-reply" role="status" className="mt-1 text-xs text-muted-foreground">
+            <p>Goal reply is unavailable or its admission could not be confirmed.</p>
+            <Button
+              type="button"
+              variant="link"
+              className="h-auto p-0 text-xs"
+              aria-label="Check status"
+              onClick={() => chat.checkGoalReply(id)}
+            >
+              Check status
+            </Button>
+          </div>
+        ) : goalReply?.state === "complete" ? (
+          <div
+            data-slot="kollab_goal-reply"
+            data-success={goalReply.success}
+            role={goalReply.success ? "status" : "alert"}
+            className={cn("mt-1 text-xs", goalReply.success ? "text-muted-foreground" : "text-destructive")}
+          >
+            <p>{goalReply.success ? "Goal completed" : "Goal failed"}</p>
+            <p className="whitespace-pre-wrap">{goalReply.message}</p>
+          </div>
+        ) : goalReply?.state === "cancelled" ? (
+          <p data-slot="kollab_goal-reply" role="status" className="mt-1 text-xs text-muted-foreground">
+            Goal cancelled.
+          </p>
+        ) : null}
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />
         </div>
       </div>
-      {queued ? <QueuedMessageNote /> : wasQueued ? <div aria-hidden className={QUEUED_NOTE_ROW} /> : null}
+      {queued ? <QueuedMessageNote inputId={id} /> : wasQueued ? <div aria-hidden className={QUEUED_NOTE_ROW} /> : null}
     </MessagePrimitive.Root>
   );
 };
 
 const UserActionBar: FC = () => {
+  const canCopy = useAuiState((s) => !messageHasRecoverableChatStreamPreview(
+    s.message.metadata.custom,
+    s.message.parts,
+  ));
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
       autohide="not-last"
       className="aui-user-action-bar-root text-muted-foreground flex items-center gap-1"
     >
-      <ActionBarPrimitive.Copy asChild>
-        <TooltipIconButton tooltip="Copy" className="aui-user-action-copy">
-          <AuiIf condition={(s) => s.message.isCopied}>
-            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
-          </AuiIf>
-          <AuiIf condition={(s) => !s.message.isCopied}>
-            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
-          </AuiIf>
-        </TooltipIconButton>
-      </ActionBarPrimitive.Copy>
-      <AuiIf condition={(s) => s.thread.capabilities.edit}>
-        <ActionBarPrimitive.Edit asChild>
-          <TooltipIconButton tooltip="Edit" className="aui-user-action-edit">
-            <PencilIcon />
+      {canCopy ? (
+        <ActionBarPrimitive.Copy asChild>
+          <TooltipIconButton tooltip="Copy" className="aui-user-action-copy">
+            <AuiIf condition={(s) => s.message.isCopied}>
+              <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+            </AuiIf>
+            <AuiIf condition={(s) => !s.message.isCopied}>
+              <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+            </AuiIf>
           </TooltipIconButton>
-        </ActionBarPrimitive.Edit>
-      </AuiIf>
+        </ActionBarPrimitive.Copy>
+      ) : null}
     </ActionBarPrimitive.Root>
-  );
-};
-
-const EditComposer: FC = () => {
-  return (
-    <MessagePrimitive.Root
-      data-slot="aui_edit-composer-wrapper"
-      className="flex flex-col px-2 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
-    >
-      <ComposerPrimitive.Root className="aui-edit-composer-root ms-auto flex w-full max-w-[85%] flex-col rounded-(--composer-radius) bg-(--composer-bg) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] dark:shadow-none">
-        <ComposerPrimitive.Input
-          className="aui-edit-composer-input text-foreground min-h-14 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-base outline-none pointer-fine:text-sm"
-          autoFocus
-        />
-        <div className="aui-edit-composer-footer mx-2.5 mb-2.5 flex items-center gap-1.5 self-end">
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 rounded-lg px-3.5"
-            >
-              Cancel
-            </Button>
-          </ComposerPrimitive.Cancel>
-          <ComposerPrimitive.Send asChild>
-            <Button size="sm" className="h-8 rounded-lg px-3.5">
-              Update
-            </Button>
-          </ComposerPrimitive.Send>
-        </div>
-      </ComposerPrimitive.Root>
-    </MessagePrimitive.Root>
   );
 };

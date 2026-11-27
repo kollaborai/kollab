@@ -112,7 +112,18 @@ def turn_display_texts(messages):
         role, content = message.get("role"), message.get("content")
         metadata = message.get("metadata") or {}
         text = None
-        if isinstance(content, str) and role == "user" and metadata.get("voice"):
+        display_content = metadata.get("display_content")
+        voice_turn_id = metadata.get("voice_turn_id")
+        is_voice_reply = answers_voice or (
+            isinstance(voice_turn_id, str) and bool(voice_turn_id)
+        )
+        has_tool_calls = bool(metadata.get("tool_calls") or metadata.get("xml_tool_calls"))
+        if role == "assistant" and isinstance(display_content, str):
+            if is_voice_reply and display_content.strip() == "." and not has_tool_calls:
+                text = ""
+            else:
+                text = display_content
+        elif isinstance(content, str) and role == "user" and metadata.get("voice"):
             try:
                 from kollabor_voice.voice_context import strip_voice_preamble
             except ImportError:
@@ -121,11 +132,7 @@ def turn_display_texts(messages):
                 text = strip_voice_preamble(content)
         elif isinstance(content, str) and role == "assistant":
             lowered = content.lower()
-            if (
-                answers_voice
-                and content.strip() == "."
-                and not metadata.get("tool_calls")
-            ):
+            if is_voice_reply and content.strip() == "." and not has_tool_calls:
                 text = ""
             elif "<display_text" in lowered or "<spoken_text" in lowered:
                 text = display_response_text(content)

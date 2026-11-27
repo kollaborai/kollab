@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -251,6 +252,47 @@ async def test_route_returns_media_bytes_from_the_daemon_owner(monkeypatch):
             "ref": "att-ref",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_route_falls_back_to_bound_history_media_after_queue_release(monkeypatch):
+    rpc = _install_session(monkeypatch)
+
+    async def released(_method, _params, *, timeout=None):
+        raise RpcHandlerError("attachment no longer staged", "attachment not found")
+
+    rpc.call = released
+    opened = []
+
+    def open_bound_media(conversations_dir, session_id, *, request_id, source_ref):
+        opened.append((conversations_dir, session_id, request_id, source_ref))
+        return b"durable image", "image/png"
+
+    monkeypatch.setattr(
+        web_queue,
+        "media_store",
+        SimpleNamespace(open_queue_handoff_media=open_bound_media),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_project_data_dir",
+        lambda: Path("/data-root"),
+    )
+
+    response = await web_queue.get_queue_attachment(
+        "s1", "conversation-a", "item-1", "att-ref"
+    )
+
+    assert response.body == b"durable image"
+    assert response.media_type == "image/png"
+    assert opened == [
+        (
+            Path("/data-root/conversations"),
+            "s1",
+            "item-1",
+            "att-ref",
+        )
+    ]
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,75 @@ def _identity() -> ConversationIdentity:
     return ConversationIdentity("conversation-a", 4)
 
 
+def _queue_handoff(request_id: str = "force-b") -> QueueHandoffContext:
+    return QueueHandoffContext(
+        request_id=request_id,
+        conversation_uid="conversation-a",
+        conversation_revision=4,
+        images=(),
+        attempt_id=f"attempt-{request_id}",
+        force_send=True,
+        queue_scope_id="queue-scope",
+        queue_incarnation="queue-incarnation",
+        batch_id=f"batch-{request_id}",
+        claim_id=f"claim-{request_id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_input_send_now_uses_the_shared_singleton_handoff():
+    llm = object.__new__(LLMService)
+    lease = SimpleNamespace(accepted_count=0, in_doubt=False)
+    handoff = _queue_handoff("send-now-b")
+    llm.begin_queue_handoff_batch = AsyncMock(return_value=lease)
+    llm.finish_queue_handoff_batch = MagicMock(return_value=True)
+
+    async def submit_one(message, queue_handoff, batch_lease):
+        assert message == "B"
+        assert queue_handoff is handoff
+        assert batch_lease is lease
+        lease.accepted_count = 1
+        return {"status": "queued", "request_id": queue_handoff.request_id}
+
+    llm._submit_forced_queue_handoff = AsyncMock(side_effect=submit_one)
+
+    result = await llm.submit_forced_queue_handoff_input("B", handoff)
+
+    assert result == {"status": "queued", "request_id": "send-now-b"}
+    llm.begin_queue_handoff_batch.assert_awaited_once_with(
+        conversation_uid="conversation-a",
+        conversation_revision=4,
+        queue_scope_id="queue-scope",
+        queue_incarnation="queue-incarnation",
+        batch_id="batch-send-now-b",
+        claim_id="claim-send-now-b",
+        request_ids=("send-now-b",),
+    )
+    llm._submit_forced_queue_handoff.assert_awaited_once_with("B", handoff, lease)
+    llm.finish_queue_handoff_batch.assert_called_once_with(
+        lease, accepted_count=1, uncertain=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_dispatch_uses_the_same_per_input_handoff_function():
+    llm = object.__new__(LLMService)
+    lease = object()
+    handoff = _queue_handoff()
+    llm.submit_forced_queue_handoff_input = AsyncMock(
+        return_value={"status": "queued", "request_id": handoff.request_id}
+    )
+
+    result = await llm.submit_queued_human_input(
+        "B", queue_handoff=handoff, batch_lease=lease
+    )
+
+    assert result == {"status": "queued", "request_id": "force-b"}
+    llm.submit_forced_queue_handoff_input.assert_awaited_once_with(
+        "B", handoff, batch_lease=lease
+    )
+
+
 @pytest.mark.asyncio
 async def test_worker_carries_send_now_to_the_native_admission_boundary():
     queue = WebMessageQueue(scope_id="conversation-a")
@@ -107,6 +176,9 @@ async def test_native_send_now_waits_for_old_turn_then_admits_once_ahead_of_back
     llm = object.__new__(LLMService)
     llm._queue_processor = processor
     llm._conversation_revision = 4
+    llm._conversation_admission_lock = asyncio.Lock()
+    llm._queue_handoff_batch_lease = None
+    llm._acp_queue_handoff_batch_lease = None
     llm.conversation_manager = SimpleNamespace(conversation_uid="conversation-a")
     llm.claim_turn_serial = lambda: 8
     llm.current_parent_uuid = "parent-a"
@@ -144,14 +216,20 @@ async def test_native_send_now_waits_for_old_turn_then_admits_once_ahead_of_back
 
     llm.cancel_current_request = MagicMock(side_effect=cancel_current_request)
 
+    async def await_old_turn(generation):
+        await old_task
+        return processor.cancel_generation == generation and not processor.is_processing
+
+    llm._await_forced_native_stop = await_old_turn
+
     async def force_submit(
         message,
         *,
         source,
-        pre_displayed,
+        pre_displayed=False,
         request_id,
-        thread_id,
-        origin_context,
+        thread_id=None,
+        origin_context=None,
         queue_handoff,
         force_next_turn,
         _force_gate_held,

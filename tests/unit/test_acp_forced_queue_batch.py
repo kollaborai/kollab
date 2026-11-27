@@ -88,7 +88,10 @@ async def test_forced_batch_reserves_full_capacity_before_stopping_active_turn()
 
 
 @pytest.mark.asyncio
-async def test_forced_batch_cancels_one_owner_then_precedes_older_fifo_without_gap():
+@pytest.mark.parametrize("forced_ids", [("forced-b",), ("forced-b", "forced-c")])
+async def test_forced_batch_cancels_one_owner_then_precedes_older_fifo_without_gap(
+    forced_ids,
+):
     runner = _ready_runner()
     started: list[str] = []
     active_started = asyncio.Event()
@@ -109,7 +112,7 @@ async def test_forced_batch_cancels_one_owner_then_precedes_older_fifo_without_g
     old_b = runner.admit("old B", request_id="old-b", source="web")
     old_c = runner.admit("old C", request_id="old-c", source="web")
 
-    begin = asyncio.create_task(runner.begin_queue_handoff_batch(("forced-b", "forced-c")))
+    begin = asyncio.create_task(runner.begin_queue_handoff_batch(forced_ids))
     try:
         await asyncio.wait_for(runner._connection.cancelled.wait(), timeout=1)
         assert runner._queue_release.is_set() is False
@@ -125,37 +128,37 @@ async def test_forced_batch_cancels_one_owner_then_precedes_older_fifo_without_g
         assert started == ["active"]
         assert runner._queue_release.is_set() is False
 
-        forced_b = runner.admit(
-            "forced B",
-            request_id="forced-b",
-            source="web",
-            queue_handoff_batch=token,
-        )
-        forced_c = runner.admit(
-            "forced C",
-            request_id="forced-c",
-            source="web",
-            queue_handoff_batch=token,
-        )
+        forced = [
+            runner.admit(
+                request_id,
+                request_id=request_id,
+                source="web",
+                queue_handoff_batch=token,
+            )
+            for request_id in forced_ids
+        ]
         assert started == ["active"]
         assert [item.request_id for item in runner._queue._queue] == [
-            "forced-b",
-            "forced-c",
+            *forced_ids,
             "old-b",
             "old-c",
         ]
 
-        assert runner.finish_queue_handoff_batch(token, accepted_count=2, uncertain=False) is True
+        assert (
+            runner.finish_queue_handoff_batch(
+                token, accepted_count=len(forced_ids), uncertain=False
+            )
+            is True
+        )
         assert [
             result.request_id
             for result in await asyncio.gather(
-                forced_b.future,
-                forced_c.future,
+                *(admission.future for admission in forced),
                 old_b.future,
                 old_c.future,
             )
-        ] == ["forced-b", "forced-c", "old-b", "old-c"]
-        assert started == ["active", "forced-b", "forced-c", "old-b", "old-c"]
+        ] == [*forced_ids, "old-b", "old-c"]
+        assert started == ["active", *forced_ids, "old-b", "old-c"]
         assert runner._connection.cancel_calls == 1
     finally:
         finish_active.set()

@@ -76,6 +76,8 @@ const brokenPlugin = {
 };
 let pluginEntries = [plugin];
 const pluginEventStreams = new Set();
+const chatStreams = new Set();
+let chatStreamRequests = 0;
 const sessions = {
   sessions: [
     {
@@ -92,7 +94,14 @@ const sessions = {
   offline: [],
   hidden: [],
 };
-const history = { history: [], start_index: 0, end_index: 0, has_more_older: false, has_more_newer: false, source: "mirror" };
+// The chat's one stream (docs/specs/webui-chat-single-stream.md): an empty conversation, held open like the engine's.
+const chatSnapshot = {
+  seq: 0,
+  conversation_uid: "fixture-conversation",
+  generation: "fixture-generation",
+  type: "snapshot",
+  data: { rows: [], next_seq: 1, older: null, turns: [], inputs: [] },
+};
 const emptyEngine = {
   sessions: [],
   profiles: [],
@@ -194,8 +203,12 @@ function engine(url, req, res) {
     sendJson(res, sessions);
     return true;
   }
-  if (pathname.endsWith("/history")) {
-    sendJson(res, history);
+  if (pathname === "/engine/sessions/fixture-session/stream") {
+    chatStreamRequests += 1;
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+    res.write(`data: ${JSON.stringify(chatSnapshot)}\n\n`);
+    chatStreams.add(res);
+    res.on("close", () => chatStreams.delete(res));
     return true;
   }
   if (pathname.startsWith("/api/")) {
@@ -484,6 +497,7 @@ try {
   await livePluginRemovalFlow();
   await throwingBundleFlow();
   await pluginsOffFlow();
+  assert.ok(chatStreamRequests > 0, "the open chat reads its stream from the fixture");
   assert.deepEqual(problems, [], "no page errors or CSP violations");
   console.log("plugins acceptance: Hello view, page and dialog pass at 1440, 820 and 390 px; live removal, throwing bundle and plugins=off pass");
 } catch (error) {
@@ -492,6 +506,7 @@ try {
   for (const problem of problems) console.error(problem);
 } finally {
   await browser?.close();
+  for (const stream of [...chatStreams, ...pluginEventStreams]) stream.destroy();
   if (server) await new Promise((closed) => server.close(closed));
   if (!process.env.PLUGIN_BUILD_OUT && buildOut) rmSync(buildOut, { recursive: true, force: true });
 }

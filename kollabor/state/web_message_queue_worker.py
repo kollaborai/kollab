@@ -23,6 +23,7 @@ from kollabor.state.web_message_queue import (
     ClaimNotFound,
     ClaimOutcome,
     ClaimPayload,
+    ItemNotFound,
     QueueEmpty,
     QueueReceipt,
     WebMessageQueue,
@@ -227,6 +228,7 @@ class WebMessageQueueWorker:
         batch_id: str,
         *,
         send_now: bool = False,
+        request_id: str | None = None,
     ) -> WorkerBatchResult:
         """Claim and dispatch one batch. No item is automatically retried."""
 
@@ -236,7 +238,7 @@ class WebMessageQueueWorker:
         try:
             async with self._run_lock:
                 result = await self._dispatch_batch_locked(
-                    batch_id, send_now=send_now
+                    batch_id, send_now=send_now, request_id=request_id
                 )
                 if (
                     self._dispatch_batch_lease is not None
@@ -255,6 +257,7 @@ class WebMessageQueueWorker:
         batch_id: str,
         *,
         send_now: bool,
+        request_id: str | None,
     ) -> WorkerBatchResult:
         if self._closing or self._closed:
             return self._unstarted_result(batch_id, WorkerStatus.CLOSED)
@@ -303,10 +306,15 @@ class WebMessageQueueWorker:
 
             operation_id = self._queue.new_operation_id()
             try:
-                claim = await self._queue.claim_batch(
-                    operation_id, batch_id, send_now=send_now
-                )
-            except BatchNotFound:
+                if request_id is None:
+                    claim = await self._queue.claim_batch(
+                        operation_id, batch_id, send_now=send_now
+                    )
+                else:
+                    claim = await self._queue.claim_batch(
+                        operation_id, batch_id, send_now=send_now, request_id=request_id
+                    )
+            except (BatchNotFound, ItemNotFound):
                 return self._result(batch_id, None, WorkerStatus.EMPTY)
             self._claim_id = claim.claim_id
             if not self._valid_batch_claim(claim, batch_id, operation_id):

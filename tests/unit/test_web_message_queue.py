@@ -140,6 +140,48 @@ async def test_enqueue_batch_is_ordered_atomic_and_idempotent_without_exposing_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_id",
+    [
+        "abc",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "x" * 256,
+    ],
+)
+async def test_stream_contract_input_ids_survive_queue_admission_send_now_and_remove(
+    request_id,
+):
+    queue = WebMessageQueue(scope_id="conversation-owner-a")
+    batch_id = _batch_id(queue, f"batch-{request_id[:8]}")
+    receipt = await queue.enqueue_batch(
+        _op(queue, f"enqueue-{request_id[:8]}"),
+        batch_id,
+        (WebMessage(request_id, b'{"text":"hello"}'),),
+    )
+
+    assert receipt.request_ids == (request_id,)
+    claimed = await queue.claim_batch(
+        _op(queue, f"claim-{request_id[:8]}"),
+        batch_id,
+        send_now=True,
+        request_id=request_id,
+    )
+    assert claimed.request_ids == (request_id,)
+
+    removable = WebMessageQueue(scope_id="conversation-owner-b")
+    removable_batch = _batch_id(removable, f"remove-batch-{request_id[:8]}")
+    await removable.enqueue_batch(
+        _op(removable, f"remove-enqueue-{request_id[:8]}"),
+        removable_batch,
+        (WebMessage(request_id, b'{"text":"hello"}'),),
+    )
+    removed = await removable.remove_item(
+        _op(removable, f"remove-{request_id[:8]}"), request_id
+    )
+    assert removed.request_ids == (request_id,)
+
+
+@pytest.mark.asyncio
 async def test_oversized_iterable_is_bounded_before_materialization():
     queue = WebMessageQueue(scope_id="conversation-owner-a", max_batch_items=2)
     consumed = 0
@@ -1046,3 +1088,57 @@ async def test_a_new_incarnation_starts_empty_and_scopes_operation_receipts():
             (WebMessage(_request_id(first_queue, "request-1"), b"body"),),
         )
     assert (await second_queue.snapshot()).revision == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [ClaimOutcome.ACCEPTED, ClaimOutcome.NOT_SENT, ClaimOutcome.IN_DOUBT])
+async def test_selected_claim_serializes_competing_claim_and_preserves_siblings(outcome):
+    queue = WebMessageQueue(scope_id="selected-claim")
+    batch_id = queue.new_batch_id()
+    ids = tuple(queue.new_request_id() for _ in range(3))
+    await queue.enqueue_batch(
+        queue.new_operation_id(), batch_id,
+        tuple(WebMessage(request_id, b"message") for request_id in ids),
+    )
+    claim = await queue.claim_batch(
+        queue.new_operation_id(), batch_id, send_now=True, request_id=ids[1]
+    )
+    assert claim.request_ids == (ids[1],)
+    with pytest.raises(ClaimBusy):
+        await queue.claim_batch(queue.new_operation_id(), batch_id, send_now=True)
+    attempt = await queue.claim_next_item(queue.new_operation_id(), claim.claim_id)
+    assert attempt.request_ids == (ids[1],)
+    await queue.settle_item(queue.new_operation_id(), attempt.attempt_id, outcome)
+    snapshot = await queue.snapshot()
+    assert snapshot.batches[0].request_ids == (ids[::2] if outcome is ClaimOutcome.ACCEPTED else ids)
+    if outcome is ClaimOutcome.IN_DOUBT:
+        assert snapshot.batches[0].status is BatchStatus.IN_DOUBT
+    else:
+        assert snapshot.batches[0].status is BatchStatus.QUEUED
+        next_claim = await queue.claim_batch(queue.new_operation_id(), batch_id)
+        assert next_claim.request_ids == (ids[::2] if outcome is ClaimOutcome.ACCEPTED else ids)
+
+
+@pytest.mark.asyncio
+async def test_selected_claim_and_remove_have_one_atomic_winner():
+    queue = WebMessageQueue(scope_id="selected-race")
+    batch_id = queue.new_batch_id()
+    ids = tuple(queue.new_request_id() for _ in range(2))
+    await queue.enqueue_batch(
+        queue.new_operation_id(), batch_id,
+        tuple(WebMessage(request_id, b"message") for request_id in ids),
+    )
+    claimed, removed = await asyncio.gather(
+        queue.claim_batch(queue.new_operation_id(), batch_id, send_now=True, request_id=ids[1]),
+        queue.remove_item(queue.new_operation_id(), ids[1]),
+        return_exceptions=True,
+    )
+    if isinstance(claimed, QueueReceipt):
+        assert claimed.request_ids == (ids[1],)
+        assert isinstance(removed, ItemNotQueued)
+        await queue.release_claim(queue.new_operation_id(), claimed.claim_id)
+        assert (await queue.snapshot()).batches[0].request_ids == ids
+    else:
+        assert isinstance(claimed, queue_module.ItemNotFound)
+        assert isinstance(removed, QueueReceipt)
+        assert (await queue.snapshot()).batches[0].request_ids == (ids[0],)

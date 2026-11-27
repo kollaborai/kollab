@@ -1,26 +1,78 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
+import { expect, test } from "vitest";
 
-import { olderLoadFailed, olderLoadRunning } from "../src/history-status.ts";
+import { initialHistoryBanner, nextOlderBanner, OLDER_LOAD_FAILED, OLDER_LOADING, threadBanner } from "../src/history-banner.ts";
 
-test("a failed load of older messages stays on screen while a scroll tries again", () => {
-  // Each scroll to the top tries again. Swapping the failure for the loading
-  // line and back on every try makes the red strip blink.
-  const loading = olderLoadRunning(null, "s1");
-  assert.deepEqual(loading, { sessionId: "s1", kind: "loading-older", message: "Loading older messages…" });
-  const failed = olderLoadFailed(loading, "s1");
-  assert.equal(failed?.kind, "error");
-  assert.match(failed?.message ?? "", /^Couldn't load older messages\./);
-  // The next try, and its failure: the same strip, not drawn again.
-  assert.equal(olderLoadRunning(failed, "s1"), failed);
-  assert.equal(olderLoadFailed(failed, "s1"), failed);
+// The banner over the chat comes from the store's olderStatus (#1451). Loading
+// shows the loading line; failed shows the failure with a way to retry.
+
+test("a loading load of older messages shows the loading line", () => {
+  expect(nextOlderBanner(null, "loading")).toEqual({ kind: "loading", message: OLDER_LOADING });
+  expect(OLDER_LOADING).toBe("Loading older messages…");
 });
 
-test("a load of older messages replaces any other history status", () => {
-  const other = { sessionId: "s1", kind: "error" as const, message: "Couldn't load the conversation." };
-  assert.equal(olderLoadRunning(other, "s1")?.kind, "loading-older");
-  // Another chat's failure is not this chat's.
-  const theirs = olderLoadFailed(null, "s2");
-  assert.equal(olderLoadRunning(theirs, "s1")?.kind, "loading-older");
-  assert.equal(olderLoadRunning(theirs, "s1")?.sessionId, "s1");
+test("a failed load of older messages shows the failure line", () => {
+  expect(nextOlderBanner(null, "failed")).toEqual({ kind: "error", message: OLDER_LOAD_FAILED });
+  expect(OLDER_LOAD_FAILED).toMatch(/^Couldn't load older messages\./);
+});
+
+test("idle and complete show no banner", () => {
+  expect(nextOlderBanner(null, "idle")).toBeNull();
+  expect(nextOlderBanner(null, "complete")).toBeNull();
+});
+
+test("a failed load stays on screen while a scroll tries again", () => {
+  // Each scroll to the top tries again. Swapping the failure for the loading
+  // line and back on every try makes the red strip blink.
+  const failed = nextOlderBanner(null, "failed");
+  expect(nextOlderBanner(failed, "loading")).toBe(failed);
+  expect(nextOlderBanner(failed, "failed")).toBe(failed);
+});
+
+test("a successful retry clears the failure", () => {
+  const failed = nextOlderBanner(null, "failed");
+  expect(nextOlderBanner(failed, "idle")).toBeNull();
+  expect(nextOlderBanner(failed, "complete")).toBeNull();
+});
+
+// The first load of a chat shows the load line the old history status showed, until its
+// rows arrive or its stream is open (#1451). Nothing shows once rows are on screen.
+test("connecting with nothing on screen shows the load line", () => {
+  expect(initialHistoryBanner("connecting", 0)).toEqual({ kind: "loading", message: "Loading conversation history…" });
+});
+
+test("rows on screen, or a stream that is open, show no load line", () => {
+  expect(initialHistoryBanner("connecting", 2)).toBeNull();
+  expect(initialHistoryBanner("live", 0)).toBeNull();
+});
+
+// A stream that fails before its first rows arrive means the conversation did not load: the old
+// history status showed this line with a Retry, which now reconnects the store (#1451).
+test("a failed stream with nothing on screen shows the old load failure with a retry", () => {
+  expect(initialHistoryBanner("failed", 0)).toEqual({
+    kind: "error",
+    message: "Couldn't load conversation history. Check the connection and retry.",
+    retry: "reconnect",
+  });
+});
+
+// The store keeps checking a failed stream, but until it is back the rows on screen are the last ones
+// it had: the chat says so, with a retry that checks now.
+test("a failed stream with rows on screen says the connection is lost, with a retry", () => {
+  expect(initialHistoryBanner("failed", 3)).toEqual({
+    kind: "error",
+    message: "Connection lost. Showing the last messages; retry to reconnect now.",
+    retry: "reconnect",
+  });
+});
+
+// A lost stream outranks a failed page of older rows: its line shows, and its Retry reconnects (#1451 review r7).
+test("a failed stream shows its own line even while an older-page failure is up", () => {
+  const older = nextOlderBanner(null, "failed");
+  expect(threadBanner(older, "failed", 3)).toEqual({
+    kind: "error",
+    message: "Connection lost. Showing the last messages; retry to reconnect now.",
+    retry: "reconnect",
+  });
+  // A live stream keeps the older-page line.
+  expect(threadBanner(older, "live", 3)).toBe(older);
 });

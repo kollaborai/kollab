@@ -90,11 +90,22 @@ class WebMessageQueueDispatcher:
             return self._rejected(request, "invalid_queue_payload")
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"text"}
+            or set(payload) not in ({"text"}, {"text", "goal_reply_id"})
             or not isinstance(payload.get("text"), str)
         ):
             return self._rejected(request, "invalid_queue_payload")
         text = payload["text"]
+        goal_reply_id = payload.get("goal_reply_id")
+        from .goal_replies import GOAL_REPLY_PATTERN, is_goal_input
+
+        if is_goal_input(text):
+            if (
+                not isinstance(goal_reply_id, str)
+                or GOAL_REPLY_PATTERN.fullmatch(goal_reply_id) is None
+            ):
+                return self._rejected(request, "invalid_queue_payload")
+        elif goal_reply_id is not None:
+            return self._rejected(request, "invalid_queue_payload")
         refs = request.attachment_refs
         if (
             not isinstance(refs, tuple)
@@ -145,6 +156,7 @@ class WebMessageQueueDispatcher:
             queue_incarnation=request.queue_incarnation,
             batch_id=request.batch_id,
             claim_id=request.claim_id,
+            goal_reply_id=goal_reply_id,
         )
         submit = getattr(self._state_service, "submit_queue_message", None)
         if not callable(submit):

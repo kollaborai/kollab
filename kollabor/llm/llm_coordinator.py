@@ -47,6 +47,7 @@ from kollabor_ai.message_content import (
     EphemeralImageStore,
     MessageContent,
     MessageContentError,
+    chat_stream_parts,
     combine_message_contents,
     contains_image_content,
     content_to_text,
@@ -64,6 +65,7 @@ from kollabor_tui.display_tap import publish_semantic
 from .acp_bridge import ACPError, ACPSteeringUnconfirmed
 from .agent_hud import (
     AgentHudEntry,
+    agent_hud_hub_metadata,
     format_agent_hud,
     merge_agent_hud_with_user_message,
     normalize_hud_label,
@@ -306,14 +308,40 @@ class LLMService:
         # conversation_manager: adds persistence, UUID tracking, metadata
         # both systems stay synchronized
         self.conversation_history.append(message)
-        if role == "user" and not hidden and publish_user_event:
+        pending_plugin_admission = (
+            role == "user"
+            and isinstance(getattr(message, "metadata", None), dict)
+            and (
+                message.metadata.get("chat_stream_trigger_llm") is True
+                or message.metadata.get("chat_stream_pending_input_id")
+            )
+        )
+        if role == "user" and not hidden and publish_user_event and not pending_plugin_admission:
             # What mirrors this conversation (the engine) follows it by these,
             # so a window opened mid-turn shows the message being answered.
+            metadata = getattr(message, "metadata", None)
+            event_fields = {}
+            if isinstance(metadata, dict):
+                for field in (
+                    "request_id",
+                    "request_ids",
+                    "input_id",
+                    "turn_id",
+                    "operator_inputs",
+                    "chat_stream_trigger_llm",
+                ):
+                    value = metadata.get(field)
+                    if value is not None:
+                        event_fields[field] = value
+                display_text = metadata.get("chat_stream_display_text")
+                if isinstance(display_text, str):
+                    event_fields["display_text"] = display_text
             publish_semantic(
                 getattr(self, "event_bus", None),
                 "user_message",
                 role="user",
                 text=content_to_text(content),
+                **event_fields,
             )
 
         return cast(str, message_uuid)
@@ -706,8 +734,8 @@ class LLMService:
         if not isinstance(queue_handoff, QueueHandoffContext):
             return {"status": "rejected", "reason": "invalid_queue_capability"}
         if queue_handoff.force_send:
-            return await self._submit_forced_queue_handoff(
-                message, queue_handoff, batch_lease
+            return await self.submit_forced_queue_handoff_input(
+                message, queue_handoff, batch_lease=batch_lease
             )
         if batch_lease is not None:
             return {"status": "rejected", "reason": "invalid_queue_batch"}
@@ -726,6 +754,73 @@ class LLMService:
                 queue_handoff=queue_handoff,
                 force_next_turn=queue_handoff.force_send,
             )
+
+    async def submit_forced_queue_handoff_input(
+        self,
+        message: MessageContent,
+        queue_handoff: Any,
+        *,
+        batch_lease: object | None = None,
+    ) -> Dict[str, Any]:
+        """Admit one Send Now item through the shared native/ACP queue gate.
+
+        Batch workers pass their existing lease. A standalone input reserves
+        the same gate as a batch of one, so both paths stop the current owner
+        and place this input ahead of the waiting queue without steering.
+        """
+        from .queue_handoff import QueueHandoffContext
+
+        if (
+            not isinstance(queue_handoff, QueueHandoffContext)
+            or not queue_handoff.force_send
+        ):
+            return {"status": "rejected", "reason": "invalid_queue_capability"}
+        if batch_lease is not None:
+            return await self._submit_forced_queue_handoff(
+                message, queue_handoff, batch_lease
+            )
+
+        lease = await self.begin_queue_handoff_batch(
+            conversation_uid=queue_handoff.conversation_uid,
+            conversation_revision=queue_handoff.conversation_revision,
+            queue_scope_id=queue_handoff.queue_scope_id or "",
+            queue_incarnation=queue_handoff.queue_incarnation or "",
+            batch_id=queue_handoff.batch_id or "",
+            claim_id=queue_handoff.claim_id or "",
+            request_ids=(queue_handoff.request_id,),
+        )
+        if lease is None:
+            return {"status": "rejected", "reason": "force_send_unavailable"}
+
+        uncertain = getattr(lease, "in_doubt", False) is True
+        try:
+            result = await self._submit_forced_queue_handoff(
+                message, queue_handoff, lease
+            )
+        except BaseException:
+            uncertain = uncertain or (
+                queue_handoff.provider_admission_started
+                or queue_handoff.history_row_preexisting
+                or queue_handoff.recording_status == "uncertain"
+            )
+            try:
+                self.finish_queue_handoff_batch(
+                    lease,
+                    accepted_count=getattr(lease, "accepted_count", 0),
+                    uncertain=uncertain,
+                )
+            except Exception:
+                logger.warning("Single-input queue handoff finalization failed")
+            raise
+
+        uncertain = uncertain or queue_handoff.recording_status == "uncertain"
+        if not self.finish_queue_handoff_batch(
+            lease,
+            accepted_count=getattr(lease, "accepted_count", 0),
+            uncertain=uncertain,
+        ):
+            raise RuntimeError("Single-input queue handoff finalization failed")
+        return result
 
     async def begin_queue_handoff_batch(
         self,
@@ -781,14 +876,49 @@ class LLMService:
             if not callable(begin):
                 return None
             in_doubt = False
+            runner_token = None
             try:
                 runner_token = await begin(request_ids)
+                if runner_token is not None:
+                    # The runner may clear its active context when the RPC
+                    # finishes, before the completion observer saves history.
+                    wait_for_history = getattr(
+                        acp, "wait_for_unsettled_history", None
+                    )
+                    if not callable(wait_for_history):
+                        raise RuntimeError("ACP completion barrier is unavailable")
+                    await wait_for_history()
+            except asyncio.CancelledError:
+                if runner_token is not None:
+                    mark_in_doubt = getattr(
+                        runner, "mark_queue_handoff_in_doubt", None
+                    )
+                    if callable(mark_in_doubt):
+                        mark_in_doubt(runner_token)
+                raise
             except ACPError as exc:
-                if getattr(exc, "error_class", None) != "queue_batch_in_doubt":
-                    return None
-                runner_token = getattr(runner, "_queue_handoff_batch", None)
+                if runner_token is not None:
+                    mark_in_doubt = getattr(
+                        runner, "mark_queue_handoff_in_doubt", None
+                    )
+                    if callable(mark_in_doubt):
+                        mark_in_doubt(runner_token)
+                    in_doubt = True
+                else:
+                    if getattr(exc, "error_class", None) != "queue_batch_in_doubt":
+                        return None
+                    runner_token = getattr(runner, "_queue_handoff_batch", None)
+                    if runner_token is None:
+                        return None
+                    in_doubt = True
+            except Exception:
                 if runner_token is None:
-                    return None
+                    raise
+                mark_in_doubt = getattr(
+                    runner, "mark_queue_handoff_in_doubt", None
+                )
+                if callable(mark_in_doubt):
+                    mark_in_doubt(runner_token)
                 in_doubt = True
             if runner_token is None:
                 return None
@@ -1524,6 +1654,34 @@ class LLMService:
         """Resolve one live pasted image for a provider request."""
         store = getattr(self, "_image_store", None)
         return store.resolve(media_id) if store is not None else None
+
+    def _persist_managed_upload_for_chat_stream(self, media_id: str) -> str | None:
+        """Make an accepted native image available through the authenticated media route."""
+        data_url = self.resolve_media(media_id)
+        conversation_logger = getattr(self, "conversation_logger", None)
+        conversations_dir = getattr(conversation_logger, "conversations_dir", None)
+        session_id = getattr(conversation_logger, "session_id", None)
+        if (
+            not isinstance(data_url, str)
+            or conversations_dir is None
+            or not isinstance(session_id, str)
+            or not session_id
+        ):
+            return None
+        try:
+            from kollabor_engine.media_store import save_managed_upload_media
+
+            record = save_managed_upload_media(
+                conversations_dir, session_id, media_id, data_url
+            )
+        except Exception:
+            logger.warning(
+                "Could not persist managed upload %s for chat display",
+                media_id,
+                exc_info=True,
+            )
+            return None
+        return f"/media/{record.ref}"
 
     def supports_image_input(self) -> bool:
         """Return whether the active provider model accepts image input."""
@@ -2591,6 +2749,86 @@ class LLMService:
         """
         return await self._queue_processor.enqueue(message)
 
+    async def send_now_native_plugin_input(self, request_id: str) -> Dict[str, Any]:
+        """Force one already-queued plugin input to the front of native work."""
+        if not isinstance(request_id, str) or not request_id:
+            return {"found": False}
+        processor = getattr(self, "_queue_processor", None)
+        begin = getattr(processor, "begin_forced_send", None)
+        end = getattr(processor, "end_forced_send", None)
+        find_queued = getattr(processor, "_queued_plugin_input", None)
+        prioritize = getattr(processor, "prioritize_queued_plugin_input", None)
+        clear_batch = getattr(processor, "clear_forced_plugin_batch", None)
+        clear = getattr(processor, "clear_force_cancellation", None)
+        if not all(
+            callable(method)
+            for method in (begin, end, find_queued, prioritize, clear_batch, clear)
+        ):
+            return {"found": False}
+
+        token = await begin()
+        generation: int | None = None
+        accepted = False
+        try:
+            item = find_queued(request_id)
+            if item is None:
+                active_ids = getattr(processor, "active_request_ids", ())
+                if request_id in active_ids:
+                    return {
+                        "found": True,
+                        "accepted": False,
+                        "state": "started",
+                    }
+                return {"found": False}
+
+            if getattr(processor, "cancel_processing", False):
+                if getattr(processor, "cancel_origin", None) != "human":
+                    return {"found": True, "accepted": False, "state": "queued"}
+                generation = getattr(processor, "cancel_generation", None)
+
+            if self.is_processing:
+                generation = self.cancel_current_request(
+                    origin="human", preserve_queued=True
+                )
+                if generation is None or not await self._await_forced_native_stop(
+                    generation
+                ):
+                    return {"found": True, "accepted": False, "state": "queued"}
+                if (
+                    getattr(processor, "cancel_generation", None) != generation
+                    or getattr(processor, "cancel_origin", None) != "human"
+                    or not getattr(processor, "cancel_processing", False)
+                ):
+                    return {"found": True, "accepted": False, "state": "queued"}
+
+            if not prioritize(request_id):
+                if find_queued(request_id) is not None:
+                    return {
+                        "found": True,
+                        "accepted": False,
+                        "state": "queued",
+                    }
+                return {"found": False}
+            if generation is not None and not clear(generation):
+                clear_batch(request_id)
+                return {"found": True, "accepted": False, "state": "queued"}
+            accepted = True
+            return {"found": True, "accepted": True, "state": "queued"}
+        finally:
+            end(token)
+            if accepted:
+                self.create_background_task(
+                    lambda: self._process_queue(),
+                    name="force_send_plugin_input",
+                )
+            elif generation is not None:
+                resume = getattr(self, "_resume_queue_after_forced_stop", None)
+                if callable(resume):
+                    self.create_background_task(
+                        lambda: resume(generation),
+                        name=f"resume_queue_after_force_{generation}",
+                    )
+
     async def _process_queue(self):
         """Process queued messages. Delegates to QueueProcessor."""
         wait_force = getattr(self._queue_processor, "wait_for_forced_send", None)
@@ -2622,6 +2860,31 @@ class LLMService:
             if isinstance(item, (QueuedInput, TaggedInput))
             and isinstance(item.history_row_uuid, str)
             and item.history_row_uuid
+        )
+        # Capture each input's original content and exact JSONL row before a
+        # pending HUD note folds the batch into one model payload. The stream
+        # projection and terminal persistence still need the per-input view.
+        stream_inputs = tuple(
+            {
+                "request_id": request_id,
+                "history_row_uuid": item.history_row_uuid,
+                "content": (
+                    item.stream_display_content
+                    if isinstance(item, TaggedInput)
+                    and isinstance(item.stream_display_content, str)
+                    else item.content
+                ),
+            }
+            for item in messages
+            if isinstance(item, (QueuedInput, TaggedInput))
+            for request_id in item.request_ids
+        )
+        # ``messages`` can also contain an untracked item that has no
+        # request ID. Preserve the count before HUD rebatching so legacy
+        # projection can distinguish a genuinely single-input history row
+        # from a mixed batch with only one tracked request.
+        stream_input_count = max(
+            len(messages), len(request_ids), len(stream_inputs)
         )
         # Keep the admission-time capture through the rebatch (#676): the
         # most recent capture, since the pointer today lands on the last row
@@ -2666,6 +2929,9 @@ class LLMService:
             combined = combine_message_contents(
                 [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
+            # This is the model prompt payload. Admission rows were captured
+            # before this merge, so HUD wrappers stay context and never become
+            # the text part of a user's input row.
             combined = self.merge_pending_agent_hud(combined)
             if voice_inputs:
                 merged_input = QueuedInput(
@@ -2721,6 +2987,8 @@ class LLMService:
             messages=messages,
             current_parent_uuid=batch_parent_uuid,
             request_ids=request_ids,
+            stream_inputs=stream_inputs,
+            stream_input_count=stream_input_count,
         )
         # Seed the chain-local tail for this batch's tool-loop continuations
         # (#676), under the same discipline as the continue ticket: an older
@@ -2750,17 +3018,20 @@ class LLMService:
         if self._pending_agent_hud and getattr(
             self._queue_processor, "turn_completed", False
         ):
-            hud_content = self.drain_pending_agent_hud()
+            hud_entries = self.pop_pending_agent_hud()
+            hud_content = format_agent_hud(hud_entries)
             if hud_content:
                 from kollabor_events.data_models import ConversationMessage
 
+                hud_metadata = {
+                    "agent_hud": True,
+                    "agent_hud_sources": ["pending"],
+                    **agent_hud_hub_metadata(hud_entries),
+                }
                 hud_message = ConversationMessage(
                     role="user",
                     content=hud_content,
-                    metadata={
-                        "agent_hud": True,
-                        "agent_hud_sources": ["pending"],
-                    },
+                    metadata=hud_metadata,
                 )
                 image_scope = current_goal_image_scope()
                 if (
@@ -2813,8 +3084,12 @@ class LLMService:
         section: str,
         label: str,
         content: str,
+        *,
+        message_id: str | None = None,
+        hub_note: dict[str, Any] | None = None,
+        hub_admission: str | None = None,
     ) -> AgentHudEntry | None:
-        """Queue one changed HUD item for the next model-visible turn."""
+        """Queue model context, retaining structured identity for hub entries."""
         body = (content or "").strip()
         if not body:
             return None
@@ -2824,6 +3099,9 @@ class LLMService:
             section=normalize_hud_label(section, fallback="state"),
             label=normalize_hud_label(label, fallback="info"),
             content=body,
+            message_id=message_id,
+            hub_note=dict(hub_note) if hub_note is not None else None,
+            hub_admission=hub_admission,
         )
         self._pending_agent_hud.append(entry)
         return entry
@@ -2958,6 +3236,9 @@ class LLMService:
         may_answer: bool = False,
         native_only: bool = False,
         request_id: str | None = None,
+        thread_id: str | None = None,
+        hub_message_id: str | None = None,
+        hub_note: dict[str, Any] | None = None,
         operator_source: str | None = None,
         queue_handoff: Any = None,
         queue_handoff_batch: object | None = None,
@@ -2982,6 +3263,9 @@ class LLMService:
                 generation writes files); refused while ACP owns the chat.
             request_id: the client follows this turn by it (#551): its events
                 carry it in ``request_ids``, and the result echoes it.
+            thread_id: hub thread associated with this admission, when present.
+            hub_message_id: stable id of the structured hub message, when present.
+            hub_note: structured hub fields retained for the transcript row.
             operator_source: authenticated source of words spoken/written by the
                 human operator. Untrusted or absent sources are not preserved.
 
@@ -3051,6 +3335,12 @@ class LLMService:
                 "reason": self.image_input_rejection_reason(),
             }
 
+        # Every accepted native input needs an identity before it is logged or
+        # queued so its transcript row, turn_start and terminal event agree.
+        # Keep a sender-chosen id when the caller supplied one.
+        if not isinstance(request_id, str) or not request_id:
+            request_id = uuid.uuid4().hex
+
         input_source = getattr(operator_source, "value", operator_source)
         operator_inputs: tuple[dict[str, str], ...] = ()
         if (
@@ -3085,6 +3375,10 @@ class LLMService:
                 acp,
                 {
                     "message": normalized_message,
+                    "request_id": request_id,
+                    "thread_id": thread_id,
+                    "hub_message_id": hub_message_id,
+                    "hub_note": hub_note,
                     "voice": voice,
                     "origin_context": origin_context,
                     "operator_inputs": operator_inputs,
@@ -3170,9 +3464,23 @@ class LLMService:
         # parent captured at admission.
         admitted_parent_uuid = admission_parent_uuid
         history_row_uuid: str | None = None
+        input_metadata: dict[str, Any] = {}
+        if request_id:
+            input_metadata["request_id"] = request_id
+        if contains_image_content(normalized_message):
+            display_parts = chat_stream_parts(
+                normalized_message,
+                persist_managed_upload=self._persist_managed_upload_for_chat_stream,
+            )
+            if any(part.get("type") == "image" for part in display_parts):
+                input_metadata["chat_stream_parts"] = display_parts
         try:
             user_uuid = await self.conversation_logger.log_user_message(
-                display_text, parent_uuid=admission_parent_uuid
+                display_text,
+                parent_uuid=admission_parent_uuid,
+                # The saved row names the sender's id, so it pairs with the input
+                # it admits and with the events that answer that input (#1371).
+                message_metadata=input_metadata or None,
             )
         except Exception as exc:
             logger.error("User message not written to history: %s", exc)
@@ -3201,6 +3509,7 @@ class LLMService:
                 admission_serial=turn_serial,
                 operator_inputs=operator_inputs,
                 history_row_uuid=history_row_uuid,
+                request_ids=(request_id,) if request_id else (),
             )
             if voice or trusted_origin_context
             else TaggedInput(
@@ -3241,7 +3550,7 @@ class LLMService:
             # Dropped, or swept by a Stop: its stream already ended, so it is not
             # reported as queued (#589).
             return {"status": "rejected", "reason": "input_not_queued"}
-        if request_id and not (voice or trusted_origin_context):
+        if request_id:
             return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
 
@@ -3558,7 +3867,10 @@ class LLMService:
         origin_context: dict[str, Any] | None,
         queue_handoff: Any,
     ) -> Dict[str, Any]:
-        """Stop a native turn to terminal settlement, then admit once at head."""
+        """Force a turn boundary before admitting a trusted Send Now input."""
+        if queue_handoff is not None:
+            return await self.submit_forced_queue_handoff_input(message, queue_handoff)
+
         processor = getattr(self, "_queue_processor", None)
         begin = getattr(processor, "begin_forced_send", None)
         end = getattr(processor, "end_forced_send", None)
@@ -3963,6 +4275,11 @@ class LLMService:
         if queue_handoff is not None and queue_handoff.force_send and queue_handoff_batch is None:
             return {"status": "rejected", "reason": "invalid_queue_batch"}
         origin = dict(data.get("origin_context") or {})
+        if isinstance(data.get("hub_note"), dict):
+            origin["hub_note"] = dict(data["hub_note"])
+            hub_message_id = data.get("hub_message_id") or request_id
+            if isinstance(hub_message_id, str) and hub_message_id:
+                origin["hub_message_id"] = hub_message_id
         origin.setdefault("operator", source != "agent")
         if not self._manual_relay_origin_authorized(origin):
             return {
@@ -4045,6 +4362,8 @@ class LLMService:
             try:
                 steered = await acp.steer(
                     message, origin=origin, thread_id=data.get("thread_id"),
+                    request_id=data.get("request_id") or None,
+                    record_request_id=request_id,
                     **({"images": images} if images else {}),
                 )
             except ACPSteeringUnconfirmed:
@@ -4058,7 +4377,12 @@ class LLMService:
                     return {"status": "rejected", "reason": "This harness can't take images."}
                 raise
             if steered:
-                return {"status": "injected", "request_id": request_id}
+                result = {"status": "injected", "request_id": request_id}
+                if isinstance(steered, dict):
+                    for key in ("joined_request_id", "joined_turn_id"):
+                        if key in steered:
+                            result[key] = steered[key]
+                return result
         # `steer` above can await while a relay is revoked; re-check at the
         # actual queue-admission boundary before sending anything to ACP.
         if not self._manual_relay_origin_authorized(origin):
@@ -4236,6 +4560,7 @@ class LLMService:
             "request_id": request_id,
             "source": source,
             "thread_id": thread_id,
+            "chat_stream_input_count": 1,
         }
         if operator_inputs:
             metadata["operator_inputs"] = list(operator_inputs)

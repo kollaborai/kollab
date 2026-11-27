@@ -40,7 +40,10 @@ function withStepCount(label: string, count: number): string {
 
 function pathArgument(command: string): string | undefined {
   const tokens = command.match(/(?:"[^"]*"|'[^']*'|\S+)/g) ?? [];
+  // A redirect (2>/dev/null, > out.txt) names where output goes, not what the command works on.
+  const redirect = /^\d*[<>]/;
   const candidates = tokens
+    .filter((token, index) => !redirect.test(token) && !/^\d*[<>]+&?$/.test(tokens[index - 1] ?? ""))
     .map((token) => token.replace(/^['"]|['"]$/g, ""))
     .filter(
       (token) =>

@@ -1,0 +1,153 @@
+{
+  "description": "Engine-materialized retrieval previews carry session identity and row-bound markers.",
+  "complete": true,
+  "expect": [],
+  "events": [
+    {
+      "seq": 1,
+      "conversation_uid": "conv-preview",
+      "generation": "fixture-daemon-1",
+      "type": "snapshot",
+      "data": {
+        "rows": [
+          {
+            "id": "row-content",
+            "seq": 1,
+            "kind": "reply",
+            "role": "assistant",
+            "turn_id": "turn-preview",
+            "status": "completed",
+            "parts": [
+              {
+                "type": "text",
+                "text": "bounded preview",
+                "chat_stream_content_preview": {
+                  "kind": "chat-stream-content-preview",
+                  "session_id": "session-preview",
+                  "row_id": "row-content",
+                  "part_index": 0,
+                  "field": "text",
+                  "output_bytes": 40000,
+                  "output_chars": 40000,
+                  "output_type": "text",
+                  "output_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "preview": "bounded preview"
+                }
+              }
+            ],
+            "created_at": "2026-11-26T10:00:00Z"
+          },
+          {
+            "id": "row-args",
+            "seq": 2,
+            "kind": "tool",
+            "role": "assistant",
+            "turn_id": "turn-preview",
+            "status": "completed",
+            "parts": [
+              {
+                "type": "tool-call",
+                "tool_call_id": "call-preview",
+                "tool_name": "inspect",
+                "args": {},
+                "chat_stream_args_preview": {
+                  "kind": "chat-stream-content-preview",
+                  "session_id": "session-preview",
+                  "row_id": "row-args",
+                  "part_index": 0,
+                  "field": "args",
+                  "output_bytes": 40000,
+                  "output_chars": 40000,
+                  "output_type": "json",
+                  "output_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "preview": "{\"path\":\"large\"}"
+                }
+              }
+            ],
+            "created_at": "2026-11-26T10:00:01Z"
+          },
+          {
+            "id": "row-part",
+            "seq": 3,
+            "kind": "reply",
+            "role": "assistant",
+            "turn_id": "turn-preview",
+            "status": "completed",
+            "parts": [
+              {
+                "type": "text",
+                "text": "[Large part. Expand to load full content.]",
+                "chat_stream_part_preview": {
+                  "kind": "chat-stream-part-preview",
+                  "session_id": "session-preview",
+                  "row_id": "row-part",
+                  "part_index": 0,
+                  "output_bytes": 40000,
+                  "output_chars": 40000,
+                  "output_type": "json",
+                  "output_revision": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "preview": "{\"type\":\"image\",...}"
+                }
+              }
+            ],
+            "created_at": "2026-11-26T10:00:02Z"
+          },
+          {
+            "id": "row-parts",
+            "seq": 4,
+            "kind": "reply",
+            "role": "assistant",
+            "turn_id": "turn-preview",
+            "status": "completed",
+            "parts": [
+              {"type": "text", "text": "[Large chat row. Expand to load all content.]"}
+            ],
+            "chat_stream_parts_preview": {
+              "kind": "chat-stream-parts-preview",
+              "session_id": "session-preview",
+              "row_id": "row-parts",
+              "part_count": 120,
+              "output_bytes": 500000,
+              "output_chars": 420000,
+              "output_type": "json",
+              "output_revision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "created_at": "2026-11-26T10:00:03Z"
+          },
+          {
+            "id": "row-result",
+            "seq": 5,
+            "kind": "tool",
+            "role": "assistant",
+            "turn_id": "turn-preview",
+            "status": "completed",
+            "parts": [
+              {
+                "type": "tool-call",
+                "tool_call_id": "call-result-preview",
+                "tool_name": "inspect",
+                "args": {},
+                "chat_stream_result_preview": {
+                  "kind": "chat-stream-tool-output-preview",
+                  "session_id": "session-preview",
+                  "row_id": "row-result",
+                  "tool_call_id": "call-result-preview",
+                  "output_bytes": 40000,
+                  "output_chars": 40000,
+                  "output_type": "text",
+                  "output_revision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "preview": "bounded result preview"
+                }
+              }
+            ],
+            "created_at": "2026-11-26T10:00:04Z"
+          }
+        ],
+        "next_seq": 6,
+        "older": null,
+        "turns": [],
+        "inputs": []
+      }
+    }
+  ]
+}
