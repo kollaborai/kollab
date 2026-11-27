@@ -131,7 +131,8 @@ export function toThreadMessageLike(row: ChatRow, turns: Readonly<Record<string,
       chatRowRole: row.role,
       ...(row.chat_stream_parts_preview ? { chatStreamPartsPreview: row.chat_stream_parts_preview } : {}),
     } },
-    ...(row.role === "assistant" && row.status === "failed"
+    // A failed tool call shows its own error mark; only a failed reply is a message error.
+    ...(row.role === "assistant" && row.kind !== "tool" && row.status === "failed"
       ? { status: { type: "incomplete" as const, reason: "error" as const } }
       : {}),
     ...(row.role === "assistant" && (row.status === "running" || row.status === "streaming") && row.turn_id !== null && turns[row.turn_id]?.state === "running"
