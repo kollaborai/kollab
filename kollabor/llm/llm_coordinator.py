@@ -876,14 +876,53 @@ class LLMService:
             if not callable(begin):
                 return None
             in_doubt = False
+            runner_token = None
             try:
                 runner_token = await begin(request_ids)
+                if runner_token is not None:
+                    active_admission = getattr(runner_token, "active_admission", None)
+                    if active_admission is not None:
+                        # Runner cancellation settles before the completion
+                        # observer writes the partial transcript.
+                        wait_for_completion = getattr(
+                            acp, "wait_for_turn_completion", None
+                        )
+                        if not callable(wait_for_completion):
+                            raise RuntimeError(
+                                "ACP completion barrier is unavailable"
+                            )
+                        await wait_for_completion(active_admission)
+            except asyncio.CancelledError:
+                if runner_token is not None:
+                    mark_in_doubt = getattr(
+                        runner, "mark_queue_handoff_in_doubt", None
+                    )
+                    if callable(mark_in_doubt):
+                        mark_in_doubt(runner_token)
+                raise
             except ACPError as exc:
-                if getattr(exc, "error_class", None) != "queue_batch_in_doubt":
-                    return None
-                runner_token = getattr(runner, "_queue_handoff_batch", None)
+                if runner_token is not None:
+                    mark_in_doubt = getattr(
+                        runner, "mark_queue_handoff_in_doubt", None
+                    )
+                    if callable(mark_in_doubt):
+                        mark_in_doubt(runner_token)
+                    in_doubt = True
+                else:
+                    if getattr(exc, "error_class", None) != "queue_batch_in_doubt":
+                        return None
+                    runner_token = getattr(runner, "_queue_handoff_batch", None)
+                    if runner_token is None:
+                        return None
+                    in_doubt = True
+            except Exception:
                 if runner_token is None:
-                    return None
+                    raise
+                mark_in_doubt = getattr(
+                    runner, "mark_queue_handoff_in_doubt", None
+                )
+                if callable(mark_in_doubt):
+                    mark_in_doubt(runner_token)
                 in_doubt = True
             if runner_token is None:
                 return None

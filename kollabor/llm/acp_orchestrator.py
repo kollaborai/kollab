@@ -104,6 +104,7 @@ class ACPOrchestrator:
         self._transition_depth = 0
         self._conversation_transition = False
         self._completion_tasks: set[asyncio.Task[Any]] = set()
+        self._completion_tasks_by_turn: dict[tuple[int, int], asyncio.Task[Any]] = {}
         self._delivery_tasks: set[asyncio.Task[Any]] = set()
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
         # Closes that outlived RUNNER_CLOSE_TIMEOUT: their runner is no longer
@@ -825,11 +826,22 @@ class ACPOrchestrator:
             self._completion_keys.discard(turn_key)
             raise
         self._completion_tasks.add(task)
+        self._completion_tasks_by_turn[turn_key] = task
         task.add_done_callback(self._completion_tasks.discard)
         task.add_done_callback(
             lambda _task, key=turn_key: self._completion_keys.discard(key)
         )
+        task.add_done_callback(
+            lambda _task, key=turn_key: self._completion_tasks_by_turn.pop(key, None)
+        )
         return True
+
+    async def wait_for_turn_completion(self, admission: ACPAdmission) -> None:
+        """Wait until this admission's result and history writes have settled."""
+        turn_key = (admission.generation, admission.turn_id)
+        task = self._completion_tasks_by_turn.get(turn_key)
+        if task is not None:
+            await asyncio.shield(task)
 
     def activate_queue_handoff_admission(
         self,
