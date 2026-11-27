@@ -12600,7 +12600,9 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.debug("hub delivery trace failed: %s", e)
 
-    async def _route_message(self, message: HubMessage) -> List[Tuple[str, str]]:
+    async def _route_message(
+        self, message: HubMessage, *, input_source: str | None = None
+    ) -> List[Tuple[str, str]]:
         """Route a message according to its explicit scope.
 
         Direct messages go only to ``message.to``. Project/team/broadcast
@@ -12667,6 +12669,7 @@ class HubPlugin(BasePlugin):
                     detail = self._surface_copy(
                         detail,
                         "This engine version cannot connect to this relay. The message was not sent.",
+                        input_source=input_source,
                     )
                 return [(message.to, detail)]
             refusal = _receipt_refusal(receipt)
@@ -14616,7 +14619,7 @@ class HubPlugin(BasePlugin):
             text = await self._write_hub_via_state_service("hub_send_msg", rest)
             if text is not None:
                 return text
-            return await self._handle_msg_command(rest)
+            return await self._handle_msg_command(rest, input_source=input_source)
         elif subcmd == "broadcast":
             text = await self._write_hub_via_state_service("hub_broadcast", rest)
             if text is not None:
@@ -17500,7 +17503,9 @@ class HubPlugin(BasePlugin):
             f"error: agent '{target}' is not online and has no runnable pool identity"
         )
 
-    async def _handle_msg_command(self, args: str) -> str:
+    async def _handle_msg_command(
+        self, args: str, *, input_source: str | None = None
+    ) -> str:
         parts = args.split(maxsplit=1)
         if len(parts) < 2:
             return "usage: /hub msg <agent> <message>"
@@ -17513,7 +17518,7 @@ class HubPlugin(BasePlugin):
             content=content,
             scope=self._resolve_scope(target),
         )
-        rejections = await self._route_message(msg)
+        rejections = await self._route_message(msg, input_source=input_source)
         if rejections:
             parts = [f"{ident}: {reason}" for ident, reason in rejections]
             if parse_handle(target) is not None:
