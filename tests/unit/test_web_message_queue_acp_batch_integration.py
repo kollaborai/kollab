@@ -430,8 +430,18 @@ async def test_acp_send_now_waits_for_cancelled_partial_history(tmp_path):
     cancel_received = asyncio.Event()
     completion_waiting = asyncio.Event()
     release_completion = asyncio.Event()
+    hub_completion_started = asyncio.Event()
+    release_hub_completion = asyncio.Event()
     send_now_user_written = asyncio.Event()
     send_now_manager_recorded = asyncio.Event()
+
+    async def hold_hub_completion(**_kwargs):
+        hub_completion_started.set()
+        await release_hub_completion.wait()
+
+    acp.hub_plugin = SimpleNamespace(
+        on_acp_completion=hold_hub_completion, _identity=None
+    )
 
     async def cancel(*, session_id):
         cancel_received.set()
@@ -563,6 +573,9 @@ async def test_acp_send_now_waits_for_cancelled_partial_history(tmp_path):
         release_completion.set()
         result = await asyncio.wait_for(dispatch, timeout=2)
         assert result.status is WorkerStatus.ADMITTED
+        await asyncio.wait_for(hub_completion_started.wait(), timeout=1)
+        assert not release_hub_completion.is_set()
+        release_hub_completion.set()
         await asyncio.wait_for(asyncio.gather(*tuple(acp._completion_tasks)), timeout=2)
 
         records = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
@@ -601,6 +614,7 @@ async def test_acp_send_now_waits_for_cancelled_partial_history(tmp_path):
         assert cut_assistant_position < send_now_user_position
     finally:
         release_completion.set()
+        release_hub_completion.set()
         if dispatch is not None:
             await asyncio.gather(dispatch, return_exceptions=True)
         runner._closing = True
