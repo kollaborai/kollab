@@ -3861,7 +3861,11 @@ class QueueProcessor:
             # turn completion happens when the model returns no tool calls, or
             # when a tool ended the turn on purpose (hub_msg wait="true"): the
             # results wait in history and the reply starts the next turn.
-            if _tool_results_requiring_followup(all_results):
+            if self.cancel_processing:
+                # A Stop or Send Now landed while the tools ran: the cut-off
+                # tool still returns a result, but no model call follows it.
+                self.turn_completed = True
+            elif _tool_results_requiring_followup(all_results):
                 self.turn_completed = False
             elif all_results:
                 self.turn_completed = True
