@@ -118,6 +118,13 @@ describe("AgentVersionNotice", () => {
     expect(html).toContain("Restart Agent");
     expect(html).not.toContain("/restart");
   });
+
+  it("explains a pending restart without agent-turn jargon", () => {
+    const notice = agentVersionNotice({ ...differ, restartAgents: false })!;
+    const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy waiting onRestart={() => {}} />);
+    expect(visibleText(html)).toContain("This agent will restart after its current work finishes.");
+    expect(visibleText(html)).not.toContain("turn");
+  });
 });
 
 describe("agents that cannot restart themselves (#968)", () => {
@@ -174,7 +181,8 @@ describe("agents that cannot restart themselves (#968)", () => {
       />,
     );
     expect(html).toContain('role="alert"');
-    expect(visibleText(html)).toContain("This agent could not be restarted by this engine.");
+    expect(visibleText(html)).toContain("This agent could not be restarted.");
+    expect(visibleText(html)).not.toContain("by this engine");
     expect(html).toContain("Try Again");
     expect(html).not.toContain("kollab --");
     expect(visibleText(html)).not.toContain("quit it and start it again");
