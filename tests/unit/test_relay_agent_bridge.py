@@ -443,6 +443,8 @@ async def test_relay_result_cannot_create_task_or_echo_to_external_bridge(bridge
     class ContinuationCoordinator:
         def __init__(self):
             self.renderer = SimpleNamespace(pipe_mode=False)
+            # The real coordinator always has a bus; with none, turn events are not published.
+            self.event_bus = None
             self._queue_processor = ContinuationQueue()
             self.scheduled = []
             self.contexts = []

@@ -1,5 +1,8 @@
 # Handoff: replace the kollab web UI with assistant-ui
 
+> The runtime choice below (`useAssistantTransportRuntime`, no `ExternalStoreRuntime`) has a draft
+> replacement in `docs/specs/webui-chat-single-stream.md` (#1451). Read it before changing the chat runtime.
+
 You are taking over a migration. Read this whole document before touching code.
 
 ## The job

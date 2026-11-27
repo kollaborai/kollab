@@ -1,0 +1,1674 @@
+import { ApiError, EngineApi } from "../src/api";
+import { readdirSync, readFileSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ChatRow, ChatStreamContentPreviewMarker, ChatStreamCursor, InputInfo, InputRequest, TurnInfo } from "../src/chat-stream";
+import { chatStreamStreamingText, fetchChatStreamContent } from "../src/chat-stream-content";
+import {
+  applyChatStreamEvent,
+  initialStreamState,
+  LiveChatStore,
+  turnsRunning,
+  type ApplyOutcome,
+  type ChatTransport,
+  type StreamState,
+} from "../src/chat-store";
+
+// The same fixtures chat-stream-contract.test.ts reads (#1451). An ok fixture
+// has an empty `expect`, the same rule as the Python contract test.
+const dir = new URL("./fixtures/chat-stream/", import.meta.url);
+const fixtures = readdirSync(dir)
+  .filter((name) => name.endsWith(".json"))
+  .map((name) => ({
+    name,
+    ...(JSON.parse(readFileSync(new URL(name, dir), "utf8")) as { expect: string[]; events: unknown[] }),
+  }));
+
+const CONV = "conv-1";
+const WHEN = "2026-11-25T00:00:00Z";
+
+function row(id: string, text = "", kind: ChatRow["kind"] = "reply", role: ChatRow["role"] = "assistant"): ChatRow {
+  return { id, seq: 1, kind, role, turn_id: null, status: "complete", parts: [{ type: "text", text }], created_at: WHEN };
+}
+
+function streamEvent(seq: number, type: string, data: unknown, conversationUid = CONV, generation = "daemon-1"): unknown {
+  return { seq, conversation_uid: conversationUid, generation, type, data };
+}
+
+/** A snapshot holding `rows`; live events after it start at `nextSeq`. */
+function snapshot(
+  nextSeq: number,
+  rows: ChatRow[] = [],
+  extra: { inputs?: InputInfo[]; turns?: TurnInfo[]; older?: string | null; generation?: string; conversationUid?: string } = {},
+): unknown {
+  return streamEvent(1, "snapshot", {
+    rows,
+    next_seq: nextSeq,
+    older: extra.older ?? null,
+    turns: extra.turns ?? [],
+    inputs: extra.inputs ?? [],
+  }, extra.conversationUid ?? CONV, extra.generation ?? "daemon-1");
+}
+
+/** Applies the events in order, expecting each one to apply, and returns the final state. */
+function applyAll(events: readonly unknown[], start: StreamState = initialStreamState): StreamState {
+  let state = start;
+  for (const event of events) {
+    const result = applyChatStreamEvent(state, event);
+    expect(result.outcome).toEqual({ kind: "applied" });
+    state = result.state;
+  }
+  return state;
+}
+
+/** The first event that does not apply, with its outcome; null when every event applies. */
+function firstStop(events: readonly unknown[]): { index: number; outcome: ApplyOutcome } | null {
+  let state = initialStreamState;
+  for (const [index, event] of events.entries()) {
+    const result = applyChatStreamEvent(state, event);
+    if (result.outcome.kind !== "applied") return { index, outcome: result.outcome };
+    state = result.state;
+  }
+  return null;
+}
+
+describe("applyChatStreamEvent", () => {
+  it("snapshot sets rows, inputs, turns and olderCursor, and sets lastSeq to next_seq minus 1", () => {
+    const input: InputInfo = { id: "web-a1", state: "started", turn_id: "t1" };
+    const turn: TurnInfo = { turn_id: "t1", state: "running", input_ids: ["web-a1"] };
+    const rows = [row("web-a1", "hi", "input", "user"), row("r1", "hello")];
+    // The snapshot's own seq (7) is not used: lastSeq comes from next_seq.
+    const result = applyChatStreamEvent(
+      initialStreamState,
+      streamEvent(7, "snapshot", { rows, next_seq: 42, older: "cursor-9", turns: [turn], inputs: [input] }),
+    );
+    expect(result.outcome).toEqual({ kind: "applied" });
+    expect(result.state).toEqual({
+      conversationUid: CONV,
+      generation: "daemon-1",
+      lastSeq: 41,
+      rows,
+      inputs: { "web-a1": input },
+      turns: { t1: turn },
+      olderCursor: "cursor-9",
+    });
+  });
+
+  it("row.upsert appends a new row and replaces an existing row with the same id in place", () => {
+    const start = applyAll([snapshot(2, [row("r1", "one"), row("r2", "two")])]);
+    const appended = applyAll([streamEvent(2, "row.upsert", row("r3", "three"))], start);
+    expect(appended.rows.map((r) => r.id)).toEqual(["r1", "r2", "r3"]);
+    const edited = { ...row("r1", "ONE"), status: "edited" };
+    const replaced = applyAll([streamEvent(3, "row.upsert", edited)], appended);
+    expect(replaced.rows).toEqual([edited, row("r2", "two"), row("r3", "three")]);
+  });
+
+  it("row.append adds text to the text part at index part and leaves the other parts unchanged", () => {
+    const parts: ChatRow["parts"] = [
+      { type: "text", text: "a" },
+      { type: "reasoning", text: "think" },
+      { type: "image", url: "x.png" },
+      { type: "text", text: "b" },
+    ];
+    const start = applyAll([snapshot(2, [{ ...row("r1"), parts }])]);
+    const first = applyAll([streamEvent(2, "row.append", { id: "r1", part: 3, text: " c" })], start);
+    const second = applyAll([streamEvent(3, "row.append", { id: "r1", part: 1, text: "ing" })], first);
+    expect(second.rows[0].parts).toEqual([
+      { type: "text", text: "a" },
+      { type: "reasoning", text: "thinking" },
+      { type: "image", url: "x.png" },
+      { type: "text", text: "b c" },
+    ]);
+    // The state before the append is not mutated.
+    expect(start.rows[0].parts[3]).toEqual({ type: "text", text: "b" });
+    expect(start.rows[0].parts[1]).toEqual({ type: "reasoning", text: "think" });
+  });
+
+  it("row.append to an unknown row resyncs", () => {
+    const start = applyAll([snapshot(2, [row("r1")])]);
+    const result = applyChatStreamEvent(start, streamEvent(2, "row.append", { id: "nope", part: 0, text: "x" }));
+    expect(result.outcome).toEqual({ kind: "resync", reason: "append to unknown row" });
+  });
+
+  it("row.append to a part that is not text or reasoning resyncs", () => {
+    const start = applyAll([snapshot(2, [{ ...row("r1"), parts: [{ type: "image", url: "x.png" }] }])]);
+    // Part 0 is an image; part 4 is past the end of the parts.
+    for (const part of [0, 4]) {
+      const result = applyChatStreamEvent(start, streamEvent(2, "row.append", { id: "r1", part, text: "x" }));
+      expect(result.outcome).toEqual({ kind: "resync", reason: "append to a part that is not text" });
+    }
+  });
+
+  it("row.delete removes the row; delete of an unknown row resyncs", () => {
+    const start = applyAll([snapshot(2, [row("r1"), row("r2")])]);
+    const deleted = applyChatStreamEvent(start, streamEvent(2, "row.delete", { id: "r1" }));
+    expect(deleted.outcome).toEqual({ kind: "applied" });
+    expect(deleted.state.rows.map((r) => r.id)).toEqual(["r2"]);
+    const unknown = applyChatStreamEvent(deleted.state, streamEvent(3, "row.delete", { id: "r1" }));
+    expect(unknown.outcome).toEqual({ kind: "resync", reason: "delete of unknown row" });
+  });
+
+  it("replace swaps the rows and keeps inputs and turns", () => {
+    const input: InputInfo = { id: "web-a1", state: "started", turn_id: "t1" };
+    const turn: TurnInfo = { turn_id: "t1", state: "running", input_ids: ["web-a1"] };
+    const start = applyAll([snapshot(2, [row("r1", "one")], { inputs: [input], turns: [turn] })]);
+    const replacement = [row("m1", "Compacted", "marker", "system")];
+    const replaced = applyChatStreamEvent(start, streamEvent(2, "replace", { rows: replacement }));
+    expect(replaced.outcome).toEqual({ kind: "applied" });
+    expect(replaced.state.rows).toEqual(replacement);
+    expect(replaced.state.inputs).toEqual({ "web-a1": input });
+    expect(replaced.state.turns).toEqual({ t1: turn });
+  });
+
+  it("input.state records the input; a second ended for the same input resyncs", () => {
+    let state = applyAll([snapshot(2)]);
+    state = applyAll([streamEvent(2, "input.state", { id: "web-a1", state: "queued", turn_id: null })], state);
+    expect(state.inputs).toEqual({ "web-a1": { id: "web-a1", state: "queued", turn_id: null } });
+    state = applyAll(
+      [
+        streamEvent(3, "input.state", { id: "web-a1", state: "started", turn_id: "t1" }),
+        streamEvent(4, "input.state", { id: "web-a1", state: "ended", turn_id: "t1", outcome: "completed" }),
+      ],
+      state,
+    );
+    expect(state.inputs["web-a1"]).toEqual({ id: "web-a1", state: "ended", turn_id: "t1", outcome: "completed" });
+    const again = applyChatStreamEvent(
+      state,
+      streamEvent(5, "input.state", { id: "web-a1", state: "ended", turn_id: "t1", outcome: "completed" }),
+    );
+    expect(again.outcome).toEqual({ kind: "resync", reason: "input changed after it ended" });
+  });
+
+  it("turn.state records the turn; turnsRunning is true only while some turn is running", () => {
+    const running: TurnInfo = { turn_id: "t1", state: "running", input_ids: ["web-a1"] };
+    const ended: TurnInfo = { ...running, state: "ended" };
+    const ran = applyAll([streamEvent(2, "turn.state", running)], applyAll([snapshot(2)]));
+    expect(ran.turns).toEqual({ t1: running });
+    expect(turnsRunning(ran.turns)).toBe(true);
+    const done = applyAll([streamEvent(3, "turn.state", ended)], ran);
+    expect(turnsRunning(done.turns)).toBe(false);
+    expect(turnsRunning({ t1: ended, t2: running })).toBe(true);
+    expect(turnsRunning({})).toBe(false);
+  });
+
+  it("an event whose seq equals lastSeq is a duplicate and leaves the state unchanged", () => {
+    const start = applyAll([snapshot(2, [row("r1")])]);
+    const result = applyChatStreamEvent(start, streamEvent(1, "row.upsert", row("r9")));
+    expect(result.outcome).toEqual({ kind: "duplicate" });
+    expect(result.state).toBe(start);
+  });
+
+  it("an event whose seq is below lastSeq resyncs", () => {
+    const start = applyAll([snapshot(3)]);
+    const result = applyChatStreamEvent(start, streamEvent(1, "row.upsert", row("r9")));
+    expect(result.outcome).toEqual({ kind: "resync", reason: "seq went backwards" });
+  });
+
+  it("an event whose seq skips ahead resyncs with reason seq gap", () => {
+    const start = applyAll([snapshot(2)]);
+    const result = applyChatStreamEvent(start, streamEvent(3, "row.upsert", row("r9")));
+    expect(result.outcome).toEqual({ kind: "resync", reason: "seq gap" });
+  });
+
+  it("a non-snapshot event before any snapshot resyncs", () => {
+    const result = applyChatStreamEvent(initialStreamState, streamEvent(1, "row.upsert", row("r1")));
+    expect(result.outcome).toEqual({ kind: "resync", reason: "event before snapshot" });
+  });
+
+  it("an event whose conversation_uid differs from the snapshot's resyncs", () => {
+    const start = applyAll([snapshot(2)]);
+    const result = applyChatStreamEvent(start, streamEvent(2, "row.upsert", row("r1"), "conv-2"));
+    expect(result.outcome).toEqual({ kind: "resync", reason: "conversation changed" });
+  });
+
+  it("an event that fails isChatStreamEvent resyncs with reason invalid event shape", () => {
+    const start = applyAll([snapshot(2)]);
+    expect(applyChatStreamEvent(start, streamEvent(2, "row.delete", {})).outcome).toEqual({
+      kind: "resync",
+      reason: "invalid event shape",
+    });
+    expect(applyChatStreamEvent(start, "not an event").outcome).toEqual({
+      kind: "resync",
+      reason: "invalid event shape",
+    });
+  });
+
+  it("input.state and turn.state keep the same rows array reference", () => {
+    const start = applyAll([snapshot(2, [row("r1")])]);
+    const withInput = applyChatStreamEvent(
+      start,
+      streamEvent(2, "input.state", { id: "web-a1", state: "queued", turn_id: null }),
+    );
+    expect(withInput.state.rows).toBe(start.rows);
+    const withTurn = applyChatStreamEvent(
+      withInput.state,
+      streamEvent(3, "turn.state", { turn_id: "t1", state: "running", input_ids: ["web-a1"] }),
+    );
+    expect(withTurn.state.rows).toBe(start.rows);
+  });
+
+  it("a resync keeps rows and inputs but clears the cursor, so the next snapshot replaces them", () => {
+    const input: InputInfo = { id: "web-a1", state: "queued", turn_id: null };
+    const start = applyAll([snapshot(2, [row("r1", "one")], { inputs: [input], older: "c1" })]);
+    const gap = applyChatStreamEvent(start, streamEvent(5, "row.upsert", row("r2")));
+    expect(gap.outcome).toEqual({ kind: "resync", reason: "seq gap" });
+    expect(gap.state).toEqual({ ...start, conversationUid: null, generation: null, lastSeq: null });
+    expect(applyChatStreamEvent(gap.state, streamEvent(6, "row.upsert", row("r2"))).outcome).toEqual({
+      kind: "resync",
+      reason: "event before snapshot",
+    });
+    const restored = applyChatStreamEvent(gap.state, snapshot(9, [row("r2")]));
+    expect(restored.outcome).toEqual({ kind: "applied" });
+    expect(restored.state.lastSeq).toBe(8);
+  });
+
+  it("resyncs when a live event belongs to an older daemon generation", () => {
+    const start = applyAll([snapshot(5, [row("r1")], { generation: "daemon-old" })]);
+    const result = applyChatStreamEvent(start, streamEvent(5, "row.upsert", row("r2"), CONV, "daemon-new"));
+
+    expect(result.outcome).toEqual({ kind: "resync", reason: "generation changed" });
+    expect(result.state).toEqual({ ...start, conversationUid: null, generation: null, lastSeq: null });
+  });
+
+  it("a snapshot from a new generation resets sequence for the same conversation", () => {
+    const oldWindow = applyAll([snapshot(101, [row("old")], { generation: "daemon-old" })]);
+    const newWindow = applyChatStreamEvent(oldWindow, snapshot(5, [row("new")], { generation: "daemon-new" }));
+    const next = applyChatStreamEvent(newWindow.state, streamEvent(5, "row.upsert", row("next"), CONV, "daemon-new"));
+
+    expect(newWindow.state).toMatchObject({ conversationUid: CONV, generation: "daemon-new", lastSeq: 4 });
+    expect(newWindow.state.rows.map((item) => item.id)).toEqual(["new"]);
+    expect(next).toMatchObject({ outcome: { kind: "applied" }, state: { generation: "daemon-new", lastSeq: 5 } });
+  });
+});
+
+describe("streaming content previews", () => {
+  it("hydrates a snapshot, appends later deltas, and switches to the final revision", async () => {
+    const conversationUid = "conversation-live-preview";
+    const generation = "daemon-live-preview";
+    const snapshotText = `snapshot baseline 🌵 ${"older text ".repeat(100)}`;
+    const appended = "newly streamed tail";
+    const finalText = snapshotText + appended;
+    const makeMarker = (content: string, revision: string): ChatStreamContentPreviewMarker => ({
+      kind: "chat-stream-content-preview",
+      session_id: "session-live-preview",
+      row_id: "row-live-preview",
+      part_index: 0,
+      field: "text",
+      output_bytes: new TextEncoder().encode(content).length,
+      output_chars: Array.from(content).length,
+      output_type: "text",
+      output_revision: revision,
+      preview: content.slice(0, 1024),
+    });
+    const snapshotMarker = makeMarker(snapshotText, "a".repeat(64));
+    const finalMarker = makeMarker(finalText, "b".repeat(64));
+    const streamRow = (
+      content: string,
+      status: string,
+      preview: ChatStreamContentPreviewMarker,
+    ): ChatRow => ({
+      id: preview.row_id,
+      seq: 1,
+      kind: "reply",
+      role: "assistant",
+      turn_id: "turn-live-preview",
+      status,
+      parts: [{ type: "text", text: content.slice(0, 1024), chat_stream_content_preview: preview }],
+      created_at: WHEN,
+    });
+    const contentApi = {
+      getChatStreamContent: vi.fn(async (
+        _sessionId: string,
+        rowId: string,
+        partIndex: number,
+        field: "text" | "reasoning" | "args" | "part",
+        revision: string,
+        { offset }: { offset: number; limit: number },
+      ) => {
+        const content = new Map([
+          [snapshotMarker.output_revision, snapshotText],
+          [finalMarker.output_revision, finalText],
+        ]).get(revision)!;
+        const nextOffset = Array.from(content).length;
+        return {
+          row_id: rowId,
+          part_index: partIndex,
+          field,
+          offset,
+          next_offset: nextOffset,
+          total_chars: nextOffset,
+          output_type: "text" as const,
+          output_revision: revision,
+          content,
+          done: true,
+        };
+      }),
+    };
+
+    const initial = applyChatStreamEvent(initialStreamState, {
+      seq: 0,
+      conversation_uid: conversationUid,
+      generation,
+      type: "snapshot",
+      data: {
+        rows: [streamRow(snapshotText, "streaming", snapshotMarker)],
+        next_seq: 1,
+        older: null,
+        turns: [],
+        inputs: [],
+      },
+    });
+    const hydrated = await fetchChatStreamContent(snapshotMarker, contentApi);
+    expect(chatStreamStreamingText(
+      snapshotMarker,
+      initial.state.rows[0].parts[0].text,
+      hydrated,
+    )).toBe(snapshotText);
+
+    const appendedState = applyChatStreamEvent(initial.state, {
+      seq: 1,
+      conversation_uid: conversationUid,
+      generation,
+      type: "row.append",
+      data: { id: snapshotMarker.row_id, part: 0, text: appended },
+    });
+    expect(chatStreamStreamingText(
+      snapshotMarker,
+      appendedState.state.rows[0].parts[0].text,
+      hydrated,
+    )).toBe(finalText);
+
+    const completed = applyChatStreamEvent(appendedState.state, {
+      seq: 2,
+      conversation_uid: conversationUid,
+      generation,
+      type: "row.upsert",
+      data: streamRow(finalText, "completed", finalMarker),
+    });
+    const finalHydration = await fetchChatStreamContent(finalMarker, contentApi);
+    expect(completed.state.rows[0].status).toBe("completed");
+    expect(finalHydration).toBe(finalText);
+    expect(chatStreamStreamingText(
+      finalMarker,
+      completed.state.rows[0].parts[0].text,
+      finalHydration,
+    )).toBe(finalText);
+  });
+});
+
+describe("fixture replay", () => {
+  it("applies every ok fixture (empty expect) with no resync", () => {
+    const ok = fixtures.filter((fixture) => fixture.expect.length === 0);
+    expect(ok.map((fixture) => fixture.name).sort()).toEqual([
+      "compaction.json",
+      "preview-markers.json",
+      "reload-mid-turn.json",
+      "steered-input.json",
+    ]);
+    for (const fixture of ok) {
+      expect([fixture.name, firstStop(fixture.events)]).toEqual([fixture.name, null]);
+    }
+  });
+
+  it("stops bad-seq.json at a resync on its seq 3 event", () => {
+    const bad = fixtures.find((fixture) => fixture.name === "bad-seq.json");
+    expect(bad?.events[1]).toMatchObject({ seq: 3 });
+    expect(firstStop(bad?.events ?? [])).toEqual({
+      index: 1,
+      outcome: { kind: "resync", reason: "seq gap" },
+    });
+  });
+});
+
+describe("LiveChatStore", () => {
+  type FakeStream = {
+    path: string;
+    signal: AbortSignal;
+    settled: boolean;
+    open(): void;
+    emit(event: unknown): void;
+    finish(): void;
+    drop(): void;
+  };
+
+  const stores: LiveChatStore[] = [];
+
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.dispose();
+  });
+
+  /** A transport whose streams the test drives by hand: open, emit, then finish or drop. */
+  function fakeTransport() {
+    const streams: FakeStream[] = [];
+    const streamSse = vi.fn(
+      (path: string, signal?: AbortSignal, onEvent?: (event: unknown) => void, onOpen?: () => void) =>
+        new Promise<void>((resolve, reject) => {
+          const stream: FakeStream = {
+            path,
+            signal: signal ?? new AbortController().signal,
+            settled: false,
+            open: () => onOpen?.(),
+            emit: (event) => onEvent?.(event),
+            finish: () => {
+              stream.settled = true;
+              resolve();
+            },
+            drop: () => {
+              stream.settled = true;
+              reject(new Error("connection dropped"));
+            },
+          };
+          stream.signal.addEventListener("abort", () => stream.drop());
+          streams.push(stream);
+        }),
+    );
+    const streamChatEvents = vi.fn((
+      sessionId: string,
+      cursor: ChatStreamCursor | null,
+      signal?: AbortSignal,
+      onEvent?: (event: unknown) => void,
+      onOpen?: () => void,
+    ) => {
+      const query = new URLSearchParams();
+      if (cursor) {
+        query.set("after", String(cursor.after));
+        query.set("conversation_uid", cursor.conversation_uid);
+        query.set("generation", cursor.generation);
+      }
+      const suffix = query.size ? `?${query.toString()}` : "";
+      return streamSse(`/sessions/${encodeURIComponent(sessionId)}/stream${suffix}`, signal, onEvent, onOpen);
+    });
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => new Response(null, { status: 202 }));
+    const transport = { request, streamSse, streamChatEvents } as unknown as ChatTransport;
+    return { transport, request, streamSse, streamChatEvents, streams };
+  }
+
+  function make(options: { maxAttempts?: number; failedRetryMs?: number; outdatedRetryMs?: number; maxUnconfirmedGoalPolls?: number; goalReplyPollIntervalMs?: number } = {}) {
+    const fake = fakeTransport();
+    const store = new LiveChatStore(fake.transport, "s1", { retryBaseMs: 0, ...options });
+    stores.push(store);
+    return { ...fake, store };
+  }
+
+  /** Starts the store and opens its first connection. */
+  async function startOpen(store: LiveChatStore, streams: FakeStream[]): Promise<FakeStream> {
+    store.start();
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    streams[0].open();
+    return streams[0];
+  }
+
+  /** Lets a stray reconnect, if there were one, run before a check that nothing happened. */
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+  /** The next history request stays open until the test answers it with a page. */
+  function holdHistory(request: ReturnType<typeof fakeTransport>["request"]) {
+    let respond!: (response: Response) => void;
+    request.mockImplementationOnce(() => new Promise<Response>((resolve) => { respond = resolve; }));
+    return (rows: ChatRow[], older: string | null) =>
+      respond(new Response(JSON.stringify({ rows, older }), { status: 200 }));
+  }
+
+  /** The next request stays open until the test answers it with a response. */
+  function holdRequest(request: ReturnType<typeof fakeTransport>["request"]) {
+    let answer!: (response: Response) => void;
+    request.mockImplementationOnce(() => new Promise<Response>((resolve) => { answer = resolve; }));
+    return (response: Response) => answer(response);
+  }
+
+  it("start() with no snapshot opens /sessions/s1/stream with no after parameter", async () => {
+    const { store, streams } = make();
+    store.start();
+    await vi.waitFor(() => expect(streams.map((stream) => stream.path)).toEqual(["/sessions/s1/stream"]));
+    expect(store.connection).toBe("connecting");
+  });
+
+  it("after a snapshot with next_seq 5, a dropped connection reconnects with the full stream cursor", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    first.drop();
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream?after=4&conversation_uid=conv-1&generation=daemon-1");
+  });
+
+  it("a normal end of the stream also reconnects, with after", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    first.finish();
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream?after=4&conversation_uid=conv-1&generation=daemon-1");
+  });
+
+  it("a same-conversation new-generation snapshot resets seq and reconnects with its generation", async () => {
+    const { store, streams, streamChatEvents } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(101, [row("old")], { generation: "daemon-old" }));
+    first.drop();
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streamChatEvents.mock.calls[1][1]).toEqual({
+      after: 100, conversation_uid: CONV, generation: "daemon-old",
+    });
+
+    streams[1].open();
+    streams[1].emit(snapshot(5, [row("new")], { generation: "daemon-new" }));
+    streams[1].drop();
+    await vi.waitFor(() => expect(streams).toHaveLength(3));
+    expect(store.rows.map((item) => item.id)).toEqual(["new"]);
+    expect(streamChatEvents.mock.calls[2][1]).toEqual({
+      after: 4, conversation_uid: CONV, generation: "daemon-new",
+    });
+  });
+
+  it("a seq gap resyncs: the next connect has no after, and rows stay visible until the next snapshot replaces them", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    first.emit(streamEvent(7, "row.upsert", row("r2", "two")));
+    expect(first.signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+    streams[1].open();
+    streams[1].emit(snapshot(8, [row("r3", "three")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r3"]);
+  });
+
+  it("stops and reports outdated when the agent predates the chat stream (426)", async () => {
+    const { store, streamChatEvents } = make({ maxAttempts: 5 });
+    streamChatEvents.mockImplementation(() => Promise.reject(new ApiError("older agent", 426, null)));
+    store.start();
+    await vi.waitFor(() => expect(store.connection).toBe("outdated"));
+    await settle();
+    expect(streamChatEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("an outdated chat checks again and goes live once the agent restarts on current code", async () => {
+    const { store, streams, streamChatEvents } = make({ outdatedRetryMs: 0 });
+    streamChatEvents.mockImplementationOnce(() => Promise.reject(new ApiError("older agent", 426, null)));
+    const seen: string[] = [];
+    store.subscribe(() => { if (seen.at(-1) !== store.connection) seen.push(store.connection); });
+    store.start();
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    streams[0].open();
+    expect(store.connection).toBe("live");
+    expect(seen).toEqual(["connecting", "outdated", "live"]);
+  });
+
+  it("fails after repeated snapshots followed by drops", async () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    const { store, streams } = make({ maxAttempts: 3 });
+    store.start();
+    for (let i = 0; i < 3; i++) {
+      await vi.waitFor(() => expect(streams).toHaveLength(i + 1));
+      streams[i].open();
+      streams[i].emit(snapshot(5, [row("r1")]));
+      streams[i].drop();
+    }
+    await vi.waitFor(() => expect(store.connection).toBe("failed"));
+    clock.mockRestore();
+  });
+
+  it("continues reconnecting after sustained idle connections drop", async () => {
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    try {
+      const { store, streams } = make({ maxAttempts: 3 });
+      store.start();
+      for (let i = 0; i < 4; i++) {
+        await vi.waitFor(() => expect(streams).toHaveLength(i + 1));
+        streams[i].open();
+        streams[i].emit(snapshot(5, [row("r1")]));
+        now += 60_000;
+        streams[i].drop();
+      }
+      await vi.waitFor(() => expect(streams).toHaveLength(5));
+      expect(store.connection).toBe("connecting");
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("resyncs without after when the final data frame is malformed", async () => {
+    const api = new EngineApi();
+    const first = `data: ${JSON.stringify(snapshot(5, [row("r1")]))}\n\n: keepalive\n\ndata: {broken}\n\n`;
+    const request = vi.spyOn(api, "request").mockResolvedValueOnce(new Response(first))
+      .mockImplementation((_path, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      }));
+    const store = new LiveChatStore(api, "s1", { retryBaseMs: 0 });
+    stores.push(store);
+    store.start();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(request.mock.calls[1][0]).toBe("/sessions/s1/stream");
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("eight failed connects in a row set connection to failed; retry() connects again", async () => {
+    const { store, streams, streamSse } = make();
+    for (let attempt = 0; attempt < 8; attempt++) streamSse.mockRejectedValueOnce(new Error("refused"));
+    store.start();
+    await vi.waitFor(() => expect(store.connection).toBe("failed"));
+    expect(streamSse).toHaveBeenCalledTimes(8);
+    store.retry();
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    expect(streams[0].path).toBe("/sessions/s1/stream");
+    streams[0].open();
+    expect(store.connection).toBe("live");
+  });
+
+  it("a failed chat keeps checking and goes live once the engine is back, with no click", async () => {
+    const { store, streams, streamSse } = make({ maxAttempts: 2, failedRetryMs: 0 });
+    for (let attempt = 0; attempt < 3; attempt++) streamSse.mockRejectedValueOnce(new Error("refused"));
+    const seen: string[] = [];
+    store.subscribe(() => { if (seen.at(-1) !== store.connection) seen.push(store.connection); });
+    store.start();
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    streams[0].open();
+    expect(store.connection).toBe("live");
+    // The failure stays on screen while it checks again: no flicker back to connecting.
+    expect(seen).toEqual(["connecting", "reconnecting", "connecting", "failed", "live"]);
+  });
+
+  it("dispose() aborts the open stream, makes no further connect, and the abort is not counted as a drop", async () => {
+    const { store, streams, streamSse } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    store.dispose();
+    expect(first.signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(first.settled).toBe(true));
+    await settle();
+    expect(streamSse).toHaveBeenCalledTimes(1);
+    expect(store.connection).toBe("live");
+  });
+
+  it("send POSTs the input JSON to /sessions/s1/inputs and resolves on a 202", async () => {
+    const { store, request } = make();
+    const input: InputRequest = { id: "web-a1", text: " hello " };
+    request.mockResolvedValueOnce(new Response(null, { status: 202 }));
+    await expect(store.send(input)).resolves.toBeUndefined();
+    expect(request).toHaveBeenCalledWith("/sessions/s1/inputs", { method: "POST", body: JSON.stringify(input) });
+  });
+
+  it("sends the private goal owner and keeps its completed reply local to the initiating UI", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-1",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"a".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    request.mockImplementation(async (path) => path.endsWith("/goal-replies/poll")
+      ? new Response(JSON.stringify({ status: "complete", success: true, message: "Build is healthy." }), { status: 200 })
+      : new Response(null, { status: 202 }));
+
+    await store.send(input);
+    await vi.waitFor(() => expect(store.getSnapshot()).toMatchObject({
+      goalReplies: { "web-goal-1": { state: "complete", success: true, message: "Build is healthy." } },
+    }));
+
+    expect(request).toHaveBeenCalledWith("/sessions/s1/inputs", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    expect(store.rows.map((candidate) => candidate.parts)).toEqual([[{ type: "text", text: input.text }]]);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
+  it("turns an expired private goal owner into a local failed outcome", async () => {
+    const { store, request, streams } = make();
+    const input = {
+      id: "web-goal-expired",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"e".repeat(32)}`,
+    } as InputRequest;
+    const stream = await startOpen(store, streams);
+    stream.emit(snapshot(2, [row(input.id, input.text, "input", "user")], {
+      inputs: [{ id: input.id, state: "ended", turn_id: "goal-turn", outcome: "completed" }],
+    }));
+    request.mockImplementation(async (path) => path.endsWith("/goal-replies/poll")
+      ? new Response(JSON.stringify({ status: "missing", message: "goal reply expired or is unavailable" }), { status: 200 })
+      : new Response(null, { status: 202 }));
+
+    await store.send(input);
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toMatchObject({
+      state: "complete",
+      success: false,
+      message: "goal reply expired or is unavailable",
+    }));
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(input.goal_reply_id);
+  });
+
+  it("keeps an ambiguous goal admission retryable when its first poll is missing", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-ambiguous",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"9".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let sendAttempts = 0;
+    let pollAttempts = 0;
+    request.mockImplementation(async (path, init) => {
+      if (path.endsWith("/inputs")) {
+        sendAttempts += 1;
+        expect(init?.body).toBe(JSON.stringify(input));
+        if (sendAttempts === 1) throw new Error("connection reset after admission");
+        return new Response(null, { status: 202 });
+      }
+      if (path.endsWith("/goal-replies/poll")) {
+        pollAttempts += 1;
+        expect(init?.body).toBe(JSON.stringify({ goal_reply_id: ownerId }));
+        return pollAttempts === 1
+          ? new Response(JSON.stringify({ status: "missing", message: "goal reply expired or is unavailable" }), { status: 200 })
+          : new Response(JSON.stringify({ status: "complete", success: true, message: "Build is healthy." }), { status: 200 });
+      }
+      return new Response(null, { status: 202 });
+    });
+
+    await expect(store.send(input)).rejects.toThrow("connection reset after admission");
+    await vi.waitFor(() => expect(pollAttempts).toBe(1));
+    expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "pending" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 15));
+    expect(sendAttempts).toBe(1);
+    expect(pollAttempts).toBe(1);
+
+    await store.send(input);
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
+      state: "complete",
+      success: true,
+      message: "Build is healthy.",
+    }));
+    expect(sendAttempts).toBe(2);
+    expect(pollAttempts).toBe(2);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
+  it("bounds missing replies for a confirmed queued goal and keeps status check poll-only", async () => {
+    const { store, request, streams } = make({ maxUnconfirmedGoalPolls: 2, goalReplyPollIntervalMs: 1 });
+    const input = {
+      id: "web-goal-confirmed-missing",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"c".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let sends = 0;
+    let polls = 0;
+    let allowRecovery = false;
+    request.mockImplementation(async (path) => {
+      if (path.endsWith("/inputs")) {
+        sends += 1;
+        return new Response(null, { status: 202 });
+      }
+      if (path.endsWith("/goal-replies/poll")) {
+        polls += 1;
+        if (polls <= 2 || !allowRecovery) return new Response(JSON.stringify({ status: "missing" }), { status: 200 });
+        if (polls === 3) return new Response(JSON.stringify({ status: "pending" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "complete", success: true, message: "Recovered after restart." }), { status: 200 });
+      }
+      return new Response(null, { status: 202 });
+    });
+
+    const stream = await startOpen(store, streams);
+    stream.emit(snapshot(2, [row(input.id, input.text, "input", "user")], {
+      inputs: [{ id: input.id, state: "queued", turn_id: null }],
+    }));
+    await store.send(input);
+
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "uncertain" }));
+    expect(store.getSnapshot().running).toBe(false);
+    expect(sends).toBe(1);
+    expect(polls).toBe(2);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+
+    allowRecovery = true;
+    store.checkGoalReply(input.id);
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
+      state: "complete",
+      success: true,
+      message: "Recovered after restart.",
+    }));
+    expect(sends).toBe(1);
+    expect(polls).toBe(4);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
+  it("reconciles an ambiguous goal admission when the stream later confirms its input", async () => {
+    const { store, request, streams } = make();
+    const input = {
+      id: "web-goal-stream-reconcile",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"7".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let sends = 0;
+    let polls = 0;
+    request.mockImplementation(async (path, init) => {
+      if (path.endsWith("/inputs")) {
+        sends += 1;
+        expect(init?.body).toBe(JSON.stringify(input));
+        throw new Error("connection reset after admission");
+      }
+      if (path.endsWith("/goal-replies/poll")) {
+        polls += 1;
+        expect(init?.body).toBe(JSON.stringify({ goal_reply_id: ownerId }));
+        return polls === 1
+          ? new Response(JSON.stringify({ status: "missing" }), { status: 200 })
+          : new Response(JSON.stringify({ status: "complete", success: true, message: "Recovered." }), { status: 200 });
+      }
+      return new Response(null, { status: 202 });
+    });
+    await expect(store.send(input)).rejects.toThrow("connection reset after admission");
+    await vi.waitFor(() => expect(polls).toBe(1));
+    expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "pending" });
+
+    // The input.state event may have passed while this client was disconnected.
+    // A later snapshot must recover the admission and restart the private poll.
+    const stream = await startOpen(store, streams);
+    stream.emit(snapshot(10, [row(input.id, input.text, "input", "user")], {
+      inputs: [{ id: input.id, state: "queued", turn_id: null }],
+    }));
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
+      state: "complete",
+      success: true,
+      message: "Recovered.",
+    }));
+
+    expect(sends).toBe(1);
+    expect(polls).toBe(2);
+    expect(store.getSnapshot().running).toBe(false);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
+  it("bounds unresolved polling and keeps status check recoverable after a rejected retry", async () => {
+    const { store, request } = make({ maxUnconfirmedGoalPolls: 2, goalReplyPollIntervalMs: 1 });
+    const input = {
+      id: "web-goal-unresolved",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"8".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let sends = 0;
+    let polls = 0;
+    request.mockImplementation(async (path) => {
+      if (path.endsWith("/inputs")) {
+        sends += 1;
+        return sends === 1
+          ? Promise.reject(new Error("connection reset after admission"))
+          : new Response(null, { status: 400 });
+      }
+      if (path.endsWith("/goal-replies/poll")) {
+        polls += 1;
+        if (polls <= 2) return new Response(JSON.stringify({ status: "missing" }), { status: 200 });
+        if (polls === 3) return new Response(JSON.stringify({ status: "pending" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "complete", success: true, message: "Found later." }), { status: 200 });
+      }
+      return new Response(null, { status: 202 });
+    });
+
+    await expect(store.send(input)).rejects.toThrow("connection reset after admission");
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "uncertain" }));
+    expect(store.getSnapshot().running).toBe(false);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+
+    await expect(store.send(input)).rejects.toThrow("send failed: 400");
+    expect(store.getSnapshot().goalReplies[input.id]).toEqual({ state: "uncertain" });
+    expect(store.getSnapshot().running).toBe(false);
+
+    store.checkGoalReply(input.id);
+    await vi.waitFor(() => expect(store.getSnapshot().goalReplies[input.id]).toEqual({
+      state: "complete",
+      success: true,
+      message: "Found later.",
+    }));
+    expect(sends).toBe(2);
+    expect(polls).toBe(4);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(ownerId);
+  });
+
+  it("stops an active goal only through its private owner id", async () => {
+    const { store, request, streams } = make();
+    const input = {
+      id: "web-goal-active",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"b".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    request.mockImplementation(async (path) => path.endsWith("/goal-replies/poll")
+      ? new Response(JSON.stringify({ status: "pending" }), { status: 200 })
+      : path.endsWith("/cancel-owned")
+        ? new Response(JSON.stringify({ cancelled: true }), { status: 200 })
+        : new Response(null, { status: 202 }));
+    await store.send(input);
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row(input.id, input.text, "input", "user")], {
+      inputs: [{ id: input.id, state: "started", turn_id: "goal-turn" }],
+      turns: [{ turn_id: "goal-turn", state: "running", input_ids: [input.id] }],
+    }));
+
+    await store.stop();
+
+    expect(request).toHaveBeenCalledWith("/sessions/s1/cancel-owned", {
+      method: "POST",
+      body: JSON.stringify({ request_id: ownerId }),
+    });
+    expect(request).not.toHaveBeenCalledWith("/sessions/s1/cancel", { method: "POST" });
+  });
+
+  it("keeps a private goal stoppable before any shared turn event arrives", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-private-only",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"d".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    request.mockImplementation(async (path) => path.endsWith("/goal-replies/poll")
+      ? new Response(JSON.stringify({ status: "pending" }), { status: 200 })
+      : path.endsWith("/cancel-owned")
+        ? new Response(JSON.stringify({ ok: true, cancelled: true }), { status: 200 })
+        : new Response(null, { status: 202 }));
+
+    await store.send(input);
+    await vi.waitFor(() => expect(store.getSnapshot().running).toBe(true));
+    await store.stop();
+
+    expect(request).toHaveBeenCalledWith("/sessions/s1/cancel-owned", {
+      method: "POST",
+      body: JSON.stringify({ request_id: ownerId }),
+    });
+  });
+
+  it("exposes owner-scoped Stop while goal input admission is still in flight", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-admission",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"f".repeat(32)}`,
+    } as InputRequest;
+    const ownerId = (input as InputRequest & { goal_reply_id: string }).goal_reply_id;
+    let resolveAdmission!: (response: Response) => void;
+    request.mockImplementation(async (path) => {
+      if (path.endsWith("/inputs")) return new Promise<Response>((resolve) => { resolveAdmission = resolve; });
+      if (path.endsWith("/cancel-owned")) return new Response(JSON.stringify({ ok: true, cancelled: true }), { status: 200 });
+      return new Response(null, { status: 202 });
+    });
+
+    const sending = store.send(input);
+    await vi.waitFor(() => expect(resolveAdmission).toBeDefined());
+    expect(store.getSnapshot().running).toBe(true);
+    await store.stop();
+    resolveAdmission(new Response(null, { status: 202 }));
+    await sending;
+
+    expect(request).toHaveBeenCalledWith("/sessions/s1/cancel-owned", {
+      method: "POST",
+      body: JSON.stringify({ request_id: ownerId }),
+    });
+  });
+
+  it("aborts private goal polling on disposal and ignores a late reply", async () => {
+    const { store, request } = make();
+    const input = {
+      id: "web-goal-dispose",
+      text: "/goal inspect the build",
+      goal_reply_id: `goal-${"c".repeat(32)}`,
+    } as InputRequest;
+    let resolvePoll!: (response: Response) => void;
+    let pollSignal: AbortSignal | undefined;
+    request.mockImplementation(async (path, init) => {
+      if (!path.endsWith("/goal-replies/poll")) return new Response(null, { status: 202 });
+      pollSignal = init?.signal as AbortSignal | undefined;
+      return new Promise<Response>((resolve) => { resolvePoll = resolve; });
+    });
+    const changed = vi.fn();
+    store.subscribe(changed);
+
+    await store.send(input);
+    await vi.waitFor(() => expect(pollSignal).toBeDefined());
+    store.dispose();
+    expect(pollSignal?.aborted).toBe(true);
+
+    resolvePoll(new Response(JSON.stringify({ status: "complete", success: true, message: "late" }), { status: 200 }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(JSON.stringify(store.getSnapshot())).not.toContain("late");
+  });
+
+  it("send throws when the POST answers 500", async () => {
+    const { store, request } = make();
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "web-a1", text: "hello" })).rejects.toThrow("send failed: 500");
+  });
+
+  it("cancel POSTs to /sessions/s1/inputs/<encoded input id>/cancel", async () => {
+    const { store, request } = make();
+    await store.cancel("web/a 1");
+    expect(request).toHaveBeenCalledWith("/sessions/s1/inputs/web%2Fa%201/cancel", { method: "POST" });
+  });
+
+  it("stop POSTs to /sessions/s1/cancel", async () => {
+    const { store, request } = make();
+    await store.stop();
+    expect(request).toHaveBeenCalledWith("/sessions/s1/cancel", { method: "POST" });
+  });
+
+  it("loadOlder GETs /sessions/s1/rows?before=<encoded cursor>&limit=50, prepends rows not already held, and takes the returned older cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one"), row("r2", "two")], { older: "cursor/1 x" }));
+    request.mockResolvedValueOnce(
+      new Response(JSON.stringify({ rows: [row("r0", "zero"), row("r1", "changed")], older: "cursor-0" }), {
+        status: 200,
+      }),
+    );
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=cursor%2F1%20x&limit=50");
+    expect(store.rows.map((r) => r.id)).toEqual(["r0", "r1", "r2"]);
+    expect(store.rows[1]).toEqual(row("r1", "one"));
+    expect(store.hasEarlier).toBe(true);
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=cursor-0&limit=50");
+    expect(store.hasEarlier).toBe(false);
+  });
+
+  it("loadOlder does nothing when there is no cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    await store.loadOlder();
+    expect(request).not.toHaveBeenCalled();
+    expect(store.hasEarlier).toBe(false);
+  });
+
+  it("loadOlder on a 409 answer resyncs", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(first.signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("loadOlder resyncs when the transport throws a 409, as EngineApi.request does for any non-2xx", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockRejectedValueOnce(Object.assign(new Error("stale cursor"), { status: 409 }));
+    await store.loadOlder();
+    expect(first.signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+  });
+
+  it("getSnapshot returns the same object until something changes; each applied event calls each listener once", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    const listenerA = vi.fn();
+    const listenerB = vi.fn();
+    store.subscribe(listenerA);
+    store.subscribe(listenerB);
+    const { getSnapshot } = store;
+    const before = getSnapshot();
+    expect(store.getSnapshot()).toBe(before);
+    first.emit(snapshot(5, [row("r1")]));
+    expect(listenerA).toHaveBeenCalledTimes(1);
+    expect(listenerB).toHaveBeenCalledTimes(1);
+    const after = getSnapshot();
+    expect(after).not.toBe(before);
+    expect(after.rows.map((r) => r.id)).toEqual(["r1"]);
+    first.emit(streamEvent(5, "row.upsert", row("r2")));
+    expect(listenerA).toHaveBeenCalledTimes(2);
+    expect(listenerB).toHaveBeenCalledTimes(2);
+    const latest = getSnapshot();
+    expect(latest).not.toBe(after);
+    first.emit(streamEvent(5, "row.upsert", row("r2")));
+    expect(listenerA).toHaveBeenCalledTimes(2);
+    expect(getSnapshot()).toBe(latest);
+  });
+
+  it("events from a superseded connection are ignored", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    first.emit(streamEvent(7, "row.upsert", row("r2")));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(snapshot(10, [row("b1")]));
+    const listener = vi.fn();
+    store.subscribe(listener);
+    first.emit(streamEvent(10, "row.upsert", row("stale")));
+    expect(listener).not.toHaveBeenCalled();
+    expect(store.rows.map((r) => r.id)).toEqual(["b1"]);
+    await settle();
+    expect(streams).toHaveLength(2);
+    expect(streams[1].signal.aborted).toBe(false);
+    expect(store.connection).toBe("live");
+  });
+
+  it("frames already buffered on a connection that a resync aborted are ignored", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    first.emit(streamEvent(7, "row.upsert", row("r2")));
+    first.emit(snapshot(9, [row("stale")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+  });
+
+  it("sendNow POSTs an empty JSON body to /sessions/s1/inputs/<encoded input id>/send-now and changes no rows or inputs", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    const queued: InputInfo = { id: "web/a 1", state: "queued", turn_id: null };
+    first.emit(snapshot(5, [row("r1", "one")], { inputs: [queued] }));
+    const rows = store.rows;
+    const inputs = store.inputs;
+    const listener = vi.fn();
+    store.subscribe(listener);
+    await store.sendNow("web/a 1");
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/inputs/web%2Fa%201/send-now", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(store.rows).toBe(rows);
+    expect(store.inputs).toBe(inputs);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("sendNow throws when the POST answers 500", async () => {
+    const { store, request } = make();
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.sendNow("web-a1")).rejects.toThrow("send-now failed: 500");
+  });
+
+  it("olderStatus is idle before any snapshot, and complete when the snapshot has no older cursor", async () => {
+    const { store, streams } = make();
+    expect(store.olderStatus).toBe("idle");
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")]));
+    expect(store.olderStatus).toBe("complete");
+  });
+
+  it("olderStatus moves idle, loading, complete on a last page, and each change calls the listeners", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    expect(store.olderStatus).toBe("idle");
+    const seen: string[] = [];
+    store.subscribe(() => seen.push(store.olderStatus));
+    let answer!: (response: Response) => void;
+    request.mockImplementationOnce(() => new Promise<Response>((resolve) => {
+      answer = resolve;
+    }));
+    const loading = store.loadOlder();
+    expect(store.olderStatus).toBe("loading");
+    answer(new Response(JSON.stringify({ rows: [row("r0", "zero")], older: null }), { status: 200 }));
+    await loading;
+    expect(store.olderStatus).toBe("complete");
+    expect(seen).toEqual(["loading", "complete"]);
+  });
+
+  it("olderStatus moves idle, loading, failed on an error, then loading, idle on a retry that returns more rows", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const seen: string[] = [];
+    store.subscribe(() => seen.push(store.olderStatus));
+    request.mockRejectedValueOnce(new Error("network down"));
+    const failed = store.loadOlder();
+    expect(store.olderStatus).toBe("loading");
+    await expect(failed).rejects.toThrow("network down");
+    expect(store.olderStatus).toBe("failed");
+    request.mockResolvedValueOnce(
+      new Response(JSON.stringify({ rows: [row("r0", "zero")], older: "c0" }), { status: 200 }),
+    );
+    const retry = store.loadOlder();
+    expect(store.olderStatus).toBe("loading");
+    await retry;
+    expect(store.olderStatus).toBe("idle");
+    expect(store.rows.map((r) => r.id)).toEqual(["r0", "r1"]);
+    expect(seen).toEqual(["loading", "failed", "loading", "idle"]);
+  });
+
+  it("olderStatus is failed after a history answer that is not ok", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "c1" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.loadOlder()).rejects.toThrow("history failed: 500");
+    expect(store.olderStatus).toBe("failed");
+  });
+
+  it("olderStatus is idle after a 409 answer, which resyncs and leaves the status to the next snapshot", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(store.olderStatus).toBe("idle");
+  });
+
+  it("after a 409 answer, hasEarlier is false until a snapshot restores the cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(store.hasEarlier).toBe(false);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(snapshot(8, [row("r3", "three")], { older: "fresh" }));
+    expect(store.hasEarlier).toBe(true);
+  });
+
+  it("a second loadOlder after a 409 answer sends no request, so the reconnect stream stays open", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1")], { older: "stale" }));
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    // If the stale cursor were requested again, the daemon would answer 409 again.
+    request.mockResolvedValueOnce(new Response(null, { status: 409 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(streams).toHaveLength(2);
+    expect(streams[1].signal.aborted).toBe(false);
+  });
+
+  it("discards an in-flight older page after a stream deletion and retries the same cursor", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one"), row("r2", "two")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(5, "row.delete", { id: "r1" }));
+    respond([row("r0", "zero"), row("r1", "stale")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["r2"]);
+    expect(store.olderStatus).toBe("idle");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [row("r0", "zero")], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c1&limit=50");
+    expect(store.rows.map((r) => r.id)).toEqual(["r0", "r2"]);
+    expect(store.olderStatus).toBe("complete");
+  });
+
+  it("a history page that finishes after a resync and a new snapshot is dropped: its rows and cursor do not join the new window", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    // A seq gap resyncs the stream while the page is in flight, then a snapshot replaces the window.
+    first.emit(streamEvent(7, "row.upsert", row("r2", "two")));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(snapshot(9, [row("r9", "nine")], { older: "c9" }));
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["r9"]);
+    expect(store.olderStatus).toBe("idle");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c9&limit=50");
+  });
+
+  it("a history page that finishes after a resync and before the next snapshot is dropped, and paging goes back to idle", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(7, "row.upsert", row("r2", "two")));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["r1"]);
+    expect(store.olderStatus).toBe("idle");
+  });
+
+  it("a history page that finishes after the conversation changed is dropped", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(5, "row.upsert", row("x1", "other"), "conv-2"));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(
+      streamEvent(1, "snapshot", { rows: [row("c2-1", "new")], next_seq: 3, older: "c2", turns: [], inputs: [] }, "conv-2"),
+    );
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["c2-1"]);
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c2&limit=50");
+  });
+
+  it("a history page that finishes after a snapshot on the open connection is dropped", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(snapshot(9, [row("r9", "nine")], { older: "c9" }));
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["r9"]);
+    expect(store.olderStatus).toBe("idle");
+  });
+
+  it("only the newest history request can update the rows, cursor, or paging status", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+
+    const respondFirst = holdHistory(request);
+    const firstLoad = store.loadOlder();
+    const respondSecond = holdHistory(request);
+    const secondLoad = store.loadOlder();
+    respondSecond([row("r-1", "newer page")], "c-1");
+    await secondLoad;
+
+    const failThird = holdRequest(request);
+    const thirdLoad = store.loadOlder();
+    respondFirst([row("r0", "stale page")], "c0");
+    await firstLoad;
+    const rowsWhileThirdLoads = store.rows.map((item) => item.id);
+    const statusWhileThirdLoads = store.olderStatus;
+
+    failThird(new Response(null, { status: 500 }));
+    await expect(thirdLoad).rejects.toThrow("history failed: 500");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [], older: null }), { status: 200 }));
+    await store.loadOlder();
+
+    expect(rowsWhileThirdLoads).toEqual(["r-1", "r1"]);
+    expect(statusWhileThirdLoads).toBe("loading");
+    expect(request).toHaveBeenLastCalledWith("/sessions/s1/rows?before=c-1&limit=50");
+  });
+
+  it("a replace while an older page is in flight drops that page: its rows do not join the replacement window", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    first.emit(streamEvent(5, "replace", { rows: [row("m1", "Compacted", "marker", "system")] }));
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["m1"]);
+  });
+
+  it("a replace resets the paging state as a snapshot does: olderStatus leaves loading when the window is replaced", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")], { older: "c1" }));
+    const respond = holdHistory(request);
+    const loading = store.loadOlder();
+    expect(store.olderStatus).toBe("loading");
+    first.emit(streamEvent(5, "replace", { rows: [row("m1", "Compacted", "marker", "system")] }));
+    expect(store.olderStatus).toBe("idle");
+    respond([row("r0", "zero")], "c0");
+    await loading;
+    expect(store.rows.map((r) => r.id)).toEqual(["m1"]);
+    expect(store.olderStatus).toBe("idle");
+  });
+
+  it("resnapshots a truncated replacement without blanking the current rows, then pages its older history", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    const visibleBeforeCompaction = row("before-compaction", "Still visible during refresh");
+    first.emit(snapshot(2, [visibleBeforeCompaction]));
+    const visibleCounts: number[] = [store.rows.length];
+    const unsubscribe = store.subscribe(() => visibleCounts.push(store.rows.length));
+
+    // The event carries only the 2,000-row replay window. A fresh snapshot is
+    // needed to learn its older-page cursor for the 2,400-row transcript.
+    const replacementWindow = Array.from({ length: 2000 }, (_, index) =>
+      row(`row-${index + 400}`, `Row ${index + 400}`),
+    );
+    first.emit(streamEvent(2, "replace", { rows: replacementWindow }));
+
+    expect(first.signal.aborted).toBe(true);
+    expect(store.rows).toEqual(replacementWindow);
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    expect(streams[1].path).toBe("/sessions/s1/stream");
+    expect(store.rows).toEqual(replacementWindow);
+
+    streams[1].open();
+    streams[1].emit(snapshot(3, replacementWindow, { older: "cursor:400" }));
+    expect(store.rows).toEqual(replacementWindow);
+    expect(store.hasEarlier).toBe(true);
+
+    for (let start = 350; start >= 0; start -= 50) {
+      const rows = Array.from({ length: 50 }, (_, index) =>
+        row(`row-${start + index}`, `Row ${start + index}`),
+      );
+      request.mockResolvedValueOnce(new Response(JSON.stringify({
+        rows,
+        older: start > 0 ? `cursor:${start}` : null,
+      }), { status: 200 }));
+      await store.loadOlder();
+    }
+
+    expect(request).toHaveBeenCalledTimes(8);
+    expect(request).toHaveBeenNthCalledWith(1, "/sessions/s1/rows?before=cursor%3A400&limit=50");
+    expect(store.rows.map((item) => item.id)).toEqual(
+      Array.from({ length: 2400 }, (_, index) => `row-${index}`),
+    );
+    expect(store.hasEarlier).toBe(false);
+    expect(visibleCounts).not.toContain(0);
+    expect(visibleCounts).toContain(1);
+    expect(visibleCounts).toContain(2000);
+    unsubscribe();
+  });
+
+  it("a snapshot with no older cursor has no earlier page: hasEarlier is false, paging is complete, and loadOlder sends nothing", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    // The shared contract requires the field, using null when there are no older rows.
+    first.emit(snapshot(5, [row("r1")]));
+    expect(store.hasEarlier).toBe(false);
+    expect(store.olderStatus).toBe("complete");
+    await store.loadOlder();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("send shows the input as a pending row at once, before the POST answers", async () => {
+    const { store, request } = make();
+    const answer = holdRequest(request);
+    const sent = store.send({ id: "web-a1", text: "hello" });
+    expect(store.rows).toEqual([
+      expect.objectContaining({
+        id: "web-a1",
+        kind: "input",
+        role: "user",
+        turn_id: null,
+        status: "pending",
+        parts: [{ type: "text", text: "hello" }],
+      }),
+    ]);
+    answer(new Response(null, { status: 202 }));
+    await sent;
+  });
+
+  it("send keeps image attachments visible on its optimistic row", async () => {
+    const { store, request } = make();
+    const answer = holdRequest(request);
+    const attachment = {
+      name: "photo.png",
+      content_type: "image/png",
+      data_url: "data:image/png;base64,cGhvdG8=",
+    };
+    const sent = store.send({ id: "web-image", text: "", attachments: [attachment] });
+    expect(store.rows[0]?.parts).toEqual([
+      { type: "text", text: "" },
+      { type: "image", url: attachment.data_url },
+    ]);
+    answer(new Response(null, { status: 202 }));
+    await sent;
+  });
+
+  it("the stream's row with the pending row's id replaces it in place: one row, no second bubble", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    await store.send({ id: "web-a1", text: "hello" });
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    first.emit(streamEvent(5, "row.upsert", row("web-a1", "hello", "input", "user")));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    expect(store.rows[1]).toEqual(row("web-a1", "hello", "input", "user"));
+  });
+
+  it("orders interleaved clients by stream delivery", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    await store.send({ id: "web-a1", text: "hello" });
+    first.emit(streamEvent(5, "row.upsert", row("other", "other", "input", "user")));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "other", "web-a1"]);
+    first.emit(streamEvent(6, "row.upsert", row("web-a1", "hello", "input", "user")));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "other", "web-a1"]);
+  });
+
+  it("reconciles an accepted local send found in an older history page", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("recent")], { older: "cursor" }));
+    await store.send({ id: "web-a1", text: "hello" });
+    const accepted = row("web-a1", "hello", "input", "user");
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ rows: [accepted], older: null }), { status: 200 }));
+    await store.loadOlder();
+    expect(store.rows).toEqual([accepted, row("recent")]);
+  });
+
+  it("a snapshot that contains the pending row's id takes the window's row in its place", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    await store.send({ id: "web-a1", text: "hello" });
+    first.emit(snapshot(7, [row("r1", "one"), row("web-a1", "hello", "input", "user")]));
+    expect(store.rows).toEqual([row("r1", "one"), row("web-a1", "hello", "input", "user")]);
+  });
+
+  it("clears old local sends after resync to a different conversation and ignores their late POSTs", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("old")]));
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "failed", text: "old failed" })).rejects.toThrow();
+    const oldAnswer = holdRequest(request);
+    const oldSend = store.send({ id: "shared", text: "old pending" });
+    first.emit(streamEvent(7, "row.upsert", row("gap")));
+    await vi.waitFor(() => expect(streams).toHaveLength(2));
+    streams[1].open();
+    streams[1].emit(streamEvent(1, "snapshot", {
+      rows: [row("new")], next_seq: 2, older: null, turns: [], inputs: [],
+    }, "conv-2"));
+    expect(store.rows).toEqual([row("new")]);
+    const newAnswer = holdRequest(request);
+    const newSend = store.send({ id: "shared", text: "new pending" });
+    oldAnswer(new Response(null, { status: 500 }));
+    await expect(oldSend).rejects.toThrow();
+    expect(store.rows[1]).toMatchObject({ id: "shared", status: "pending" });
+    newAnswer(new Response(null, { status: 202 }));
+    await newSend;
+  });
+
+  it("a snapshot without the pending row's id keeps the row while its POST is in flight", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    const answer = holdRequest(request);
+    const sent = store.send({ id: "web-a1", text: "hello" });
+    first.emit(snapshot(7, [row("r1", "one")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    answer(new Response(null, { status: 202 }));
+    await sent;
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+  });
+
+  it("once the POST has succeeded, a snapshot without the pending row's id retains it", async () => {
+    const { store, streams } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    await store.send({ id: "web-a1", text: "hello" });
+    first.emit(snapshot(7, [row("r1", "one")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    first.emit(streamEvent(7, "row.upsert", row("web-a1", "hello", "input", "user")));
+    expect(store.rows).toEqual([row("r1", "one"), row("web-a1", "hello", "input", "user")]);
+  });
+
+  it("a replace that lacks the pending row's id keeps the row while its POST is in flight", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    const answer = holdRequest(request);
+    const sent = store.send({ id: "web-a1", text: "hello" });
+    first.emit(streamEvent(5, "replace", { rows: [row("m1", "Compacted", "marker", "system")] }));
+    expect(store.rows.map((r) => r.id)).toEqual(["m1", "web-a1"]);
+    answer(new Response(null, { status: 202 }));
+    await sent;
+  });
+
+  it("a failed POST keeps the row as failed, so the text stays on screen, and send rejects", async () => {
+    const { store, request } = make();
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "web-a1", text: "hello" })).rejects.toThrow("send failed: 500");
+    request.mockRejectedValueOnce(new Error("network down"));
+    await expect(store.send({ id: "web-a2", text: "again" })).rejects.toThrow("network down");
+    expect(store.rows).toEqual([
+      expect.objectContaining({ id: "web-a1", status: "failed", parts: [{ type: "text", text: "hello" }] }),
+      expect.objectContaining({ id: "web-a2", status: "failed", parts: [{ type: "text", text: "again" }] }),
+    ]);
+  });
+
+  it("a failed row stays through a snapshot that lacks its id, so the text stays on screen", async () => {
+    const { store, streams, request } = make();
+    const first = await startOpen(store, streams);
+    first.emit(snapshot(5, [row("r1", "one")]));
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "web-a1", text: "hello" })).rejects.toThrow("send failed: 500");
+    first.emit(snapshot(7, [row("r1", "one")]));
+    expect(store.rows.map((r) => r.id)).toEqual(["r1", "web-a1"]);
+    expect(store.rows[1].status).toBe("failed");
+  });
+
+  it("keeps an accepted send pending when a same-id resend fails", async () => {
+    const { store, request } = make();
+    const firstAnswer = holdRequest(request);
+    const first = store.send({ id: "web-a1", text: "hello" });
+    const secondAnswer = holdRequest(request);
+    const second = store.send({ id: "web-a1", text: "hello" });
+    firstAnswer(new Response(null, { status: 202 }));
+    await first;
+    secondAnswer(new Response(null, { status: 500 }));
+    await expect(second).rejects.toThrow("send failed: 500");
+    expect(store.rows).toEqual([expect.objectContaining({ id: "web-a1", status: "pending" })]);
+  });
+
+  it("sending again with the same id adds no second row; a resend after a failure is pending again", async () => {
+    const { store, request } = make();
+    await store.send({ id: "web-a1", text: "hello" });
+    await store.send({ id: "web-a1", text: "hello" });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(store.rows.map((r) => r.id)).toEqual(["web-a1"]);
+    request.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(store.send({ id: "web-b1", text: "more" })).rejects.toThrow("send failed: 500");
+    const answer = holdRequest(request);
+    const resend = store.send({ id: "web-b1", text: "more" });
+    expect(store.rows[1]).toMatchObject({ id: "web-b1", status: "pending" });
+    answer(new Response(null, { status: 202 }));
+    await resend;
+    expect(store.rows.map((r) => r.id)).toEqual(["web-a1", "web-b1"]);
+  });
+});

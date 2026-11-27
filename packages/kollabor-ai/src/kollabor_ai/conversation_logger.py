@@ -31,6 +31,19 @@ logger = logging.getLogger(__name__)
 _TIGHTEN_ENTRY_LIMIT = 4096
 
 
+
+def _row_metadata_value(metadata: dict, key: str):
+    """Read ``key`` from a saved row, as the chat stream reads it.
+
+    A daemon-queue admission row keeps its request id inside ``queue_handoff``
+    only; the chat stream already treats that as the row's request id (#1451).
+    """
+    if key == "request_id" and "request_id" not in metadata:
+        handoff = metadata.get("queue_handoff")
+        if isinstance(handoff, dict):
+            return handoff.get("request_id")
+    return metadata.get(key)
+
 class ConversationAppendRejected(RuntimeError):
     """A synchronous admission callback rejected a new durable row."""
 
@@ -1054,12 +1067,15 @@ class KollaborConversationLogger:
         *,
         expected_metadata: Dict[str, Any],
         updates: Dict[str, Any],
+        remove_metadata_keys: List[str] | tuple[str, ...] = (),
     ) -> bool:
-        """Atomically add metadata to one exact user row in the current log.
+        """Atomically update metadata on one exact user row in the current log.
 
         ACP assigns dispatch order when a prompt actually begins, after its
         admission row was written. The row UUID and expected identity prevent a
         delayed callback from modifying a reused request ID or another turn.
+        ``remove_metadata_keys`` supports lifecycle transitions that retire
+        private admission markers from the durable row.
         """
         if (
             not isinstance(message_uuid, str)
@@ -1068,6 +1084,12 @@ class KollaborConversationLogger:
             or not expected_metadata
             or not isinstance(updates, dict)
             or not updates
+            or not isinstance(remove_metadata_keys, (list, tuple))
+            or any(
+                not isinstance(key, str) or not key
+                for key in remove_metadata_keys
+            )
+            or set(remove_metadata_keys) & set(updates)
         ):
             return False
         try:
@@ -1083,6 +1105,7 @@ class KollaborConversationLogger:
                 message_uuid,
                 expected_metadata,
                 updates,
+                tuple(remove_metadata_keys),
             )
 
     async def reorder_native_queue_history(
@@ -1207,6 +1230,7 @@ class KollaborConversationLogger:
         message_uuid: str,
         expected_metadata: Dict[str, Any],
         updates: Dict[str, Any],
+        remove_metadata_keys: tuple[str, ...],
     ) -> bool:
         """Rewrite one exact JSONL row under the shared rewrite/write locks."""
         temp_path: Path | None = None
@@ -1242,7 +1266,7 @@ class KollaborConversationLogger:
                                 else None
                             )
                             if not isinstance(metadata, dict) or any(
-                                metadata.get(key) != value
+                                _row_metadata_value(metadata, key) != value
                                 for key, value in expected_metadata.items()
                             ):
                                 return False
@@ -1254,8 +1278,10 @@ class KollaborConversationLogger:
                             changed = any(
                                 metadata.get(key) != value
                                 for key, value in updates.items()
-                            )
+                            ) or any(key in metadata for key in remove_metadata_keys)
                             metadata.update(deepcopy(updates))
+                            for key in remove_metadata_keys:
+                                metadata.pop(key, None)
                             output.append((json.dumps(record) + "\n").encode())
                     if not found:
                         return False
@@ -1298,6 +1324,8 @@ class KollaborConversationLogger:
         thinking_content: Optional[List[str]] = None,
         tool_calls: Optional[List[Dict]] = None,
         provider_reasoning: Optional[Dict[str, Any]] = None,
+        display_content: Optional[str] = None,
+        turn_id: Optional[str] = None,
         display_metadata: Optional[Dict[str, Any]] = None,
         voice_turn_id: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -1313,6 +1341,11 @@ class KollaborConversationLogger:
             tool_calls: Optional list of tool call dicts with id, name, input keys
             provider_reasoning: Provider-native reasoning artifacts, stored
                 verbatim so a resumed session can hand them back to the model
+            display_content: Optional visible text for XML tool replies. An
+                empty string is meaningful: an XML-only assistant response
+                should not replay its raw tool tags as chat text.
+            turn_id: Stable stream identity for the assistant turn, used to
+                reconstruct the same transcript row identities after resume.
             display_metadata: ACP cards, updates and stop reason for replay;
                 excluded from native provider tool-call reconstruction
             voice_turn_id: The voice turn a reply belongs to, so a talk-over
@@ -1385,6 +1418,10 @@ class KollaborConversationLogger:
 
         if provider_reasoning:
             message["provider_reasoning"] = provider_reasoning
+        if display_content is not None:
+            message["display_content"] = display_content
+        if isinstance(turn_id, str) and turn_id:
+            message["turn_id"] = turn_id
         if replay_metadata := _acp_display_metadata(display_metadata):
             message["display_metadata"] = replay_metadata
         if voice_turn_id:
@@ -1537,6 +1574,11 @@ class KollaborConversationLogger:
                     dropped[record["uuid"]] = record.get("parentUuid")
                 continue
             message["content"] = [*content, *calls]
+            if isinstance(record.get("display_content"), str):
+                # The display projection is independently persisted for XML
+                # replies. Keep it in step with a voice cut, including an
+                # intentionally empty value for an XML-only reply.
+                record["display_content"] = text or ""
         kept = []
         for record in records:
             if isinstance(record, dict):
@@ -1564,6 +1606,7 @@ class KollaborConversationLogger:
         subtype: str = "informational",
         tool_use_id: Optional[str] = None,
         tool_result: Optional[Dict[str, Any]] = None,
+        chat_stream_row: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Log system messages including hook outputs and tool calls."""
         message_uuid = str(uuid4())
@@ -1595,6 +1638,13 @@ class KollaborConversationLogger:
             # Display data travels beside the existing textual log. The
             # parent UUID and toolUseID bind it to its assistant's call.
             message["tool_result"] = tool_result
+        if chat_stream_row is not None:
+            if not isinstance(chat_stream_row, dict):
+                raise TypeError("chat stream row must be an object")
+            # This row is display-only persistence. ConversationManager reads
+            # it into its separate chat_stream_rows collection, never into the
+            # model-facing message history.
+            message["chat_stream_row"] = deepcopy(chat_stream_row)
 
         await self._append_to_jsonl(message)
         return message_uuid

@@ -1569,3 +1569,10 @@ or changes to TaskLedger semantics.
   with isolated probes; no live goal implementation or paid provider
   execution has been tested. The cited line numbers are snapshots of
   2026-09-20 and will drift.
+
+
+### Native goal stream association
+
+After a native goal attempt wins admission, the driver persists its stream turn ID on that attempt before emitting the running turn. One stream turn covers the attempt's continuation calls and carries the immutable full goal and attempt IDs in its origin through completion, replay and snapshots, as specified in `webui-chat-single-stream.md`. A yielded attempt has no stream turn. ACP goal execution remains unavailable until its evidence and spend can be verified.
+
+The authenticated engine `GET /sessions/{id}/goal` exposes the current conversation’s persisted unfinished goal and latest unfinished attempt, including full identifiers, status/state and bound turn ID, through the daemon state RPC. Its response, isolation and failure semantics are defined in `webui-chat-single-stream.md`; it does not expose the objective or require access to daemon-local SQLite.

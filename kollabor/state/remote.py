@@ -158,6 +158,12 @@ class RemoteStateService(StateService):
             )
         return ConversationSnapshot.from_dict(result)
 
+    async def get_goal_state(self) -> dict:
+        result = await self._rpc.call("state.get_goal_state", {}, timeout=self._timeout)
+        if not isinstance(result, dict):
+            raise TypeError("state.get_goal_state expected dict")
+        return result
+
     async def goal_command(self, text: str) -> dict:
         """Execute one /goal command daemon-side (goal spec 5 + 10.2).
 
