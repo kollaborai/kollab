@@ -57,8 +57,9 @@ def _install(tmp_path, monkeypatch, source):
 
 
 async def _ready(path):
+    # Existence is not readiness: a writer creates the marker before its content lands.
     async with asyncio.timeout(5):
-        while not path.exists():
+        while not (path.is_file() and path.stat().st_size):
             await asyncio.sleep(0.01)
 
 
