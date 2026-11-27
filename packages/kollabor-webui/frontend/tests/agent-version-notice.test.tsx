@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, isAgentTooOld } from "@/api";
 import { DaemonNotice } from "@/components/code/DaemonNotice";
-import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
+import { AgentVersionNotice, agentVersionNotice, versionNoticeKey } from "@/components/shell/AgentVersionNotice";
 import { TerminalView } from "@/components/terminal/TerminalView";
 
 const terminalMock = vi.hoisted(() => ({ errorCode: "daemon_outdated" }));
@@ -52,6 +52,13 @@ describe("agentVersionNotice", () => {
       .toMatchObject({ kind: "button" });
     expect(agentVersionNotice({ engineVersion: "0.21.0", agent: { ...agent, version: "0.21.0" }, restartAgents: false, chatOutdated: true }))
       .toMatchObject({ kind: "unknown", name: "lapis" });
+  });
+
+  it("keys each chat's notice by session, and a 426 notice apart from a dismissed version notice (#1451 review)", () => {
+    expect(versionNoticeKey("s1", undefined, true)).not.toBe(versionNoticeKey("s2", undefined, true));
+    expect(versionNoticeKey("s1", "a1", true)).not.toBe(versionNoticeKey("s1", "a1", false));
+    expect(versionNoticeKey("s1", "a1", false)).toBe("s1|a1");
+    expect(versionNoticeKey(undefined, "a1", false)).toBe("");
   });
 
   it("never leaves an outdated chat without a notice (#1451 review)", () => {

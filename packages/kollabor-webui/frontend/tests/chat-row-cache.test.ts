@@ -92,6 +92,15 @@ describe("the saved conversation", () => {
     store.dispose();
   });
 
+  it("does not save an input still started or joined in a turn (#1451 review)", () => {
+    const kept = cacheableRows([
+      row("started", { kind: "input", role: "user", status: "started" }),
+      row("joined", { kind: "input", role: "user", status: "joined" }),
+      row("reply"),
+    ]);
+    expect(kept.map((item) => item.id)).toEqual(["reply"]);
+  });
+
   it("saves only settled rows: no prompt, queued or streaming row", () => {
     const kept = cacheableRows([
       row("input", { kind: "input", role: "user" }),
