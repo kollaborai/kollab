@@ -14,11 +14,10 @@ import logging
 import re
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from ..goal_image_scope import safe_goal_error_cause
-
 import httpx
 
-from ..message_content import redact_error_media, content_to_text, serialize_gemini_parts
+from ..goal_image_scope import safe_goal_error_cause
+from ..message_content import content_to_text, redact_error_media, serialize_gemini_parts
 from .base import LLMProvider
 from .errors import map_httpx_error
 from .gemini_transformer import (

@@ -495,7 +495,11 @@ def test_a_stream_gets_none_of_another_requests_output():
     assert not _foreign_output({"type": "token"}, mine)  # session-wide, or a daemon that tags nothing
     assert not _foreign_output({"type": "token", "request_ids": ["A"]}, set())  # a stream with no id
     prompt = _normalize_event(
-        {"type": "permission_request", "request_ids": ["A"], "details": {"tool_name": "terminal", "permission_id": "owner-A"}}
+        {
+            "type": "permission_request",
+            "request_ids": ["A"],
+            "details": {"tool_name": "terminal", "permission_id": "owner-A"},
+        }
     )
     assert prompt["request_ids"] == ["A"] and prompt["permission_id"] == "owner-A" and _foreign_output(prompt, mine)
     # Chalcedony on #554 round 5: a turn typed in the terminal names no request
@@ -565,10 +569,9 @@ async def test_an_old_turns_dropped_frame_fails_no_other_request(monkeypatch):
 async def test_a_request_id_inside_a_tool_frame_names_no_request(monkeypatch):
     # Tourmaline on #543 round 6: an oversized tool frame's input held a
     # request_id of its own, read before the turn's, so another request got the error.
+    import kollabor_rpc.transport
     from kollabor_tui.display_tap import DisplayTap, publish_semantic
     from kollabor_tui.turn_context import current_turn
-
-    import kollabor_rpc.transport
 
     monkeypatch.setattr(kollabor_rpc.transport, "LARGE_BUFFER_LIMIT", 1024)
     tap = DisplayTap()

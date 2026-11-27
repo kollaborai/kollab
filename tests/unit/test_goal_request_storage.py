@@ -5,9 +5,9 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from kollabor.state.goal_store import (
-    GoalAttachmentRequestNotFound,
     GoalAttachmentRequestCommitted,
     GoalAttachmentRequestConflict,
+    GoalAttachmentRequestNotFound,
     GoalStore,
     UnfinishedGoalExists,
 )
@@ -89,6 +89,7 @@ def test_same_request_has_a_receipt_even_after_goal_clear_and_restart(tmp_path):
 
 def test_concurrent_promotion_publishes_complete_shared_artifact(tmp_path):
     import base64
+
     from kollabor.goals.service import GoalService
 
     store = GoalStore(tmp_path / "goals.db")
@@ -105,6 +106,7 @@ def test_concurrent_promotion_publishes_complete_shared_artifact(tmp_path):
 
 def test_failed_publication_never_exposes_partial_artifact(tmp_path, monkeypatch):
     import os
+
     from kollabor.goals.service import GoalService
 
     store = GoalStore(tmp_path / "goals.db")

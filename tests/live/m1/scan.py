@@ -14,11 +14,15 @@
 The join code is only ever read from a pipe, compared, and replaced with
 "[join code]". It is never printed by scan/redact and never written to a file.
 """
+
 import os
 import re
 import sys
 
-ERR = re.compile(r"Traceback|ERROR|Failed executing|(?i:refus(?!e a route's)|denied|cannot(?! start work here)|unknown subcommand|not online|could not be delivered|\[warn\]|warning:)")
+ERR = re.compile(
+    r"Traceback|ERROR|Failed executing|(?i:refus(?!e a route's)|denied|cannot(?! start work here)|"
+    r"unknown subcommand|not online|could not be delivered|\[warn\]|warning:)"
+)
 # Environment, not the build: server has no `hostname` binary and its old global _base prompt runs it every turn.
 ENV_OK = re.compile(r"Failed to execute command 'hostname'")
 HEX64 = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{64}(?![0-9A-Za-z])")
@@ -86,7 +90,7 @@ if mode == "file":
         sys.exit(0)
     print(f"size={len(text.encode())}")
     lines, hits = report(text, vs, False, panes=False)
-    print(f"shell_ok={sum(1 for l in lines if SHELL_OK.search(l))}")
+    print(f"shell_ok={sum(1 for line in lines if SHELL_OK.search(line))}")
     for h in hits[:25]:
         print("HIT " + h)
 elif mode == "text":
@@ -97,7 +101,7 @@ elif mode == "text":
         print("HIT " + h)
 elif mode == "redact":
     vs = variants(read_fd(3))
-    sys.stdout.write("\n".join(redact_line(l, vs) for l in sys.stdin.read().split("\n")))
+    sys.stdout.write("\n".join(redact_line(line, vs) for line in sys.stdin.read().split("\n")))
 elif mode == "findcode":
     baseline = {m.group(1) for m in CODE_RE.finditer(read_fd(4))}
     labelled, other = [], []
@@ -107,7 +111,7 @@ elif mode == "findcode":
             if code in baseline or not re.search(r"[A-Z]", code):
                 continue
             (labelled if re.search(r"(?i)join code|code", line) else other).append(code)
-    pick = (labelled or other)
+    pick = labelled or other
     sys.stdout.write(pick[-1] if pick else "")
 else:
     sys.exit("scan.py: unknown mode")

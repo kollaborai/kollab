@@ -226,7 +226,11 @@ class ACPHubTools:
         reply_to = question.message_id if question is not None else peers.get(target, "")
         is_ask = name == "hub_ask"
         peer = next((row for row in self.hub._acp_roster() if row.get("identity") == target), {})
-        active = getattr(getattr(self.hub.event_bus.get_service("acp_orchestrator"), "runner", None), "_active_context", None)
+        active = getattr(
+            getattr(self.hub.event_bus.get_service("acp_orchestrator"), "runner", None),
+            "_active_context",
+            None,
+        )
         requester = (getattr(active, "origin", None) or {}).get("sender_identity")
         busy_peer = (
             question is None
