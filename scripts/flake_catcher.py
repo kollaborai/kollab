@@ -85,7 +85,7 @@ def _api_text(gh: Gh, path: str) -> str:
 
 
 def parse_failed_lines(logs: str) -> list[str]:
-    """Extract distinct pytest node IDs from FAILED summary lines."""
+    """Extract distinct pytest node IDs from FAILED or ERROR summary lines."""
     nodeids: list[str] = []
     seen: set[str] = set()
     timestamp_prefix = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z[ \t]+")
@@ -103,7 +103,7 @@ def parse_failed_lines(logs: str) -> list[str]:
         if result is None:
             in_summary = False
             continue
-        if result.group(1) != "FAILED":
+        if result.group(1) not in ("FAILED", "ERROR"):
             continue
         summary = result.group(2).strip()
         # A parameter id may itself hold " - ", so the id ends at its closing bracket when it has one.
