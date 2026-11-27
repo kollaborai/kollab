@@ -113,8 +113,12 @@ def build_issue_title(nodeid: str) -> str:
 def build_issue_body(nodeid: str, run_url: str, attempt: int) -> str:
     if not nodeid or not run_url or attempt < 1:
         raise ValueError("test node id, run URL, and positive attempt are required")
+    longest_backtick_run = max((len(run) for run in re.findall(r"`+", nodeid)), default=0)
+    delimiter = "`" * (longest_backtick_run + 1)
+    padding = " " if nodeid.startswith("`") or nodeid.endswith("`") else ""
+    fenced_nodeid = f"{delimiter}{padding}{nodeid}{padding}{delimiter}"
     return (
-        f"Test: `{nodeid}`\n\n"
+        f"Test: {fenced_nodeid}\n\n"
         f"- [Workflow run attempt {attempt}]({run_url}/attempts/{attempt}) "
         "failed; a later attempt passed."
     )
