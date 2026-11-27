@@ -1256,7 +1256,10 @@ async def test_external_cancel_persists_plugin_input_terminal_outcome(
 
     processor.request_cancellation(origin="external")
     try:
-        await asyncio.sleep(0.05)  # the old fixed wait, with the write still held
+        await asyncio.wait_for(write_started.wait(), timeout=5)
+        terminal_task, = processor._queued_terminal_tasks
+        release_write.set()
+        await asyncio.wait_for(terminal_task, timeout=5)
 
         record = next(
             json.loads(line)
