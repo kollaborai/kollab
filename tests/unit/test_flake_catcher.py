@@ -36,13 +36,35 @@ def test_parse_failed_lines_extracts_and_deduplicates_pytest_node_ids() -> None:
         "FAILED tests/unit/test_alpha.py::test_one - AssertionError",
         "FAILED tests/unit/test_beta.py::TestBeta::test_two[param 1] - RuntimeError",
         "FAILED tests/unit/test_alpha.py::test_one - AssertionError",
-        "ERROR tests/unit/test_gamma.py::test_three - collection error",
+        "ERROR tests/unit/test_gamma.py - ImportError",
     )
 
     assert catcher.parse_failed_lines(logs) == [
         "tests/unit/test_alpha.py::test_one",
         "tests/unit/test_beta.py::TestBeta::test_two[param 1]",
     ]
+
+
+def test_parse_failed_lines_records_test_setup_or_teardown_errors() -> None:
+    nodeid = "tests/unit/test_fixture_flake.py::test_intermittent_setup"
+    logs = _pytest_summary_block(f"ERROR {nodeid} - RuntimeError: fixture setup failed")
+
+    assert catcher.parse_failed_lines(logs) == [nodeid]
+
+
+def test_parse_failed_lines_ignores_collection_errors_without_node_ids() -> None:
+    logs = _pytest_summary_block("ERROR tests/unit/test_collection.py - ImportError")
+
+    assert catcher.parse_failed_lines(logs) == []
+
+
+def test_parse_failed_lines_deduplicates_failed_and_error_results() -> None:
+    nodeid = "tests/unit/test_fixture_flake.py::test_intermittent_teardown"
+    logs = _pytest_summary_block(f"FAILED {nodeid} - AssertionError") + _pytest_summary_block(
+        f"ERROR {nodeid} - RuntimeError: fixture teardown failed"
+    )
+
+    assert catcher.parse_failed_lines(logs) == [nodeid]
 
 
 def test_issue_title_and_body_include_test_run_url_and_attempt() -> None:
@@ -208,7 +230,7 @@ def test_parse_failed_lines_ignores_captured_output_before_summary() -> None:
 def test_parse_failed_lines_reads_each_summary_block_and_stops_at_non_result() -> None:
     logs = _pytest_summary_block(
         "FAILED tests/unit/test_first.py::test_failure - AssertionError",
-        "ERROR tests/unit/test_error.py::test_collection - ImportError",
+        "ERROR tests/unit/test_error.py - ImportError",
         "SKIPPED tests/unit/test_skip.py::test_skip - skipped",
         "XFAIL tests/unit/test_xfail.py::test_expected_failure - expected",
         "XPASS tests/unit/test_xpass.py::test_unexpected_pass - unexpected",
