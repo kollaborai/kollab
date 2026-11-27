@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
@@ -100,7 +102,7 @@ def test_issue_body_keeps_plain_node_id_text_unchanged() -> None:
     )
 
 
-def test_issue_decision_creates_then_updates_once_per_test() -> None:
+def test_issue_decision_creates_or_selects_existing_issue() -> None:
     nodeid = "tests/unit/test_alpha.py::test_one"
     title = catcher.build_issue_title(nodeid)
     first = catcher.build_issue_body(nodeid, "https://example.test/runs/7", 1)
@@ -110,14 +112,13 @@ def test_issue_decision_creates_then_updates_once_per_test() -> None:
 
     existing = {"number": 12, "title": title, "state": "open", "body": body}
     second = catcher.build_issue_body(nodeid, "https://example.test/runs/8", 2)
-    action, issue, updated = catcher.decide_issue_action([existing], title, second)
-    assert action == "update"
+    action, issue, selected = catcher.decide_issue_action([existing], title, second)
+    assert action == "record"
     assert issue == existing
-    assert "runs/7" in updated and "runs/8" in updated
+    assert selected == second
 
-    updated_issue = {**existing, "body": updated}
-    duplicate = catcher.decide_issue_action([updated_issue], title, second)
-    assert duplicate == ("noop", updated_issue, updated)
+    duplicate = catcher.decide_issue_action([existing], title, first)
+    assert duplicate == ("noop", existing, body)
 
 
 class FakeGh:
@@ -181,6 +182,8 @@ class RacingGh(FakeGh):
     def __init__(self) -> None:
         super().__init__()
         self.lists = 0
+        self.folded_comments: list[dict[str, str]] = []
+        self.duplicate_comments: list[dict[str, str]] = []
 
     def __call__(self, args: list[str]) -> str:
         path = args[1]
@@ -192,6 +195,16 @@ class RacingGh(FakeGh):
             other = {"number": 11, "title": title, "state": "open", "body": "Test: x\n\n- other run"}
             ours = {"number": 12, "title": title, "state": "open", "body": self.created[0]["body"]}
             return json.dumps([ours, other])
+        if path == "repos/owner/repo/issues/11/comments?per_page=100":
+            return json.dumps([])
+        if path == "repos/owner/repo/issues/11/comments" and "--method" in args:
+            fields = dict(args[i + 1].split("=", 1) for i, v in enumerate(args[:-1]) if v == "-f")
+            self.folded_comments.append(fields)
+            return json.dumps({"id": 1, **fields})
+        if path == "repos/owner/repo/issues/12/comments" and "--method" in args:
+            fields = dict(args[i + 1].split("=", 1) for i, v in enumerate(args[:-1]) if v == "-f")
+            self.duplicate_comments.append(fields)
+            return json.dumps({"id": 2, **fields})
         if path.startswith("repos/owner/repo/issues/") and "--method" in args:
             fields = dict(args[i + 1].split("=", 1) for i, v in enumerate(args[:-1]) if v == "-f")
             self.updated.append((path, fields))
@@ -204,9 +217,11 @@ def test_a_duplicate_from_a_concurrent_run_folds_into_the_oldest_issue() -> None
 
     catcher.open_or_update_flaky_tests("owner/repo", "7", 2, gh=gh)
 
+    assert "https://example.test/runs/7/attempts/1" in gh.folded_comments[0]["body"]
     updates = dict(gh.updated)
-    assert "https://example.test/runs/7" in updates["repos/owner/repo/issues/11"]["body"]
-    assert updates["repos/owner/repo/issues/12"]["state"] == "closed"
+    assert "repos/owner/repo/issues/11" not in updates
+    assert updates["repos/owner/repo/issues/12"] == {"state": "closed"}
+    assert gh.duplicate_comments == [{"body": "Duplicate of #11."}]
 
 
 def test_parse_failed_lines_keeps_package_suite_tests() -> None:
@@ -304,3 +319,111 @@ def test_a_timed_out_attempt_is_read_for_flaky_tests() -> None:
     catcher.open_or_update_flaky_tests("owner/repo", "7", 2, gh=gh)
 
     assert len(gh.created) == 1
+
+
+class ExistingIssueGh:
+    """Fake GitHub API for an existing issue, including independent run snapshots."""
+
+    def __init__(
+        self,
+        *,
+        state: str = "open",
+        body: str = "",
+        comments: list[dict] | None = None,
+        concurrent_reads: bool = False,
+    ) -> None:
+        self.issue = {
+            "number": 12,
+            "title": "flaky test: tests/unit/test_alpha.py::test_one",
+            "state": state,
+            "body": body or "Test: `tests/unit/test_alpha.py::test_one`",
+        }
+        self.comments = list(comments or [])
+        self.comment_posts: list[dict[str, str]] = []
+        self.comment_reads: list[list[str]] = []
+        self.patches: list[dict[str, str]] = []
+        self.issue_reads = threading.Barrier(2) if concurrent_reads else None
+        self.lock = threading.Lock()
+
+    def __call__(self, args: list[str]) -> str:
+        path = args[1]
+        if path.startswith("repos/owner/repo/actions/runs/") and "/attempts/" not in path:
+            run_id = path.rsplit("/", 1)[1]
+            return json.dumps(
+                {
+                    "html_url": f"https://example.test/runs/{run_id}",
+                    "conclusion": "success",
+                    "run_attempt": 2,
+                }
+            )
+        if "/attempts/1/jobs?per_page=100" in path:
+            run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+            return json.dumps({"jobs": [{"id": run_id, "conclusion": "failure"}]})
+        if "/actions/jobs/" in path and path.endswith("/logs"):
+            return _pytest_summary_block("FAILED tests/unit/test_alpha.py::test_one - AssertionError")
+        if path == "repos/owner/repo/issues?state=all&per_page=100":
+            snapshot = dict(self.issue)
+            if self.issue_reads is not None:
+                self.issue_reads.wait(timeout=5)
+            return json.dumps([snapshot])
+        if path == "repos/owner/repo/issues/12/comments?per_page=100":
+            self.comment_reads.append(list(args))
+            return json.dumps(self.comments)
+        if path == "repos/owner/repo/issues/12/comments" and "--method" in args:
+            fields = dict(args[i + 1].split("=", 1) for i, value in enumerate(args[:-1]) if value == "-f")
+            with self.lock:
+                self.comment_posts.append(fields)
+                self.comments.append({"body": fields["body"]})
+            return json.dumps({"id": len(self.comment_posts), **fields})
+        if path == "repos/owner/repo/issues/12" and "--method" in args:
+            fields = dict(args[i + 1].split("=", 1) for i, value in enumerate(args[:-1]) if value == "-f")
+            self.patches.append(fields)
+            self.issue.update(fields)
+            return json.dumps(self.issue)
+        raise AssertionError(f"unexpected gh call: {args}")
+
+
+def test_concurrent_runs_post_both_observations_without_replacing_issue_body() -> None:
+    gh = ExistingIssueGh(concurrent_reads=True)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(catcher.open_or_update_flaky_tests, "owner/repo", run_id, 2, gh=gh) for run_id in ("101", "102")
+        ]
+        for future in futures:
+            future.result()
+
+    posted = "\n".join(comment["body"] for comment in gh.comment_posts)
+    expected = {
+        catcher.build_issue_body(
+            "tests/unit/test_alpha.py::test_one", f"https://example.test/runs/{run_id}", 1
+        ).partition("\n\n")[2]
+        for run_id in ("101", "102")
+    }
+    assert {comment["body"] for comment in gh.comment_posts} == expected
+    assert all("--paginate" in args for args in gh.comment_reads)
+    assert "https://example.test/runs/101/attempts/1" in posted
+    assert "https://example.test/runs/102/attempts/1" in posted
+    assert len(gh.comment_posts) == 2
+    assert gh.patches == []
+
+
+def test_closed_issue_reopens_with_state_only_while_recording_comment() -> None:
+    gh = ExistingIssueGh(state="closed")
+
+    catcher.open_or_update_flaky_tests("owner/repo", "101", 2, gh=gh)
+
+    assert len(gh.comment_posts) == 1
+    assert gh.patches == [{"state": "open"}]
+
+
+def test_observation_already_in_issue_body_or_paginated_comment_is_skipped() -> None:
+    run_url = "https://example.test/runs/101"
+    observation = catcher.build_issue_body("tests/unit/test_alpha.py::test_one", run_url, 1).partition("\n\n")[2]
+    for gh in (
+        ExistingIssueGh(body=f"Test: `tests/unit/test_alpha.py::test_one`\n\n{observation}"),
+        ExistingIssueGh(comments=[{"body": observation}]),
+    ):
+        catcher.open_or_update_flaky_tests("owner/repo", "101", 2, gh=gh)
+        assert gh.comment_posts == []
+        assert gh.patches == []
