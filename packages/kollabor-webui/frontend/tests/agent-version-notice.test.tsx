@@ -125,6 +125,12 @@ describe("AgentVersionNotice", () => {
     expect(visibleText(html)).toContain("This agent will restart after its current work finishes.");
     expect(visibleText(html)).not.toContain("turn");
   });
+
+  it("keeps the notice dismissible while a restart waits", () => {
+    const notice = agentVersionNotice({ ...differ, restartAgents: false })!;
+    const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy waiting onRestart={() => {}} onDismiss={() => {}} />);
+    expect(html).toContain('aria-label="Dismiss"');
+  });
 });
 
 describe("agents that cannot restart themselves (#968)", () => {
