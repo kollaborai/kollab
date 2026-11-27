@@ -471,7 +471,13 @@ describe("toRepository", () => {
     const statusOf = (rows: ChatRow[]) => toRepository(rows, running).messages[0].message.status.type;
     expect(statusOf([tool("a", "failed"), tool("b", "running")])).toBe("running");
     expect(statusOf([tool("a", "running"), tool("b", "complete")])).toBe("running");
-    expect(statusOf([tool("a", "complete"), tool("b", "failed")])).toBe("incomplete");
+    // A failed tool shows its own error mark; only a failed reply marks the message as an error.
+    expect(statusOf([tool("a", "complete"), tool("b", "failed")])).not.toBe("incomplete");
+  });
+
+  it("a failed reply row still marks its message as an error", () => {
+    const failedReply = { ...row("reply-x", [{ type: "text" as const, text: "partial" }]), status: "failed" } as ChatRow;
+    expect(toRepository([failedReply]).messages[0].message.status.type).toBe("incomplete");
   });
 
   it("puts a turn's consecutive tool rows in one message so the thread groups them (#1451)", () => {
