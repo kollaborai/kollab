@@ -433,7 +433,8 @@ async def test_revocation_after_ambiguous_admission_does_not_publish_or_persist(
 
     monkeypatch.setattr(messages, "_save_sent_media", save_media)
 
-    async def revoke_then_lose_reply(_content, *, request_id):
+    async def revoke_then_lose_reply(_content, *, request_id, input_source):
+        assert input_source == "webui"
         session._events.put_nowait(
             {"type": "token", "text": "private late reply", "request_id": request_id}
         )
