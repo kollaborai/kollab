@@ -574,7 +574,15 @@ Aliases: /t, /term, /tmux"""
         session = self.sessions.get(session_name)
         if session is None or session.ring_buffer is None:
             return [f"(session '{session_name}' not found)"]
+        return self._session_lines(session, max_lines)
 
+    @staticmethod
+    def _session_lines(
+        session: TerminalSession, max_lines: Optional[int] = None
+    ) -> List[str]:
+        """Read last N lines from one session's ring buffer."""
+        if session.ring_buffer is None:
+            return []
         n = max_lines or 200
         lines = session.ring_buffer.get_last(n)
 
@@ -950,7 +958,8 @@ Aliases: /t, /term, /tmux"""
         # process is read as is.
         if session.reader is not None and not session.is_alive():
             await asyncio.to_thread(session.reader.join, 2.0)
-        output_lines = self._capture_output(name, max_lines=lines)
+        # The session waited for, even if another took its name meanwhile.
+        output_lines = self._session_lines(session, max_lines=lines)
         return {"success": True, "output": output_lines}
 
     async def kill_background_session(
