@@ -131,6 +131,6 @@ describe("the saved conversation", () => {
       retry: "reconnect",
     });
     expect(initialHistoryBanner("connecting", 2, true)).toBeNull();
-    expect(initialHistoryBanner("failed", 2)).toBeNull();
+    expect(initialHistoryBanner("failed", 2)?.message).toBe("Connection lost. Showing the last messages; retry to reconnect now.");
   });
 });

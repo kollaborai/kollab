@@ -55,6 +55,12 @@ test("a failed stream with nothing on screen shows the old load failure with a r
   });
 });
 
-test("a failed stream with rows on screen shows no load failure", () => {
-  expect(initialHistoryBanner("failed", 3)).toBeNull();
+// The store keeps checking a failed stream, but until it is back the rows on screen are the last ones
+// it had: the chat says so, with a retry that checks now.
+test("a failed stream with rows on screen says the connection is lost, with a retry", () => {
+  expect(initialHistoryBanner("failed", 3)).toEqual({
+    kind: "error",
+    message: "Connection lost. Showing the last messages; retry to reconnect now.",
+    retry: "reconnect",
+  });
 });

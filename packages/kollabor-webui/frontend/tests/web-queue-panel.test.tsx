@@ -243,12 +243,10 @@ describe("QueuePanel on the chat store", () => {
     expect(fake.store.retry).toHaveBeenCalledTimes(1);
   });
 
-  it("says the queue could not load when the stream fails with nothing queued", async () => {
+  it("leaves a failed stream to the chat's own notice when nothing is queued", () => {
     const fake = fakeChatStore(chatSnapshot([], {}, false, "failed"));
     const container = mountOnStore(fake.live);
-    expect(container.textContent).toContain("Could not load queued messages.");
-    await click(buttonNamed(container, "Retry"));
-    expect(fake.store.retry).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-slot="web-queue-panel"]')).toBeNull();
   });
 
   it("shows an error line when the store refuses a Remove", async () => {

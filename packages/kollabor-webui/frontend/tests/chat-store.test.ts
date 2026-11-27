@@ -482,7 +482,7 @@ describe("LiveChatStore", () => {
     return { transport, request, streamSse, streamChatEvents, streams };
   }
 
-  function make(options: { maxAttempts?: number; maxUnconfirmedGoalPolls?: number; goalReplyPollIntervalMs?: number } = {}) {
+  function make(options: { maxAttempts?: number; failedRetryMs?: number; outdatedRetryMs?: number; maxUnconfirmedGoalPolls?: number; goalReplyPollIntervalMs?: number } = {}) {
     const fake = fakeTransport();
     const store = new LiveChatStore(fake.transport, "s1", { retryBaseMs: 0, ...options });
     stores.push(store);
@@ -655,6 +655,19 @@ describe("LiveChatStore", () => {
     expect(streams[0].path).toBe("/sessions/s1/stream");
     streams[0].open();
     expect(store.connection).toBe("live");
+  });
+
+  it("a failed chat keeps checking and goes live once the engine is back, with no click", async () => {
+    const { store, streams, streamSse } = make({ maxAttempts: 2, failedRetryMs: 0 });
+    for (let attempt = 0; attempt < 3; attempt++) streamSse.mockRejectedValueOnce(new Error("refused"));
+    const seen: string[] = [];
+    store.subscribe(() => { if (seen.at(-1) !== store.connection) seen.push(store.connection); });
+    store.start();
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    streams[0].open();
+    expect(store.connection).toBe("live");
+    // The failure stays on screen while it checks again: no flicker back to connecting.
+    expect(seen).toEqual(["connecting", "reconnecting", "connecting", "failed", "live"]);
   });
 
   it("dispose() aborts the open stream, makes no further connect, and the abort is not counted as a drop", async () => {
