@@ -8,7 +8,7 @@ export function nodeTestFiles(root = process.cwd()) {
     .filter((entry) => entry.isFile() && /^.+\.test\.ts$/.test(entry.name))
     .map((entry) => `tests/${entry.name}`)
     .filter((file) =>
-      !hasTestFrameworkImport(readFileSync(path.join(root, file), "utf8"), "vitest"),
+      !hasTestFrameworkImport(readFileSync(path.join(root, file), "utf8"), "vitest", file),
     )
     .sort();
 }

@@ -10,7 +10,7 @@ export function nodeTestSuites(root: string): string[] {
       .filter((file) => /\.test\.(ts|tsx|mjs)$/.test(file))
       .map((file) => `${dir}/${file.split(path.sep).join("/")}`)
       .filter((file) =>
-        hasTestFrameworkImport(readFileSync(path.join(root, file), "utf8"), "node:test"),
+        hasTestFrameworkImport(readFileSync(path.join(root, file), "utf8"), "node:test", file),
       ),
   );
 }

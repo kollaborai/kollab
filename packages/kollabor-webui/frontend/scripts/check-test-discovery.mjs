@@ -27,7 +27,7 @@ export function uncollectedTests(root, vitestFiles, explicitNodeFiles = []) {
       const nodeCandidate = /^tests\/[^/]+\.test\.ts$/.test(normalized);
       return (
         !nodeCandidate ||
-        hasTestFrameworkImport(readFileSync(path.join(root, file), "utf8"), "vitest")
+        hasTestFrameworkImport(readFileSync(path.join(root, file), "utf8"), "vitest", normalized)
       );
     })
     .sort();
