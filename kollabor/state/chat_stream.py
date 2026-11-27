@@ -477,9 +477,8 @@ class ChatStreamService:
         self._set_input_state(conversation_uid, input_id, "started", turn_id=turn_id)
         row = self._rows.get(conversation_uid, {}).get(input_id)
         if row is not None:
-            self._upsert(
-                conversation_uid,
-                {**row, "turn_id": turn_id, "status": "started"},
+            self._upsert_admitted_input(
+                conversation_uid, row, turn_id=turn_id, status="started"
             )
         self._set_turn_state(conversation_uid, turn_id, "running", input_id=input_id)
         self._active_turns[conversation_uid] = turn_id
