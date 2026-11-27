@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 addopts = "-p no:warnings"
 markers = [
     "host_process_enumeration: live host process scan allowed only in the guarded CI/tests job",
+    "quarantine: known flaky tests run in the non-blocking quarantine CI job",
 ]
 testpaths = ["tests"]
 # pytest-asyncio: silence the unset-scope deprecation nag that -W error turns

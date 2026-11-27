@@ -398,6 +398,13 @@ are never edited, staged, or committed.
 - Integration tests in `tests/integration/`
 - Visual tests in `tests/visual/`
 - Component tests (`test_*.py`)
+- A CI run that turns red then green on the same commit is a flake record; the bot opens or updates one issue per test.
+- Quarantine a flaky test within 24 hours, then fix or delete it within 7 days.
+- Run each new or changed Python test file 20 times in its PR; one non-quarantined failure blocks the PR.
+- Unit tests never reach the internet; CI downloads use a pinned cache or retry.
+- Tests wait on events and injected clocks, not sleeps or tight timeouts.
+- Keep main-run flakes under 1%; track the share in the weekly throughput report.
+- Keep main green: rerun a red main CI run once; if it is red twice, revert the merge.
 
 ### Hook Development
 Consider:

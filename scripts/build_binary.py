@@ -42,6 +42,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -77,17 +78,27 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kwargs)
 
 
-def run_with_retry(cmd: list[str], attempts: int = 4, **kwargs) -> subprocess.CompletedProcess:
-    """`run`, tried again when it fails: pex downloads the portable CPython from
-    GitHub, and a read timeout there failed CI on a commit that passed on re-run."""
+def run_with_retry(
+    cmd: list[str],
+    attempts: int = 4,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess] | None = None,
+    **kwargs,
+) -> subprocess.CompletedProcess:
+    """Retry a pinned pex download up to three times with short backoff."""
+    execute = runner or run
     for attempt in range(1, attempts + 1):
         try:
-            return run(cmd, **kwargs)
+            return execute(cmd, **kwargs)
         except subprocess.CalledProcessError:
             if attempt == attempts:
                 raise
-            print(f"build step failed (attempt {attempt}/{attempts}); retrying", flush=True)
-            time.sleep(15 * attempt)
+            delay = attempt
+            print(
+                f"command failed (attempt {attempt}/{attempts}); retrying in {delay}s",
+                flush=True,
+            )
+            time.sleep(delay)
     raise AssertionError("unreachable")
 
 
