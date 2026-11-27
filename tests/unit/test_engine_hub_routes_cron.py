@@ -139,6 +139,20 @@ class TestAggregateCronJobs(_Fixture):
         self.assertEqual(data["jobs"], [])
         self.assertEqual(data["agents_unavailable"], ["odd"])
 
+    def test_malformed_job_rows_are_reported_without_crashing_aggregation(self):
+        bridge = _StubBridge(
+            agents=[{"agent_id": "lapis-1", "identity": "lapis"}],
+            replies={
+                "lapis-1": {"type": "cron_jobs", "jobs": ["bad-row"], "error": ""}
+            },
+        )
+        self._install(bridge)
+
+        data = asyncio.run(hub_routes.list_cron_jobs())
+
+        self.assertEqual(data["jobs"], [])
+        self.assertIn("lapis", data["agents_errors"])
+
     def test_empty_roster_returns_an_empty_view(self):
         self._install(_StubBridge(agents=[], replies={}))
 
