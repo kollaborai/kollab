@@ -41,6 +41,92 @@ from kollabor_config.file_lock import try_lock, unlock
 
 logger = logging.getLogger(__name__)
 
+
+async def _await_shielded_task(task: asyncio.Task):
+    """Finish an owned task despite repeated cancellation of its caller."""
+    interrupted = False
+    while True:
+        try:
+            return await asyncio.shield(task), interrupted
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            interrupted = True
+
+
+async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
+    """Ask the artifact owner to kill/reap every child before it removes files."""
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        pass
+    await proc.wait()
+    # The owner is the sole holder of its stdout/stderr pipes. Its children use
+    # private regular files, so reaping it also guarantees pipe EOF.
+    await asyncio.gather(communication_task, return_exceptions=True)
+
+
+async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
+    """Transcribe with a direct whisper run where no child subreaper exists.
+
+    macOS and Windows cannot enumerate detached descendants, so this path kills
+    and reaps only the whisper process it starts. Audio and transcript live in a
+    private directory that is removed after that process has exited.
+    """
+    import shutil
+    import tempfile
+
+    run_dir = tempfile.mkdtemp(prefix="kollab-telegram-voice-")
+    try:
+        audio_path = Path(run_dir) / f"voice{suffix}"
+        audio_path.write_bytes(audio)
+        proc = await asyncio.create_subprocess_exec(
+            "whisper",
+            str(audio_path),
+            "--model",
+            "base",
+            "--language",
+            "en",
+            "--output_format",
+            "txt",
+            "--output_dir",
+            run_dir,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except BaseException:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            _, interrupted = await _await_shielded_task(asyncio.create_task(proc.wait()))
+            if interrupted:
+                raise asyncio.CancelledError
+            raise
+        if proc.returncode != 0:
+            logger.error("Voice transcription whisper failed (exit %s)", proc.returncode)
+            return "[voice message - transcription failed]"
+        transcript_path = audio_path.with_suffix(".txt")
+        transcription = ""
+        if transcript_path.exists():
+            transcript = transcript_path.read_text(encoding="utf-8", errors="replace")
+            transcription = transcript.strip()
+        if not transcription:
+            # Fallback: parse stdout, skip whisper debug lines
+            for line in stdout_bytes.decode("utf-8", errors="replace").split("\n"):
+                line = line.strip()
+                if line and not line.startswith(("Detecting", "[")):
+                    transcription = line
+                    break
+        logger.info("Telegram voice transcription completed")
+        return f"[voice] {transcription or '[voice message - whisper returned empty]'}"
+    finally:
+        shutil.rmtree(run_dir)
+
+
 # Seconds to back off after an inbound poll conflict (e.g. Telegram HTTP 409).
 # The poll inbox is a singleton per token; on conflict we yield hard rather
 # than hammering the API every poll_interval and flooding the log.
@@ -258,6 +344,17 @@ class TelegramBridge(MessagingBridge):
                     continue
 
                 text = msg.get("text", "")
+                from_user = msg.get("from", {})
+                incoming_chat_id = str(msg.get("chat", {}).get("id", ""))
+                from_user_id = str(from_user.get("id", ""))
+
+                # Reject unauthorized updates before fetching any private media.
+                if incoming_chat_id != self._chat_id:
+                    logger.warning(f"telegram: unauthorized chat_id {incoming_chat_id}")
+                    continue
+                if self._user_id and from_user_id != self._user_id:
+                    logger.warning(f"telegram: unauthorized user_id {from_user_id}")
+                    continue
 
                 # Voice/audio message support -- transcribe with whisper
                 if not text:
@@ -268,20 +365,6 @@ class TelegramBridge(MessagingBridge):
                             text = await self._transcribe_voice(file_id)
 
                 if not text:
-                    continue
-
-                from_user = msg.get("from", {})
-                incoming_chat_id = str(msg.get("chat", {}).get("id", ""))
-                from_user_id = str(from_user.get("id", ""))
-
-                # Security: validate chat_id (telemux pattern)
-                if incoming_chat_id != self._chat_id:
-                    logger.warning(f"telegram: unauthorized chat_id {incoming_chat_id}")
-                    continue
-
-                # Security: validate user_id if configured
-                if self._user_id and from_user_id != self._user_id:
-                    logger.warning(f"telegram: unauthorized user_id {from_user_id}")
                     continue
 
                 results.append(
@@ -309,9 +392,11 @@ class TelegramBridge(MessagingBridge):
 
     async def _transcribe_voice(self, file_id: str) -> str:
         """Download voice file from telegram and transcribe with local whisper."""
-        import asyncio
-        import os
+        import shutil
+        import sys
         import tempfile
+
+        from .voice_transcription import SUPERVISOR
 
         if not self._client:
             return "[voice message - bridge not connected]"
@@ -335,70 +420,76 @@ class TelegramBridge(MessagingBridge):
             audio_resp = await self._client.get(download_url, timeout=30.0)
             audio_resp.raise_for_status()
 
-            # Save to temp file (telegram voice is usually .ogg opus)
-            suffix = "." + file_path.split(".")[-1] if "." in file_path else ".ogg"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                f.write(audio_resp.content)
-                tmp_path = f.name
+            if sys.platform != "linux":
+                return await _transcribe_unsupervised(
+                    audio_resp.content, Path(file_path).suffix or ".ogg"
+                )
 
-            # Transcribe with local whisper CLI (non-blocking)
-            proc = await asyncio.create_subprocess_exec(
-                "whisper",
-                tmp_path,
-                "--model",
-                "base",
-                "--language",
-                "en",
-                "--output_format",
-                "txt",
-                "--output_dir",
-                "/tmp",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            # One isolated process owns both the artifacts and every CLI child.
+            # The stdlib interpreter is separate from Kollab's binary entrypoint.
+            python = shutil.which("python3")
+            if python is None:
+                logger.error("Voice transcription requires python3")
+                return "[voice message - transcription failed]"
+            spawn_task = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    python,
+                    "-I",
+                    "-c",
+                    SUPERVISOR,
+                    tempfile.gettempdir(),
+                    Path(file_path).suffix or ".ogg",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
             )
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=60
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                proc = await asyncio.shield(spawn_task)
+            except asyncio.CancelledError as cancellation:
+                try:
+                    proc, _ = await _await_shielded_task(spawn_task)
+                except BaseException:
+                    raise cancellation
+                communication_task = asyncio.create_task(proc.communicate(audio_resp.content))
+                await _await_shielded_task(asyncio.create_task(_stop_transcriber(proc, communication_task)))
                 raise
-            result_stdout = stdout_bytes.decode("utf-8", errors="replace")
 
-            # Read the transcription -- whisper writes to /tmp/<basename>.txt
-            basename = os.path.basename(tmp_path).rsplit(".", 1)[0]
-            txt_path = f"/tmp/{basename}.txt"
-            transcription = ""
-            if os.path.exists(txt_path):
-                with open(txt_path) as f:
-                    transcription = f.read().strip()
-                os.unlink(txt_path)
-            if not transcription:
-                # Fallback: parse stdout, skip whisper debug lines
-                for line in result_stdout.split("\n"):
-                    line = line.strip()
-                    if (
-                        line
-                        and not line.startswith("Detecting")
-                        and not line.startswith("[")
-                    ):
-                        transcription = line
-                        break
-            if not transcription:
-                transcription = "[voice message - whisper returned empty]"
+            communication_task = asyncio.create_task(proc.communicate(audio_resp.content))
+            try:
+                stdout_bytes, _ = await asyncio.wait_for(asyncio.shield(communication_task), timeout=60)
+            except BaseException:
+                _, interrupted = await _await_shielded_task(
+                    asyncio.create_task(_stop_transcriber(proc, communication_task))
+                )
+                if interrupted:
+                    raise asyncio.CancelledError
+                raise
+            if proc.returncode == 124:
+                raise asyncio.TimeoutError
+            if proc.returncode == 127:
+                logger.error("Voice transcription failed (whisper executable not found)")
+                return "[voice message - transcription failed]"
+            if proc.returncode != 0:
+                logger.error("Voice transcription owner failed (exit %s)", proc.returncode)
+                return "[voice message - transcription failed]"
+            transcription = stdout_bytes.decode("utf-8", errors="replace").strip()
 
-            # Clean up temp audio file
-            os.unlink(tmp_path)
-
-            logger.info(f"Voice transcribed: {transcription[:80]}")
+            logger.info("Telegram voice transcription completed")
             return f"[voice] {transcription}"
 
         except asyncio.TimeoutError:
             logger.error("Voice transcription timed out (60s)")
             return "[voice message - transcription timed out]"
         except Exception as e:
-            logger.error(f"Voice transcription failed: {e}")
+            # Exception messages can include Telegram URLs with the bot token.
+            if isinstance(e, FileNotFoundError) and e.filename == "whisper":
+                logger.error(
+                    "Voice transcription failed (%s: whisper executable not found)",
+                    type(e).__name__,
+                )
+            else:
+                logger.error("Voice transcription failed (%s)", type(e).__name__)
             return "[voice message - transcription failed]"
 
 

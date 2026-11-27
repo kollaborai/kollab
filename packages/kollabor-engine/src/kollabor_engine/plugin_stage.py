@@ -9,7 +9,7 @@ from pathlib import Path
 
 def main() -> int:
     from kollabor.version import get_runtime_version
-    from kollabor_plugins.packages import stage_git_source
+    from kollabor_plugins.packages import ManifestReviewLimitError, stage_git_source
 
     try:
         raw = sys.stdin.buffer.read(1024 * 1024 + 1)
@@ -32,6 +32,8 @@ def main() -> int:
             raise ValueError("Staging result is too large")
         sys.stdout.buffer.write(response)
         return 0
+    except ManifestReviewLimitError:
+        return 2
     except Exception:
         # Git output and exception text can contain private source credentials.
         sys.stdout.buffer.write(b'{"ok":false}')

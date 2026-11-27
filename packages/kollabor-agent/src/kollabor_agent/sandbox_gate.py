@@ -37,7 +37,7 @@ MAX_OVERRIDE_SECONDS = 3600
 DEFAULT_TOKEN_TTL_SECONDS = 900
 DEFAULT_VALIDATION_TIMEOUT_SECONDS = 600
 
-READ_TYPES = {"file_read", "file_grep"}
+READ_TYPES = {"file_read", "file_grep", "file_find"}
 PATH_KEYS = ("file", "file_path", "path", "from", "to")
 
 

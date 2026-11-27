@@ -228,3 +228,32 @@ def test_prefixed_fallback_requires_matching_catalog_provider(monkeypatch):
     assert resolve_context_window("anthropic/shared-model", "openrouter") == 32000
     assert supports_sampling("anthropic/shared-model") is True
     assert supports_thinking("anthropic/shared-model") is True
+
+
+def test_oversized_json_integer_in_user_override_does_not_abort_load(
+    tmp_path, monkeypatch
+):
+    # json.load raises ValueError past Python's int-from-str digit limit. The
+    # override must read as an unrepresentable value while the rest still loads.
+    text = json.dumps(
+        {
+            "models": {
+                "valid-override": {"provider": "openrouter", "context_window": 1234},
+                "overflow-override": {
+                    "provider": "openrouter",
+                    "context_window": "PLACEHOLDER",
+                },
+            }
+        }
+    )
+    (tmp_path / "models.json").write_text(text.replace('"PLACEHOLDER"', "9" * 5000))
+    monkeypatch.setattr(
+        model_registry,
+        "resolve_global_path",
+        lambda *parts: tmp_path.joinpath(*parts),
+    )
+
+    models = model_registry.load_model_registry()["models"]
+
+    assert models["valid-override"]["context_window"] == 1234
+    assert not isinstance(models["overflow-override"]["context_window"], int)

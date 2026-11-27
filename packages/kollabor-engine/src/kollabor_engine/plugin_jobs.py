@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import shutil
-import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -18,12 +18,18 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from kollabor_config import proc_ctl
+
 logger = logging.getLogger(__name__)
 _MAX_JOBS = 32
 _MAX_STAGING = 4
 _JOB_TTL = 3600
 _CLEANUP_RETRY_DELAY = 60
 _STAGE_TIMEOUT = 120
+_MAX_PLUGIN_CHANGED_FOLDERS = 256
+_MANIFEST_REVIEW_LIMIT_ERROR = (
+    "Plugin review exceeds a display limit; reduce the manifest or changed folders and stage again."
+)
 
 
 class PluginJobs:
@@ -59,9 +65,16 @@ class PluginJobs:
             self._expire()
 
     def _expire(self) -> None:
+        if self.closing:
+            return
         cutoff = time.monotonic() - _JOB_TTL
         for job_id, job in list(self.jobs.items()):
-            if job["status"] not in {"staging", "installing"} and job["updated"] < cutoff:
+            cancellation_running = job["status"] == "cancelling" and job.get("cancel_task") is not None
+            if (
+                job["status"] not in {"staging", "installing"}
+                and not cancellation_running
+                and job["updated"] < cutoff
+            ):
                 del self.jobs[job_id]
                 self.expired_jobs[job_id] = job
         for job_id, job in list(self.expired_jobs.items()):
@@ -154,6 +167,9 @@ class PluginJobs:
         if self.closing:
             raise HTTPException(status_code=503, detail="Plugin manager is shutting down")
         self._expire()
+        for job_id, job in list(self.jobs.items()):
+            if job.get("status") in {"error", "cancelled"} and "base" not in job:
+                self.jobs.pop(job_id, None)
         if len(self.jobs) + len(self.expired_jobs) >= _MAX_JOBS:
             raise HTTPException(status_code=429, detail="Too many plugin jobs; try again later")
         home = Path.home() / ".kollab"
@@ -192,7 +208,7 @@ class PluginJobs:
 
     @classmethod
     def _update_preview(cls, job: dict, staged: dict) -> dict:
-        from kollabor_plugins.packages import _read_registry, files_sha256
+        from kollabor_plugins.packages import ManifestReviewLimitError, _read_registry, files_sha256
 
         home = Path.home() / ".kollab"
         plugin_id = job["target_id"]
@@ -208,16 +224,18 @@ class PluginJobs:
             str(Path(name).parent)
             for name in before.keys() | after.keys() if before.get(name) != after.get(name)
         })
+        if len(changed) > _MAX_PLUGIN_CHANGED_FOLDERS:
+            raise ManifestReviewLimitError(_MANIFEST_REVIEW_LIMIT_ERROR)
         return {"previous_commit": job["expected_record"].get("commit"), "changed_folders": changed}
 
     @staticmethod
     async def _stop_staging_process(process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
             return
-        # Kill this job's private process group together. Waiting for the worker
-        # alone after SIGTERM could leave a Git/SSH child that ignores SIGTERM.
+        # Stop this job's private process tree so a Git/SSH child cannot outlive
+        # the worker and race staging-directory cleanup.
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            await asyncio.to_thread(proc_ctl.kill_tree, process.pid, proc_ctl.HARD)
         except ProcessLookupError:
             pass
         await process.communicate()
@@ -231,10 +249,15 @@ class PluginJobs:
             raise ValueError("Plugin staging request is too large")
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
+        process_group = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            if os.name == "nt"
+            else {"start_new_session": True}
+        )
         creation = asyncio.create_task(asyncio.create_subprocess_exec(
             sys.executable, "-m", "kollabor_engine.plugin_stage",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, start_new_session=True, env=env,
+            stderr=asyncio.subprocess.DEVNULL, env=env, **process_group,
         ))
         try:
             process = await asyncio.shield(creation)
@@ -247,6 +270,8 @@ class PluginJobs:
         except BaseException:
             await cls._stop_staging_process(process)
             raise
+        if process.returncode == 2:
+            raise ValueError(_MANIFEST_REVIEW_LIMIT_ERROR)
         if process.returncode != 0 or len(output) > 1024 * 1024:
             raise ValueError("Plugin staging worker failed")
         result = json.loads(output)
@@ -305,7 +330,11 @@ class PluginJobs:
             raise
         except Exception as exc:
             logger.warning("Plugin staging failed: %s", type(exc).__name__)
-            job["error"] = "Cannot stage plugin source; check the URL, ref, and plugin manifest"
+            job["error"] = (
+                _MANIFEST_REVIEW_LIMIT_ERROR
+                if str(exc) == _MANIFEST_REVIEW_LIMIT_ERROR
+                else "Cannot stage plugin source; check the URL, ref, and plugin manifest"
+            )
             interrupted = await self._cleanup_staging(job)
             if job["status"] != "cancelling":  # a cancel that arrived during cleanup owns the state
                 job["status"] = "error"
@@ -316,6 +345,8 @@ class PluginJobs:
             self.hub.publish_change()
 
     async def cancel(self, job_id: str) -> dict:
+        if self.closing:
+            raise HTTPException(status_code=503, detail="Plugin manager is shutting down")
         self._expire()
         job = self.jobs.get(job_id)
         if job is None:
@@ -325,7 +356,9 @@ class PluginJobs:
             return await asyncio.shield(job["cancel_task"])
         if status == "cancelled" and "base" not in job:
             return self._public(job)
-        if status not in {"staging", "ready", "cancelling", "cancelled"}:
+        if status not in {"staging", "ready", "cancelling", "cancelled"} and not (
+            status == "error" and "base" in job
+        ):
             raise HTTPException(status_code=409, detail="Plugin job cannot be cancelled")
         # Terminal "cancelled" is published only after the staged files are gone (#1373).
         job["status"] = "cancelling"
@@ -493,7 +526,7 @@ class PluginJobs:
             task.cancel()
         if self.tasks:
             await asyncio.gather(*list(self.tasks), return_exceptions=True)
-        for job in self.jobs.values():
+        for job in list(self.jobs.values()):
             await asyncio.to_thread(self._cleanup, job)
         for job_id, job in list(self.expired_jobs.items()):
             if await asyncio.to_thread(self._cleanup, job):

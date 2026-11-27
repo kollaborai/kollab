@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_CONTRIBUTIONS, type Contributions } from "./registry";
-import { createPluginApi, definePlugin, remoteView, type PluginApiDeps, type PluginEntry } from "./sdk";
+import { redactPluginError } from "./plugin-errors";
+import { createPluginApi, definePlugin, remoteView, type PluginApiDeps, type PluginEntry, type PluginInventoryResponse, type RendererSpec } from "./sdk";
 
 const Tab = () => null;
 
@@ -19,13 +20,18 @@ const entry = (id = "hello", extra: Partial<PluginEntry> = {}): PluginEntry => (
     views: [{ id: "peek", label: "Peek" }],
     modals: ["about"],
     slash: ["hello"],
-    renderers: ["hello_tool"],
+    renderers: [{ tool: "hello_tool" }],
   },
   services: [],
+  omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
   ...extra,
 });
 
-function harness(id = "hello") {
+function harness(
+  id = "hello",
+  declaredSlash = ["hello"],
+  declaredRenderers: NonNullable<PluginEntry["contributes"]>["renderers"] = [{ tool: "hello_tool" }],
+) {
   let contributions: Contributions = EMPTY_CONTRIBUTIONS;
   const json = (body: unknown) =>
     new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
@@ -41,7 +47,10 @@ function harness(id = "hello") {
     open: vi.fn(),
     openSession: vi.fn(),
   } satisfies PluginApiDeps;
-  const { k, dispose } = createPluginApi(entry(id), deps);
+  const pluginEntry = entry(id);
+  pluginEntry.contributes.slash = declaredSlash;
+  pluginEntry.contributes.renderers = declaredRenderers;
+  const { k, dispose } = createPluginApi(pluginEntry, deps);
   return { k, dispose, deps, current: () => contributions };
 }
 
@@ -53,6 +62,99 @@ describe("definePlugin", () => {
   it("returns the plugin function unchanged", () => {
     const setup = () => {};
     expect(definePlugin(setup)).toBe(setup);
+  });
+});
+
+describe("plugin inventory types", () => {
+  it("exposes all normalized contribution arrays as required typed fields", () => {
+    const response: PluginInventoryResponse = { plugins: [entry()] };
+    const contributionCounts = response.plugins.flatMap((plugin) => [
+      plugin.contributes.menu.length,
+      plugin.contributes.views.length,
+      plugin.contributes.pages.length,
+      plugin.contributes.modals.length,
+      plugin.contributes.slash.length,
+      plugin.contributes.renderers.length,
+    ]);
+
+    expect(contributionCounts).toEqual([1, 1, 1, 1, 1, 1]);
+  });
+});
+
+describe("plugin error redaction", () => {
+  it("redacts suffixed private-key names and PEM private-key blocks", () => {
+    const suffixed = redactPluginError("PRIVATE_KEY_PEM=private-key-sentinel");
+    const pem = redactPluginError(
+      "-----BEGIN PRIVATE KEY-----\nprivate-key-body-sentinel\n-----END PRIVATE KEY-----",
+    );
+
+    expect(suffixed).not.toContain("private-key-sentinel");
+    expect(pem).not.toContain("private-key-body-sentinel");
+    expect(pem).not.toContain("BEGIN PRIVATE KEY");
+  });
+});
+
+describe("renderer declarations", () => {
+  it("accepts exactly one renderer kind at the type level", () => {
+    const tool: RendererSpec = { tool: "shell", render: Tab };
+    const tag: RendererSpec = { tag: "status", render: Tab };
+    // @ts-expect-error A renderer cannot claim both surfaces.
+    const both: RendererSpec = { tool: "shell", tag: "status", render: Tab };
+    // @ts-expect-error A renderer must claim one surface.
+    const neither: RendererSpec = { render: Tab };
+    expect([tool, tag, both, neither]).toHaveLength(4);
+  });
+
+  it("requires each renderer branch's payload in plugin render callbacks", () => {
+    const { k, current } = harness("hello", ["hello"], [
+      { tool: "search" },
+      { tag: "card" },
+    ]);
+    k.renderer({
+      tool: "search",
+      render: ({ toolCall }) => {
+        void toolCall.name;
+        return null;
+      },
+    });
+    k.renderer({
+      tag: "card",
+      render: ({ tag }) => {
+        void tag.content;
+        return null;
+      },
+    });
+
+    expect(current().renderers).toHaveLength(2);
+  });
+
+  it("rejects ambiguous and missing renderer kinds at runtime", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["hello"], ["hello_tool"]);
+    k.renderer({ tool: "hello_tool", tag: "hello_tool", render: Tab } as unknown as RendererSpec);
+    k.renderer({ render: Tab } as unknown as RendererSpec);
+
+    expect(current().renderers).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("renderer ignored: provide exactly one of tool or tag"));
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it("F1 rejects registration against an untyped declaration", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["hello"], ["hello_tool"]);
+    k.renderer({ tool: "hello_tool", render: Tab });
+
+    expect(current().renderers).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("F6 binds a renderer only to a declaration of the same kind", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["hello"], [{ tool: "hello_tool" }]);
+    k.renderer({ tag: "hello_tool", render: Tab });
+
+    expect(current().renderers).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -88,6 +190,62 @@ describe("contribution points", () => {
     expect(current()).toEqual(EMPTY_CONTRIBUTIONS);
     expect(warn).toHaveBeenCalledTimes(6);
     expect(String(warn.mock.calls[1][0])).toContain("hello did not declare page secret");
+  });
+
+  it("keeps tool and tag renderers with the same name as separate claims", () => {
+    const { k, current } = harness("hello", ["hello"], [
+      { tool: "hello_tool" },
+      { tag: "hello_tool" },
+    ]);
+    k.renderer({ tool: "hello_tool", render: Tab });
+    k.renderer({ tag: "hello_tool", render: Tab });
+
+    expect(current().renderers).toEqual([
+      { tool: "hello_tool", render: Tab },
+      { tag: "hello_tool", render: Tab },
+    ]);
+  });
+
+  it("rejects tag renderer names the message parser cannot match", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["hello"], [{ tag: "my.card" }]);
+    k.renderer({ tag: "my.card", render: Tab });
+
+    expect(current().renderers).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("renderer ignored: tag name must start with a letter"));
+  });
+
+  it("replaces a same-plugin command registration without regard to case", () => {
+    const { k, current } = harness("hello", ["deploy", "Deploy"]);
+    const first = vi.fn();
+    const second = vi.fn();
+    k.command({ name: "deploy", description: "first", run: first });
+    k.command({ name: "Deploy", description: "second", run: second });
+
+    expect(current().commands).toHaveLength(1);
+    expect(current().commands[0]).toMatchObject({ name: "Deploy", description: "second", run: second });
+  });
+
+  it("rejects command names that are not one slash token with a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const names = ["two words", "/leading", "nested/name"];
+    const { k, current } = harness("hello", names);
+    for (const name of names) k.command({ name, description: "", run: () => {} });
+    expect(current()).toEqual(EMPTY_CONTRIBUTIONS);
+    expect(warn).toHaveBeenCalledTimes(names.length);
+    for (const [message] of warn.mock.calls) {
+      expect(String(message)).toContain("command ignored: name must be a single slash token");
+    }
+  });
+
+  it("uses the inventory declaration rule for slash command names", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { k, current } = harness("hello", ["_publish", "café", "publish"]);
+    for (const name of ["_publish", "café", "publish"])
+      k.command({ name, description: "", run: () => {} });
+
+    expect(current().commands.map(({ name }) => name)).toEqual(["publish"]);
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 
   it("ignores malformed specs instead of storing something that cannot draw", () => {
@@ -241,6 +399,30 @@ describe("k.events", () => {
     expect(signal.aborted).toBe(true);
     k.notice({ text: "Late" });
     k.page({ id: "main", title: "Late", tabs: [{ id: "one", label: "One", render: Tab }] });
+    expect(current()).toEqual(EMPTY_CONTRIBUTIONS);
+  });
+
+  it("ignores late event failures and notices after disposal", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const timer = vi.spyOn(globalThis, "setTimeout");
+    const { k, deps, dispose, current } = harness();
+    let reject!: (reason: unknown) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    void pending.catch(() => {});
+    k.events.on("late", () => pending);
+    deps.stream.mock.calls[0]![2]({ topic: "late", data: null });
+
+    dispose();
+    k.toast("Too late");
+    k.notice({ text: "Too late" });
+    reject(new Error("late plugin rejection"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(error).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
+    expect(timer).not.toHaveBeenCalled();
     expect(current()).toEqual(EMPTY_CONTRIBUTIONS);
   });
 });

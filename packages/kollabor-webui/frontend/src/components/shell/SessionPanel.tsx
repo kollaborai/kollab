@@ -518,7 +518,7 @@ export function SessionPanel({
       <span className="sr-only" role={statusError ? "alert" : "status"}>{status || (session.acp_waiting ? "Waiting for Approval" : "")}</span>
       {isMobile ? (
         <Sheet open={sheetOpen} onOpenChange={onSheetOpenChange}>
-          <SheetContent side="right" className="bg-sidebar top-2 right-2 bottom-auto h-auto max-h-[calc(100%-1rem)] w-72 max-w-[85vw] gap-0 overflow-y-auto rounded-xl p-4 pt-10 shadow-lg">
+          <SheetContent side="right" className="bg-sidebar top-2 right-2 bottom-auto h-auto max-h-[calc(100%-1rem)] w-72 max-w-[85vw] gap-0 overflow-y-auto rounded-xl p-4 pt-10 pointer-coarse:pt-14 shadow-lg">
             <SheetTitle className="sr-only">Session Controls</SheetTitle>
             <SheetDescription className="sr-only">{sessionLabel}</SheetDescription>
             {body(null)}

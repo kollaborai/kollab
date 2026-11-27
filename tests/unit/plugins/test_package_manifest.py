@@ -19,6 +19,18 @@ import pytest
         ("service-name", "service"),
         ("undeclared-secret", "secret"),
         ("contributes", "contributes"),
+        ("invalid-contribution-menu", "contributes"),
+        ("invalid-contribution-views", "contributes"),
+        ("invalid-contribution-pages", "contributes"),
+        ("invalid-contribution-modals", "contributes"),
+        ("invalid-contribution-slash", "contributes"),
+        ("multiple-slash-identities", "contributes"),
+        ("multiple-renderer-identities", "contributes"),
+        ("renderer-string", "contributes"),
+        ("renderer-id", "contributes"),
+        ("renderer-name", "contributes"),
+        ("renderer-invalid-tag", "contributes"),
+        ("multiple-menu-identities", "contributes"),
     ],
 )
 def test_manifest_checks(change, message, tmp_path, monkeypatch):
@@ -61,12 +73,72 @@ def test_manifest_checks(change, message, tmp_path, monkeypatch):
         manifest["services"] = {"loop": {"command": ["python3"], "secrets": ["KEY"]}}
     elif change == "contributes":
         manifest["contributes"] = {"typo": []}
+    elif change.startswith("invalid-contribution-"):
+        kind = change.removeprefix("invalid-contribution-")
+        identity = "publish command"
+        manifest["contributes"] = {
+            kind: [identity] if kind == "slash" else [{"id": identity}]
+        }
+    elif change == "multiple-slash-identities":
+        manifest["contributes"] = {"slash": [{"id": "deploy", "name": "review"}]}
+    elif change == "multiple-renderer-identities":
+        manifest["contributes"] = {"renderers": [{"tool": "shell", "tag": "card"}]}
+    elif change == "renderer-string":
+        manifest["contributes"] = {"renderers": ["shell"]}
+    elif change == "renderer-id":
+        manifest["contributes"] = {"renderers": [{"id": "shell"}]}
+    elif change == "renderer-name":
+        manifest["contributes"] = {"renderers": [{"name": "shell"}]}
+    elif change == "renderer-invalid-tag":
+        manifest["contributes"] = {"renderers": [{"tag": "my.card"}]}
+    elif change == "multiple-menu-identities":
+        manifest["contributes"] = {
+            "menu": [{"id": "home", "name": "other", "label": "Home", "open": {"view": "home"}}]
+        }
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
     if message:
         with pytest.raises(ValueError, match=message):
             validate_manifest(root, "0.23.0")
     else:
         assert validate_manifest(root, "0.23.0") == manifest
+
+
+@pytest.mark.parametrize("kind", ["menu", "views", "pages", "modals", "slash", "renderers"])
+@pytest.mark.parametrize("field", ["id", "name", "tool", "tag"])
+def test_manifest_rejects_non_string_contribution_identities(kind, field, tmp_path, monkeypatch):
+    if kind == "menu" and field != "id":
+        pytest.skip("menu declarations require id")
+    if kind == "renderers" and field not in {"tool", "tag"}:
+        pytest.skip("renderer declarations require tool or tag")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+    from kollabor_plugins.registry import _normalize_declared
+
+    root = tmp_path / "package"
+    (root / "python").mkdir(parents=True)
+    (root / "python" / "entry.py").write_text("pass\n")
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "Example",
+        "kollab": ">=0.23.0",
+        "python": "python/entry.py:Hello",
+        "uses": [],
+        "contributes": {kind: [{field: 42}]},
+    }
+    assert _normalize_declared({field: 42}) is None
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="contributes identity"):
+        validate_manifest(root, "0.23.0")
+
+
+def test_inventory_preserves_the_documented_sk_fetch_renderer_tag():
+    from kollabor_plugins.registry import _normalize_declared
+
+    assert _normalize_declared({"tag": "sk-fetch"}) == {"tag": "sk-fetch"}
 
 
 @pytest.mark.parametrize("key", ["stop_timeout_s", "heartbeat_s"])
@@ -84,3 +156,153 @@ def test_service_seconds_must_be_finite_and_bounded(key, value, tmp_path, monkey
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match=key):
         validate_manifest(root, "0.23.0")
+
+
+@pytest.mark.parametrize(
+    ("collection", "count", "error"),
+    [
+        ("uses", 256, None),
+        ("uses", 257, "exceeds 256 uses"),
+        ("services", 128, None),
+        ("services", 129, "exceeds 128 services"),
+        ("secrets", 64, None),
+        ("secrets", 65, "exceeds 64 secrets"),
+    ],
+    ids=["uses-at-limit", "uses-over-limit", "services-at-limit", "services-over-limit",
+         "secrets-at-limit", "secrets-over-limit"],
+)
+def test_manifest_collections_fit_the_plugin_review_limits(collection, count, error, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "Example",
+        "kollab": ">=0.23.0",
+        "uses": [],
+    }
+    if collection == "uses":
+        manifest["uses"] = [f"net:host-{index}.example" for index in range(count)]
+    elif collection == "services":
+        manifest["services"] = {
+            f"worker-{index}": {"command": ["python3"]} for index in range(count)
+        }
+    else:
+        secrets = [f"KEY_{index}" for index in range(count)]
+        manifest["uses"] = [f"secret:{secret}" for secret in secrets]
+        manifest["services"] = {"worker": {"command": ["python3"], "secrets": secrets}}
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+
+    if error:
+        with pytest.raises(ValueError, match=error):
+            validate_manifest(root, "0.23.0")
+    else:
+        assert validate_manifest(root, "0.23.0") == manifest
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "contributes.menu",
+        "contributes.views",
+        "contributes.pages",
+        "contributes.modals",
+        "contributes.slash",
+        "contributes.renderers",
+        "settings.widgets",
+        "settings.options",
+        "settings.option_labels",
+    ],
+)
+def test_plugin_manifest_review_lists_reject_over_limit(surface, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "Example",
+        "kollab": ">=0.23.0",
+        "uses": [],
+    }
+    kind, key = surface.split(".")
+    if kind == "contributes":
+        manifest["contributes"] = {key: [{"id": f"entry-{index}"} for index in range(257)]}
+    else:
+        manifest["settings"] = "settings.json"
+        if key == "widgets":
+            widgets = [{"type": "label", "label": f"Field {index}"} for index in range(257)]
+        elif key == "options":
+            widgets = [{"type": "dropdown", "label": "Mode", "config_path": "mode",
+                        "options": [f"choice-{index}" for index in range(257)]}]
+        else:
+            widgets = [{"type": "dropdown", "label": "Mode", "config_path": "mode",
+                        "option_labels": {f"choice-{index}": f"Choice {index}" for index in range(257)}}]
+        (root / "settings.json").write_text(json.dumps({"widgets": widgets}))
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="exceeds 256"):
+        validate_manifest(root, "0.23.0")
+
+
+@pytest.mark.parametrize("use", ["unsupported", "net:token=canary", "net:host-\u200b.example"])
+def test_manifest_rejects_use_declarations_the_review_cannot_display(use, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "Example",
+        "kollab": ">=0.23.0",
+        "uses": [use],
+    }
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="Invalid uses"):
+        validate_manifest(root, "0.23.0")
+
+
+def test_manifest_file_size_is_bounded_before_json_parsing(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import ManifestReviewLimitError, validate_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "x" * 1_100_000,
+        "kollab": ">=0.23.0",
+        "uses": [],
+    }
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ManifestReviewLimitError, match="Plugin manifest is too large"):
+        validate_manifest(root, "0.23.0")
+
+
+def test_manifest_string_length_uses_the_review_limit_error():
+    from kollabor_plugins.packages import ManifestReviewLimitError, _check_manifest_string_lengths
+
+    with pytest.raises(ManifestReviewLimitError, match="4096"):
+        _check_manifest_string_lengths({"description": "x" * 4097})

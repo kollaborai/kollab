@@ -10,7 +10,6 @@ import {
   type ComposerPaletteItem,
 } from "@/components/assistant-ui/composer-palette";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/follow-up-suggestions";
-import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { MessageTimingBadge } from "@/components/assistant-ui/message-timing";
 import {
   Reasoning,
@@ -45,7 +44,14 @@ import {
   orphanImageNotice,
   stripImageTokens,
   stripLeadingImageTokens,
+  type ComposerAttachmentLike,
 } from "@/composer-restore";
+import {
+  acknowledgeBusyWebMessage,
+  hasUnresolvedBusyWebMessage,
+  type BusyWebMessageComposerRequest,
+  type BusyWebMessageResult,
+} from "@/components/web-queue/submit";
 import { useShallow } from "zustand/shallow";
 import type { ThreadUserMessagePart } from "@assistant-ui/core";
 import {
@@ -59,7 +65,28 @@ import {
   usePendingPermissionCancellation,
   useSendWaitingNow,
 } from "@/runtime";
-import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
+import {
+  type AgentPoolEntry,
+  type MediaEntry,
+  type NetworkAgent,
+  type SlashCommand,
+} from "@/api";
+import {
+  matchPluginCommand,
+  pluginCommandCatalogReady,
+  pluginCommandConflicts,
+  pluginCommandEntries,
+  pluginCommandFailure,
+  pluginCommandItems,
+  pluginCommandSubmissionPending,
+  reservedCommandKeys,
+  warnPluginCommandConflicts,
+  canRestorePluginCommandDraft,
+} from "@/plugins/composer-commands";
+import { PluginTaggedText, PluginToolPart } from "@/plugins/renderers";
+import { slashCatalogNotice } from "./slash-catalog-notice";
+import { pluginRegistry, usePlugins } from "@/plugins/registry";
+import { logPluginFailure } from "@/plugins/plugin-errors";
 import {
   panelCommandRequest,
   type PanelOpenRequest,
@@ -78,7 +105,6 @@ import {
   type PendingAttachment,
   type ToolCallMessagePartComponent,
   useAui,
-  useAssistantTransportSendCommand,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -97,6 +123,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useLayoutEffect,
   useRef,
@@ -105,7 +132,17 @@ import {
   type FC,
   type KeyboardEvent,
   type PropsWithChildren,
+  type ReactNode,
 } from "react";
+
+const PLUGIN_COMMAND_SUBMISSION_WAIT_MS = 2_000;
+type PendingPluginSubmission = {
+  text: string;
+  session: string | null;
+  queueSessionId: string | null;
+  timer: number;
+  sendsNow: boolean;
+};
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 
@@ -151,7 +188,19 @@ export type ThreadProps = {
   historyStartIndex?: number | undefined;
   /** Per-agent/conversation localStorage key for the unsent composer text. */
   draftKey?: string | null | undefined;
+  /** Engine session owning this daemon queue submission plan. */
+  queueSessionId?: string | null | undefined;
+  /** Current canonical conversation for local queue retry ownership. */
+  queueConversationUid?: string | null | undefined;
+  /** Daemon-backed queue shown in the sticky composer footer. */
+  queuePanel?: ReactNode | undefined;
+  /** Queue a busy-composer message through the authenticated daemon route. */
+  onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
 };
+
+function composerRevisionSignature(text: string, attachments: readonly { id: string }[]): string {
+  return JSON.stringify([text, attachments.map(({ id }) => id)]);
+}
 
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -191,6 +240,10 @@ export const Thread: FC<ThreadProps> = ({
   onRetryHistory,
   historyStartIndex = 0,
   draftKey,
+  queueSessionId,
+  queueConversationUid,
+  queuePanel,
+  onQueueBusyMessage,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -210,6 +263,10 @@ export const Thread: FC<ThreadProps> = ({
         onRetryHistory={onRetryHistory}
         historyStartIndex={historyStartIndex}
         draftKey={draftKey}
+        queueSessionId={queueSessionId}
+        queueConversationUid={queueConversationUid}
+        queuePanel={queuePanel}
+        onQueueBusyMessage={onQueueBusyMessage}
       />
     </ThreadComponentsContext.Provider>
   );
@@ -229,6 +286,10 @@ const ThreadRoot: FC<{
   onRetryHistory: ThreadProps["onRetryHistory"];
   historyStartIndex: number;
   draftKey: ThreadProps["draftKey"];
+  queueSessionId: ThreadProps["queueSessionId"];
+  queueConversationUid: ThreadProps["queueConversationUid"];
+  queuePanel: ThreadProps["queuePanel"];
+  onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
 }> = ({
   isEmpty,
   agents,
@@ -243,6 +304,10 @@ const ThreadRoot: FC<{
   onRetryHistory,
   historyStartIndex,
   draftKey,
+  queueSessionId,
+  queueConversationUid,
+  queuePanel,
+  onQueueBusyMessage,
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -397,6 +462,7 @@ const ThreadRoot: FC<{
                 : "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
+            {queuePanel}
             {/* Keep transient status in the sticky footer so its mount/unmount
                 does not change the positions of transcript rows above it. */}
             {historyStatus ? (
@@ -432,6 +498,9 @@ const ThreadRoot: FC<{
                 onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={attachmentsEnabled}
                 draftKey={draftKey}
+                queueSessionId={queueSessionId}
+                queueConversationUid={queueConversationUid}
+                onQueueBusyMessage={onQueueBusyMessage}
               />
             </div>
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -527,9 +596,11 @@ const Composer: FC<{
   onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
-}> = ({ agents, commands, commandCatalogStatus, onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey }) => {
+  queueSessionId: ThreadProps["queueSessionId"];
+  queueConversationUid: ThreadProps["queueConversationUid"];
+  onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
+}> = ({ agents, commands, commandCatalogStatus, onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey, queueSessionId, queueConversationUid, onQueueBusyMessage }) => {
   const aui = useAui();
-  const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
   // running the agent listens) stays a typed command, and its status line shows.
   const terminalVoice = useVoiceMode();
@@ -538,13 +609,15 @@ const Composer: FC<{
   // Text typed into a chat that is about to be swapped out would be lost, or
   // sent to the chat being left.
   const lock = useContext(ComposerLockContext);
+  // A delayed submit can outlive the render that scheduled it.
+  const lockRef = useRef(lock);
+  lockRef.current = lock;
   const { workspace, remote: remoteAgents } = useContext(ComposerHubContext);
   // The mic only exists where the session's live command list has /voice.
   const voiceAvailable = commands.some(
     (command) => command.name === "voice" && command.enabled !== false,
   );
   const permissionStop = usePendingPermissionCancellation();
-  const sendWaitingNow = useSendWaitingNow();
   // The submit under way came from Cmd/Ctrl+Enter: the message goes at once.
   const submitSendsNow = useRef(false);
   const slotMode = useAuiState((s) =>
@@ -552,6 +625,9 @@ const Composer: FC<{
   );
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const composerText = useAuiState((s) => s.composer.text);
+  const composerRevisionKey = useAuiState((s) =>
+    composerRevisionSignature(s.composer.text, s.composer.attachments),
+  );
   const composerImages = useAuiState(
     useShallow((s) => s.composer.attachments),
   );
@@ -564,8 +640,14 @@ const Composer: FC<{
   } | null>(null);
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
   const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
-  const skipEmptyDraftPersist = useRef(false);
+  const skipEmptyDraftPersist = useRef<{ key: string } | null>(null);
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
+  const [queueAdmissionLock, setQueueAdmissionLock] = useState<{
+    draftKey: string | null;
+    locked: boolean;
+  } | null>(null);
+  const queueAdmissionLocked = hasUnresolvedBusyWebMessage(queueSessionId, draftKey, undefined, queueConversationUid) ||
+    (queueAdmissionLock?.locked === true && queueAdmissionLock.draftKey === (draftKey ?? null));
 
   useLayoutEffect(() => {
     let cancelled = false;
@@ -580,7 +662,6 @@ const Composer: FC<{
     const restored = stripImageTokens(draftText);
     setDraftRestoreSnapshot({ key, text: draftText });
     restoredDraft.current = { key, text: restored.text };
-    skipEmptyDraftPersist.current = false;
     if (aui.composer.getState().text !== restored.text) {
       aui.composer.setText(restored.text);
     }
@@ -671,15 +752,77 @@ const Composer: FC<{
       restoredDraft.current = null;
     }
     if (!key) return;
-    if (composerText.length === 0 && skipEmptyDraftPersist.current) {
+    if (composerText.length === 0 && skipEmptyDraftPersist.current?.key === key) {
       // assistant-ui clears the input as soon as submit starts. Keep the
-      // durable copy until the transport confirms that add-message succeeded.
-      skipEmptyDraftPersist.current = false;
+      // durable copy until transport or daemon queue admission is confirmed.
+      skipEmptyDraftPersist.current = null;
       return;
     }
-    if (composerText.length > 0) skipEmptyDraftPersist.current = false;
+    if (composerText.length > 0 && skipEmptyDraftPersist.current?.key === key) {
+      skipEmptyDraftPersist.current = null;
+    }
     saveComposerDraft(key, composerText);
   }, [composerText, draftKey]);
+
+  const composerRevisionRef = useRef(0);
+  const observedComposerRevisionKeyRef = useRef(composerRevisionKey);
+  if (observedComposerRevisionKeyRef.current !== composerRevisionKey) {
+    composerRevisionRef.current += 1;
+    observedComposerRevisionKeyRef.current = composerRevisionKey;
+  }
+  const currentDraftKeyRef = useRef(draftKey ?? null);
+  currentDraftKeyRef.current = draftKey ?? null;
+  const currentQueueSessionIdRef = useRef(queueSessionId ?? null);
+  currentQueueSessionIdRef.current = queueSessionId ?? null;
+  const composerFormId = useId();
+  const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const pendingPluginSubmitRef = useRef<PendingPluginSubmission | null>(null);
+  const normalPluginFallbackRef = useRef<{ text: string; session: string | null } | null>(null);
+  const cancelPendingPluginSubmit = () => {
+    const pending = pendingPluginSubmitRef.current;
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    pendingPluginSubmitRef.current = null;
+  };
+  const replayPendingPluginSubmit = (normalFallback: boolean) => {
+    const pending = pendingPluginSubmitRef.current;
+    if (!pending) return;
+    cancelPendingPluginSubmit();
+    if (
+      lockRef.current ||
+      currentDraftKeyRef.current !== pending.session ||
+      currentQueueSessionIdRef.current !== pending.queueSessionId ||
+      aui.composer.getState().text !== pending.text
+    ) return;
+    if (normalFallback) normalPluginFallbackRef.current = pending;
+    submitSendsNow.current = pending.sendsNow;
+    try {
+      const form = composerFormRef.current ?? document.getElementById(composerFormId);
+      if (form instanceof HTMLFormElement) form.requestSubmit();
+    } finally {
+      submitSendsNow.current = false;
+      if (normalFallback) normalPluginFallbackRef.current = null;
+    }
+  };
+  const composerWithOptionalSubscribe = aui.composer as typeof aui.composer & {
+    subscribe?: (listener: () => void) => () => void;
+  };
+  useLayoutEffect(() => {
+    const observeComposerChange = () => {
+      const state = aui.composer.getState();
+      const key = composerRevisionSignature(state.text, state.attachments);
+      if (observedComposerRevisionKeyRef.current !== key) {
+        composerRevisionRef.current += 1;
+        observedComposerRevisionKeyRef.current = key;
+      }
+    };
+    const unsubscribeClient = aui.subscribe(observeComposerChange);
+    const unsubscribeComposer = composerWithOptionalSubscribe.subscribe?.(observeComposerChange);
+    return () => {
+      unsubscribeClient();
+      unsubscribeComposer?.();
+    };
+  }, [aui, aui.composer]);
 
   const lastBusySubmit = useRef<{
     fingerprint: string;
@@ -709,6 +852,150 @@ const Composer: FC<{
     aui.composer.setText("");
     onOpenPanel(request);
   };
+
+  const pluginSnapshot = usePlugins();
+  const { plugins } = pluginSnapshot;
+  const pluginCommandsReady = pluginCommandCatalogReady(commandCatalogStatus);
+  const reserved = useMemo(
+    () => reservedCommandKeys(commands),
+    [commands],
+  );
+  const pluginEntries = useMemo(
+    () => pluginCommandsReady ? pluginCommandEntries(plugins, reserved) : [],
+    [pluginCommandsReady, plugins, reserved],
+  );
+  const pluginConflicts = useMemo(
+    () => pluginCommandsReady ? pluginCommandConflicts(plugins, reserved) : [],
+    [pluginCommandsReady, plugins, reserved],
+  );
+  const reportedPluginConflicts = useRef(new Set<string>());
+  useEffect(() => {
+    const current = new Set<string>();
+    const newConflicts = pluginConflicts.filter((conflict) => {
+      const key = JSON.stringify([
+        conflict.commandName.toLowerCase(),
+        conflict.winnerPluginId,
+        conflict.pluginId,
+      ]);
+      current.add(key);
+      return !reportedPluginConflicts.current.has(key);
+    });
+    reportedPluginConflicts.current = current;
+    warnPluginCommandConflicts(newConflicts);
+  }, [pluginConflicts]);
+
+  // A loaded plugin's /command typed in the composer runs here instead of
+  // going to the agent. Returns true when it handled the submit.
+  const runPluginCommand = (event: { preventDefault: () => void }) => {
+    const state = aui.composer.getState();
+    if (state.attachments.length > 0) return false;
+    const draft = state.text;
+    const commandSession = draftKey ?? null;
+    const commandQueueSessionId = queueSessionId ?? null;
+    const normalFallback = normalPluginFallbackRef.current;
+    if (normalFallback?.session === commandSession && normalFallback.text === draft) return false;
+    if (normalFallback) normalPluginFallbackRef.current = null;
+    const pending = pendingPluginSubmitRef.current;
+    if (pending && (
+      pending.session !== commandSession ||
+      pending.queueSessionId !== commandQueueSessionId ||
+      pending.text !== draft
+    )) {
+      cancelPendingPluginSubmit();
+    }
+    if (pluginCommandSubmissionPending(draft, commandCatalogStatus, pluginSnapshot, reserved, Boolean(draftKey))) {
+      event.preventDefault();
+      const pendingSubmission = pendingPluginSubmitRef.current;
+      if (!pendingSubmission) {
+        const timer = window.setTimeout(
+          () => replayPendingPluginSubmit(true),
+          PLUGIN_COMMAND_SUBMISSION_WAIT_MS,
+        );
+        pendingPluginSubmitRef.current = {
+          text: draft,
+          session: commandSession,
+          queueSessionId: commandQueueSessionId,
+          timer,
+          sendsNow: submitSendsNow.current,
+        };
+      } else if (submitSendsNow.current) {
+        pendingSubmission.sendsNow = true;
+      }
+      return true;
+    }
+    cancelPendingPluginSubmit();
+    const match = matchPluginCommand(draft, pluginEntries);
+    if (!match) return false;
+    event.preventDefault();
+    if (commandSession) {
+      saveComposerDraft(commandSession, draft);
+      skipEmptyDraftPersist.current = { key: commandSession };
+    }
+    aui.composer.setText("");
+    composerRevisionRef.current += 1;
+    observedComposerRevisionKeyRef.current = composerRevisionSignature("", state.attachments);
+    const clearedRevision = composerRevisionRef.current;
+    const fail = (error: unknown) => {
+      const current = pluginRegistry.getSnapshot().plugins.find((record) => record.id === match.entry.pluginId);
+      if (current?.k !== match.entry.k) return;
+      if (
+        canRestorePluginCommandDraft(
+          composerRevisionRef.current,
+          clearedRevision,
+          currentDraftKeyRef.current,
+          commandSession,
+        ) &&
+        aui.composer.getState().text === ""
+      ) {
+        aui.composer.setText(draft);
+      }
+      logPluginFailure(match.entry.pluginId, `command /${match.entry.name} failed`, error);
+      match.entry.k.toast(pluginCommandFailure(match.entry.name, error));
+    };
+    const clearSavedDraft = () => {
+      if (
+        commandSession &&
+        canRestorePluginCommandDraft(
+          composerRevisionRef.current,
+          clearedRevision,
+          currentDraftKeyRef.current,
+          commandSession,
+        ) &&
+        loadComposerDraft(commandSession) === draft
+      ) {
+        saveComposerDraft(commandSession, "");
+      }
+    };
+    try {
+      const result = match.entry.run(match.args);
+      void Promise.resolve(result).then(clearSavedDraft, fail);
+    } catch (error) {
+      fail(error);
+    }
+    return true;
+  };
+
+  useEffect(() => {
+    const pending = pendingPluginSubmitRef.current;
+    if (!pending) return;
+    const state = aui.composer.getState();
+    if (
+      pending.session !== (draftKey ?? null) ||
+      pending.queueSessionId !== (queueSessionId ?? null) ||
+      pending.text !== state.text
+    ) {
+      cancelPendingPluginSubmit();
+      return;
+    }
+    if (!pluginCommandSubmissionPending(pending.text, commandCatalogStatus, pluginSnapshot, reserved, Boolean(draftKey))) {
+      replayPendingPluginSubmit(false);
+    }
+  }, [aui, commandCatalogStatus, composerText, draftKey, pluginSnapshot, queueSessionId, reserved]);
+
+  useEffect(() => () => {
+    const pending = pendingPluginSubmitRef.current;
+    if (pending) window.clearTimeout(pending.timer);
+  }, []);
 
   // Picking a panel command in the slash menu (Enter or click) opens its tab
   // instead of leaving "/config" in the box for a second Enter.
@@ -743,6 +1030,9 @@ const Composer: FC<{
     inFlight.add(fingerprint);
     event.preventDefault();
     setBusySubmitError(null);
+    setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: true });
+    let admissionConfirmed = false;
+    let exactDraftStillVisible = true;
     try {
       const attachments = await Promise.all(
         state.attachments.map(async (attachment) => {
@@ -756,43 +1046,51 @@ const Composer: FC<{
           throw new Error("Attachment is not ready to send");
         }),
       );
-      const parts: Array<
-        | { type: "text"; text: string }
-        | { type: "image"; image: string }
-      > = [];
-      if (state.text.trim()) parts.push({ type: "text", text: state.text });
-      for (const attachment of attachments) {
-        for (const part of attachment.content ?? []) {
-          if (part.type === "text") parts.push({ type: "text", text: part.text });
-          if (part.type === "image") parts.push({ type: "image", image: part.image });
-        }
-      }
-      if (parts.length === 0) throw new Error("Message has no sendable content");
-      queueComposerDraftSubmission(draftKey, state.text);
-      if (state.text.length > 0) skipEmptyDraftPersist.current = true;
-      // The message waits for the turn to end, as a queued message (#1102).
-      sendTransportCommand({
-        type: "add-message",
-        message: { role: "user", parts },
-        parentId: null,
-        sourceId: null,
+      if (!onQueueBusyMessage) throw new Error("The daemon message queue is unavailable.");
+      const result = await onQueueBusyMessage({
+        draftKey,
+        text: state.text,
+        attachments: attachments as ComposerAttachmentLike[],
+        sendNow: sendsNow,
       });
-      if (sendsNow) sendWaitingNow?.();
+      if (!result.admitted) throw new Error("The daemon did not confirm queue admission.");
+      admissionConfirmed = true;
       const currentState = aui.composer.getState();
       const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
         .map((attachment) => attachment.id)
         .join(",")}`;
+      exactDraftStillVisible = currentFingerprint === fingerprint;
       if (currentFingerprint === fingerprint) {
-        void aui.composer.reset();
+        if (state.text.length > 0 && draftKey) skipEmptyDraftPersist.current = { key: draftKey };
+        await aui.composer.reset();
+        if (state.text.length > 0) saveComposerDraft(draftKey, "");
+        if (!await acknowledgeBusyWebMessage(result)) {
+          setBusySubmitError("Message was queued, but the local retry guard could not be cleared. Check the queue before reusing this draft.");
+        } else if (sendsNow && result.sendNowStatus !== "accepted") {
+          setBusySubmitError(result.sendNowStatus === "unknown"
+            ? "Message is queued, but Send Now could not be confirmed. Check the queue before retrying."
+            : "Message is queued, but Send Now was not accepted. It remains in the queue.");
+        }
       }
-    } catch {
+      setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: false });
+    } catch (error) {
       if (lastBusySubmit.current?.fingerprint === fingerprint) {
         lastBusySubmit.current = {
           ...lastBusySubmit.current,
           at: Number.NEGATIVE_INFINITY,
         };
       }
-      setBusySubmitError("Could not send the message. Retry or remove the attachment.");
+      const unresolved = typeof error === "object" && error !== null &&
+        "requiresExactRetry" in error && error.requiresExactRetry === true;
+      const rejected = typeof error === "object" && error !== null &&
+        "definitelyNotAdmitted" in error && error.definitelyNotAdmitted === true;
+      const keepExactDraft = unresolved || (admissionConfirmed && exactDraftStillVisible);
+      setQueueAdmissionLock({ draftKey: draftKey ?? null, locked: keepExactDraft });
+      setBusySubmitError(unresolved
+        ? "Queue admission may have succeeded. Keep this exact message unchanged and retry to reconcile it safely."
+        : rejected && error instanceof Error
+          ? error.message
+          : "Could not queue this message. Keep it in the composer and retry.");
     } finally {
       inFlight.delete(fingerprint);
     }
@@ -802,6 +1100,7 @@ const Composer: FC<{
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
+    if (runPluginCommand(event)) return;
     openPanelFromComposer(event);
     sendBusyMessage(event);
   };
@@ -810,9 +1109,10 @@ const Composer: FC<{
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
+    if (runPluginCommand(event)) return;
     // Keep panel commands on their existing path, then bypass assistant-ui's
-    // disabled-send predicate while a turn is running. The transport already
-    // queues this append message behind the active run.
+    // disabled-send predicate while a turn is running. Busy text is admitted
+    // through the daemon-owned queue instead of creating a transient stream row.
     openPanelFromComposer(event);
     if (event.defaultPrevented) return;
     if (isRunning) {
@@ -822,7 +1122,7 @@ const Composer: FC<{
     const text = aui.composer.getState().text;
     if (text.length > 0) {
       queueComposerDraftSubmission(draftKey, text);
-      skipEmptyDraftPersist.current = true;
+      if (draftKey) skipEmptyDraftPersist.current = { key: draftKey };
     }
   };
 
@@ -830,6 +1130,8 @@ const Composer: FC<{
     id: string;
     metadata?: Record<string, unknown> | undefined;
   }) => {
+    // Plugin commands are inserted as text and run on submit, not from here.
+    if (item.metadata?.category === "plugins") return;
     const insert = item.metadata?.insertText;
     const commandText = `/${typeof insert === "string" ? insert : item.id}`;
     if (
@@ -956,6 +1258,24 @@ const Composer: FC<{
     [commands],
   );
 
+  const pluginItems = useMemo(
+    () => pluginCommandItems(pluginEntries, prettyCommandName),
+    [pluginEntries],
+  );
+  const paletteItems = useMemo<readonly ComposerPaletteItem[]>(
+    () => [...commandItems, ...pluginItems],
+    [commandItems, pluginItems],
+  );
+  const slashNotice = pluginCommandSubmissionPending(
+    composerText,
+    commandCatalogStatus,
+    pluginSnapshot,
+    reserved,
+    Boolean(draftKey),
+  ) && commandCatalogStatus !== "loading"
+    ? "Loading plugin commands."
+    : slashCatalogNotice(commandCatalogStatus, pluginItems.length > 0);
+
   const nestedCommandNames = useMemo(() => {
     const names = new Set<string>();
 
@@ -1001,13 +1321,11 @@ const Composer: FC<{
     event.preventDefault();
   };
 
-  // While a turn runs the kit leaves Enter alone (it has no queue to put the
-  // message in), and the message box starts a new line. Send the message as
-  // the Send button does (#1365): it waits for the turn to end. Cmd+Enter
-  // (Ctrl+Enter off a Mac) sends it, and every message waiting before it, at
-  // once (#1102). This runs after the message box's own handler: an Enter the
-  // slash or @ menu took has its default prevented, and Shift+Enter still
-  // starts a new line.
+  // While a turn runs, Enter admits this message to the daemon queue for the
+  // next turn. Cmd+Enter (Ctrl+Enter off a Mac) admits it and requests Send
+  // Now for that batch. This runs after the message box's own handler: an
+  // Enter the slash or @ menu took has its default prevented, and Shift+Enter
+  // still starts a new line.
   const handleBusyEnter = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
       event.key !== "Enter" ||
@@ -1022,7 +1340,7 @@ const Composer: FC<{
     }
     event.preventDefault();
     // The submit handler runs inside requestSubmit and reads this at once.
-    submitSendsNow.current = sendWaitingNow !== null && (event.metaKey || event.ctrlKey);
+    submitSendsNow.current = event.metaKey || event.ctrlKey;
     event.target.form?.requestSubmit();
     submitSendsNow.current = false;
   };
@@ -1104,31 +1422,25 @@ const Composer: FC<{
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
       <ComposerPrimitive.Root
+        id={composerFormId}
+        ref={composerFormRef}
         className="aui-composer-root group/composer relative flex min-w-0 flex-1 flex-col"
         data-mode={slotMode}
         onSubmit={handleComposerSubmit}
       >
         <ComposerPalette
           char="/"
-          items={commandItems}
+          items={paletteItems}
           title="Commands"
           emptyMessage="No matching commands"
           emptyHint="Keep typing to refine the command search."
           onInserted={openPanelForItem}
         />
-        {composerText.trimStart().startsWith("/") && commandCatalogStatus !== "ready" ? (
+        {slashNotice && composerText.trimStart().startsWith("/") ? (
           <div role="status" className="bg-muted/50 text-muted-foreground flex items-center justify-between gap-3 px-3 py-2 text-xs">
-            <span className="min-w-0">
-              {commandCatalogStatus === "loading"
-                ? "Loading commands for this session."
-                : commandCatalogStatus === "empty"
-                  ? "No commands are available for this session. You can still type a slash command."
-                  : commandCatalogStatus === "fallback"
-                    ? "This engine does not provide a live command catalog. Showing built-in commands as a compatibility fallback."
-                    : "Commands couldn't be loaded for this session. Your draft is preserved."}
-            </span>
+            <span className="min-w-0">{slashNotice}</span>
             {(commandCatalogStatus === "fallback" || commandCatalogStatus === "unavailable") && onRetryCommands ? (
-              <Button type="button" size="sm" variant="outline" onClick={onRetryCommands}>
+              <Button type="button" size="sm" variant="outline" onClick={onRetryCommands} className="pointer-coarse:min-h-11">
                 Try Again
               </Button>
             ) : null}
@@ -1148,7 +1460,7 @@ const Composer: FC<{
         ) : null}
         <ComposerPrimitive.AttachmentDropzone
           asChild
-          disabled={!attachmentsEnabled}
+          disabled={!attachmentsEnabled || queueAdmissionLocked}
         >
           <div
             data-slot="aui_composer-shell"
@@ -1162,7 +1474,7 @@ const Composer: FC<{
                 {orphanTokenNotice}
               </p>
             ) : null}
-            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} />
+            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} disabled={queueAdmissionLocked} />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
@@ -1171,23 +1483,26 @@ const Composer: FC<{
               className="aui-composer-row flex items-end gap-1.5"
               onKeyDown={handleBusyEnter}
             >
-              {attachmentsEnabled ? <ComposerAddAttachment /> : null}
+              {attachmentsEnabled ? <ComposerAddAttachment disabled={queueAdmissionLocked} /> : null}
               <ComposerPrimitive.Input
                 placeholder={lock || placeholder}
-                disabled={Boolean(lock)}
+                disabled={Boolean(lock) || queueAdmissionLocked}
                 className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-base leading-6 outline-none pointer-fine:text-sm"
                 rows={1}
                 autoFocus
                 enterKeyHint="send"
                 aria-label="Message input"
-                addAttachmentOnPaste={attachmentsEnabled}
+                addAttachmentOnPaste={attachmentsEnabled && !queueAdmissionLocked}
                 onKeyDown={handleComposerKeyDown}
               />
               <ComposerSlot
                 voice={voiceAvailable ? voice : null}
                 running={isRunning}
                 permissionStop={permissionStop}
-                onBeforeSend={openPanelFromComposer}
+                onBeforeSend={(event) => {
+                  if (runPluginCommand(event)) return;
+                  openPanelFromComposer(event);
+                }}
                 onSteer={submitBusyMessage}
               />
             </div>
@@ -1212,7 +1527,7 @@ function prettyCommandName(name: string): string {
       }
       return lower.charAt(0).toUpperCase() + lower.slice(1);
     })
-    .join(" ");
+    .join(" ") || name;
 }
 
 type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
@@ -1461,11 +1776,16 @@ const AssistantMessage: FC = () => {
                 );
               }
               case "text":
-                return <MarkdownText />;
+                return <PluginTaggedText text={part.text} />;
               case "reasoning":
                 return <Reasoning {...part} />;
               case "tool-call":
-                return part.toolUI ?? <ToolFallbackComponent {...part} />;
+                return (
+                  <PluginToolPart
+                    part={part}
+                    fallback={part.toolUI ?? <ToolFallbackComponent {...part} />}
+                  />
+                );
               case "data":
                 return part.dataRendererUI;
               case "indicator":

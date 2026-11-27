@@ -92,6 +92,56 @@ def test_install_job_requires_exact_commit_and_file_hash(client, managed_repo, t
     assert client.post(f"/plugins/jobs/{job_id}/confirm", json=accepted).status_code == 409
 
 
+def test_install_reports_manifest_review_limit_refusal(client, managed_repo):
+    source, bare = managed_repo
+    manifest = json.loads((source / "kollab-plugin.json").read_text())
+    manifest["uses"] = [f"net:host-{index}.example" for index in range(257)]
+    (source / "kollab-plugin.json").write_text(json.dumps(manifest))
+    _git("add", "kollab-plugin.json", cwd=source)
+    _git("commit", "-m", "exceed review limit", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo#main"})
+    job = _ready(client, response.json()["job_id"])
+
+    assert job["status"] == "error"
+    assert job["error"] == (
+        "Plugin review exceeds a display limit; reduce the manifest or changed folders and stage again."
+    )
+
+
+def test_update_rejects_changed_folder_lists_over_the_review_limit(client, managed_repo):
+    source, bare = managed_repo
+    for index in range(257):
+        folder = source / f"component-{index}"
+        folder.mkdir()
+        (folder / "plugin.txt").write_text("before")
+    _git("add", ".", cwd=source)
+    _git("commit", "-m", "add plugin folders", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+    _install_hello(client)
+
+    for index in range(257):
+        (source / f"component-{index}" / "plugin.txt").write_text("after")
+    _git("add", ".", cwd=source)
+    _git("commit", "-m", "change plugin folders", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+
+    response = client.post("/plugins/hello/update")
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    job = _ready(client, job_id)
+
+    assert job["status"] == "error"
+    assert job["error"] == (
+        "Plugin review exceeds a display limit; reduce the manifest or changed folders and stage again."
+    )
+    assert "changed_folders" not in job
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": "0" * 40, "files_sha256": "0" * 64,
+    }).status_code == 409
+
+
 def test_cancel_ready_job_removes_stage_and_rejects_confirmation(client, tmp_path):
     response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
     job_id = response.json()["job_id"]
@@ -135,6 +185,63 @@ def test_cancel_reports_cleanup_failure_and_allows_retry(client, monkeypatch):
     assert not base.exists()
 
 
+@pytest.mark.parametrize("status", ["error", "cancelled"])
+def test_cancel_retries_cleanup_for_terminal_jobs_with_staged_files(client, status):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    _ready(client, job_id)
+    job = client.app.state.plugin_jobs.jobs[job_id]
+    job["status"] = status
+    if status == "error":
+        job["warning"] = "Plugin staging files could not be removed"
+    base = job["base"]
+
+    result = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert result.status_code == 200, result.text
+    assert result.json()["status"] == "cancelled"
+    assert not base.exists()
+
+
+def test_failed_cancel_cleanup_expires_and_retries(client, monkeypatch):
+    import asyncio
+    import shutil
+
+    from kollabor_engine import plugin_jobs
+
+    manager = client.app.state.plugin_jobs
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    _ready(client, job_id)
+    job = manager.jobs[job_id]
+    base = job["base"]
+    original = shutil.rmtree
+
+    def fail_base(path, *args, **kwargs):
+        if path == base:
+            raise PermissionError("private path")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_base)
+    assert client.delete(f"/plugins/jobs/{job_id}").status_code == 503
+    assert job["status"] == "cancelling"
+    assert "cancel_task" not in job
+
+    monkeypatch.setattr(shutil, "rmtree", original)
+    monkeypatch.setattr(plugin_jobs, "_JOB_TTL", 1)
+    job["updated"] = time.monotonic() - 2
+
+    async def expire_and_wait_for_cleanup():
+        manager._expire()
+        await asyncio.gather(*list(manager.tasks))
+
+    client.portal.call(expire_and_wait_for_cleanup)
+
+    assert job_id not in manager.jobs
+    assert job_id not in manager.expired_jobs
+    assert not base.exists()
+
+
 def test_cancel_staging_job_stops_worker_and_cleans_stage(client, monkeypatch):
     import asyncio
     import threading
@@ -163,12 +270,159 @@ def test_cancel_staging_job_stops_worker_and_cleans_stage(client, monkeypatch):
     assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "cancelled"
 
 
+def test_windows_staging_stop_uses_process_tree_helper(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from kollabor_engine import plugin_jobs
+
+    from kollabor_config import proc_ctl
+
+    monkeypatch.delattr(plugin_jobs.os, "killpg", raising=False)
+    killed = []
+    monkeypatch.setattr(proc_ctl, "kill_tree", lambda pid, sig: killed.append((pid, sig)))
+    process = SimpleNamespace(pid=4321, returncode=None, communicate=AsyncMock(return_value=(b"", b"")))
+
+    asyncio.run(plugin_jobs.PluginJobs._stop_staging_process(process))
+
+    assert killed == [(4321, proc_ctl.HARD)]
+    process.communicate.assert_awaited_once()
+
+
 def test_job_management_is_local_even_with_user_token(client):
     response = client.post("/plugins/install", headers={"x-kollab-plugin-remote": "1"},
                            json={"source": "https://example.invalid/repo"})
     assert response.status_code == 403
     assert client.get("/plugins/jobs/missing", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
     assert client.delete("/plugins/jobs/missing", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
+
+
+def test_cancel_discards_ready_plugin_job(client):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    assert _ready(client, job_id)["status"] == "ready"
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+
+    response = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["job_id"] == job_id
+    assert response.json()["status"] == "cancelled"
+    assert not base.exists()
+    # The cancelled job stays queryable until it expires, so a repeated DELETE is safe.
+    assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("status", ["installing", "complete"])
+def test_cancel_preserves_installing_or_completed_job(client, status):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    assert _ready(client, job_id)["status"] == "ready"
+    jobs = client.app.state.plugin_jobs
+    job = jobs.jobs[job_id]
+    base = job["base"]
+    job["status"] = status
+
+    response = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert response.status_code == 409
+    assert base.exists()
+    assert jobs.jobs[job_id]["status"] == status
+
+
+def test_cancel_reserves_ready_job_while_cleanup_runs(client, monkeypatch):
+    import asyncio
+    import threading
+
+    from fastapi import HTTPException
+
+    jobs = client.app.state.plugin_jobs
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    cleanup_started, release_cleanup = threading.Event(), threading.Event()
+    release_apply = threading.Event()
+    original_cleanup = jobs._cleanup
+    cleanups = []
+
+    def slow_cleanup(job):
+        cleanups.append(job["id"])
+        cleanup_started.set()
+        assert release_cleanup.wait(5)
+        return original_cleanup(job)
+
+    async def blocked_apply(job, commit, digest):
+        assert await asyncio.to_thread(release_apply.wait, 5)
+        return jobs._public(job)
+
+    monkeypatch.setattr(jobs, "_cleanup", slow_cleanup)
+    monkeypatch.setattr(jobs, "_apply", blocked_apply)
+    # The finished staging task belongs to the TestClient's loop; this race runs in its own loop.
+    jobs.jobs[job_id].pop("stage_task", None)
+
+    async def race():
+        cancel = asyncio.create_task(jobs.cancel(job_id))
+        try:
+            assert await asyncio.to_thread(cleanup_started.wait, 2)
+            duplicate_cancel = asyncio.create_task(jobs.cancel(job_id))
+            confirm = asyncio.create_task(jobs.confirm(job_id, ready["commit"], ready["files_sha256"]))
+            await asyncio.sleep(0.05)
+            assert confirm.done(), "confirm must be rejected while cancellation owns the job"
+            with pytest.raises(HTTPException) as confirm_error:
+                await confirm
+            assert confirm_error.value.status_code == 409
+            assert not duplicate_cancel.done(), "a second DELETE must join the running cancellation"
+            release_cleanup.set()
+            first, second = await asyncio.gather(cancel, duplicate_cancel)
+            assert first["status"] == second["status"] == "cancelled"
+            assert cleanups == [job_id], "cleanup must run once for both DELETEs"
+        finally:
+            release_cleanup.set()
+            release_apply.set()
+            await asyncio.gather(cancel, return_exceptions=True)
+
+    asyncio.run(race())
+
+
+def test_cancel_rejects_new_work_while_manager_is_closing(client):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    assert _ready(client, job_id)["status"] == "ready"
+    client.app.state.plugin_jobs.closing = True
+
+    response = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert response.status_code == 503
+
+
+def test_cancel_stops_staging_job_and_removes_its_files(client, monkeypatch):
+    import asyncio
+    import threading
+
+    stopped = threading.Event()
+
+    async def stalled(*args):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.set()
+            raise
+
+    monkeypatch.setattr(client.app.state.plugin_jobs, "_run_staging", stalled)
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "staging"
+
+    response = client.delete(f"/plugins/jobs/{job_id}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["job_id"] == job_id
+    assert response.json()["status"] == "cancelled"
+    assert stopped.is_set()
+    assert not base.exists()
+    assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "cancelled"
 
 
 def test_install_staging_is_background_and_does_not_reveal_errors(client, monkeypatch):
@@ -221,6 +475,73 @@ def test_jobs_are_bounded_and_expire(client, monkeypatch):
     assert client.post("/plugins/install", json={"source": "https://example.invalid/repo"}).status_code == 429
     monkeypatch.setattr(plugin_jobs, "_JOB_TTL", -1)
     assert client.get(f"/plugins/jobs/{first['job_id']}").status_code == 404
+
+
+def test_finished_review_job_does_not_block_the_next_review(client, managed_repo, monkeypatch):
+    from kollabor_engine import plugin_jobs
+
+    source, bare = managed_repo
+    manifest = json.loads((source / "kollab-plugin.json").read_text())
+    manifest["uses"] = [f"net:host-{index}.example" for index in range(257)]
+    (source / "kollab-plugin.json").write_text(json.dumps(manifest))
+    _git("add", "kollab-plugin.json", cwd=source)
+    _git("commit", "-m", "exceed review limit", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+
+    monkeypatch.setattr(plugin_jobs, "_MAX_JOBS", 1)
+    first = client.post("/plugins/install", json={"source": "https://example.invalid/repo#main"})
+    failed = _ready(client, first.json()["job_id"])
+    assert failed["status"] == "error"
+
+    second = client.post("/plugins/install", json={"source": "https://example.invalid/repo#main"})
+
+    assert second.status_code == 202, second.text
+    assert failed["job_id"] not in client.app.state.plugin_jobs.jobs
+
+
+@pytest.mark.parametrize(
+    ("status", "retained"),
+    [("error", False), ("cancelled", False), ("complete", True)],
+)
+def test_start_keeps_unacknowledged_completed_result(client, monkeypatch, status, retained):
+    import asyncio
+
+    manager = client.app.state.plugin_jobs
+    previous_id = "unacknowledged-result"
+    manager.jobs[previous_id] = {
+        "id": previous_id,
+        "action": "install",
+        "status": status,
+        "updated": time.monotonic(),
+    }
+
+    async def hold_staging(_job):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager, "_stage", hold_staging)
+    started = client.portal.call(
+        manager._start, "install", "https://example.invalid/repo"
+    )
+
+    assert started["status"] == "staging"
+    assert (previous_id in manager.jobs) is retained
+
+
+def test_expiry_leaves_cleanup_to_close_when_manager_is_closing(client, monkeypatch):
+    from kollabor_engine import plugin_jobs
+
+    manager = client.app.state.plugin_jobs
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    assert _ready(client, job_id)["status"] == "ready"
+    manager.closing = True
+    monkeypatch.setattr(plugin_jobs, "_JOB_TTL", -1)
+
+    def expire_while_closing():
+        manager._expire()
+        return job_id in manager.jobs and job_id not in manager.expired_jobs
+
+    assert client.portal.call(expire_while_closing)
 
 
 def _install_hello(client):

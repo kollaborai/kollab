@@ -552,8 +552,12 @@ async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_a
         restored_manager = ConversationManager(configuration)
         assert restored_manager.load_session(conversation_logger.session_id)
         assistant = next(message for message in restored_manager.messages if message["role"] == "assistant")
-        assert set(assistant["metadata"]) == {"provider", "acp_updates", "tool_calls", "stop_reason"}
+        assert set(assistant["metadata"]) == {
+            "provider", "request_id", "turn_id", "acp_updates", "tool_calls", "stop_reason"
+        }
         assert assistant["metadata"]["provider"] == "acp"
+        assert assistant["metadata"]["request_id"] == "owned-request"
+        assert assistant["metadata"]["turn_id"] == 1
         assert assistant["metadata"]["stop_reason"] == stop_reason
         assert assistant["metadata"]["tool_calls"] == metadata["tool_calls"]
         assert assistant["metadata"]["acp_updates"] == list(updates)

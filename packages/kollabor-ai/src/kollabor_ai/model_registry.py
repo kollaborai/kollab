@@ -27,6 +27,21 @@ PROVIDER_MODEL_SOURCE = {
 }
 
 
+def parse_json_int(text: str) -> int | float:
+    """Read a JSON integer literal without raising past Python's digit limit.
+
+    int() refuses a literal longer than sys.get_int_max_str_digits() with a
+    plain ValueError, which json does not wrap, so one such value would abort
+    the whole catalog file. Such a value is unrepresentable, so it reads as the
+    float it overflows to (inf or -inf). Catalog readers already reject
+    non-finite numbers, so the entry is skipped or flagged, and the rest loads.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        return float(text)
+
+
 def load_model_registry() -> Dict[str, Any]:
     """Load and merge the model registry.
 
@@ -45,7 +60,7 @@ def load_model_registry() -> Dict[str, Any]:
         try:
             if path.exists():
                 with open(path) as handle:
-                    loaded = json.load(handle)
+                    loaded = json.load(handle, parse_int=parse_json_int)
                 if not isinstance(loaded, dict):
                     logger.warning("Ignoring malformed model registry root in %s", path)
                     continue
@@ -66,7 +81,7 @@ def load_model_registry() -> Dict[str, Any]:
     try:
         if user_path.exists():
             with open(user_path) as handle:
-                user_data = json.load(handle)
+                user_data = json.load(handle, parse_int=parse_json_int)
             if not isinstance(user_data, dict):
                 logger.warning("Ignoring malformed user model registry root in %s", user_path)
             else:

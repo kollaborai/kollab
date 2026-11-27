@@ -31,6 +31,7 @@ import { NetworkPanel, type NetworkSection } from "./NetworkPanel";
 import { PickerList } from "./PickerList";
 import { PromptsPage } from "@/components/prompts/PromptsPage";
 import { PromptsApi } from "@/prompts-api";
+import { PluginsSettings } from "@/plugins/settings";
 import { SessionSettings } from "./SessionSettings";
 import { PanelDialogSurface } from "./PanelDialogSurface";
 import {
@@ -208,6 +209,7 @@ export function PanelHost({
   const promptsApi = useMemo(() => new PromptsApi(api), [api]);
   const [tabs, setTabs] = useState<TabMap>(freshTabs);
   const [busy, setBusy] = useState(false);
+  const [pluginDraftCount, setPluginDraftCount] = useState(0);
   const [reveal, setReveal] = useState<Reveal | null>(null);
   const [poll, setPoll] = useState<Poll | null>(null);
   const [networkSection, setNetworkSection] = useState<"overview" | "access">("overview");
@@ -289,6 +291,7 @@ export function PanelHost({
       tab !== "session" &&
       tab !== "prompts" &&
       tab !== "phonelink" &&
+      tab !== "plugins" &&
       tabs[tab].status === "idle"
     ) {
       void loadRoot(tab);
@@ -492,7 +495,7 @@ export function PanelHost({
     (total, state) =>
       total +
       state.views.reduce((n, view) => n + Object.keys(view.draft).length, 0),
-    0,
+    pluginDraftCount,
   );
   const handleOpenChange = (next: boolean) => {
     if (
@@ -527,14 +530,14 @@ export function PanelHost({
     onTabChange(next as SettingsTab);
   };
 
-  const state = tab === "session" || tab === "prompts" || tab === "phonelink" ? null : tabs[tab];
+  const state = tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins" ? null : tabs[tab];
   const top = state?.views[state.views.length - 1];
   const activeTab =
     SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0];
   const message = top?.message ?? null;
 
   const refresh = async () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink") return;
+    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return;
     if (tab === "network" && top?.panel.panel === "connect-knocks") {
       const mine = epoch.current;
       setBusy(true);
@@ -567,7 +570,7 @@ export function PanelHost({
     patchTab(tab, () => IDLE);
   };
   const back = () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink") return;
+    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return;
     setReveal(null);
     patchTab(tab, (current) => ({
       ...current,
@@ -596,7 +599,7 @@ export function PanelHost({
   };
 
   const panelBody = () => {
-    if (!state || tab === "session" || tab === "prompts" || tab === "phonelink") return null;
+    if (!state || tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return null;
     if (state.status === "error") {
       return (
         <div className="flex flex-col items-start gap-3 px-4 py-4 sm:px-6">
@@ -843,13 +846,13 @@ export function PanelHost({
       >
         <TabsList
           aria-label="Settings sections"
-          className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 md:h-9 md:flex-nowrap md:overflow-x-auto [&::-webkit-scrollbar]:hidden"
+          className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 [&::-webkit-scrollbar]:hidden"
         >
           {SETTINGS_TABS.filter((item) => sessionId || sessionlessTabs(!!session.workspace).includes(item.id)).map((item) => (
             <TabsTrigger
               key={item.id}
               value={item.id}
-              className="h-9 flex-none px-2.5 sm:px-3 md:h-full"
+              className="h-9 flex-none px-2.5 sm:px-3 pointer-coarse:min-h-11"
             >
               {item.label}
             </TabsTrigger>
@@ -884,12 +887,22 @@ export function PanelHost({
           >
             {sessionId ? <PromptsPage api={promptsApi} /> : null}
           </div>
+          <div
+            role="tabpanel"
+            aria-label="Plugins"
+            className={cn(
+              "min-h-0 flex-1 flex-col",
+              tab === "plugins" ? "flex" : "hidden",
+            )}
+          >
+            <PluginsSettings api={api} onDirtyChange={setPluginDraftCount} />
+          </div>
           {tab === "phonelink" && open ? (
             <div role="tabpanel" aria-label="PhoneLink" className="flex min-h-0 w-full flex-1 flex-col">
               <PhoneLinkPanel api={api} onOpenNetwork={() => changeTab("network")} />
             </div>
           ) : null}
-          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" ? (
+          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" && tab !== "plugins" ? (
             <div
               role="tabpanel"
               aria-label={activeTab.label}
