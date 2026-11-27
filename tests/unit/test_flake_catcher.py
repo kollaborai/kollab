@@ -172,3 +172,30 @@ def test_gh_output_that_is_not_utf8_does_not_crash(tmp_path, monkeypatch) -> Non
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
 
     assert "FAILED tests/unit/test_a.py::t" in catcher._run_gh(["api", "x"])
+
+
+def test_parse_failed_lines_keeps_parameter_ids_that_contain_the_separator() -> None:
+    logs = (
+        "FAILED tests/unit/test_net.py::test_link[network - timeout] - AssertionError\n"
+        "FAILED tests/unit/test_net.py::test_link[network - reset] - AssertionError\n"
+    )
+
+    assert catcher.parse_failed_lines(logs) == [
+        "tests/unit/test_net.py::test_link[network - timeout]",
+        "tests/unit/test_net.py::test_link[network - reset]",
+    ]
+
+
+class TimedOutGh(FakeGh):
+    def __call__(self, args: list[str]) -> str:
+        if args[1] == "repos/owner/repo/actions/runs/7/attempts/1/jobs?per_page=100":
+            return json.dumps({"jobs": [{"id": 90, "conclusion": "timed_out"}]})
+        return super().__call__(args)
+
+
+def test_a_timed_out_attempt_is_read_for_flaky_tests() -> None:
+    gh = TimedOutGh()
+
+    catcher.open_or_update_flaky_tests("owner/repo", "7", 2, gh=gh)
+
+    assert len(gh.created) == 1

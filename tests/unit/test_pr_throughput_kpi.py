@@ -829,3 +829,30 @@ def test_markdown_shows_unknown_merge_states():
         },
     }
     assert "Merge state unknown: 2" in kpi.render_markdown(report)
+
+
+def test_main_ci_red_to_green_counts_a_timed_out_attempt_as_red():
+    runner = FakeRunner(
+        {
+            "actions/workflows/ci.yml/runs": {
+                "total_count": 1,
+                "workflow_runs": [
+                    {
+                        "id": 21,
+                        "run_attempt": 2,
+                        "status": "completed",
+                        "conclusion": "success",
+                    }
+                ],
+            },
+            "actions/runs/21/attempts/1/jobs": {
+                "jobs": [{"conclusion": "timed_out"}]
+            },
+        }
+    )
+
+    result = kpi._main_ci_red_to_green(
+        kpi.GhApi(runner), "o/r", NOW - timedelta(hours=24), 10
+    )
+
+    assert result["main_red_to_green_rate"] == pytest.approx(1.0)

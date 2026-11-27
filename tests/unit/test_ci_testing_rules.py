@@ -99,3 +99,12 @@ def test_every_blocking_suite_is_covered_by_the_repeat_job() -> None:
             repeated |= _test_roots(command.split("--suites", 1)[1])
 
     assert blocking - repeated == set()
+
+
+def test_a_failing_quarantine_suite_does_not_skip_the_next_ones() -> None:
+    steps = _workflow(".github/workflows/ci.yml")["jobs"]["quarantine"]["steps"]
+    runs = [step for step in steps if "-m quarantine" in step.get("run", "")]
+
+    assert len(runs) >= 3
+    for step in runs[1:]:
+        assert "!cancelled()" in str(step.get("if", "")), step["name"]
