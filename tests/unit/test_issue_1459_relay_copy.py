@@ -62,3 +62,38 @@ async def test_hub_msg_from_the_web_ui_gets_page_copy_for_relay_errors():
     assert await hub._handle_msg_command("helper@relay-test hi", input_source="webui") == "sent to helper@relay-test"
     assert await hub._handle_msg_command("helper@relay-test hi") == "sent to helper@relay-test"
     assert seen == ["webui", None]
+
+
+@pytest.mark.asyncio
+async def test_hub_msg_via_state_service_keeps_web_request_source():
+    hub = HubPlugin.__new__(HubPlugin)
+    hub._identity = SimpleNamespace(identity="browser-agent", agent_id="browser-image")
+    hub._relay_agent = SimpleNamespace(
+        resolve_handle=lambda _handle: (_ for _ in ()).throw(
+            RelayError(
+                "this version of kollab is too old for relay.test; run kollab --upgrade"
+            )
+        ),
+        send=lambda *_args, **_kwargs: None,
+        _turn=SimpleNamespace(get=lambda: None),
+    )
+    hub._resolve_scope = lambda _target: MessageScope.DIRECT.value
+
+    async def state_hub_send_msg(target, content, *, input_source=None):
+        return await hub._handle_msg_command(
+            f"{target} {content}", input_source=input_source
+        )
+
+    state_service = SimpleNamespace(hub_send_msg=state_hub_send_msg)
+    hub.event_bus = SimpleNamespace(get_service=lambda _name: state_service)
+    result = await hub._handle_hub_command(
+        SimpleNamespace(
+            args=["msg", "helper@relay-test", "hi"], _input_source="webui"
+        )
+    )
+
+    assert result == (
+        "rejected: helper@relay-test: This engine version cannot connect to this "
+        "relay. The message was not sent."
+    )
+    assert "kollab --" not in result
