@@ -2603,37 +2603,59 @@ class QueueProcessor:
                     # private pending marker before this terminal update
                     # acquired the JSONL lock. Accept either exact phase.
                     expected_options.append({"request_id": input_id})
-                try:
-                    persisted = False
-                    for expected in expected_options:
-                        persisted = await update_metadata(
-                            row_uuid,
-                            expected_metadata=expected,
-                            updates=updates,
-                            remove_metadata_keys=(
-                                ("chat_stream_pending_input_id",)
-                                if plugin_pending
-                                else ()
-                            ),
-                        )
-                        if persisted:
-                            break
-                except Exception:
-                    logger.exception(
-                        "Could not persist native input outcome for %s", input_id
-                    )
-                else:
-                    if persisted is not True:
+                for attempt in range(3):
+                    try:
+                        persisted = False
+                        for expected in expected_options:
+                            persisted = await update_metadata(
+                                row_uuid,
+                                expected_metadata=expected,
+                                updates=updates,
+                                remove_metadata_keys=(
+                                    ("chat_stream_pending_input_id",)
+                                    if plugin_pending
+                                    else ()
+                                ),
+                            )
+                            if persisted:
+                                break
+                    except Exception as exc:
+                        if attempt < 2:
+                            continue
                         logger.warning(
-                            "Native input outcome row did not match admission %s",
+                            "Could not persist native input outcome for %s after "
+                            "%s attempts",
                             input_id,
+                            attempt + 1,
+                            exc_info=(type(exc), exc, exc.__traceback__),
                         )
+                        try:
+                            self.message_display_service.display_error_message(
+                                "Could not save this input's result to "
+                                f"conversation history: {exc}"
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Could not display native input history warning"
+                            )
+                        break
                     else:
-                        getattr(self, "_persisted_native_stream_ids", set()).add(
-                            input_id
-                        )
-                        getattr(self, "_native_stream_inputs", {}).pop(input_id, None)
-                        getattr(self, "_native_stream_messages", {}).pop(input_id, None)
+                        if persisted is not True:
+                            logger.warning(
+                                "Native input outcome row did not match admission %s",
+                                input_id,
+                            )
+                        else:
+                            getattr(self, "_persisted_native_stream_ids", set()).add(
+                                input_id
+                            )
+                            getattr(self, "_native_stream_inputs", {}).pop(
+                                input_id, None
+                            )
+                            getattr(self, "_native_stream_messages", {}).pop(
+                                input_id, None
+                            )
+                        break
             else:
                 # No durable admission row exists, but the live combined row
                 # was still stamped above and there is nothing to retry.
