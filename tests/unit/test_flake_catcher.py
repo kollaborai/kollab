@@ -32,6 +32,29 @@ def test_issue_title_and_body_include_test_run_url_and_attempt() -> None:
     assert "attempt 2" in body
 
 
+def test_issue_body_keeps_node_id_backticks_and_markdown_inside_one_code_span() -> None:
+    nodeid = "tests/unit/test_alpha.py::TestAlpha::test_one[parameter ``run @someone <https://example.invalid>]"
+
+    body = catcher.build_issue_body(nodeid, "https://example.test/runs/7", 2)
+
+    assert body == (
+        "Test: ```tests/unit/test_alpha.py::TestAlpha::test_one[parameter "
+        "``run @someone <https://example.invalid>]```\n\n"
+        "- [Workflow run attempt 2](https://example.test/runs/7/attempts/2) "
+        "failed; a later attempt passed."
+    )
+
+
+def test_issue_body_keeps_plain_node_id_text_unchanged() -> None:
+    nodeid = "tests/unit/test_alpha.py::TestAlpha::test_one[param]"
+
+    assert catcher.build_issue_body(nodeid, "https://example.test/runs/7", 2) == (
+        f"Test: `{nodeid}`\n\n"
+        "- [Workflow run attempt 2](https://example.test/runs/7/attempts/2) "
+        "failed; a later attempt passed."
+    )
+
+
 def test_issue_decision_creates_then_updates_once_per_test() -> None:
     nodeid = "tests/unit/test_alpha.py::test_one"
     title = catcher.build_issue_title(nodeid)
