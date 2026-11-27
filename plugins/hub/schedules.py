@@ -91,19 +91,45 @@ class ScheduleRow:
             not isinstance(agent, str) for agent in agents
         ):
             raise ValueError("schedule agents must be a list of names")
+        for field in ("id", "prompt", "when_busy", "skill", "created_by"):
+            if field in data and not isinstance(data[field], str):
+                raise ValueError(f"schedule {field} must be a string")
+        active = data.get("active", True)
+        if not isinstance(active, bool):
+            raise ValueError("schedule active must be a boolean")
+        numeric = {}
+        for field, default in (
+            ("interval_seconds", 0),
+            ("anchor", 0),
+            ("created_at", 0),
+            ("updated_at", 0),
+        ):
+            value = data.get(field, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"schedule {field} must be a number")
+            try:
+                number = float(value)
+            except (OverflowError, ValueError):
+                raise ValueError(f"schedule {field} must be finite") from None
+            if not math.isfinite(number):
+                raise ValueError(f"schedule {field} must be finite")
+            numeric[field] = number
+        revision = data.get("revision", 1)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise ValueError("schedule revision must be a positive integer")
         row = cls(
-            id=str(data.get("id", "")),
+            id=data.get("id", ""),
             agents=list(agents),
-            prompt=str(data.get("prompt", "")),
-            interval_seconds=float(data.get("interval_seconds", 0)),
-            anchor=float(data.get("anchor", 0)),
-            active=bool(data.get("active", True)),
-            when_busy=str(data.get("when_busy", "queue")),
-            skill=str(data.get("skill", "")),
-            created_by=str(data.get("created_by", "")),
-            created_at=float(data.get("created_at", 0)),
-            updated_at=float(data.get("updated_at", 0)),
-            revision=int(data.get("revision", 1)),
+            prompt=data.get("prompt", ""),
+            interval_seconds=numeric["interval_seconds"],
+            anchor=numeric["anchor"],
+            active=active,
+            when_busy=data.get("when_busy", "queue"),
+            skill=data.get("skill", ""),
+            created_by=data.get("created_by", ""),
+            created_at=numeric["created_at"],
+            updated_at=numeric["updated_at"],
+            revision=revision,
         )
         if not row.id or not row.agents or not row.prompt:
             raise ValueError("a schedule needs id, agents and prompt")
