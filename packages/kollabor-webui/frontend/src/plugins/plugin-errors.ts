@@ -22,8 +22,8 @@ const SENSITIVE_ASSIGNMENT = new RegExp(
   String.raw`((?:^|[^A-Za-z0-9])(?:"${SENSITIVE_KEY_NAME}(?:[_-][A-Za-z0-9]+)*"|${SENSITIVE_KEY_NAME}(?:[_-][A-Za-z0-9]+)*)(?![A-Za-z0-9_])\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)`,
   "gi",
 );
-const SECRET_VALUE = /\b(?:secret[-_]token[-_][A-Za-z0-9_-]+|sk-|gh[pousr]_|github_pat_|AIza[A-Za-z0-9_-]{34,35})[A-Za-z0-9_-]*/gi;
-const SAFE_TEXT_VALUES = new Set(["budget", "length", "required"]);
+const SECRET_VALUE = /\b(?:(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9_-]+|secret[-_]token[-_][A-Za-z0-9_-]+|sk-|gh[pousr]_|github_pat_|AIza[A-Za-z0-9_-]{34,35})[A-Za-z0-9_-]*/gi;
+const SAFE_TEXT_VALUES = new Set(["budget", "length", "required", "status"]);
 
 function isAuthCredential(value: string): boolean {
   return value.length >= 24 || (value.length >= 6 && /\d/.test(value));

@@ -152,7 +152,13 @@ function indexCodeSpanClosers(text: string): ReadonlyMap<number, number> {
     }
     const start = index;
     while (text[index] === "`") index++;
-    runs.push({ start, end: index, length: index - start });
+    let precedingBackslashes = 0;
+    for (let cursor = start - 1; cursor >= 0 && text[cursor] === "\\"; cursor--) {
+      precedingBackslashes++;
+    }
+    if (precedingBackslashes % 2 === 0) {
+      runs.push({ start, end: index, length: index - start });
+    }
   }
 
   const closers = new Map<number, number>();

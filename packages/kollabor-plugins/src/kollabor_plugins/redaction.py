@@ -14,6 +14,9 @@ _AUTH_SCHEME_ASSIGNMENT = re.compile(
     r"(?i)(?P<key>\b(?:proxy-authorization|authorization|token)\b\s*[:=]\s*)"
     r"(?P<scheme>bearer|basic)\s+[^\s,;]+"
 )
+_COOKIE_HEADER = re.compile(
+    r"(?i)(?:^|[^A-Za-z0-9])(?:set-cookie|cookie)(?![A-Za-z0-9_])\s*:\s*[^\r\n]*"
+)
 _SECRET_VALUE = re.compile(
     r"(?i)\b(?:secret[-_]token[-_][A-Za-z0-9_-]{6,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_|github_pat_)[A-Za-z0-9_-]*"
 )
@@ -31,7 +34,11 @@ def _is_auth_credential(value: str) -> bool:
 
 def contains_sensitive_text(text: str, *, allow_safe_values: bool = False) -> bool:
     """Return whether text contains a credential or a credential-shaped value."""
-    if _SECRET_VALUE.search(text) or _AUTH_SCHEME_ASSIGNMENT.search(text):
+    if (
+        _SECRET_VALUE.search(text)
+        or _AUTH_SCHEME_ASSIGNMENT.search(text)
+        or _COOKIE_HEADER.search(text)
+    ):
         return True
     for match in _AUTH_SCHEME.finditer(text):
         if _is_auth_credential(match.group(2)):
