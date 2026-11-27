@@ -40,17 +40,17 @@ const suiteFixtures = {
 };
 const embeddedNodeSources = {
   "tests/embedded-node-string.test.ts": [
-    'import { it } from "vitest";',
+    ["import { it }", "from", '"vitest";'].join(" "),
     'const fixture = \'import { test } from "node:test";\';',
     'it("runs under Vitest", () => {});',
   ].join("\n"),
   "tests/embedded-node-comment.test.ts": [
-    'import { it } from "vitest";',
+    ["import { it }", "from", '"vitest";'].join(" "),
     '// fixture sample: import { test } from "node:test";',
     'it("runs under Vitest", () => {});',
   ].join("\n"),
   "tests/embedded-node-template.test.ts": [
-    'import { it } from "vitest";',
+    ["import { it }", "from", '"vitest";'].join(" "),
     'const fixture = `import { test } from "node:test";`;',
     'it("runs under Vitest", () => {});',
   ].join("\n"),
