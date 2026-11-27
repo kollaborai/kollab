@@ -70,6 +70,11 @@ async def test_engine_fallback_signals_the_selected_generation_then_reuses_sessi
 
     signal = AsyncMock(side_effect=signal_shutdown)
     monkeypatch.setattr(AgentMessenger, "signal_shutdown", signal)
+    monkeypatch.setattr(
+        AgentMessenger,
+        "request_status",
+        AsyncMock(return_value={"type": "status", "state": "idle"}),
+    )
     session = EngineSession(
         session_id="s1",
         profile=SimpleNamespace(name="default", provider="custom"),
@@ -101,6 +106,70 @@ async def test_engine_fallback_signals_the_selected_generation_then_reuses_sessi
     )
     assert session._borrowed_daemon is False
     assert session.external is False
+
+
+@pytest.mark.asyncio
+async def test_engine_fallback_waits_for_active_turn_before_signalling_shutdown(
+    monkeypatch, tmp_path
+):
+    class Handle:
+        identity = "lapis"
+        project = str(tmp_path)
+        socket_path = str(tmp_path / "lapis.sock")
+        pid = 1234
+        process_started_at = 12.5
+        _daemon_image = "image-1"
+        stopped = False
+
+        @property
+        def alive(self):
+            return not self.stopped
+
+    handle = Handle()
+    presence = {
+        "identity": "lapis",
+        "agent_id": "image-1",
+        "pid": 1234,
+        "started_at": 12.5,
+    }
+    bridge = SimpleNamespace(
+        get_agent_by_identity=lambda identity, use_cache, project: presence
+    )
+    monkeypatch.setattr(engine_session, "HubBridge", lambda: bridge, raising=False)
+
+    from plugins.hub.messenger import AgentMessenger
+
+    states = iter(("working", "idle"))
+    events = []
+
+    async def request_status(socket_path, **kwargs):
+        state = next(states)
+        events.append(f"status:{state}")
+        return {"type": "status", "state": state}
+
+    async def signal_shutdown(socket_path, **kwargs):
+        events.append("shutdown")
+        handle.stopped = True
+        return True
+
+    monkeypatch.setattr(AgentMessenger, "request_status", AsyncMock(side_effect=request_status))
+    monkeypatch.setattr(AgentMessenger, "signal_shutdown", AsyncMock(side_effect=signal_shutdown))
+
+    session = EngineSession(
+        session_id="s1",
+        profile=SimpleNamespace(name="default", provider="custom"),
+        workspace=str(tmp_path),
+        identity="lapis",
+    )
+    session.daemon = handle
+    session._borrowed_daemon = True
+    session.shutdown = AsyncMock()
+    session.initialize = AsyncMock()
+
+    result = await session.restart_outdated_agent()
+
+    assert result == {"restarting": True, "waiting_for_turn": True}
+    assert events == ["status:working", "status:idle", "shutdown"]
 
 
 @pytest.mark.asyncio
