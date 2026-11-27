@@ -26,7 +26,10 @@ def select_test_files(paths: Sequence[str], suites: Sequence[str] = DEFAULT_SUIT
         for raw in paths
         if (path := str(PurePosixPath(raw))).startswith(tuple(f"{s}/" for s in suites))
         and len(PurePosixPath(path).parts) > 1
-        and PurePosixPath(path).name.startswith("test_")
+        and (
+            (name := PurePosixPath(path).name).startswith("test_")
+            or (not path.startswith(f"{ROOT_SUITE}/") and name.endswith("_test.py"))
+        )
         and PurePosixPath(path).suffix == ".py"
     }
     return sorted(selected)
