@@ -31,6 +31,19 @@ logger = logging.getLogger(__name__)
 _TIGHTEN_ENTRY_LIMIT = 4096
 
 
+
+def _row_metadata_value(metadata: dict, key: str):
+    """Read ``key`` from a saved row, as the chat stream reads it.
+
+    A daemon-queue admission row keeps its request id inside ``queue_handoff``
+    only; the chat stream already treats that as the row's request id (#1451).
+    """
+    if key == "request_id" and "request_id" not in metadata:
+        handoff = metadata.get("queue_handoff")
+        if isinstance(handoff, dict):
+            return handoff.get("request_id")
+    return metadata.get(key)
+
 class ConversationAppendRejected(RuntimeError):
     """A synchronous admission callback rejected a new durable row."""
 
@@ -1253,7 +1266,7 @@ class KollaborConversationLogger:
                                 else None
                             )
                             if not isinstance(metadata, dict) or any(
-                                metadata.get(key) != value
+                                _row_metadata_value(metadata, key) != value
                                 for key, value in expected_metadata.items()
                             ):
                                 return False
