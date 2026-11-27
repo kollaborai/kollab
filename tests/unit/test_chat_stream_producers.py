@@ -2150,3 +2150,98 @@ async def test_a_snapshot_taken_during_a_move_still_has_the_row():
 
     snapshot = seen[0][0]
     assert "web-help" in [row["id"] for row in snapshot["data"]["rows"]]
+
+
+@pytest.mark.asyncio
+async def test_fresh_snapshot_places_send_now_after_cancelled_acp_tool_rows(
+    tmp_path, monkeypatch
+):
+    from kollabor.llm.queue_handoff import QueueHandoffContext
+
+    state = _State()
+    orchestrator = _acp_orchestrator(state, monkeypatch, tmp_path)
+    cut_request_id = "cut-turn"
+    cut_history_key = "cut-turn-key"
+    orchestrator._record_user(
+        cut_request_id,
+        "original input",
+        "user",
+        None,
+        turn_id=17,
+        history_key=cut_history_key,
+        generation=1,
+    )
+    orchestrator._take_turn_history((1, 17), cut_request_id)
+    await orchestrator._record_result(
+        ACPResult(
+            generation=1,
+            session_id="acp-session",
+            text="partial reply",
+            stop_reason="cancelled",
+            updates=(
+                {"kind": "text", "text": "partial reply"},
+                {
+                    "kind": "tool_call",
+                    "payload": {
+                        "toolCallId": "cut-tool",
+                        "title": "Read file",
+                        "kind": "read",
+                        "rawInput": {"path": "notes.txt"},
+                        "status": "completed",
+                        "rawOutput": "partial tool output",
+                    },
+                },
+            ),
+            end_frame={"stopReason": "cancelled"},
+            turn_id=17,
+            request_id=cut_request_id,
+            source="user",
+            history_key=cut_history_key,
+        ),
+        (1, 17),
+    )
+
+    send_now_request_id = "send-now-input"
+    handoff = QueueHandoffContext(
+        request_id=send_now_request_id,
+        conversation_uid="conversation-a",
+        conversation_revision=0,
+        images=(),
+        attempt_id="attempt-send-now-input",
+        force_send=True,
+        queue_scope_id="scope-a",
+        queue_incarnation="incarnation-a",
+        batch_id="batch-a",
+        claim_id="claim-a",
+    )
+    orchestrator._record_user(
+        send_now_request_id,
+        "next input",
+        "web",
+        None,
+        queue_handoff=handoff,
+        durable_logged=True,
+        turn_id=18,
+        history_key="send-now-turn-key",
+        generation=1,
+    )
+
+    # A new service has no live rows to merge; it must rebuild from history.
+    snapshot, rows = _snapshot_rows(ChatStreamService(state))
+    cut_tool_index = next(
+        index
+        for index, row in enumerate(rows)
+        if row["kind"] == "tool"
+        and row["parts"][0]["tool_call_id"] == "cut-tool"
+    )
+    send_now_input_index = next(
+        index
+        for index, row in enumerate(rows)
+        if row["kind"] == "input" and row["id"] == send_now_request_id
+    )
+    assert cut_tool_index < send_now_input_index
+    assert rows[cut_tool_index]["parts"][0]["result"] == "partial tool output"
+    assert sequence_problems([snapshot]) == []
+    assert state._llm_service.conversation_history[-1].metadata["queue_handoff"][
+        "force_send"
+    ] is True
