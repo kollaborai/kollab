@@ -946,6 +946,20 @@ def test_collect_reports_ci_runs_per_merged_pr():
     ) in md
 
 
+def test_collect_excludes_merges_after_report_now():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r", "windows": [24]}})
+    recent = NOW - timedelta(hours=2)
+    future = NOW + timedelta(seconds=1)
+    closed = [
+        _pr(1, closed=recent, merged=recent, updated=recent),
+        _pr(2, closed=future, merged=future, updated=future),
+    ]
+
+    report = kpi.collect(kpi.GhApi(_per_merge_runner(closed, _pr_runs(1))), cfg, NOW)
+
+    assert report["ci"]["merged_in_window"] == 1
+
+
 def test_collect_shows_runs_per_merge_missing_with_no_merges():
     cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r", "windows": [24]}})
     recent = NOW - timedelta(hours=2)
