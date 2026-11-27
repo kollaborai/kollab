@@ -9698,7 +9698,14 @@ class HubPlugin(BasePlugin):
             turns = self._acp_network_turns = {}
         sender = message.from_identity or message.from_agent or ""
         acp = self.event_bus.get_service("acp_orchestrator")
-        if acp is not None and acp.active and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}):
+        if (
+            acp is not None
+            and acp.active
+            and (
+                message.reply_to
+                or message.to in {"all", "*", "everyone", "team", "project"}
+            )
+        ):
             if not acp.observe_notification(message):
                 return {"status": "refused", "request_id": message.id}
             return {"status": "queued", "request_id": message.id}
@@ -14583,6 +14590,15 @@ class HubPlugin(BasePlugin):
         else:
             return self._format_status()
 
+    @staticmethod
+    def _surface_copy(cli_text: str, webui_text: str) -> str:
+        """Keep CLI guidance in terminal sessions and use page guidance in WebUI."""
+        return (
+            webui_text
+            if os.environ.get("KOLLAB_WEBUI_SESSION") == "1"
+            else cli_text
+        )
+
     async def _handle_dns_command(self, args: str) -> str:
         """Handle /hub dns subcommands: resolve, find, trust, leaderboard, endorse, keys, endpoint, connect."""
         parts = args.strip().split(maxsplit=1)
@@ -14591,7 +14607,11 @@ class HubPlugin(BasePlugin):
                 parts[1] if len(parts) > 1 else ""
             )
         if not _DNS_AVAILABLE:
-            return "dns: PyNaCl not installed\nrun: pip install pynacl"
+            return self._surface_copy(
+                "dns: PyNaCl not installed\nrun: pip install pynacl",
+                "Agent DNS is unavailable because this engine is missing a required "
+                "dependency. Other Hub controls remain available.",
+            )
         if not self._dns_registry:
             return "dns: not initialized (hub not started as agent)"
 
@@ -15789,9 +15809,16 @@ class HubPlugin(BasePlugin):
             lines.append(f"\nstill running: {count} agent(s) in other folders")
             for folder, names in sorted(elsewhere.items()):
                 lines.append(f"  {folder}: {', '.join(sorted(names))}")
-                lines.append(
+                cli_instruction = (
                     "    stop those too: KOLLAB_PROJECT_ROOT={} kollab --hub stop all".format(
                         shlex.quote(folder)
+                    )
+                )
+                lines.append(
+                    self._surface_copy(
+                        cli_instruction,
+                        f"    Agents in {folder} remain active. Review that folder "
+                        "in the sidebar to stop them.",
                     )
                 )
         return "\n".join(lines)
@@ -17897,7 +17924,11 @@ class HubPlugin(BasePlugin):
             picker = OrgPickerAltView(teams, team=selected_team, mission=mission)
             pushed = await stack_mgr.push(picker, "hub-org-picker", reuse=False)
         except AltViewUnavailable:
-            return "team picker requires an interactive terminal; use `kollab --hub org`"
+            return self._surface_copy(
+                "team picker requires an interactive terminal; use `kollab --hub org`",
+                "The team picker is unavailable here. Open Team Launch in the "
+                "sidebar to choose a team.",
+            )
         except Exception as exc:
             logger.exception("Failed to open the team picker")
             return f"could not open team picker: {type(exc).__name__}: {exc}"
@@ -17946,7 +17977,22 @@ class HubPlugin(BasePlugin):
         if selection.mission:
             lines.append(f"\nmission: {selection.mission}")
 
-        lines.extend(launch.notes(team, selection.mission))
+        notes = launch.notes(team, selection.mission)
+        for index, note in enumerate(notes):
+            if note.startswith("mission not sent,"):
+                notes[index] = self._surface_copy(
+                    note,
+                    f"The mission was not sent because {team.lead} is already "
+                    f"online. Open {team.lead}'s chat to send it.",
+                )
+            elif "did not come online, so the launch stopped there" in note:
+                failed = note.split(" did not come online", 1)[0]
+                notes[index] = self._surface_copy(
+                    note,
+                    f"The team launch stopped because {failed} did not come online. "
+                    "Agents that started remain active.",
+                )
+        lines.extend(notes)
         return "\n".join(lines)
 
     def _format_orgs(self) -> str:
@@ -18314,10 +18360,17 @@ class HubPlugin(BasePlugin):
                 rows[identity] = {**rows.get(identity, {}), **row}
         for remote in self._remote_agent_rows():
             handle = remote.get("handle") or format_handle(remote.get("name", "?"), remote.get("device", "?"))
-            rows[handle] = {**rows.get(handle, {}),
-                           "identity": handle, "state": remote.get("state"), "device": remote.get("device"),
-                           "tags": {"harness": remote.get("harness") or "", "provider": "acp" if remote.get("harness") else "",
-                                    "acp_waiting": bool(remote.get("acp_waiting"))}}
+            rows[handle] = {
+                **rows.get(handle, {}),
+                "identity": handle,
+                "state": remote.get("state"),
+                "device": remote.get("device"),
+                "tags": {
+                    "harness": remote.get("harness") or "",
+                    "provider": "acp" if remote.get("harness") else "",
+                    "acp_waiting": bool(remote.get("acp_waiting")),
+                },
+            }
         if self._identity:
             current = self._identity.to_dict()
             identity = str(current.get("identity") or current.get("agent_id") or "")
@@ -18331,7 +18384,11 @@ class HubPlugin(BasePlugin):
         return self._acp_hub_tools
 
     async def _handle_acp_hub_call(self, *, token, generation, name, arguments):
-        if not token or not secrets.compare_digest(str(token), self._acp_hub_token) or str(generation) != str(self._acp_hub_generation):
+        if (
+            not token
+            or not secrets.compare_digest(str(token), self._acp_hub_token)
+            or str(generation) != str(self._acp_hub_generation)
+        ):
             return {"error": "stale or invalid ACP hub binding"}
         relay = getattr(self, "_relay_agent", None)
         acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
@@ -18364,7 +18421,16 @@ class HubPlugin(BasePlugin):
                 self._presence.publish()
         turn = getattr(self, "_acp_network_turns", {}).get(request_id)
         if waiting and turn is not None:
-            line = f"{self._identity.identity} is waiting for your OK: {payload.get('title') or 'Tool permission'} · open it: kollab --attach {self._identity.identity}"
+            title = payload.get("title") or "Tool permission"
+            cli_line = (
+                f"{self._identity.identity} is waiting for your OK: {title} · "
+                f"open it: kollab --attach {self._identity.identity}"
+            )
+            line = self._surface_copy(
+                cli_line,
+                f"{self._identity.identity} is waiting for your approval: {title}. "
+                "Review the pending request in this chat.",
+            )
             message = HubMessage(action="message", from_agent=self._identity.agent_id,
                 from_identity=self._identity.identity, to=turn.handle, content=line,
                 thread_id=turn.thread_id, reply_to=turn.message_id, metadata={"acp_waiting": True})
@@ -18396,7 +18462,11 @@ class HubPlugin(BasePlugin):
             turn.started = True
             turn.bound_ask = True
             relay = getattr(self, "_relay_agent", None)
-            relay_token = relay._turn.set(message.metadata["_relay_turn_id"]) if relay is not None and message.metadata.get("_relay_turn_id") else None
+            relay_token = (
+                relay._turn.set(message.metadata["_relay_turn_id"])
+                if relay is not None and message.metadata.get("_relay_turn_id")
+                else None
+            )
             token = current_turn.set({"request_id": message.id, "thread_id": message.thread_id,
                                       "input_source": "agent"})
             try:
