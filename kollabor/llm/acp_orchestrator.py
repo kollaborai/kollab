@@ -105,6 +105,7 @@ class ACPOrchestrator:
         self._conversation_transition = False
         self._completion_tasks: set[asyncio.Task[Any]] = set()
         self._history_settled_by_turn: dict[tuple[int, int], asyncio.Event] = {}
+        self._history_admissions_by_turn: dict[tuple[int, int], ACPAdmission] = {}
         self._delivery_tasks: set[asyncio.Task[Any]] = set()
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
         # Closes that outlived RUNNER_CLOSE_TIMEOUT: their runner is no longer
@@ -820,11 +821,13 @@ class ACPOrchestrator:
         self._completion_keys.add(turn_key)
         try:
             self._history_settled_by_turn[turn_key] = asyncio.Event()
+            self._history_admissions_by_turn[turn_key] = admission
             task = asyncio.create_task(
                 self._complete(admission), name=f"acp-turn-{admission.request_id}"
             )
         except BaseException:
             self._history_settled_by_turn.pop(turn_key, None)
+            self._history_admissions_by_turn.pop(turn_key, None)
             self._completion_keys.discard(turn_key)
             raise
         self._completion_tasks.add(task)
@@ -835,6 +838,9 @@ class ACPOrchestrator:
         task.add_done_callback(
             lambda _task, key=turn_key: self._history_settled_by_turn.pop(key, None)
         )
+        task.add_done_callback(
+            lambda _task, key=turn_key: self._history_admissions_by_turn.pop(key, None)
+        )
         return True
 
     async def wait_for_turn_history(self, admission: ACPAdmission) -> None:
@@ -843,6 +849,22 @@ class ACPOrchestrator:
         settled = self._history_settled_by_turn.get(turn_key)
         if settled is not None:
             await settled.wait()
+
+    async def wait_for_unsettled_history(self) -> None:
+        """Wait for completed turns' unsettled history writes captured at call time."""
+        snapshot = tuple(self._history_settled_by_turn.items())
+        unsettled = tuple(
+            event
+            for turn_key, event in snapshot
+            if (
+                not event.is_set()
+                and (admission := self._history_admissions_by_turn.get(turn_key))
+                is not None
+                and admission.future.done()
+            )
+        )
+        if unsettled:
+            await asyncio.gather(*(event.wait() for event in unsettled))
 
     def _mark_turn_history_settled(self, turn_key: tuple[int, int]) -> None:
         settled = self._history_settled_by_turn.get(turn_key)

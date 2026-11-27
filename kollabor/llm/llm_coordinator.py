@@ -880,18 +880,14 @@ class LLMService:
             try:
                 runner_token = await begin(request_ids)
                 if runner_token is not None:
-                    active_admission = getattr(runner_token, "active_admission", None)
-                    if active_admission is not None:
-                        # Runner cancellation settles before the completion
-                        # observer writes the partial transcript.
-                        wait_for_completion = getattr(
-                            acp, "wait_for_turn_history", None
-                        )
-                        if not callable(wait_for_completion):
-                            raise RuntimeError(
-                                "ACP completion barrier is unavailable"
-                            )
-                        await wait_for_completion(active_admission)
+                    # The runner may clear its active context when the RPC
+                    # finishes, before the completion observer saves history.
+                    wait_for_history = getattr(
+                        acp, "wait_for_unsettled_history", None
+                    )
+                    if not callable(wait_for_history):
+                        raise RuntimeError("ACP completion barrier is unavailable")
+                    await wait_for_history()
             except asyncio.CancelledError:
                 if runner_token is not None:
                     mark_in_doubt = getattr(
