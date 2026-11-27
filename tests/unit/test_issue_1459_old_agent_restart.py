@@ -402,3 +402,72 @@ async def test_engine_fallback_refuses_a_replaced_hub_identity(monkeypatch, tmp_
 
     session.shutdown.assert_not_awaited()
     session.initialize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_engine_fallback_rechecks_generation_after_wait_before_shutdown(
+    monkeypatch, tmp_path
+):
+    class Handle:
+        identity = "lapis"
+        project = str(tmp_path)
+        socket_path = str(tmp_path / "lapis.sock")
+        pid = 1234
+        process_started_at = 12.5
+        _daemon_image = "image-1"
+        stopped = False
+
+        @property
+        def alive(self):
+            return not self.stopped
+
+    handle = Handle()
+    original = {
+        "identity": "lapis",
+        "agent_id": "image-1",
+        "pid": 1234,
+        "started_at": 12.5,
+    }
+    replacement = {
+        "identity": "lapis",
+        "agent_id": "replacement-image",
+        "pid": 4321,
+        "started_at": 98.7,
+    }
+    presences = iter((original, replacement))
+    bridge = SimpleNamespace(
+        get_agent_by_identity=lambda identity, use_cache, project: next(presences)
+    )
+    monkeypatch.setattr(engine_session, "HubBridge", lambda: bridge, raising=False)
+
+    from plugins.hub.messenger import AgentMessenger
+
+    monkeypatch.setattr(
+        AgentMessenger,
+        "request_status",
+        AsyncMock(return_value={"type": "status", "state": "idle"}),
+    )
+
+    async def signal_shutdown(*_args, **_kwargs):
+        handle.stopped = True
+        return True
+
+    signal = AsyncMock(side_effect=signal_shutdown)
+    monkeypatch.setattr(AgentMessenger, "signal_shutdown", signal)
+
+    session = EngineSession(
+        session_id="s1",
+        profile=SimpleNamespace(name="default", provider="custom"),
+        workspace=str(tmp_path),
+        identity="lapis",
+    )
+    session.daemon = handle
+    session.shutdown = AsyncMock()
+    session.initialize = AsyncMock()
+
+    with pytest.raises(ValueError):
+        await session.restart_outdated_agent()
+
+    signal.assert_not_awaited()
+    session.shutdown.assert_not_awaited()
+    session.initialize.assert_not_awaited()
