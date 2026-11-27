@@ -3107,6 +3107,8 @@ class QueueProcessor:
                             "[system] Your response was truncated due to output "
                             "token limits. Continue exactly where you left off."
                         ),
+                        # For the model only: the chat never shows it as the user's message.
+                        metadata={"hidden": True},
                     )
                 )
                 continuation_msg_count += 2
