@@ -57,7 +57,7 @@ import {
 } from "./context-compaction-status";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, prepareRemoteOpen, targetsOn } from "@/components/shell/agent-network";
-import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
+import { AgentVersionNotice, agentVersionNotice, versionNoticeKey } from "@/components/shell/AgentVersionNotice";
 import type { DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
@@ -998,7 +998,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     chatName: activeSession?.identity || activeSession?.agent || "",
   });
   const agentIsCurrent = Boolean(activeAgent && engineVersion && activeAgent.version === engineVersion);
-  const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
+  const versionNoticeKeyHere = versionNoticeKey(activeSession?.session_id, activeAgent?.agent_id, chatOutdated);
   const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
   const restartActiveAgent = async () => {
     if (!activeSession) return;
@@ -1589,7 +1589,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               This page does not match the running build. Reload to use the current Web UI.
             </NoticeBar>
           ) : null}
-          {versionNotice && !dismissedVersionNotices.has(versionNoticeKey) ? (
+          {versionNotice && !dismissedVersionNotices.has(versionNoticeKeyHere) ? (
             <AgentVersionNotice
               notice={versionNotice}
               busy={Boolean(restartHere) && !restartHere?.failure}
@@ -1597,7 +1597,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               failure={restartHere?.failure ?? ""}
               tooOld={restartHere?.tooOld ?? false}
               onRestart={() => void restartActiveAgent()}
-              onDismiss={() => setDismissedVersionNotices((current) => new Set(current).add(versionNoticeKey))}
+              onDismiss={() => setDismissedVersionNotices((current) => new Set(current).add(versionNoticeKeyHere))}
             />
           ) : null}
           {pickFailure && pickFailure.sessionId === activeId ? (

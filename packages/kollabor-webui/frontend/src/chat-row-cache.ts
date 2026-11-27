@@ -16,7 +16,7 @@ export interface ChatRowCache {
 }
 
 // A row in one of these states waits on the live daemon: saved, it would look live or offer a stale action.
-const UNSETTLED = new Set(["queued", "pending", "open", "streaming", "running"]);
+const UNSETTLED = new Set(["queued", "started", "joined", "pending", "open", "streaming", "running"]);
 
 /** The rows worth saving: the newest settled ones, without prompts, within the row and byte limits. */
 export function cacheableRows(rows: readonly ChatRow[]): ChatRow[] {

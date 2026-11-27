@@ -38,6 +38,16 @@ export type AgentVersionNoticeState = {
   name: string;
 };
 
+/**
+ * The dismiss key for one chat's notice: per session, so dismissing one chat hides nothing elsewhere, and a
+ * notice raised by the chat stream's 426 apart from an earlier, dismissed version notice. Empty with no chat.
+ */
+export function versionNoticeKey(sessionId: string | undefined, agentId: string | undefined, chatOutdated: boolean): string {
+  if (!sessionId) return "";
+  const base = `${sessionId}|${agentId ?? ""}`;
+  return chatOutdated ? `${base}|outdated` : base;
+}
+
 /** The stop-and-start action shared by too-old and unknown-version notices. */
 function stopAndStartLine(name: string) {
   return (
