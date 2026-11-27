@@ -203,6 +203,7 @@ describe("agents that cannot restart themselves (#968)", () => {
     expect(visibleText(html)).not.toContain("409:");
     expect(visibleText(html)).not.toContain("not on a hub");
     expect(html).toContain("409: this agent is not on a hub, so it cannot restart itself");
+    expect(html).toContain('aria-label="Restart details"');
     expect(html).toContain("Try Again");
     expect(html).not.toContain("started before Restart Agent existed");
   });
