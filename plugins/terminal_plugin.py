@@ -575,11 +575,6 @@ Aliases: /t, /term, /tmux"""
         if session is None or session.ring_buffer is None:
             return [f"(session '{session_name}' not found)"]
 
-        # A process that has exited may still have output in the pipe: let its
-        # reader finish copying it first (#1465). A live process is read as is.
-        if session.reader is not None and not session.is_alive():
-            session.reader.join(timeout=2.0)
-
         n = max_lines or 200
         lines = session.ring_buffer.get_last(n)
 
@@ -950,6 +945,11 @@ Aliases: /t, /term, /tmux"""
                 "message": f"Session '{name}' not found",
             }
 
+        # A process that has exited may still have output in the pipe: let its
+        # reader finish copying it first, off the event loop (#1465). A live
+        # process is read as is.
+        if session.reader is not None and not session.is_alive():
+            await asyncio.to_thread(session.reader.join, 2.0)
         output_lines = self._capture_output(name, max_lines=lines)
         return {"success": True, "output": output_lines}
 
