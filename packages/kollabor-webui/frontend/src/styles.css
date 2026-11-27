@@ -151,6 +151,22 @@
   html, body, #root {
     height: 100%;
   }
+  /* #1174: scrolling stays native everywhere, the scrollbar chrome does not
+     render. scrollbar-width: none covers Firefox and newer WebKit; the
+     zero-size ::-webkit-scrollbar covers Blink and older WebKit. Content
+     stays reachable by wheel, trackpad, touch, keyboard and script. */
+  * {
+    scrollbar-width: none;
+  }
+  *::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+  *::-webkit-scrollbar-thumb,
+  *::-webkit-scrollbar-track,
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
   /* Density follows the input, as design systems do: mouse-and-keyboard
      screens get a denser UI a step under the browser default, touch screens
      keep 16px for comfortable targets (and iOS zooms into smaller inputs).
@@ -181,6 +197,25 @@
   }
 }
 
+/* #1174: this stylesheet owns native and custom scrollbar chrome. Keep
+   Radix ScrollBar components in the tree: they enable viewport scrolling.
+   Hide only the known drawing elements, including Monaco's separate minimap
+   slider and xterm 6's custom scrollback bar. Unlayered and important to beat
+   utility classes and inline display styles without changing scroll logic. */
+[data-slot="scroll-area-scrollbar"],
+.monaco-editor .monaco-scrollable-element > .scrollbar,
+.monaco-editor .minimap-slider,
+.xterm .xterm-scrollable-element > .scrollbar {
+  display: none !important;
+}
+/* xterm renders its scrollback in a native-scrolled viewport element. */
+.xterm .xterm-viewport {
+  scrollbar-width: none;
+}
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
 /* Web plugins (#1028): on a touch screen every control a plugin draws is at least 44 px tall. Unlayered, so
    it holds over the utility classes of the app components a plugin uses (k.ui). Switches, checkboxes, radios
    and sliders keep their own shape. */
