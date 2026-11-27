@@ -1311,3 +1311,21 @@ async def test_delayed_continuation_cannot_clobber_newer_batch_tail_or_cursor():
         release_cont.set()
         if not cont_task.done():
             await cont_task
+
+
+@pytest.mark.asyncio
+async def test_web_ui_sends_enter_the_pipeline_with_the_webui_source():
+    """#1459: a web send names its source; the coordinator still admits it."""
+    bus, llm, calls, pending_tool = await _pipeline()
+    proxy = _StateLLMProxy(llm)
+    state = LocalStateService(
+        llm_service=proxy,
+        profile_manager=MagicMock(),
+        event_bus=bus,
+    )
+
+    result = await state.send_message("from the page", input_source="webui")
+
+    assert result["accepted"] is True, result
+    await asyncio.gather(*proxy.tasks)
+    assert {source for _, source, _ in calls} == {"webui"}
