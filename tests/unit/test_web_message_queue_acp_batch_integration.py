@@ -580,7 +580,10 @@ async def test_acp_send_now_waits_for_cancelled_partial_history(tmp_path):
             == send_now_id
         )
         assert cut_assistant_index < send_now_user_index
-        assert records[cut_assistant_index]["tool_calls"][0]["id"] == "cut-tool"
+        assert any(
+            part.get("type") == "tool_use" and part.get("id") == "cut-tool"
+            for part in records[cut_assistant_index]["message"]["content"]
+        )
 
         messages = llm.conversation_manager.messages
         cut_assistant_position = next(
