@@ -232,9 +232,10 @@ describe("daemon outdated notices", () => {
     expect(html).toContain("Restart Agent");
   });
 
-  it("shows /restart for a versioned agent when the restart setting is off", () => {
+  it("shows Restart Agent for a versioned agent when automatic restarts are off", () => {
     const html = renderToStaticMarkup(<DaemonNotice {...panelNoticeProps("0.21.0+bbbb2222", false)} />);
-    expect(html).toContain("Run /restart to update the agent version running.");
+    expect(html).toContain("Restart Agent");
+    expect(html).not.toContain("/restart");
   });
 
   it("does not invent a local stop command when the daemon has no live agent identity", () => {
