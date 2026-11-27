@@ -62,6 +62,8 @@ HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS = 30.0
 # after these pauses: the relay can outlast that RPC timeout (~19 s seen live),
 # and the page waits for history_updated rather than asking again.
 HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+OUTDATED_AGENT_IDLE_POLL_SECONDS = 0.5
+OUTDATED_AGENT_IDLE_TIMEOUT_SECONDS = 3600.0
 
 
 class HistoryRefreshUnavailable(Exception):
@@ -277,6 +279,8 @@ class EngineSession:
         self._acp_usage_display_turn: tuple[str, int] | None = None
 
         self._pending_permissions: Dict[tuple[str, str], Dict[str, Any]] = {}
+        # None until an event or status request establishes the current turn state.
+        self._turn_in_progress: Optional[bool] = None
         self._active_turn_task: Optional[asyncio.Task] = None
         self._event_task: Optional[asyncio.Task] = None
         self._facts_task: Optional[asyncio.Task] = None
@@ -435,6 +439,9 @@ class EngineSession:
 
         from plugins.hub.messenger import AgentMessenger
 
+        waiting_for_turn = await self._wait_for_outdated_agent_idle(
+            daemon, AgentMessenger
+        )
         generation = AgentMessenger.shutdown_generation(agent_id, pid, started_at)
         if not generation:
             raise ValueError("This agent's identity could not be confirmed.")
@@ -480,7 +487,36 @@ class EngineSession:
             raise ValueError(
                 "The agent stopped, but the engine could not start it again."
             ) from exc
-        return {"restarting": True, "waiting_for_turn": False}
+        return {"restarting": True, "waiting_for_turn": waiting_for_turn}
+
+    async def _wait_for_outdated_agent_idle(self, daemon, messenger) -> bool:
+        """Wait for the old daemon's published turn state to settle before shutdown."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + OUTDATED_AGENT_IDLE_TIMEOUT_SECONDS
+        waiting_for_turn = False
+
+        while True:
+            if not daemon.alive:
+                raise ValueError("This agent stopped before its turn could finish.")
+            status = await messenger.request_status(daemon.socket_path, timeout=3.0)
+            state = status.get("state") if isinstance(status, dict) else None
+            state = state.lower() if isinstance(state, str) else None
+
+            if state in {"working", "active"}:
+                busy = True
+            elif state in {"idle", "waiting", "registered"}:
+                busy = self._turn_in_progress is True
+            elif self._turn_in_progress is not None:
+                busy = self._turn_in_progress
+            else:
+                raise ValueError("This agent's turn state could not be confirmed.")
+
+            if not busy:
+                return waiting_for_turn
+            waiting_for_turn = True
+            if loop.time() >= deadline:
+                raise ValueError("This agent's turn did not finish. Try again.")
+            await asyncio.sleep(OUTDATED_AGENT_IDLE_POLL_SECONDS)
 
     async def _await_acp_startup(self) -> None:
         """A connected daemon is usable only after its adapter has started."""
@@ -1359,7 +1395,10 @@ class EngineSession:
                         if event.get(key) is not None
                     }
 
-                elif etype == "turn_start" and event.get("generation") is not None:
+                elif etype == "turn_start":
+                    self._turn_in_progress = True
+                    if event.get("generation") is None:
+                        continue
                     # ACP can start another prompt while the prior completion
                     # is still persisting. Never display that prior turn as the
                     # new turn's usage if its completion arrives late.
@@ -1373,6 +1412,7 @@ class EngineSession:
                         # This admitted request was cancelled before a native
                         # turn started; it has no history or usage to count.
                         continue
+                    self._turn_in_progress = False
                     self.total_turns += 1
                     self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
                     self.total_output_tokens += int(event.get("output_tokens", 0) or 0)
