@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from kollabor_engine import server, voice_livekit
 
 from plugins.hub import plugin as hub_plugin
