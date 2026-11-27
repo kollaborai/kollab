@@ -95,10 +95,15 @@ def test_every_pull_request_workflow_excludes_quarantine_from_pytest_runs() -> N
                     if "--collect-only" not in invocation and '-m "not quarantine"' not in invocation:
                         violations.append(f"{path.name}: {job_id}/{step.get('name')}: {invocation}")
                     if path.name in windows_workflows:
-                        if step.get("shell") != "bash":
-                            violations.append(f"{path.name}: {job_id}/{step.get('name')}: shell is not Bash")
-                        if '|| [ "$?" -eq 5 ]' not in command:
-                            violations.append(f"{path.name}: {job_id}/{step.get('name')}: exit 5 is not tolerated")
+                        if step.get("shell") == "bash":
+                            violations.append(f"{path.name}: {job_id}/{step.get('name')}: Bash overrides Windows shell")
+                        lines = [line.strip() for line in command.splitlines()]
+                        pytest_lines = [index for index, line in enumerate(lines) if "python -m pytest" in line]
+                        if len(pytest_lines) != len(_pytest_invocations(command)) or any(
+                            index + 1 >= len(lines) or lines[index + 1] != "if ($LASTEXITCODE -eq 5) { exit 0 }"
+                            for index in pytest_lines
+                        ):
+                            violations.append(f"{path.name}: {job_id}/{step.get('name')}: exit-5 handler missing")
 
     assert not violations, "\n".join(violations)
 
