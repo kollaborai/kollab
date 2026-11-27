@@ -60,6 +60,11 @@ list could not be read.
 - **CI pass rate on first push.** Check runs on the earliest PR commit that has
   any, which is the head of its first push: `pass` when all completed runs
   succeeded, `fail` when any failed, missing otherwise.
+- **CI runs per merged PR.** Pull request `ci.yml` run attempts created in the
+  longest window, divided by PRs merged in it. Each rerun attempt counts. Runs
+  are listed one day at a time, since GitHub returns at most 1000 runs for a
+  filtered list. Missing when no PR merged, the run list failed, or the closed
+  PR list does not cover the window.
 - **Throughput by author and lane.** Closed PRs in the longest window, grouped
   by PR author and by the first label matching a `lane_labels` prefix.
 
