@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, isAgentTooOld } from "@/api";
 import { DaemonNotice } from "@/components/code/DaemonNotice";
+import { webUiPanelCopy } from "@/components/panels/panel-web-copy";
 import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
 import { TerminalView } from "@/components/terminal/TerminalView";
 
@@ -286,5 +287,37 @@ describe("daemon outdated notices", () => {
       <TerminalView sessionId="s1" workspace="/workspace" daemonNotice={panelNoticeProps("", false)} />,
     );
     expect(html).toMatch(/>Retry<\/button>/);
+  });
+});
+
+
+describe("browser-safe panel errors", () => {
+  it.each([
+    [
+      "this version of kollab is too old for that relay; run kollab --upgrade",
+      "This engine version is too old for this relay. Update the engine, then retry the join here.",
+    ],
+    [
+      "This network has one machine that can confirm a resume. A halt needs a second one to lift it; add one first, or use kollab --hub stop all on this machine.",
+      "A second device on this network must confirm the resume. Add one before trying again here.",
+    ],
+    [
+      "A person has to confirm this first: use the Halt and Resume view, or kollab --hub halt.",
+      "Confirm this action in the page before continuing.",
+    ],
+  ])("replaces terminal guidance with page copy", (serverMessage, expected) => {
+    expect(webUiPanelCopy(serverMessage)).toBe(expected);
+    expect(webUiPanelCopy(serverMessage)).not.toMatch(/kollab --|in a terminal/i);
+  });
+
+  it("keeps unrelated panel messages unchanged", () => {
+    expect(webUiPanelCopy("The relay is unavailable; try again later.")).toBe(
+      "The relay is unavailable; try again later.",
+    );
+  });
+
+  it("applies browser copy to server panel results", () => {
+    const source = readFileSync(new URL("../src/components/panels/PanelHost.tsx", import.meta.url), "utf8");
+    expect(source).toContain("webUiPanelCopy(result.message)");
   });
 });
