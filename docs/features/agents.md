@@ -381,7 +381,7 @@ agent that publishes no version started before agents did and counts as older.
 |---|---|---|
 | on | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
 | off (default) | "Run /restart to update the agent version running." | Type `/restart` in the chat |
-| either, when the agent publishes no version (it started before Restart Agent existed) | "This agent started before Restart Agent existed. Run kollab --hub stop <name> in a terminal, then select its Offline row in the sidebar to start it again." No button | Stop it in a terminal, then select its Offline row in the sidebar |
+| either, when the agent publishes no version | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
 
 Both versions are in the line's hover text, never in the line. The setting is in
 `/config` under Updates as "Restart Agent Button".
@@ -398,6 +398,10 @@ the state RPC `state.restart_agent`) restarts the agent in place:
 4. The new image resumes the conversation it was told to pick back up. The hub
    socket path is named by the identity, so the web UI reattaches to the same
    path on its own and the open chat needs no reload.
+
+If an older agent does not implement `state.restart_agent`, the engine asks it
+to shut down through the hub and starts the session again through the normal
+agent launcher. This keeps recovery in the page and preserves the chat history.
 
 `/restart` no longer clears the conversation. `/new` (alias `/clear`) does that.
 A window started with `--no-daemon` has no daemon to replace: `/restart` there

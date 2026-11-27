@@ -38,25 +38,6 @@ export type AgentVersionNoticeState = {
   name: string;
 };
 
-/** The stop-and-start action shared by too-old and unknown-version notices. */
-function stopAndStartLine(name: string) {
-  return (
-    <>
-      Run{" "}
-      <span className="[&_code]:break-words">
-        <code className="whitespace-normal">
-          kollab{" "}<span className="whitespace-nowrap">--hub</span>{" "}stop {name}
-        </code>
-      </span>{" "}
-      in a terminal, then select its Offline row in the sidebar to start it again.
-    </>
-  );
-}
-
-function tooOldLine(name: string) {
-  return <>This agent started before Restart Agent existed. {stopAndStartLine(name)}</>;
-}
-
 /**
  * The notice for one chat, or null while its agent runs the engine's version. An agent that publishes
  * no version started before agents did, so it counts as older even while the engine version loads.
@@ -80,15 +61,15 @@ export function agentVersionNotice({
   if (running === engineVersion) return null;
   const detail = `Agent ${running || "(version unknown)"} · engine ${engineVersion}`;
   // No version means a build from before /restart restarted in place. There /restart is an alias of /new,
-  // which wipes the conversation, so that agent gets the stop-and-start line and no button or /restart.
+  // which wipes the conversation, so that agent must use the engine's restart action.
   if (!running) return { kind: "too-old", detail, name: agent.name };
   return { kind: restartAgents ? "button" : "command", detail, name: agent.name };
 }
 
 /**
  * One quiet line above the chat: this agent runs an older version of Kollab. With Restart Agent on,
- * the button restarts it where it stands (same chat, same history); off, the line names /restart. An
- * agent that cannot restart itself gets its stop-and-start command instead, with no button.
+ * the button restarts it where it stands (same chat, same history); off, the line names /restart.
+ * An agent that cannot restart itself is restarted by the engine through the same in-page action.
  */
 export type AgentVersionNoticeProps = {
   notice: AgentVersionNoticeState;
@@ -115,8 +96,14 @@ export function AgentVersionNotice({
 }: AgentVersionNoticeProps) {
   if (failure && tooOld) {
     return (
-      <NoticeBar urgent detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
-        {tooOldLine(notice.name)}
+      <NoticeBar
+        urgent
+        detail={notice.detail}
+        details={<VersionDetails detail={notice.detail} />}
+        actions={<NoticeAction onClick={onRestart}>Try Again</NoticeAction>}
+        onDismiss={onDismiss}
+      >
+        This agent could not be restarted by this engine.
       </NoticeBar>
     );
   }
@@ -140,17 +127,15 @@ export function AgentVersionNotice({
       </NoticeBar>
     );
   }
-  if (notice.kind === "too-old") {
+  if (notice.kind === "too-old" || notice.kind === "unknown") {
     return (
-      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
-        {tooOldLine(notice.name)}
-      </NoticeBar>
-    );
-  }
-  if (notice.kind === "unknown") {
-    return (
-      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />}>
-        <>This agent runs older code. {stopAndStartLine(notice.name)}</>
+      <NoticeBar
+        detail={notice.detail}
+        details={<VersionDetails detail={notice.detail} />}
+        actions={<NoticeAction onClick={onRestart}>Restart Agent</NoticeAction>}
+        onDismiss={onDismiss}
+      >
+        This agent runs an older version of Kollab.
       </NoticeBar>
     );
   }
