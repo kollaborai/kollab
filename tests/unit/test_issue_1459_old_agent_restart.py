@@ -77,6 +77,7 @@ async def test_engine_fallback_signals_the_selected_generation_then_reuses_sessi
         identity="lapis",
         webui_owned=True,
     )
+    session.conversation_id = "conversation-existing"
     session.daemon = handle
     session._borrowed_daemon = True
     session.external = True
@@ -95,7 +96,9 @@ async def test_engine_fallback_signals_the_selected_generation_then_reuses_sessi
         expected_started_at=12.5,
     )
     session.shutdown.assert_awaited_once_with()
-    session.initialize.assert_awaited_once_with()
+    assert session.initialize.await_args.kwargs["resume_conversation_id"] == (
+        "conversation-existing"
+    )
     assert session._borrowed_daemon is False
     assert session.external is False
 
