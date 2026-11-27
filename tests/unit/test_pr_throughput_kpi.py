@@ -856,3 +856,149 @@ def test_main_ci_red_to_green_counts_a_timed_out_attempt_as_red():
     )
 
     assert result["main_red_to_green_rate"] == pytest.approx(1.0)
+
+
+# ------------------------------------------------- CI runs per merged PR (#1496)
+
+
+def _pr_runs(*attempts):
+    return {
+        "total_count": len(attempts),
+        "workflow_runs": [
+            {"id": 100 + i, "run_attempt": a} for i, a in enumerate(attempts)
+        ],
+    }
+
+
+def test_pr_ci_run_attempts_fetch_one_day_at_a_time_and_count_reruns():
+    # One query per day keeps each filtered list under GitHub's 1000-run cap;
+    # each window (start, end] is fetched once, with no overlap at the seams.
+    runner = FakeRunner(
+        {
+            "created=2026-11-02T12:00:01Z..2026-11-03T12:00:00Z": _pr_runs(1, 3),
+            "created=2026-11-03T12:00:01Z..2026-11-04T12:00:00Z": _pr_runs(2),
+        }
+    )
+
+    attempts = kpi._pr_ci_run_attempts(
+        kpi.GhApi(runner), "o/r", NOW - timedelta(hours=48), NOW, 10
+    )
+
+    assert attempts == 6
+    assert len(runner.calls) == 2
+    assert all("ci.yml/runs?event=pull_request&created=" in c for c in runner.calls)
+
+
+def test_pr_ci_run_attempts_refuse_a_run_without_an_attempt_number():
+    runner = FakeRunner(
+        {
+            "event=pull_request": {
+                "total_count": 1,
+                "workflow_runs": [{"id": 1, "run_attempt": None}],
+            }
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="run_attempt"):
+        kpi._pr_ci_run_attempts(
+            kpi.GhApi(runner), "o/r", NOW - timedelta(hours=24), NOW, 10
+        )
+
+
+def _per_merge_runner(closed, pr_runs):
+    return FakeRunner(
+        {
+            "event=pull_request": pr_runs,
+            "pulls?state=closed": closed,
+            "pulls?state=open": [],
+            "/reviews": [],
+            "/commits": [],
+        }
+    )
+
+
+def test_collect_reports_ci_runs_per_merged_pr():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r", "windows": [24]}})
+    recent = NOW - timedelta(hours=2)
+    closed = [
+        _pr(1, closed=recent, merged=recent, updated=recent),
+        _pr(2, closed=recent, merged=recent, updated=recent),
+        _pr(3, closed=recent, updated=recent),  # closed unmerged: not a merge
+        _pr(
+            4,
+            closed=NOW - timedelta(hours=30),
+            merged=NOW - timedelta(hours=30),
+            updated=NOW - timedelta(hours=30),
+        ),  # merged before the window
+    ]
+
+    report = kpi.collect(
+        kpi.GhApi(_per_merge_runner(closed, _pr_runs(1, 1, 3))), cfg, NOW
+    )
+
+    assert report["ci"]["pr_ci_run_attempts"] == 5
+    assert report["ci"]["merged_in_window"] == 2
+    assert report["ci"]["ci_runs_per_merge"] == pytest.approx(2.5)
+    md = kpi.render_markdown(report)
+    assert (
+        "- CI runs per merged PR (24h): 2.50 "
+        "(5 pull_request ci.yml run attempts, 2 merged PRs)"
+    ) in md
+
+
+def test_collect_shows_runs_per_merge_missing_with_no_merges():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r", "windows": [24]}})
+    recent = NOW - timedelta(hours=2)
+
+    report = kpi.collect(
+        kpi.GhApi(
+            _per_merge_runner([_pr(3, closed=recent, updated=recent)], _pr_runs(2))
+        ),
+        cfg,
+        NOW,
+    )
+
+    assert report["ci"]["pr_ci_run_attempts"] == 2
+    assert report["ci"]["merged_in_window"] == 0
+    assert report["ci"]["ci_runs_per_merge"] is None
+    assert "- CI runs per merged PR (24h): missing" in kpi.render_markdown(report)
+
+
+def test_collect_shows_runs_per_merge_missing_when_the_closed_list_is_cut_off():
+    cfg = kpi.parse_config(
+        {"kpi": {"enabled": True, "repo": "o/r", "windows": [24], "max_pages": 1}}
+    )
+    recent = NOW - timedelta(minutes=30)
+    closed = [
+        _pr(n, closed=recent, merged=recent, updated=recent)
+        for n in range(1, kpi.PER_PAGE + 1)
+    ]
+
+    report = kpi.collect(kpi.GhApi(_per_merge_runner(closed, _pr_runs(1))), cfg, NOW)
+
+    assert report["ci"]["merged_in_window"] is None
+    assert report["ci"]["ci_runs_per_merge"] is None
+    assert any("CI runs per merged PR" in e for e in report["errors"])
+
+
+def test_collect_shows_runs_per_merge_missing_when_the_run_list_fails():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r", "windows": [24]}})
+    recent = NOW - timedelta(hours=2)
+    runner = _per_merge_runner(
+        [_pr(1, closed=recent, merged=recent, updated=recent)], _pr_runs(1)
+    )
+    runner.fail = {"event=pull_request"}
+
+    report = kpi.collect(kpi.GhApi(runner), cfg, NOW)
+
+    assert report["ci"]["pr_ci_run_attempts"] is None
+    assert report["ci"]["ci_runs_per_merge"] is None
+    assert report["status"] == "partial"
+    assert any("CI runs per merged PR" in e for e in report["errors"])
+
+
+def test_unavailable_report_has_runs_per_merge_missing():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r"}})
+    report = kpi.collect(kpi.GhApi(FakeRunner(fail={"/pulls?"})), cfg, NOW)
+    assert report["ci"]["ci_runs_per_merge"] is None
+    assert "- CI runs per merged PR (24h): missing" in kpi.render_markdown(report)
