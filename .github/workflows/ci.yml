@@ -372,7 +372,7 @@ jobs:
           npx tsc --noEmit
           node scripts/check-test-discovery.mjs
           npx vitest run
-          node --test $(grep -L 'from "vitest"' tests/*.test.ts)
+          node --test $(grep -L -E "(from[[:space:]]+\"vitest\"|from[[:space:]]+'vitest'|require[[:space:]]*\\([[:space:]]*\"vitest\"|require[[:space:]]*\\([[:space:]]*'vitest')" tests/*.test.ts)
 
       - name: Install Chromium for browser acceptance
         working-directory: packages/kollabor-webui/frontend

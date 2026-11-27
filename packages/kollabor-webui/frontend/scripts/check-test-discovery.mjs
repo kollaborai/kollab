@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { globSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { hasTestFrameworkImport } from "./test-framework-import.mjs";
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const testPatterns = [
@@ -26,7 +27,7 @@ export function uncollectedTests(root, vitestFiles, explicitNodeFiles = []) {
       const nodeCandidate = /^tests\/[^/]+\.test\.ts$/.test(normalized);
       return (
         !nodeCandidate ||
-        readFileSync(path.join(root, file), "utf8").includes('from "vitest"')
+        hasTestFrameworkImport(readFileSync(path.join(root, file), "utf8"), "vitest")
       );
     })
     .sort();
