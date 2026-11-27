@@ -297,7 +297,10 @@ class GhApi:
         self._runner = runner or gh_runner
 
     def get(self, path: str) -> Any:
-        return json.loads(self._runner(["api", path]) or "null")
+        try:
+            return json.loads(self._runner(["api", path]) or "null")
+        except json.JSONDecodeError as exc:
+            raise GhError(f"gh api {path} returned invalid JSON: {exc.msg}") from exc
 
 
 def fetch_pulls(
