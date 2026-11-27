@@ -905,6 +905,13 @@ def test_pr_ci_run_attempts_refuse_a_run_without_an_attempt_number():
         )
 
 
+def test_workflow_runs_refuse_a_non_object_row():
+    runner = FakeRunner({"runs": {"total_count": 0, "workflow_runs": [None]}})
+
+    with pytest.raises(RuntimeError, match=r"runs.*page 1"):
+        kpi._workflow_runs(kpi.GhApi(runner), "runs", 10)
+
+
 def _per_merge_runner(closed, pr_runs):
     return FakeRunner(
         {
@@ -1006,6 +1013,21 @@ def test_collect_shows_runs_per_merge_missing_when_the_run_list_fails():
     report = kpi.collect(kpi.GhApi(runner), cfg, NOW)
 
     assert report["ci"]["pr_ci_run_attempts"] is None
+    assert report["ci"]["ci_runs_per_merge"] is None
+    assert report["status"] == "partial"
+    assert any("CI runs per merged PR" in e for e in report["errors"])
+
+
+def test_collect_shows_runs_per_merge_missing_when_the_run_list_has_a_non_object():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r", "windows": [24]}})
+    recent = NOW - timedelta(hours=2)
+    runner = _per_merge_runner(
+        [_pr(1, closed=recent, merged=recent, updated=recent)],
+        {"total_count": 0, "workflow_runs": [None]},
+    )
+
+    report = kpi.collect(kpi.GhApi(runner), cfg, NOW)
+
     assert report["ci"]["ci_runs_per_merge"] is None
     assert report["status"] == "partial"
     assert any("CI runs per merged PR" in e for e in report["errors"])
