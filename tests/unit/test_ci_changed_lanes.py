@@ -94,7 +94,7 @@ def test_support_job_pick_step_uses_fail_closed_shell():
     assert '| python scripts/ci_changed_lanes.py >> "$GITHUB_OUTPUT"' not in pick_step["run"]
 
 
-def test_python_only_pull_request_runs_ten_ci_jobs():
+def test_python_only_pull_request_runs_twelve_ci_jobs():
     workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
     jobs = workflow["jobs"]
     lanes = ci_changed_lanes.lanes_for(["tests/unit/test_agent_manager.py"])
@@ -111,7 +111,9 @@ def test_python_only_pull_request_runs_ten_ci_jobs():
         and not (name == "support_webui_tests" and not lanes["webui"])
     )
 
-    assert active_jobs == 10
+    # Ten lanes from #1413 plus the 20-run repeat of changed tests and the
+    # non-blocking quarantine job from #1471.
+    assert active_jobs == 12
 
 
 def test_main_prints_exactly_two_lane_lines(monkeypatch, capsys):
