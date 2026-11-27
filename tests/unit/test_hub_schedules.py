@@ -138,6 +138,17 @@ def test_store_defaults_fill_optional_fields(tmp_path):
     assert row.skill == ""
 
 
+def test_store_skips_row_with_string_boolean_state(tmp_path):
+    path = tmp_path / "schedules.json"
+    path.write_text(
+        '[{"id":"s1","agents":["lapis@device-a"],"prompt":"report",'
+        '"interval_seconds":60,"anchor":0,"active":"false"}]',
+        encoding="utf-8",
+    )
+
+    assert ScheduleStore(path).load() == []
+
+
 def test_store_skips_broken_rows_but_keeps_the_rest(tmp_path):
     path = tmp_path / "schedules.json"
     path.write_text(
