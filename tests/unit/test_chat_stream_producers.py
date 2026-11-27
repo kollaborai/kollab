@@ -1993,3 +1993,45 @@ async def test_native_reply_segments_keep_tool_order_in_replay_and_snapshot(goal
         assert [row["kind"] for row in result] == ["reply", "tool", "reply"]
         assert [result[0]["parts"][0]["text"], result[2]["parts"][0]["text"]] == ["before", "after"]
         assert result[0]["id"] != result[2]["id"]
+
+
+@pytest.mark.asyncio
+async def test_a_queued_input_moves_to_where_its_turn_starts():
+    """A message queued mid-turn shows at the end of the chat while it waits. When
+    its turn starts, the live stream moves it after the earlier turn's rows, the
+    place every later snapshot shows it, instead of leaving it where it was queued."""
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+
+    def tool(turn_id, tool_id):
+        _publish(state, "tool_start", turn_id=turn_id, tool_id=tool_id,
+                 tool_name="terminal", input={"command": "ls"})
+        _publish(state, "tool_result", turn_id=turn_id, tool_id=tool_id,
+                 tool_name="terminal", input={"command": "ls"}, success=True, output="ok")
+
+    await _add(stream, "web-first", "look around")
+    _publish(state, "turn_start", request_id="web-first", turn_id="native-1", input_source="web")
+    tool("native-1", "tool-1")
+    await _add(stream, "web-later", "and then this")
+    tool("native-1", "tool-2")
+    _publish(state, "turn_complete", request_id="web-first", turn_id="native-1", stop_reason="cancelled")
+    _publish(state, "turn_start", request_id="web-later", turn_id="native-2", input_source="web")
+
+    events = _events(stream, initial)
+    assert sequence_problems(events, complete=False) == []
+    # The rows a client holds after applying the events in order.
+    order: list[str] = [row["id"] for row in events[0]["data"]["rows"]]
+    tool_rows: set[str] = set()
+    for event in events[1:]:
+        row_id = event["data"].get("id")
+        if event["type"] == "row.upsert":
+            if event["data"]["kind"] == "tool":
+                tool_rows.add(row_id)
+            if row_id not in order:
+                order.append(row_id)
+        elif event["type"] == "row.delete":
+            order.remove(row_id)
+    assert len(tool_rows) == 2, order
+    assert order.index("web-later") > max(order.index(row_id) for row_id in tool_rows), order
