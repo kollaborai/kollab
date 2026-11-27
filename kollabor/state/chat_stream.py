@@ -1138,7 +1138,7 @@ class ChatStreamService:
             self._add_turn_input(uid, turn_id, input_id)
             row = self._rows.setdefault(uid, {}).get(input_id)
             if row is not None:
-                self._upsert(uid, {**row, "turn_id": turn_id, "status": state})
+                self._upsert_admitted_input(uid, row, turn_id=turn_id, status=state)
         self._set_turn_state(uid, turn_id, "running", origin=event.get("origin"))
         self._active_turns[uid] = turn_id
 
@@ -1345,14 +1345,8 @@ class ChatStreamService:
         if row is not None and (
             row.get("status") != state or row.get("parts") != parts
         ):
-            self._upsert(
-                uid,
-                {
-                    **row,
-                    "turn_id": turn_id,
-                    "status": state,
-                    "parts": parts,
-                },
+            self._upsert_admitted_input(
+                uid, row, turn_id=turn_id, status=state, parts=parts
             )
         if current.get("state") != "running" or joined:
             self._set_turn_state(uid, turn_id, "running")
@@ -1854,7 +1848,7 @@ class ChatStreamService:
         if row is not None and (
             row.get("turn_id") != turn_id or row.get("status") != "joined"
         ):
-            self._upsert(uid, {**row, "turn_id": turn_id, "status": "joined"})
+            self._upsert_admitted_input(uid, row, turn_id=turn_id, status="joined")
         self._set_turn_state(uid, turn_id, "running")
 
     def _register_joined_turn(self, uid: str, request_id: str, turn_id: str) -> bool:
@@ -1876,7 +1870,7 @@ class ChatStreamService:
         if row is not None and (
             row.get("turn_id") != turn_id or row.get("status") != state
         ):
-            self._upsert(uid, {**row, "turn_id": turn_id, "status": state})
+            self._upsert_admitted_input(uid, row, turn_id=turn_id, status=state)
         self._set_turn_state(uid, turn_id, "running")
         self._active_turns[uid] = turn_id
         return True
@@ -1906,6 +1900,21 @@ class ChatStreamService:
             "created_at": self._timestamp(),
         }
         self._upsert(uid, row)
+
+    def _upsert_admitted_input(
+        self, uid: str, row: dict[str, Any], **changes: Any
+    ) -> None:
+        """Upsert an input row as a turn takes it.
+
+        A row queued behind a running turn sits where it was sent. Once a turn
+        takes it, it moves to the end, where the transcript and so every later
+        snapshot puts it: a row.delete, then a fresh row.upsert.
+        """
+        rows = self._rows.setdefault(uid, {})
+        if row.get("status") == "queued" and next(reversed(rows), None) != row["id"]:
+            rows.pop(row["id"], None)
+            self._log(uid).publish("row.delete", {"id": row["id"]})
+        self._upsert(uid, {**row, **changes})
 
     def _transcript_input_id(self, uid: str, text: str) -> str | None:
         for row in reversed(self._transcript_rows(uid)):
