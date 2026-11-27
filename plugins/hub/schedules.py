@@ -35,7 +35,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple, Union
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
 
-from .device_names import parse_handle
+from .device_names import NAME_RE, parse_handle
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,14 @@ class ScheduleRow:
             not isinstance(agent, str) for agent in agents
         ):
             raise ValueError("schedule agents must be a list of names")
+        for agent in agents:
+            if not agent or agent != agent.strip():
+                raise ValueError("schedule agent names must not be empty or padded")
+            if NAME_RE.fullmatch(agent):
+                continue
+            handle = parse_handle(agent)
+            if handle is None or f"{handle[0]}@{handle[1]}" != agent:
+                raise ValueError("schedule agents must be names or name@device handles")
         for field in ("id", "prompt", "when_busy", "skill", "created_by"):
             if field in data and not isinstance(data[field], str):
                 raise ValueError(f"schedule {field} must be a string")
