@@ -39,7 +39,7 @@ def test_cli_defaults_to_twenty_runs() -> None:
 
 
 def test_main_exits_cleanly_when_no_test_file_changed(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(repeat, "changed_test_files", lambda _base: [])
+    monkeypatch.setattr(repeat, "changed_test_files", lambda _base, **_kwargs: [])
 
     assert repeat.main(["--base", "origin/main"]) == 0
     assert "No changed test files" in capsys.readouterr().out
