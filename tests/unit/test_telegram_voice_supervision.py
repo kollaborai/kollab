@@ -62,6 +62,21 @@ async def _ready(path):
             await asyncio.sleep(0.01)
 
 
+async def test_ready_waits_for_marker_content(tmp_path):
+    # A writer creates its marker before the PID lands in it, so existence is not readiness.
+    marker = tmp_path / "marker"
+    marker.touch()
+    waiter = asyncio.create_task(_ready(marker))
+    try:
+        await asyncio.sleep(0.1)
+        assert not waiter.done(), "an empty marker must not count as ready"
+        marker.write_text("12345")
+        await asyncio.wait_for(waiter, 2)
+    finally:
+        waiter.cancel()
+    assert marker.read_text() == "12345"
+
+
 @pytest.mark.parametrize("generations", [1, 2])
 @pytest.mark.parametrize("hold_pipes", [False, True])
 async def test_success_owns_fast_detached_writers(
