@@ -13,7 +13,6 @@ import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from ..goal_image_scope import safe_goal_error_cause
-
 from ..message_content import redact_error_media, serialize_openai_chat_content
 from .base import LLMProvider
 from .errors import map_openai_error

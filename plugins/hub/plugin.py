@@ -9835,7 +9835,9 @@ class HubPlugin(BasePlugin):
             turns = self._acp_network_turns = {}
         sender = message.from_identity or message.from_agent or ""
         acp = self.event_bus.get_service("acp_orchestrator")
-        if acp is not None and acp.active and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}):
+        if acp is not None and acp.active and (
+            message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}
+        ):
             if not acp.observe_notification(message):
                 return {"status": "refused", "request_id": message.id}
             return {"status": "queued", "request_id": message.id}
@@ -9846,6 +9848,10 @@ class HubPlugin(BasePlugin):
             opened_at=time.monotonic(),
         )
         origin_context = self._agent_message_origin_context(message)
+        from kollabor.llm.agent_hud import build_hub_note
+
+        origin_context["hub_message_id"] = message.id
+        origin_context["hub_note"] = build_hub_note(message, observed=False)
         parked_line = getattr(self, "_acp_busy_parked", None)
         if parked_line and len(parked_line) < _ACP_BUSY_PARK_LIMIT:
             # Fairness (#483): a message arriving while earlier ones are
@@ -10454,6 +10460,26 @@ class HubPlugin(BasePlugin):
                 is_human_elsewhere=is_human_elsewhere,
                 llm_service=llm_service,
             )
+            from kollabor.llm.agent_hud import build_hub_note
+
+            hub_note = build_hub_note(
+                message,
+                observed=is_human_elsewhere or not is_intended,
+            )
+
+            def publish_hub_admission(admission: str) -> None:
+                from kollabor_tui.display_tap import publish_semantic
+
+                publish_semantic(
+                    self.event_bus,
+                    "hub_message",
+                    message_id=message.id,
+                    request_id=message.id,
+                    input_source="hub",
+                    hub_note=hub_note,
+                    hub_admission=admission,
+                )
+
             message_metadata = message.metadata or {}
             task_id = str(message_metadata.get("task_id") or "").strip()
             dispatch_mode = self._agent_dispatch_mode(llm_service)
@@ -10464,6 +10490,7 @@ class HubPlugin(BasePlugin):
                 # ACP owns a request FIFO and its transcript. Keep native HUD,
                 # compaction and continuation injections out of this path.
                 if is_departure or is_human_elsewhere or not is_intended:
+                    publish_hub_admission("note")
                     return
                 acp = self.event_bus.get_service("acp_orchestrator")
                 if is_operator_direct or message.from_agent == "human":
@@ -10471,8 +10498,14 @@ class HubPlugin(BasePlugin):
                         await llm_service.submit_human_input(
                             message.content, source=UserInputSource.HUB_MESSAGE,
                             request_id=message.id, thread_id=message.thread_id,
-                            origin_context={"operator": True},
+                            origin_context={
+                                "operator": True,
+                                "hub_message_id": message.id,
+                                "hub_note": hub_note,
+                            },
                         )
+                    else:
+                        publish_hub_admission("note")
                 elif message.reply_to or message.to in {"*", "all", "everyone", "team", "project"}:
                     if dispatch_mode == "acp":
                         if not acp.observe_notification(message):
@@ -10481,6 +10514,7 @@ class HubPlugin(BasePlugin):
                 elif wake_decision.should_trigger:
                     await self._submit_authenticated_agent_message(message, llm_service)
                 else:
+                    publish_hub_admission("note")
                     turn = _NetworkTurn(handle=message.from_identity or message.from_agent,
                                         thread_id=message.thread_id or message.id,
                                         message_id=message.id, opened_at=time.monotonic())
@@ -10592,11 +10626,16 @@ class HubPlugin(BasePlugin):
                 # Build metadata, include bridge info if present
                 msg_metadata = {
                     "hub_message": True,
+                    "hub_message_id": message.id,
+                    "hub_note": hub_note,
+                    # The native continuation claims the input only when its
+                    # turn actually starts. Until then this transcript copy
+                    # and the live row remain a note.
+                    "hub_admission": "note",
                     "hub_from": message.from_identity,
                     "hub_to": message.to,
                     "hub_is_intended": is_intended,
                     "hub_scope": getattr(message, "scope", "direct"),
-                    "hub_message_id": message.id,
                     "hub_thread_id": getattr(message, "thread_id", ""),
                     "hub_reply_to": getattr(message, "reply_to", ""),
                     "hub_wake_mode": wake_decision.mode,
@@ -10679,6 +10718,11 @@ class HubPlugin(BasePlugin):
                             section="hub",
                             label=f"{message.from_identity}->{message.to}",
                             content=formatted,
+                            message_id=message.id,
+                            hub_note=hub_note,
+                            hub_admission=(
+                                "input" if should_trigger_llm else "note"
+                            ),
                         )
                         hud_content = (
                             llm_service.drain_pending_agent_hud()
@@ -10692,12 +10736,42 @@ class HubPlugin(BasePlugin):
                         and llm_service.conversation_logger
                     ):
                         try:
+                            from kollabor_ai.conversation_logger import utc_stamp
+
+                            chat_stream_row = {
+                                "id": message.id,
+                                "seq": 0,
+                                "kind": "note",
+                                "role": "system",
+                                "turn_id": None,
+                                "status": "done",
+                                "parts": [dict(hub_note)],
+                                "created_at": utc_stamp(),
+                            }
+                            conversation_manager = getattr(
+                                llm_service, "conversation_manager", None
+                            )
+                            record_row = getattr(
+                                conversation_manager,
+                                "record_hub_chat_stream_row",
+                                None,
+                            )
+                            if callable(record_row):
+                                recorded_row = record_row(
+                                    chat_stream_row,
+                                    history=getattr(
+                                        llm_service, "conversation_history", None
+                                    ),
+                                )
+                                if isinstance(recorded_row, dict):
+                                    chat_stream_row = recorded_row
                             await llm_service.conversation_logger.log_system_message(
                                 hud_content or formatted,
                                 parent_uuid=getattr(
                                     llm_service, "current_parent_uuid", None
                                 ),
                                 subtype="hub_incoming",
+                                chat_stream_row=chat_stream_row,
                             )
                         except Exception as e:
                             logger.debug(f"incoming message injection failed: {e}")
@@ -10717,7 +10791,16 @@ class HubPlugin(BasePlugin):
                     from kollabor_tui.display_tap import publish_semantic
 
                     publish_semantic(
-                        self.event_bus, "hub_message", message_id=message.id
+                        self.event_bus,
+                        "hub_message",
+                        message_id=message.id,
+                        request_id=message.id,
+                        input_source="hub",
+                        hub_note=hub_note,
+                        # A requested wake can still be absorbed by an active
+                        # turn or declined before it starts. MessageHandler
+                        # promotes it to an input at the actual turn_start.
+                        hub_admission="note",
                     )
                 # Trigger LLM if this agent is the intended target (or broadcast).
                 # Skip departures to avoid feedback loops.
@@ -10750,7 +10833,9 @@ class HubPlugin(BasePlugin):
                             # name the sender as its handle, never the address.
                             "source": f"hub:{self._outgoing_label(message.from_identity or '')}",
                             "content": message.content,
+                            "request_id": message.id,
                             "hub_message_id": message.id,
+                            "hub_note": hub_note,
                             "hub_wake_mode": wake_decision.mode,
                             "hub_wake_reason": wake_decision.reason,
                             "pending_hub_message_ids": list(
@@ -18532,10 +18617,17 @@ class HubPlugin(BasePlugin):
                 rows[identity] = {**rows.get(identity, {}), **row}
         for remote in self._remote_agent_rows():
             handle = remote.get("handle") or format_handle(remote.get("name", "?"), remote.get("device", "?"))
-            rows[handle] = {**rows.get(handle, {}),
-                           "identity": handle, "state": remote.get("state"), "device": remote.get("device"),
-                           "tags": {"harness": remote.get("harness") or "", "provider": "acp" if remote.get("harness") else "",
-                                    "acp_waiting": bool(remote.get("acp_waiting"))}}
+            rows[handle] = {
+                **rows.get(handle, {}),
+                "identity": handle,
+                "state": remote.get("state"),
+                "device": remote.get("device"),
+                "tags": {
+                    "harness": remote.get("harness") or "",
+                    "provider": "acp" if remote.get("harness") else "",
+                    "acp_waiting": bool(remote.get("acp_waiting")),
+                },
+            }
         if self._identity:
             current = self._identity.to_dict()
             identity = str(current.get("identity") or current.get("agent_id") or "")
@@ -18549,7 +18641,11 @@ class HubPlugin(BasePlugin):
         return self._acp_hub_tools
 
     async def _handle_acp_hub_call(self, *, token, generation, name, arguments):
-        if not token or not secrets.compare_digest(str(token), self._acp_hub_token) or str(generation) != str(self._acp_hub_generation):
+        if (
+            not token
+            or not secrets.compare_digest(str(token), self._acp_hub_token)
+            or str(generation) != str(self._acp_hub_generation)
+        ):
             return {"error": "stale or invalid ACP hub binding"}
         relay = getattr(self, "_relay_agent", None)
         acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
@@ -18582,7 +18678,11 @@ class HubPlugin(BasePlugin):
                 self._presence.publish()
         turn = getattr(self, "_acp_network_turns", {}).get(request_id)
         if waiting and turn is not None:
-            line = f"{self._identity.identity} is waiting for your OK: {payload.get('title') or 'Tool permission'} · open it: kollab --attach {self._identity.identity}"
+            line = (
+                f"{self._identity.identity} is waiting for your OK: "
+                f"{payload.get('title') or 'Tool permission'} · open it: "
+                f"kollab --attach {self._identity.identity}"
+            )
             message = HubMessage(action="message", from_agent=self._identity.agent_id,
                 from_identity=self._identity.identity, to=turn.handle, content=line,
                 thread_id=turn.thread_id, reply_to=turn.message_id, metadata={"acp_waiting": True})
@@ -18614,7 +18714,11 @@ class HubPlugin(BasePlugin):
             turn.started = True
             turn.bound_ask = True
             relay = getattr(self, "_relay_agent", None)
-            relay_token = relay._turn.set(message.metadata["_relay_turn_id"]) if relay is not None and message.metadata.get("_relay_turn_id") else None
+            relay_token = (
+                relay._turn.set(message.metadata["_relay_turn_id"])
+                if relay is not None and message.metadata.get("_relay_turn_id")
+                else None
+            )
             token = current_turn.set({"request_id": message.id, "thread_id": message.thread_id,
                                       "input_source": "agent"})
             try:
@@ -19251,6 +19355,7 @@ class HubPlugin(BasePlugin):
                             to=ident,
                             content=f"agent '{self._identity.identity}' is going offline.",
                             scope=MessageScope.DIRECT.value,
+                            metadata={"lifecycle_event": "departure"},
                         )
                         await self._deliver_to_agent(peer, departure)
                     except Exception as e:

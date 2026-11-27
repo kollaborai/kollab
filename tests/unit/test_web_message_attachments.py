@@ -23,7 +23,6 @@ from kollabor.state.web_message_attachments import (
     WebMessageAttachmentRegistry,
 )
 
-
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 

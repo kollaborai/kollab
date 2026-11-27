@@ -17,15 +17,20 @@ from kollabor_ai.message_content import EphemeralImageStore
 from kollabor_ai.providers.models import OpenAIResponsesConfig, ProviderType
 from kollabor_ai.providers.openai_responses_provider import OpenAIResponsesProvider
 
-IMAGE_1 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+IMAGE_1 = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 IMAGE_2 = "data:image/jpeg;base64,anBlZyBieXRlcw=="
 
 
 @contextmanager
 def active_provider_image_diagnostics():
     from kollabor_ai.goal_image_scope import (
-        goal_image_diagnostics_scope, goal_image_request_scope, goal_image_scope,
+        goal_image_diagnostics_scope,
+        goal_image_request_scope,
+        goal_image_scope,
     )
+
     queue, api = object(), object()
     with goal_image_scope([{"type": "image"}], queue, api):
         with goal_image_request_scope(queue):
@@ -252,7 +257,11 @@ async def test_goal_images_through_real_queue_and_api_service(tmp_path, caplog, 
                 return httpx.Response(400, json={"error": {"message": "maximum context length exceeded"}})
             if echo == "stream-code":
                 event = json.dumps({"response": {"error": {"message": "provider failed", "code": encoded}}})
-                return httpx.Response(200, text=f"event: response.failed\ndata: {event}\n\n", headers={"content-type": "text/event-stream"})
+                return httpx.Response(
+                    200,
+                    text=f"event: response.failed\ndata: {event}\n\n",
+                    headers={"content-type": "text/event-stream"},
+                )
             detail = {"url": IMAGE_1, "base64": encoded, "partial": encoded[:35], "hook-failure": IMAGE_1}[echo]
             return httpx.Response(400, json={"error": {"message": f"provider echoed {detail}"}})
         payload = {
@@ -317,10 +326,12 @@ async def test_goal_images_through_real_queue_and_api_service(tmp_path, caplog, 
     event_bus.emit_with_hooks = AsyncMock(return_value={})
     if echo == "hook-failure":
         from kollabor_events.models import EventType
+
         async def fail_error_hook(event, *_args):
             if event == EventType.LLM_REQUEST_ERROR:
                 raise RuntimeError("test error hook failed")
             return {}
+
         event_bus.emit_with_hooks.side_effect = fail_error_hook
     coord.event_bus = event_bus
     display = MagicMock()
@@ -376,7 +387,12 @@ async def test_goal_images_through_real_queue_and_api_service(tmp_path, caplog, 
             assert detail not in repr(event_bus.emit_with_hooks.await_args_list)
             if echo == "context-overflow":
                 from kollabor_events.models import EventType
-                events = [call.args[1] for call in event_bus.emit_with_hooks.await_args_list if call.args[0] == EventType.LLM_REQUEST_ERROR]
+
+                events = [
+                    call.args[1]
+                    for call in event_bus.emit_with_hooks.await_args_list
+                    if call.args[0] == EventType.LLM_REQUEST_ERROR
+                ]
                 assert events[-1]["context_window_exceeded"] is True
             assert detail not in "".join(p.read_text() for p in (tmp_path / "raw").glob("*.jsonl"))
             assert coord._image_store.count == 0
@@ -553,13 +569,15 @@ async def test_queued_user_turn_drains_after_goal_images_are_revoked(tmp_path):
 @pytest.mark.parametrize("stream", [False, True])
 async def test_provider_error_traceback_does_not_reveal_goal_image(stream):
     import traceback
-    from kollabor_ai.goal_image_scope import goal_image_scope
+
     from kollabor_ai.providers.errors import ProviderError
 
     def reject(_request):
         return httpx.Response(400, json={"error": {"message": f"bad input: {IMAGE_1}"}})
 
-    provider = OpenAIResponsesProvider(OpenAIResponsesConfig(provider=ProviderType.OPENAI_RESPONSES, api_key="test", model="gpt-5.4"))
+    provider = OpenAIResponsesProvider(
+        OpenAIResponsesConfig(provider=ProviderType.OPENAI_RESPONSES, api_key="test", model="gpt-5.4")
+    )
     provider._client = httpx.AsyncClient(base_url="https://example.test/v1", transport=httpx.MockTransport(reject))
     provider._initialized = True
     encoded = IMAGE_1.split(",", 1)[1]
@@ -580,13 +598,16 @@ async def test_provider_error_traceback_does_not_reveal_goal_image(stream):
 
 def test_grouped_provider_error_redacts_nested_tracebacks():
     import traceback
-    from kollabor_ai.goal_image_scope import goal_image_scope, safe_goal_error_cause
+
+    from kollabor_ai.goal_image_scope import safe_goal_error_cause
     from kollabor_ai.providers.errors import ProviderError, map_openai_error
 
     encoded = IMAGE_1.split(",", 1)[1]
     truncated = encoded[:35]
     assert len(truncated) < len(encoded)
-    error = ExceptionGroup("provider failed", [RuntimeError(IMAGE_1), ExceptionGroup("nested", [RuntimeError(truncated)])])
+    error = ExceptionGroup(
+        "provider failed", [RuntimeError(IMAGE_1), ExceptionGroup("nested", [RuntimeError(truncated)])]
+    )
     with active_provider_image_diagnostics():
         try:
             raise map_openai_error(error, "openai") from safe_goal_error_cause(error)
@@ -601,9 +622,14 @@ def test_provider_snapshot_does_not_scan_every_prompt_field_for_goal_image(monke
 
     scans = []
     monkeypatch.setattr(scope_module, "goal_image_diagnostics_active", lambda: scans.append(True) or True)
-    provider = OpenAIResponsesProvider(OpenAIResponsesConfig(provider=ProviderType.OPENAI_RESPONSES, api_key="test", model="gpt-5.4"))
+    provider = OpenAIResponsesProvider(
+        OpenAIResponsesConfig(provider=ProviderType.OPENAI_RESPONSES, api_key="test", model="gpt-5.4")
+    )
     with scope_module.goal_image_scope([{"type": "image"}], object(), object()):
-        provider.last_request_payload = {"input": [{"content": "long ordinary prompt field"}] * 20, "image_url": IMAGE_1}
+        provider.last_request_payload = {
+            "input": [{"content": "long ordinary prompt field"}] * 20,
+            "image_url": IMAGE_1,
+        }
     assert not scans
     assert provider.last_request_payload["image_url"] == "[image data redacted]"
 
@@ -615,7 +641,7 @@ async def test_native_sdk_exception_traceback_never_exposes_goal_image(kind, cap
     from unittest.mock import AsyncMock, MagicMock
 
     from pydantic import BaseModel, ValidationError
-    from kollabor_ai.goal_image_scope import goal_image_scope
+
     from kollabor_ai.providers.errors import ProviderError
     from kollabor_ai.providers.models import OpenAIConfig
     from kollabor_ai.providers.openai_provider import OpenAIProvider
@@ -626,8 +652,10 @@ async def test_native_sdk_exception_traceback_never_exposes_goal_image(kind, cap
     elif kind == "bytes":
         original = RuntimeError(("image " + encoded[:11]).encode())
     else:
+
         class Parsed(BaseModel):
             number: int
+
         try:
             Parsed(number=encoded[:11])
         except ValidationError as exc:
@@ -648,12 +676,18 @@ async def test_native_sdk_exception_traceback_never_exposes_goal_image(kind, cap
         assert "details withheld" in str(caught.value)
 
 
-@pytest.mark.parametrize("message", [
-    "context window exceeded", "context_window exceeded", "maximum context length exceeded",
-    "too many tokens", "prompt is too long", "context_length_exceeded",
-])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "context window exceeded",
+        "context_window exceeded",
+        "maximum context length exceeded",
+        "too many tokens",
+        "prompt is too long",
+        "context_length_exceeded",
+    ],
+)
 def test_image_goal_provider_errors_preserve_context_overflow_classification(message):
-    from kollabor_ai.goal_image_scope import goal_image_scope
     from kollabor_ai.providers.errors import ProviderError
 
     with active_provider_image_diagnostics():
@@ -666,6 +700,7 @@ def test_image_goal_provider_errors_preserve_context_overflow_classification(mes
 @pytest.mark.parametrize("message", ["Network error", "HTTP 429", "HTTP 503"])
 async def test_image_goal_keeps_retry_classification_without_logging_error_text(message, caplog):
     from unittest.mock import AsyncMock, MagicMock
+
     from kollabor_ai.goal_image_scope import goal_image_scope
     from tests.unit.test_retry_hardening import _make_service
 
@@ -676,6 +711,7 @@ async def test_image_goal_keeps_retry_classification_without_logging_error_text(
     api._log_raw_interaction = MagicMock()
     from kollabor_ai.goal_image_scope import goal_image_request_scope
     from kollabor_events.data_models import ConversationMessage
+
     queue = object()
     carrier = ConversationMessage(role="user", content="inspect")
     image = {"type": "image", "source": {"kind": "url", "url": "https://example.test/image.png"}}
@@ -690,6 +726,7 @@ async def test_image_goal_keeps_retry_classification_without_logging_error_text(
 @pytest.mark.asyncio
 async def test_other_api_child_retains_its_own_diagnostics_and_retry(caplog):
     from unittest.mock import AsyncMock, MagicMock
+
     from kollabor_ai.goal_image_scope import goal_image_request_scope, goal_image_scope
     from kollabor_events.data_models import ConversationMessage
     from tests.unit.test_retry_hardening import _make_service
@@ -719,6 +756,7 @@ async def test_other_api_child_retains_its_own_diagnostics_and_retry(caplog):
 @pytest.mark.asyncio
 async def test_image_api_returns_fresh_exception_without_raw_context():
     from unittest.mock import AsyncMock, MagicMock
+
     from kollabor_ai.goal_image_scope import goal_image_request_scope, goal_image_scope
     from kollabor_ai.providers.errors import ProviderError
     from kollabor_events.data_models import ConversationMessage
@@ -746,7 +784,9 @@ async def test_image_api_returns_fresh_exception_without_raw_context():
 async def test_openai_sdk_debug_never_logs_goal_image_but_keeps_other_debug(caplog):
     import logging
     from unittest.mock import AsyncMock, MagicMock
+
     from openai import AsyncOpenAI
+
     from kollabor_ai.goal_image_scope import goal_image_request_scope, goal_image_scope
     from kollabor_ai.message_content import normalize_message_content
     from kollabor_ai.providers.models import OpenAIConfig
@@ -755,9 +795,20 @@ async def test_openai_sdk_debug_never_logs_goal_image_but_keeps_other_debug(capl
     from tests.unit.test_retry_hardening import _make_service
 
     captured = []
+
     def capture(request):
         captured.append(json.loads(request.content))
-        return httpx.Response(200, json={"id": "chat-test", "object": "chat.completion", "created": 0, "model": "gpt-5.4", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-5.4",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(capture))
     provider = OpenAIProvider(OpenAIConfig(provider=ProviderType.OPENAI, api_key="test", model="gpt-5.4"))

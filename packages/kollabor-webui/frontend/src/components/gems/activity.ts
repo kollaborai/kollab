@@ -1,4 +1,4 @@
-import { useAuiState } from "@assistant-ui/react";
+import { isChatStreamToolOutputPreviewMarker, type ChatRow, type InputInfo } from "../../chat-stream.ts";
 import type { Activity } from "./gem-face";
 
 const TOOL_ACTIVITY: Record<string, Activity> = {
@@ -89,25 +89,34 @@ export function liveActivity(live: LiveActivity): Activity | null {
 }
 
 /**
- * What the open session's gem acts out, read from its live thread while this
- * page runs the turn, else from `live` (the event stream). Null while nothing
- * runs, so the sidebar falls back to the hub's presence state.
+ * What the open session's gem acts out while this page's chat runs, read from the
+ * chat store's rows, inputs and running state (#1451). Null while nothing runs and
+ * nothing failed, so the sidebar falls back to the hub's presence state. A failed
+ * connection, or a latest input that ended failed, reads as an error.
  */
-export function useThreadActivity(failed: boolean, live: Activity | null = null): Activity | null {
-  const thread = useAuiState((s) => {
-    const last = s.thread.messages.at(-1);
-    if (!s.thread.isRunning) {
-      const errored = last?.role === "assistant" && last.status?.type === "incomplete" && last.status.reason === "error";
-      return failed || errored ? "error" : null;
+export function threadActivityOf(
+  rows: readonly ChatRow[],
+  inputs: Readonly<Record<string, InputInfo>>,
+  running: boolean,
+  failed: boolean,
+): Activity | null {
+  const last = rows.at(-1);
+  if (!running) {
+    let lastInput: ChatRow | undefined;
+    for (let index = rows.length - 1; index >= 0 && !lastInput; index -= 1) {
+      if (rows[index].kind === "input") lastInput = rows[index];
     }
-    if (last?.role !== "assistant") return "thinking";
-    const part = last.parts.at(-1);
-    // A harness card carries an interim result while it runs.
-    if (part?.type === "tool-call" && (part.result === undefined || part.isPreliminary)) {
-      return toolActivity(part.toolName, harnessKind(part.result));
-    }
-    if (part?.type === "text" && part.text) return "speaking";
-    return "thinking";
-  });
-  return thread ?? live;
+    const errored = lastInput !== undefined && inputs[lastInput.id]?.outcome === "failed";
+    return failed || errored ? "error" : null;
+  }
+  if (last?.role !== "assistant") return "thinking";
+  const part = last.parts.at(-1);
+  // A tool call with no result yet is still running; one with a result is read by the model next.
+  if (part?.type === "tool-call" && part.result === undefined &&
+      !(isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview) &&
+        part.chat_stream_result_preview.tool_call_id === part.tool_call_id)) {
+    return toolActivity(part.tool_name, harnessKind(part.result));
+  }
+  if (part?.type === "text" && part.text) return "speaking";
+  return "thinking";
 }

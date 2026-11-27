@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from nacl.signing import SigningKey
 
-from plugins.hub.config_sync import is_machine_network_state_dir, kollab_root
+from plugins.hub.config_sync import is_machine_network_state_dir
 from plugins.hub.device_record import (
     DeviceRecord,
     DeviceRecordError,
@@ -27,7 +27,7 @@ from plugins.hub.device_record import (
     origin_slug,
     workspace_dir,
 )
-from plugins.hub.relay_state import RelayState, RelayStateStore
+from plugins.hub.relay_state import RelayState
 
 
 @pytest.fixture
@@ -88,7 +88,7 @@ def test_add_network_mints_membership_key_and_first_network_is_primary(home):
     key = record.membership_key(slug)
     assert isinstance(key, SigningKey)
     assert record.primary == slug
-    other = record.add_network("https://other.example.com")
+    record.add_network("https://other.example.com")
     assert record.primary == slug  # first stays primary
 
 
@@ -177,7 +177,8 @@ def test_migration_refuses_missing_key(home, tmp_path):
 def test_migration_keeps_both_keys_when_second_folder_claims_network(home, tmp_path):
     workspace_a = tmp_path / "a"
     workspace_b = tmp_path / "b"
-    workspace_a.mkdir(); workspace_b.mkdir()
+    workspace_a.mkdir()
+    workspace_b.mkdir()
     key_a = _seed_legacy(workspace_a, home)
     key_b = _seed_legacy(workspace_b, home)  # same network, different key
     assert migrate_legacy_network_state(workspace_a) is True
@@ -233,11 +234,7 @@ def test_flat_primary_network_spelling_loads_and_normalizes(home):
     (device_dir() / "device.json").write_text(_json.dumps(payload))
 
     reloaded = DeviceRecord()
-    slug_beta = next(
-        slug
-        for slug, entry in reloaded.networks().items()
-        if entry["network_name"] == "beta-net"
-    )
+    slug_beta = next(slug for slug, entry in reloaded.networks().items() if entry["network_name"] == "beta-net")
     assert reloaded.primary == slug_beta
 
 
@@ -267,11 +264,7 @@ def test_slug_spelling_wins_over_flat_when_both_present(home):
     record.add_network("https://b.example.com", "beta-net")
     import json as _json
 
-    slug_alpha = next(
-        slug
-        for slug, entry in record.networks().items()
-        if entry["network_name"] == "alpha-net"
-    )
+    slug_alpha = next(slug for slug, entry in record.networks().items() if entry["network_name"] == "alpha-net")
     payload = _json.loads((device_dir() / "device.json").read_text())
     payload["primary"] = slug_alpha
     payload["primary_network"] = "beta-net"  # stale flat field

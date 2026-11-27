@@ -274,6 +274,16 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint.startsWith("/sessions/")) {
       const requestedId = endpoint.split("/")[2];
+      if (method === "GET" && endpoint.endsWith("/stream")) {
+        // The chat reads one ordered stream (#1451). A reconnect (it carries a cursor) is held open: the
+        // snapshot already arrived and nothing new happens in these fixtures.
+        if (url.searchParams.has("after")) return new Promise(() => {});
+        return route.fulfill({
+          status: 200,
+          contentType: "text/event-stream",
+          body: `data: ${JSON.stringify(streamSnapshot(requestedId, options.history ?? []))}\n\n`,
+        });
+      }
       if (requestedId === remoteAgent.handle) {
         remoteSessionOpened = true;
         return json(route, remoteSession);
@@ -313,6 +323,38 @@ export function makeFixtures(options = {}) {
     holdFolderDefaults,
     releaseFolderDefaults,
     profileListings: () => profileListings,
+  };
+}
+
+/** The fixture history as the chat stream's opening snapshot: one row per message, no turns or inputs. */
+export function streamSnapshot(sessionId, history) {
+  const rows = history.map((message, index) => ({
+    id: `${sessionId}-h${index}`,
+    seq: index + 1,
+    kind: message.role === "user" ? "input" : "reply",
+    role: message.role,
+    turn_id: null,
+    status: "complete",
+    parts: [
+      {
+        type: "text",
+        text: typeof message.content === "string"
+          ? message.content
+          : message.content.filter((part) => part.type === "text").map((part) => part.text).join(""),
+      },
+      // Saved pictures ride the row as image parts at their media path, as the daemon writes them.
+      ...(message.media ?? [])
+        .filter((media) => media.ref && !media.failed)
+        .map((media) => ({ type: "image", url: `/media/${encodeURIComponent(media.ref)}` })),
+    ],
+    created_at: "2026-11-26T00:00:00Z",
+  }));
+  return {
+    seq: rows.length + 1,
+    conversation_uid: `conv-${sessionId}`,
+    generation: "fixture",
+    type: "snapshot",
+    data: { rows, next_seq: rows.length + 2, older: null, turns: [], inputs: [] },
   };
 }
 
@@ -667,7 +709,7 @@ async function main() {
         sidebarTitleIncludes: "Open Remote Coder on remote-build",
         sessionHeading: "Remote Coder",
         sessionName: "Remote coder session",
-        historyPath: "/sessions/remote-session-1/history",
+        historyPath: "/sessions/remote-session-1/stream",
         composerPlaceholder: "Message Remote Coder…",
         clickTarget: remoteAgentButton,
         timeout: 60_000,

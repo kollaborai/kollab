@@ -48,6 +48,7 @@ async def test_cancel_and_failure_give_a_safe_terminal_result():
 
 def test_private_history_recording_does_not_publish_goal_recovery_id():
     from types import SimpleNamespace
+
     from kollabor.llm.llm_coordinator import LLMService
     from kollabor_tui.display_tap import DisplayTap
 

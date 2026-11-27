@@ -1,0 +1,141 @@
+{
+  "description": "Preview markers must match their row, part kind, and tool-call identity.",
+  "complete": true,
+  "expect": [
+    "preview marker row_id does not match its row",
+    "args preview is only valid on a tool-call part",
+    "result preview is only valid on a tool-call part",
+    "preview marker tool_call_id does not match its part"
+  ],
+  "event_expect": {
+    "0": [
+      "preview marker row_id does not match its row",
+      "args preview is only valid on a tool-call part",
+      "result preview is only valid on a tool-call part",
+      "preview marker tool_call_id does not match its part"
+    ]
+  },
+  "events": [
+    {
+      "seq": 1,
+      "conversation_uid": "conv-preview",
+      "generation": "fixture-daemon-1",
+      "type": "snapshot",
+      "data": {
+        "rows": [
+          {
+            "id": "row-bad-preview",
+            "seq": 1,
+            "kind": "reply",
+            "role": "assistant",
+            "turn_id": "turn-preview",
+            "status": "completed",
+            "parts": [
+              {
+                "type": "image",
+                "url": "data:image/png;base64,AAAA",
+                "chat_stream_part_preview": {
+                  "kind": "chat-stream-part-preview",
+                  "session_id": "session-preview",
+                  "row_id": "some-other-row",
+                  "part_index": 0,
+                  "output_bytes": 40000,
+                  "output_chars": 40000,
+                  "output_type": "json",
+                  "output_revision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "preview": "{\"type\":\"image\",...}"
+                }
+              }
+            ],
+            "created_at": "2026-11-26T10:00:00Z"
+          },
+          {
+            "id": "row-bad-args-kind",
+            "seq": 2,
+            "kind": "reply",
+            "role": "assistant",
+            "turn_id": "turn-preview",
+            "status": "completed",
+            "parts": [
+              {
+                "type": "text",
+                "text": "bounded args placeholder",
+                "chat_stream_args_preview": {
+                  "kind": "chat-stream-content-preview",
+                  "session_id": "session-preview",
+                  "row_id": "row-bad-args-kind",
+                  "part_index": 0,
+                  "field": "args",
+                  "output_bytes": 40000,
+                  "output_chars": 40000,
+                  "output_type": "json",
+                  "output_revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                  "preview": "{}"
+                }
+              }
+            ],
+            "created_at": "2026-11-26T10:00:01Z"
+          },
+          {
+            "id": "row-bad-result-kind",
+            "seq": 3,
+            "kind": "reply",
+            "role": "assistant",
+            "turn_id": "turn-preview",
+            "status": "completed",
+            "parts": [
+              {
+                "type": "text",
+                "text": "bounded result placeholder",
+                "chat_stream_result_preview": {
+                  "kind": "chat-stream-tool-output-preview",
+                  "session_id": "session-preview",
+                  "row_id": "row-bad-result-kind",
+                  "tool_call_id": "call-no-tool-part",
+                  "output_bytes": 40000,
+                  "output_chars": 40000,
+                  "output_type": "text",
+                  "output_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "preview": "bounded result preview"
+                }
+              }
+            ],
+            "created_at": "2026-11-26T10:00:02Z"
+          },
+          {
+            "id": "row-bad-result-id",
+            "seq": 4,
+            "kind": "tool",
+            "role": "assistant",
+            "turn_id": "turn-preview",
+            "status": "completed",
+            "parts": [
+              {
+                "type": "tool-call",
+                "tool_call_id": "call-expected",
+                "tool_name": "inspect",
+                "args": {},
+                "chat_stream_result_preview": {
+                  "kind": "chat-stream-tool-output-preview",
+                  "session_id": "session-preview",
+                  "row_id": "row-bad-result-id",
+                  "tool_call_id": "call-actual",
+                  "output_bytes": 40000,
+                  "output_chars": 40000,
+                  "output_type": "text",
+                  "output_revision": "2222222222222222222222222222222222222222222222222222222222222222",
+                  "preview": "bounded result preview"
+                }
+              }
+            ],
+            "created_at": "2026-11-26T10:00:03Z"
+          }
+        ],
+        "next_seq": 5,
+        "older": null,
+        "turns": [],
+        "inputs": []
+      }
+    }
+  ]
+}

@@ -14,8 +14,7 @@ import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from ..goal_image_scope import safe_goal_error_cause
-
-from ..message_content import redact_error_media, content_to_text, serialize_anthropic_content
+from ..message_content import content_to_text, redact_error_media, serialize_anthropic_content
 from .anthropic_reasoning import (
     PrefixHasher,
     ThinkingStreamCollector,
@@ -357,7 +356,10 @@ class AnthropicProvider(LLMProvider):
                     event = json.loads(data)
                     yield event
                 except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse SSE event: {redact_error_media(str(e))}, data: {redact_error_media(data)}")
+                    logger.warning(
+                        f"Failed to parse SSE event: {redact_error_media(str(e))}, "
+                        f"data: {redact_error_media(data)}"
+                    )
                     continue
 
     def _get_headers(self) -> Dict[str, str]:

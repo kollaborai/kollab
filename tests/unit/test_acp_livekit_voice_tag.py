@@ -57,7 +57,11 @@ def busy_room():
     runner.session_id = "session"
     runner.initialize_metadata = {"steering": {"supported": True}}
     runner._active_turn_id = 1
-    runner._active_context = SimpleNamespace(thread_id=None, origin={})
+    runner._active_generation = 1
+    # A real running turn carries its admission's request id and turn id (#1371).
+    runner._active_context = SimpleNamespace(
+        thread_id=None, origin={}, request_id="active-req", turn_id=1
+    )
     runner._connection = extension
     orchestrator = object.__new__(ACPOrchestrator)
     orchestrator._runner = runner
