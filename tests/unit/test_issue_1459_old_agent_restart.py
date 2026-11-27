@@ -1,5 +1,6 @@
 """#1459: old agents restart in place through the engine's existing launcher."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -99,6 +100,7 @@ async def test_engine_fallback_signals_the_selected_generation_then_reuses_sessi
         expected_agent_id="image-1",
         expected_pid=1234,
         expected_started_at=12.5,
+        generation_check=False,
     )
     session.shutdown.assert_awaited_once_with()
     assert session.initialize.await_args.kwargs["resume_conversation_id"] == (
@@ -106,6 +108,56 @@ async def test_engine_fallback_signals_the_selected_generation_then_reuses_sessi
     )
     assert session._borrowed_daemon is False
     assert session.external is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_shutdown_action_keeps_generation_fields_without_preflight(monkeypatch):
+    from plugins.hub.messenger import AgentMessenger
+
+    requests = []
+
+    class Reader:
+        async def readline(self):
+            return b'{"type":"ack"}\n'
+
+    class Writer:
+        def write(self, data):
+            requests.append(json.loads(data.decode()))
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    monkeypatch.setattr(
+        AgentMessenger,
+        "_open",
+        AsyncMock(return_value=(Reader(), Writer())),
+    )
+
+    accepted = await AgentMessenger.signal_shutdown(
+        "/tmp/old-agent.sock",
+        reason="Restart Agent requested by the web UI",
+        expected_agent_id="image-1",
+        expected_pid=1234,
+        expected_started_at=12.5,
+        generation_check=False,
+    )
+
+    assert accepted is True
+    assert requests == [
+        {
+            "action": "shutdown",
+            "reason": "Restart Agent requested by the web UI",
+            "expected_agent_id": "image-1",
+            "expected_pid": 1234,
+            "expected_started_at": 12.5,
+        }
+    ]
 
 
 @pytest.mark.asyncio
