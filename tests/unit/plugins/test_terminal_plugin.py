@@ -188,3 +188,36 @@ async def test_capture_after_exit_waits_for_the_reader_thread(monkeypatch):
     captured = await plugin.capture_session_output("quick")
 
     assert captured["output"] == ["done"]
+
+
+@pytest.mark.asyncio
+async def test_capture_waits_for_the_reader_without_blocking_the_loop():
+    """A child that keeps stdout open after the shell exits holds the reader; the
+    capture's wait for it must not stall the event loop (#1465 review)."""
+    import time
+
+    plugin = TmuxPlugin()
+    result = await plugin.execute_background("sleep 1.5 & printf 'x\\n'", name="held")
+    assert result["success"] is True
+    session = plugin.sessions["held"]
+    await asyncio.wait_for(asyncio.to_thread(session.proc.wait), timeout=5)
+
+    gaps = []
+
+    async def ticker():
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(0.05)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    tick = asyncio.create_task(ticker())
+    try:
+        await asyncio.sleep(0.12)  # the ticker is running before the capture
+        await plugin.capture_session_output("held")
+        await asyncio.sleep(0.12)  # and records the gap a stall leaves
+    finally:
+        tick.cancel()
+
+    assert max(gaps, default=0) < 0.5, gaps
