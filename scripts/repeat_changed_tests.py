@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -64,6 +65,7 @@ def run_test_file(
     """Run one test file repeatedly and stop at its first failing run."""
     execute = runner or subprocess.run
     interpreter = python or sys.executable
+    host_scans = os.environ.get("GITHUB_ACTIONS") == "true"
     command = [
         interpreter,
         "-m",
@@ -75,7 +77,8 @@ def run_test_file(
         "not quarantine",
         *(["-o", "asyncio_mode=auto"] if path.startswith(PACKAGE_SUITES) else []),  # as ci.yml runs them
         # As the unit shards run them; the option is defined in tests/conftest.py, so root suite only.
-        *(["--allow-host-process-enumeration"] if path.startswith(f"{ROOT_SUITE}/") else []),
+        # conftest refuses it outside GitHub-hosted CI, so local runs leave host scans skipped.
+        *(["--allow-host-process-enumeration"] if host_scans and path.startswith(f"{ROOT_SUITE}/") else []),
         path,
     ]
     for attempt in range(1, runs + 1):
