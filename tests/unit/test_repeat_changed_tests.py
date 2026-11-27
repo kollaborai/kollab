@@ -43,3 +43,37 @@ def test_main_exits_cleanly_when_no_test_file_changed(monkeypatch, capsys) -> No
 
     assert repeat.main(["--base", "origin/main"]) == 0
     assert "No changed test files" in capsys.readouterr().out
+
+
+def test_select_test_files_includes_the_package_suites_ci_runs() -> None:
+    assert repeat.select_test_files(
+        [
+            "packages/kollabor-engine/tests/test_x.py",
+            "packages/kollabor-rpc/tests/sub/test_y.py",
+            "packages/kollabor-voice/tests/test_z.py",
+        ]
+    ) == ["packages/kollabor-engine/tests/test_x.py", "packages/kollabor-rpc/tests/sub/test_y.py"]
+
+
+def test_changed_test_files_diffs_the_package_suites_too() -> None:
+    commands: list[list[str]] = []
+
+    def runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    repeat.changed_test_files("origin/main", runner=runner)
+
+    assert "packages/kollabor-engine/tests" in commands[0]
+    assert "packages/kollabor-rpc/tests" in commands[0]
+
+
+def test_package_test_files_repeat_with_the_asyncio_mode_ci_uses() -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    assert repeat.run_test_file("packages/kollabor-engine/tests/test_x.py", 1, runner=runner) == 0
+    assert calls[0][calls[0].index("-o") + 1] == "asyncio_mode=auto"

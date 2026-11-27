@@ -75,11 +75,7 @@ class FakeGh:
         if path == "repos/owner/repo/issues?state=all&per_page=100":
             return json.dumps([])
         if path == "repos/owner/repo/issues" and "--method" in args:
-            fields = [
-                args[index + 1].split("=", 1)
-                for index, value in enumerate(args[:-1])
-                if value == "-f"
-            ]
+            fields = [args[index + 1].split("=", 1) for index, value in enumerate(args[:-1]) if value == "-f"]
             payload = dict(fields)
             self.created.append(payload)
             return json.dumps({"number": 12, **payload})
@@ -109,3 +105,37 @@ def test_workflow_runs_only_after_a_successful_ci_rerun() -> None:
     assert "run_attempt > 1" in job["if"]
     assert job["permissions"]["actions"] == "read"
     assert job["permissions"]["issues"] == "write"
+
+
+class RacingGh(FakeGh):
+    """Another catcher run opened the same issue between our read and our create."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lists = 0
+
+    def __call__(self, args: list[str]) -> str:
+        path = args[1]
+        if path == "repos/owner/repo/issues?state=all&per_page=100":
+            self.lists += 1
+            if self.lists == 1:
+                return json.dumps([])
+            title = "flaky test: tests/unit/test_alpha.py::test_one"
+            other = {"number": 11, "title": title, "state": "open", "body": "Test: x\n\n- other run"}
+            ours = {"number": 12, "title": title, "state": "open", "body": self.created[0]["body"]}
+            return json.dumps([ours, other])
+        if path.startswith("repos/owner/repo/issues/") and "--method" in args:
+            fields = dict(args[i + 1].split("=", 1) for i, v in enumerate(args[:-1]) if v == "-f")
+            self.updated.append((path, fields))
+            return json.dumps({"number": int(path.rsplit("/", 1)[1]), **fields})
+        return super().__call__(args)
+
+
+def test_a_duplicate_from_a_concurrent_run_folds_into_the_oldest_issue() -> None:
+    gh = RacingGh()
+
+    catcher.open_or_update_flaky_tests("owner/repo", "7", 2, gh=gh)
+
+    updates = dict(gh.updated)
+    assert "https://example.test/runs/7" in updates["repos/owner/repo/issues/11"]["body"]
+    assert updates["repos/owner/repo/issues/12"]["state"] == "closed"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -18,9 +19,7 @@ def test_quarantine_marker_is_registered_and_issuer_case_is_marked() -> None:
     assert any(marker.split(":", 1)[0] == "quarantine" for marker in markers)
 
     source = (ROOT / "tests/unit/test_enrollment_client.py").read_text()
-    test_block = source.split(
-        "async def test_issuer_requires_explicit_decision_after_proof", 1
-    )[0].splitlines()[-12:]
+    test_block = source.split("async def test_issuer_requires_explicit_decision_after_proof", 1)[0].splitlines()[-12:]
     decorators = "\n".join(test_block)
     assert "@pytest.mark.quarantine" in decorators
     assert "@pytest.mark.skip" not in decorators
@@ -54,9 +53,29 @@ def test_every_blocking_pytest_invocation_excludes_quarantine() -> None:
 def test_base_fresh_workflow_and_current_docs_are_retired() -> None:
     assert not (ROOT / ".github/workflows/base-fresh.yml").exists()
     operations = ROOT / "docs/operations"
-    references = [
-        path
-        for path in operations.glob("*.md")
-        if "base-fresh" in path.read_text().lower()
-    ]
+    references = [path for path in operations.glob("*.md") if "base-fresh" in path.read_text().lower()]
     assert references == []
+
+
+def _test_roots(command: str) -> set[str]:
+    return set(re.findall(r"(?<![\w/.-])(packages/[\w-]+/tests|tests)(?=[/\s]|$)", command))
+
+
+def test_every_suite_kept_out_of_blocking_runs_runs_in_the_quarantine_job() -> None:
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    excluded: set[str] = set()
+    for job_id, job in jobs.items():
+        if job_id in {"quarantine", "required_tests"}:
+            continue
+        for step in job.get("steps", []):
+            command = step.get("run", "")
+            if '-m "not quarantine"' in command:
+                excluded |= _test_roots(command)
+    quarantined: set[str] = set()
+    for step in jobs["quarantine"]["steps"]:
+        command = step.get("run", "")
+        if "-m quarantine" in command:
+            quarantined |= _test_roots(command)
+
+    assert excluded >= {"tests", "packages/kollabor-engine/tests", "packages/kollabor-voice/tests"}
+    assert excluded - quarantined == set()
