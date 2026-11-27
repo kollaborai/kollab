@@ -11,8 +11,8 @@ in the trailing window (now - hours, now], divided by hours, compared with
 
 Supporting metrics: merged vs closed-unmerged, open PR count and age, stale
 open PRs, conflicted/BEHIND open PRs, time to first review, review rounds per
-PR (CHANGES_REQUESTED reviews), CI pass rate on the first pushed commit, and
-per-author and per-lane throughput.
+PR (CHANGES_REQUESTED reviews), CI pass rate on the first pushed commit, CI
+runs per merged PR, and per-author and per-lane throughput.
 
 Missing data is shown as missing, never as zero. A metric whose inputs failed
 or whose window was not fully fetched is `None`, and the markdown renders it
@@ -464,6 +464,42 @@ def _main_ci_runs(
         f"repos/{repo}/actions/workflows/ci.yml/runs?branch=main"
         f"&created=%3E{created_after}"
     )
+    return _workflow_runs(api, endpoint, max_pages)
+
+
+def _pr_ci_run_attempts(
+    api: GhApi, repo: str, window_start: datetime, now: datetime, max_pages: int
+) -> int:
+    """pull_request ci.yml run attempts created in (window_start, now].
+
+    GitHub returns at most 1000 runs for a filtered list, so the window is fetched
+    one day at a time; each query's range is inclusive, so it starts a second
+    after the previous one ends.
+    """
+    attempts = 0
+    start = window_start
+    while start < now:
+        end = min(start + timedelta(days=1), now)
+        created = (
+            f"{(start + timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            f"..{end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        )
+        endpoint = (
+            f"repos/{repo}/actions/workflows/ci.yml/runs?event=pull_request"
+            f"&created={created}"
+        )
+        for run in _workflow_runs(api, endpoint, max_pages):
+            attempt = run.get("run_attempt")
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                raise RuntimeError(
+                    f"run {run.get('id')} has no valid run_attempt: {attempt!r}"
+                )
+            attempts += attempt
+        start = end
+    return attempts
+
+
+def _workflow_runs(api: GhApi, endpoint: str, max_pages: int) -> list[dict]:
     runs: list[dict] = []
     expected_total: int | None = None
     for page in range(1, max_pages + 1):
@@ -485,7 +521,9 @@ def _main_ci_runs(
             expected_total = total_count
         elif total_count != expected_total:
             raise RuntimeError(f"{endpoint} total_count changed while paging")
-        runs.extend(row for row in batch if isinstance(row, dict))
+        if any(not isinstance(row, dict) for row in batch):
+            raise RuntimeError(f"{endpoint} returned a non-object run on page {page}")
+        runs.extend(batch)
         if len(runs) == expected_total:
             return runs
         if len(batch) < PER_PAGE:
@@ -493,7 +531,7 @@ def _main_ci_runs(
                 f"{endpoint} returned a short page before total_count was reached"
             )
     raise RuntimeError(
-        f"{endpoint} exceeded max_pages={max_pages}; main CI rate is incomplete"
+        f"{endpoint} exceeded max_pages={max_pages}; the run list is incomplete"
     )
 
 
@@ -599,6 +637,48 @@ def _enrich_open(
     return detailed
 
 
+RUNS_PER_MERGE_MISSING = {
+    "ci_runs_per_merge": None,
+    "pr_ci_run_attempts": None,
+    "merged_in_window": None,
+}
+
+
+def _ci_runs_per_merge(
+    api: GhApi,
+    config: KpiConfig,
+    stop_before: datetime,
+    now: datetime,
+    closed_in_range: list[dict],
+    covered: datetime | None,
+    errors: list[str],
+) -> dict[str, Any]:
+    """pull_request ci.yml run attempts / PRs merged, both in (stop_before, now]."""
+    result = dict(RUNS_PER_MERGE_MISSING)
+    if covered is None or covered <= stop_before:
+        result["merged_in_window"] = sum(
+            1
+            for pr in closed_in_range
+            if (m := parse_time(pr.get("merged_at"))) is not None
+            and stop_before < m <= now
+        )
+    else:
+        errors.append(
+            "CI runs per merged PR: the closed PR list does not cover the window"
+        )
+    try:
+        result["pr_ci_run_attempts"] = _pr_ci_run_attempts(
+            api, config.repo, stop_before, now, config.max_pages
+        )
+    except (GhError, RuntimeError) as exc:
+        errors.append(f"CI runs per merged PR: {exc}")
+    if result["merged_in_window"] and result["pr_ci_run_attempts"] is not None:
+        result["ci_runs_per_merge"] = (
+            result["pr_ci_run_attempts"] / result["merged_in_window"]
+        )
+    return result
+
+
 def collect(
     api: GhApi,
     config: KpiConfig,
@@ -665,6 +745,7 @@ def collect(
             "main_red_to_green_runs": None,
             "main_completed_runs": None,
             "main_window_hours": longest,
+            **RUNS_PER_MERGE_MISSING,
         }
         report["throughput"] = {}
         return report
@@ -707,6 +788,11 @@ def collect(
             "main_window_hours": longest,
         }
     report["ci"].update(main_ci)
+    report["ci"].update(
+        _ci_runs_per_merge(
+            api, config, stop_before, now, closed_in_range, covered, errors
+        )
+    )
     key_lane = lane_key(config.lane_labels) if config.lane_labels else None
     report["throughput"] = {
         "by_author": throughput_by(closed, now, longest, author_key)
@@ -772,6 +858,14 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"{_pct(ci.get('main_red_to_green_rate'))} "
         f"({_num(ci.get('main_red_to_green_runs'), 'd')} of "
         f"{_num(ci.get('main_completed_runs'), 'd')} completed runs)",
+        f"- CI runs per merged PR ({ci.get('main_window_hours', 'unknown')}h): "
+        + (
+            "missing"
+            if ci.get("ci_runs_per_merge") is None
+            else f"{ci['ci_runs_per_merge']:.2f} "
+            f"({ci['pr_ci_run_attempts']} pull_request ci.yml run attempts, "
+            f"{ci['merged_in_window']} merged PRs)"
+        ),
     ]
     throughput = report.get("throughput") or {}
     for label, group in (("Author", "by_author"), ("Lane", "by_lane")):
@@ -833,6 +927,11 @@ def main(
     if now is None:
         print("pr_throughput_kpi: --now must be ISO 8601", file=sys.stderr)
         return 2
+    now = (
+        now.replace(tzinfo=timezone.utc)
+        if now.tzinfo is None
+        else now.astimezone(timezone.utc)
+    )
 
     report = collect(GhApi(runner), config, now)
     markdown = render_markdown(report)
