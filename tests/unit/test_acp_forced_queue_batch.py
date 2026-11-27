@@ -104,14 +104,12 @@ async def test_forced_batch_cancels_one_owner_then_precedes_older_fifo_without_g
 
     runner._run_prompt = run_prompt
     worker = asyncio.create_task(runner._drain_queue())
-    active = runner.admit("active", request_id="active", source="web")
+    runner.admit("active", request_id="active", source="web")
     await asyncio.wait_for(active_started.wait(), timeout=1)
     old_b = runner.admit("old B", request_id="old-b", source="web")
     old_c = runner.admit("old C", request_id="old-c", source="web")
 
-    begin = asyncio.create_task(
-        runner.begin_queue_handoff_batch(("forced-b", "forced-c"))
-    )
+    begin = asyncio.create_task(runner.begin_queue_handoff_batch(("forced-b", "forced-c")))
     try:
         await asyncio.wait_for(runner._connection.cancelled.wait(), timeout=1)
         assert runner._queue_release.is_set() is False
@@ -147,9 +145,7 @@ async def test_forced_batch_cancels_one_owner_then_precedes_older_fifo_without_g
             "old-c",
         ]
 
-        assert runner.finish_queue_handoff_batch(
-            token, accepted_count=2, uncertain=False
-        ) is True
+        assert runner.finish_queue_handoff_batch(token, accepted_count=2, uncertain=False) is True
         assert [
             result.request_id
             for result in await asyncio.gather(
@@ -186,9 +182,7 @@ async def test_batch_gate_serializes_idle_waiter_with_dequeue_and_normal_admit()
     try:
         if hasattr(runner, "_dequeue_waiting_for_input"):
             # The gated dequeue implementation must never park inside Queue.get.
-            await asyncio.wait_for(
-                runner._dequeue_waiting_for_input.wait(), timeout=1
-            )
+            await asyncio.wait_for(runner._dequeue_waiting_for_input.wait(), timeout=1)
             token = await runner.begin_queue_handoff_batch(("forced",))
             assert token is not None
             with pytest.raises(ACPError, match="forced batch"):
@@ -201,21 +195,15 @@ async def test_batch_gate_serializes_idle_waiter_with_dequeue_and_normal_admit()
             await asyncio.wait_for(paused.get_entered.wait(), timeout=1)
             runner.admit("ordinary", request_id="ordinary", source="web")
             await asyncio.wait_for(paused.item_removed.wait(), timeout=1)
-            begin = asyncio.create_task(
-                runner.begin_queue_handoff_batch(("forced",))
-            )
+            begin = asyncio.create_task(runner.begin_queue_handoff_batch(("forced",)))
             await asyncio.sleep(0)
             paused.allow_return.set()
             token = await asyncio.wait_for(begin, timeout=1)
             assert token is not None
 
-        forced = runner.admit(
-            "forced", request_id="forced", source="web", queue_handoff_batch=token
-        )
+        forced = runner.admit("forced", request_id="forced", source="web", queue_handoff_batch=token)
         assert started == []
-        assert runner.finish_queue_handoff_batch(
-            token, accepted_count=1, uncertain=False
-        ) is True
+        assert runner.finish_queue_handoff_batch(token, accepted_count=1, uncertain=False) is True
         assert (await forced.future).request_id == "forced"
         assert started == ["forced"]
     finally:
@@ -254,12 +242,8 @@ async def test_ambiguous_cancel_keeps_token_and_queue_held():
     with pytest.raises(ACPError, match="forced batch"):
         runner.admit("next", request_id="next", source="web")
     with pytest.raises(ACPError, match="invalid forced queue batch"):
-        runner.admit(
-            "forced", request_id="forced-b", source="web", queue_handoff_batch=batch
-        )
-    assert runner.finish_queue_handoff_batch(
-        batch, accepted_count=0, uncertain=False
-    ) is False
+        runner.admit("forced", request_id="forced-b", source="web", queue_handoff_batch=batch)
+    assert runner.finish_queue_handoff_batch(batch, accepted_count=0, uncertain=False) is False
     assert runner._queue_release.is_set() is False
     finish_active.set()
     try:
@@ -286,13 +270,7 @@ async def test_batch_rejects_duplicate_ids_and_foreign_runner_token():
     assert token is not None
     foreign = _ready_runner()
     with pytest.raises(ACPError, match="invalid forced queue batch"):
-        foreign.admit(
-            "forced", request_id="forced", source="web", queue_handoff_batch=token
-        )
-    assert foreign.finish_queue_handoff_batch(
-        token, accepted_count=0, uncertain=False
-    ) is False
+        foreign.admit("forced", request_id="forced", source="web", queue_handoff_batch=token)
+    assert foreign.finish_queue_handoff_batch(token, accepted_count=0, uncertain=False) is False
     assert foreign._queue_release.is_set()
-    assert runner.finish_queue_handoff_batch(
-        token, accepted_count=0, uncertain=False
-    ) is True
+    assert runner.finish_queue_handoff_batch(token, accepted_count=0, uncertain=False) is True
