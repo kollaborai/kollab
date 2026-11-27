@@ -1910,12 +1910,15 @@ class ChatStreamService:
         snapshot puts it: a row.delete, then a fresh row.upsert. It takes the
         time the turn took it, since snapshots place live rows by created_at.
         """
-        rows = self._rows.setdefault(uid, {})
-        if row.get("status") == "queued" and next(reversed(rows), None) != row["id"]:
-            rows.pop(row["id"], None)
-            self._log(uid).publish("row.delete", {"id": row["id"]})
-            changes = {"created_at": self._timestamp(), **changes}
-        self._upsert(uid, {**row, **changes})
+        # Under the log lock, so a snapshot cannot land between the delete and
+        # the upsert (a reader on another thread would miss the row).
+        with self._log(uid)._lock:
+            rows = self._rows.setdefault(uid, {})
+            if row.get("status") == "queued" and next(reversed(rows), None) != row["id"]:
+                rows.pop(row["id"], None)
+                self._log(uid).publish("row.delete", {"id": row["id"]})
+                changes = {"created_at": self._timestamp(), **changes}
+            self._upsert(uid, {**row, **changes})
 
     def _transcript_input_id(self, uid: str, text: str) -> str | None:
         for row in reversed(self._transcript_rows(uid)):
