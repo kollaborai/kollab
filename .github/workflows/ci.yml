@@ -477,6 +477,22 @@ jobs:
       - name: Run quarantined tests
         run: uv run python -m pytest tests -m quarantine -q -rs -p no:cacheprovider
 
+      # Exit 5 = nothing quarantined in that suite, which is the normal case.
+      - name: Run quarantined engine and rpc package tests
+        run: >-
+          uv run python -m pytest -o asyncio_mode=auto
+          packages/kollabor-engine/tests packages/kollabor-rpc/tests
+          -m quarantine -q -rs -p no:cacheprovider || [ $? -eq 5 ]
+
+      - name: Run quarantined voice package tests
+        run: >-
+          uv run --no-project --python 3.12 --with numpy==2.5.3
+          --with pytest --with pytest-asyncio
+          --with livekit==1.1.20 --with livekit-agents==1.8.8
+          --with livekit-plugins-silero==1.8.8 --with onnxruntime==1.30.0
+          --with livekit-local-inference==0.2.7
+          python -m pytest packages/kollabor-voice/tests -m quarantine -q -rs -p no:cacheprovider || [ $? -eq 5 ]
+
   # Keep the exact required "ci/tests" check name expected by branch
   # protection. It succeeds only when change detection, every unit shard, the
   # PR repeat check, and every needed support lane pass; skipped lanes are allowed.

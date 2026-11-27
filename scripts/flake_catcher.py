@@ -110,15 +110,9 @@ def build_issue_body(nodeid: str, run_url: str, attempt: int) -> str:
     )
 
 
-def decide_issue_action(
-    issues: list[dict[str, Any]], title: str, body: str
-) -> tuple[str, dict[str, Any] | None, str]:
+def decide_issue_action(issues: list[dict[str, Any]], title: str, body: str) -> tuple[str, dict[str, Any] | None, str]:
     """Choose create, update, or no-op while retaining prior run observations."""
-    matches = [
-        issue
-        for issue in issues
-        if "pull_request" not in issue and issue.get("title") == title
-    ]
+    matches = [issue for issue in issues if "pull_request" not in issue and issue.get("title") == title]
     if not matches:
         return "create", None, body
     issue = min(matches, key=lambda row: int(row.get("number", 0)))
@@ -129,6 +123,36 @@ def decide_issue_action(
     if observation in existing_body:
         return "noop", issue, existing_body
     return "update", issue, f"{existing_body.rstrip()}\n\n{observation}"
+
+
+def _fold_duplicate(gh: Gh, repo: str, title: str, created: dict[str, Any], body: str) -> dict[str, Any]:
+    """Another catcher run may have opened the same issue between our read and our create.
+
+    The issue with the lowest number wins: our observation moves onto it and our copy closes.
+    The later creator always sees both, so concurrent runs converge on one open issue.
+    """
+    rows = _rows(_api(gh, f"repos/{repo}/issues?state=all&per_page=100", paginate=True), "issues")
+    others = [
+        r
+        for r in rows
+        if "pull_request" not in r and r.get("title") == title and r.get("number") != created.get("number")
+    ]
+    oldest = min(others, key=lambda r: int(r.get("number", 0)), default=None)
+    if oldest is None or int(oldest["number"]) > int(created.get("number", 0)):
+        return created
+    action, _, merged = decide_issue_action([oldest], title, body)
+    fields = {"body": merged}
+    if oldest.get("state") == "closed":
+        fields["state"] = "open"
+    if action != "noop":
+        oldest = _api(gh, f"repos/{repo}/issues/{oldest['number']}", method="PATCH", fields=fields)
+    _api(
+        gh,
+        f"repos/{repo}/issues/{created['number']}",
+        method="PATCH",
+        fields={"state": "closed", "body": f"{body}\n\nDuplicate of #{oldest['number']}."},
+    )
+    return oldest
 
 
 def open_or_update_flaky_tests(
@@ -192,6 +216,7 @@ def open_or_update_flaky_tests(
                     fields={"title": title, "body": next_body},
                 )
                 if isinstance(issue, dict):
+                    issue = _fold_duplicate(gh, repo, title, issue, body)
                     issues.append(issue)
                     changed.append(issue)
                 continue
@@ -207,10 +232,7 @@ def open_or_update_flaky_tests(
                 fields=fields,
             )
             if isinstance(issue, dict):
-                issues = [
-                    issue if row.get("number") == existing.get("number") else row
-                    for row in issues
-                ]
+                issues = [issue if row.get("number") == existing.get("number") else row for row in issues]
                 changed.append(issue)
     return changed
 
@@ -222,9 +244,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--attempt", required=True, type=int)
     args = parser.parse_args(argv)
     try:
-        changes = open_or_update_flaky_tests(
-            args.repo, args.run_id, args.attempt
-        )
+        changes = open_or_update_flaky_tests(args.repo, args.run_id, args.attempt)
     except (RuntimeError, ValueError) as exc:
         print(f"flake catcher: {exc}", file=sys.stderr)
         return 1

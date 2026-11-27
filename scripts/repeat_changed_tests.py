@@ -11,14 +11,18 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+# The Python suites CI runs with the root environment. The voice suite needs its own
+# pinned environment (ci.yml support_voice_tests), so it is not repeated here.
+ROOT_SUITE = "tests"
+PACKAGE_SUITES = ("packages/kollabor-engine/tests", "packages/kollabor-rpc/tests")
 
 
 def select_test_files(paths: Sequence[str]) -> list[str]:
-    """Keep added or changed Python tests under tests/, in stable order."""
+    """Keep added or changed Python tests in the suites CI runs, in stable order."""
     selected = {
         path
         for raw in paths
-        if (path := str(PurePosixPath(raw))).startswith("tests/")
+        if (path := str(PurePosixPath(raw))).startswith(tuple(f"{s}/" for s in (ROOT_SUITE, *PACKAGE_SUITES)))
         and len(PurePosixPath(path).parts) > 1
         and PurePosixPath(path).name.startswith("test_")
         and PurePosixPath(path).suffix == ".py"
@@ -35,7 +39,8 @@ def changed_test_files(base_ref: str, *, runner: Runner | None = None) -> list[s
         "--diff-filter=ACMR",
         f"{base_ref}...HEAD",
         "--",
-        "tests",
+        ROOT_SUITE,
+        *PACKAGE_SUITES,
     ]
     result = (runner or subprocess.run)(
         command,
@@ -44,11 +49,7 @@ def changed_test_files(base_ref: str, *, runner: Runner | None = None) -> list[s
         text=True,
         check=True,
     )
-    return [
-        path
-        for path in select_test_files(result.stdout.splitlines())
-        if (ROOT / path).is_file()
-    ]
+    return [path for path in select_test_files(result.stdout.splitlines()) if (ROOT / path).is_file()]
 
 
 def run_test_file(
@@ -70,6 +71,7 @@ def run_test_file(
         "no:cacheprovider",
         "-m",
         "not quarantine",
+        *(["-o", "asyncio_mode=auto"] if path.startswith(PACKAGE_SUITES) else []),  # as ci.yml runs them
         path,
     ]
     for attempt in range(1, runs + 1):
