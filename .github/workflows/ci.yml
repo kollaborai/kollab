@@ -374,7 +374,7 @@ jobs:
           npx tsc --noEmit
           node scripts/check-test-discovery.mjs
           npx vitest run
-          node --test $(grep -L 'from "vitest"' tests/*.test.ts)
+          node --test $(node scripts/node-test-files.mjs)
 
       - name: Install Chromium for browser acceptance
         working-directory: packages/kollabor-webui/frontend
