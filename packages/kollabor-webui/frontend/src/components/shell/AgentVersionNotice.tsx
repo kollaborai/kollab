@@ -4,7 +4,7 @@ import type { LiveAgent } from "@/api";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import { cn } from "@/lib/utils";
 
-function VersionDetails({ detail }: { detail: string }) {
+function VersionDetails({ detail, label = "Version details" }: { detail: string; label?: string }) {
   const [expanded, setExpanded] = useState(false);
   const contentId = useId();
 
@@ -12,8 +12,8 @@ function VersionDetails({ detail }: { detail: string }) {
     <>
       {/* Collapsed, the disclosure is one icon inline with the actions; it never takes its own row. */}
       <details className="min-w-0" onToggle={(event) => setExpanded(event.currentTarget.open)}>
-        <summary aria-label="Version details" aria-expanded={expanded} aria-controls={contentId} title={detail} className="group/version relative min-h-7 list-none cursor-pointer px-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 [&::-webkit-details-marker]:hidden">
-          <Info aria-hidden="true" className="size-3" />
+        <summary aria-label={label} aria-expanded={expanded} aria-controls={contentId} title={detail} className="group/version relative inline-flex min-h-7 list-none cursor-pointer items-center justify-center px-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 pointer-coarse:size-11 [&::-webkit-details-marker]:hidden">
+          <Info aria-hidden="true" className="block size-3" />
         </summary>
       </details>
       {/* Expanded, the detail text is the strip's last row: full width, below the Dismiss. */}
@@ -34,7 +34,7 @@ export type AgentVersionNoticeState = {
   kind: "too-old" | "button" | "unknown";
   /** Version details for the disclosure; never included in the notice line. */
   detail: string;
-  /** The agent's name, for the stop-and-start line. */
+  /** The agent's name from the live row; recovery copy does not expose it. */
   name: string;
 };
 
@@ -103,7 +103,7 @@ export function AgentVersionNotice({
         actions={<NoticeAction onClick={onRestart}>Try Again</NoticeAction>}
         onDismiss={onDismiss}
       >
-        This agent could not be restarted by this engine.
+        This agent could not be restarted.
       </NoticeBar>
     );
   }
@@ -112,18 +112,18 @@ export function AgentVersionNotice({
       <NoticeBar
         urgent
         detail={notice.detail}
-        details={<VersionDetails detail={notice.detail} />}
+        details={<VersionDetails detail={`${notice.detail} · ${failure}`} label="Restart details" />}
         actions={<NoticeAction onClick={onRestart}>Try Again</NoticeAction>}
         onDismiss={onDismiss}
       >
-        {`Couldn't restart this agent. ${failure}`}
+        Couldn't restart this agent.
       </NoticeBar>
     );
   }
   if (busy) {
     return (
-      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />}>
-        {waiting ? "This agent restarts when its turn ends." : "Restarting this agent…"}
+      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
+        {waiting ? "This agent will restart after its current work finishes." : "Restarting this agent…"}
       </NoticeBar>
     );
   }

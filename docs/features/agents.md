@@ -379,10 +379,11 @@ agent that publishes no version started before agents did and counts as older.
 
 | `kollabor.updates.restart_agents` | The line says | You do |
 |---|---|---|
-| on | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
-| off (default) | "Run /restart to update the agent version running." | Type `/restart` in the chat |
+| on or off (default) | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
 | either, when the agent publishes no version | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
 
+The `POST /sessions/{id}/restart-agent` route accepts a user-requested restart
+when the setting is off, so the notice offers the same in-page action either way.
 Both versions are in the line's hover text, never in the line. The setting is in
 `/config` under Updates as "Restart Agent Button".
 
