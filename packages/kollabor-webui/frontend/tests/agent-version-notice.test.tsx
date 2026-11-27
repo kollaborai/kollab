@@ -95,6 +95,13 @@ describe("AgentVersionNotice", () => {
     expect(html).toMatch(/<summary[^>]*class="[^"]*\[&amp;::-webkit-details-marker\]:hidden/);
   });
 
+  it("centers the version disclosure and gives touch users a 44px target", () => {
+    const notice = agentVersionNotice({ ...differ, restartAgents: true })!;
+    const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
+    expect(html).toMatch(/<summary[^>]*class="[^"]*inline-flex[^\"]*items-center[^\"]*justify-center/);
+    expect(html).toContain("pointer-coarse:size-11");
+  });
+
   it("keeps the disclosure on the actions row at phone widths; only the expanded text spans full width", () => {
     const notice = agentVersionNotice({ ...differ, restartAgents: true })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
@@ -178,6 +185,10 @@ describe("agents that cannot restart themselves (#968)", () => {
     const html = renderToStaticMarkup(
       <AgentVersionNotice notice={notice} busy={false} failure="409: this agent is not on a hub, so it cannot restart itself" onRestart={() => {}} onDismiss={() => {}} />,
     );
+    expect(visibleText(html)).toContain("Couldn't restart this agent.");
+    expect(visibleText(html)).not.toContain("409:");
+    expect(visibleText(html)).not.toContain("not on a hub");
+    expect(html).toContain("409: this agent is not on a hub, so it cannot restart itself");
     expect(html).toContain("Try Again");
     expect(html).not.toContain("started before Restart Agent existed");
   });
