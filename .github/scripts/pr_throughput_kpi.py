@@ -521,7 +521,9 @@ def _workflow_runs(api: GhApi, endpoint: str, max_pages: int) -> list[dict]:
             expected_total = total_count
         elif total_count != expected_total:
             raise RuntimeError(f"{endpoint} total_count changed while paging")
-        runs.extend(row for row in batch if isinstance(row, dict))
+        if any(not isinstance(row, dict) for row in batch):
+            raise RuntimeError(f"{endpoint} returned a non-object run on page {page}")
+        runs.extend(batch)
         if len(runs) == expected_total:
             return runs
         if len(batch) < PER_PAGE:
