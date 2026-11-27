@@ -56,6 +56,9 @@ class _Process:
         self.killed = True
         self.release.set()
 
+    # Off Linux the bridge runs whisper directly and stops it with kill() (#931, #1463).
+    kill = terminate
+
     async def wait(self):
         self.waited = True
 
@@ -184,6 +187,7 @@ async def test_cancellation_reaps_child_before_removing_artifacts(tmp_path, monk
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux shields the supervisor spawn")
 @pytest.mark.asyncio
 async def test_repeated_cancellation_during_spawn_reaps_child(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
