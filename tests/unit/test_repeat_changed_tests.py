@@ -86,3 +86,17 @@ def test_the_voice_suite_can_be_repeated_in_its_own_environment() -> None:
     args = repeat.build_parser().parse_args(["--base", "x", "--suites", "packages/kollabor-voice/tests"])
     assert args.suites == ("packages/kollabor-voice/tests",)
     assert repeat.build_parser().parse_args(["--base", "x"]).suites == repeat.DEFAULT_SUITES
+
+
+def test_root_suite_repeats_run_the_host_scan_tests_ci_runs() -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    repeat.run_test_file("tests/unit/test_network_halt.py", 1, runner=runner)
+    repeat.run_test_file("packages/kollabor-engine/tests/test_x.py", 1, runner=runner)
+
+    assert "--allow-host-process-enumeration" in calls[0]
+    assert "--allow-host-process-enumeration" not in calls[1]  # the option lives in tests/conftest.py
