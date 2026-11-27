@@ -801,6 +801,49 @@ def test_main_writes_json_markdown_and_step_summary(tmp_path, monkeypatch):
     assert "PR throughput" in summary.read_text()
 
 
+def _run_main_with_now(tmp_path, now):
+    cfg_path = tmp_path / "kpi.json"
+    cfg_path.write_text(json.dumps({"kpi": {"enabled": True, "repo": "o/r"}}))
+    json_out = tmp_path / "kpi.json.out"
+    runner = FakeRunner(
+        {
+            "state=closed": [_pr(1, closed=NOW, merged=NOW)],
+            "state=open": [],
+            "pulls/1/reviews": [],
+            "pulls/1/commits": [],
+        }
+    )
+    rc = kpi.main(
+        ["--config", str(cfg_path), "--json-out", str(json_out), "--now", now],
+        runner=runner,
+    )
+    return rc, json.loads(json_out.read_text()), runner.calls
+
+
+def _assert_main_uses_utc_now(report, calls):
+    assert report["generated_at"] == "2026-11-04T12:00:00Z"
+    ci_calls = [call for call in calls if "actions/workflows/ci.yml/runs" in call]
+    assert len(ci_calls) == 2
+    main_call = next(call for call in ci_calls if "branch=main" in call)
+    pr_call = next(call for call in ci_calls if "event=pull_request" in call)
+    assert "created=%3E2026-11-03T12:00:00Z" in main_call
+    assert "created=2026-11-03T12:00:01Z..2026-11-04T12:00:00Z" in pr_call
+
+
+def test_main_normalizes_offset_now_to_utc(tmp_path):
+    rc, report, calls = _run_main_with_now(tmp_path, "2026-11-04T14:00:00+02:00")
+
+    assert rc == 0
+    _assert_main_uses_utc_now(report, calls)
+
+
+def test_main_treats_naive_now_as_utc(tmp_path):
+    rc, report, calls = _run_main_with_now(tmp_path, "2026-11-04T12:00:00")
+
+    assert rc == 0
+    _assert_main_uses_utc_now(report, calls)
+
+
 def test_render_markdown_states_target_and_all_windows():
     cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r"}})
     report = kpi.collect(
