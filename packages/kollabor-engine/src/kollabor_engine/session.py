@@ -459,6 +459,15 @@ class EngineSession:
         generation = AgentMessenger.shutdown_generation(agent_id, pid, started_at)
         if not generation:
             raise ValueError("This agent's identity could not be confirmed.")
+        current = bridge.get_agent_by_identity(
+            daemon.identity, use_cache=False, project=daemon.project or self.workspace
+        )
+        if not current or (
+            current.get("agent_id") != agent_id
+            or current.get("pid") != pid
+            or current.get("started_at") != started_at
+        ):
+            raise ValueError("This agent's identity changed before shutdown.")
         accepted = await AgentMessenger.signal_shutdown(
             daemon.socket_path,
             reason="Restart Agent requested by the web UI",
