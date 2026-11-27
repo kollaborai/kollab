@@ -405,8 +405,8 @@ Evidence:
 - `packages/kollabor-agent/src/kollabor_agent/mcp_integration.py:665`
 - `packages/kollabor-agent/src/kollabor_agent/mcp_integration.py:776`
 - `packages/kollabor-agent/src/kollabor_agent/mcp_integration.py:861`
-- `docs/features/tools.md:234`
-- `docs/features/tools.md:498`
+- [Built-in Tools / File Operations](../../../features/tools/built-in-tools.md#file-operations)
+- [Tool Calling Methods / Configuration](../../../features/tools/tool-calling-methods.md#configuration)
 
 MCP discovery walks configured servers serially. A bad server can sit for a
 long request timeout and block discovery for every later server.

@@ -209,6 +209,7 @@ backups/
 code_audit/
 codemon/
 tools/
+!docs/features/tools/
 docs/project-management/
 docs/archive/
 .archive

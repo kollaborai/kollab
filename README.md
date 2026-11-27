@@ -753,7 +753,7 @@ architecture guidance, see [AGENTS.md](https://github.com/kollaborai/kollab/blob
 - [Voice Mode](https://github.com/kollaborai/kollab/blob/main/docs/features/voice-mode.md)
 - [Hub Quick Start](https://github.com/kollaborai/kollab/blob/main/docs/guides/hub-quick-start.md)
 - [Tasks and Checkpoints](https://github.com/kollaborai/kollab/blob/main/docs/features/tasks.md)
-- [Tool Calling](https://github.com/kollaborai/kollab/blob/main/docs/features/tools.md)
+- [Tool Calling](https://github.com/kollaborai/kollab/blob/main/docs/features/tools/overview.md)
 - [Attach Mode](https://github.com/kollaborai/kollab/blob/main/docs/features/attach-mode.md)
 - [Agent Network Architecture](https://github.com/kollaborai/kollab/blob/main/docs/architecture/agent-network.md)
 - [Command Reference](https://github.com/kollaborai/kollab/blob/main/docs/reference/commands.md)
