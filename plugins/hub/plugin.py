@@ -12662,7 +12662,13 @@ class HubPlugin(BasePlugin):
                     **({"waiting": True} if (message.metadata or {}).get("acp_waiting") else {}),
                 )
             except RelayError as exc:
-                return [(message.to, str(exc) or type(exc).__name__)]
+                detail = str(exc) or type(exc).__name__
+                if "run kollab --" in detail.casefold() or "in a terminal" in detail.casefold():
+                    detail = self._surface_copy(
+                        detail,
+                        "This engine version cannot connect to this relay. The message was not sent.",
+                    )
+                return [(message.to, detail)]
             refusal = _receipt_refusal(receipt)
             if refusal:
                 if receipt.get("reason") == "recipient_unavailable" or (
