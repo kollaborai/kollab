@@ -1071,6 +1071,53 @@ describe("early plugin command submission", () => {
     }
   });
 
+  it("does not replay a held slash into the next session when no lock covers the switch", async () => {
+    // The app's draft key is agent plus session id, so a new engine session is a new
+    // draft key. With no composer lock, that key change alone must cancel the held send.
+    vi.useFakeTimers();
+    prepareMountedThread();
+    const draft = "/zzz explain this";
+    pluginRegistry.setListed(null);
+    putLoadingThreadCommand("probe");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        draftKey: "agent:session-before",
+        queueSessionId: "session-before",
+      })));
+      const runtime = sendCapture.runtime as {
+        thread: { composer: { setText(text: string): void } };
+      };
+      await act(async () => {
+        runtime.thread.composer.setText(draft);
+        publishComposerText(draft);
+      });
+      await act(async () => host.querySelector("form")?.requestSubmit());
+      expect(sendCapture.modelRuns).toBe(0);
+
+      // The next session restores the same text, so only the session check can stop the replay.
+      saveComposerDraft("agent:session-after", draft);
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        draftKey: "agent:session-after",
+        queueSessionId: "session-after",
+      })));
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+
+      expect(sendCapture.modelRuns).toBe(0);
+      expect(sendCapture.queueRequests).toHaveLength(0);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      saveComposerDraft("agent:session-before", "");
+      saveComposerDraft("agent:session-after", "");
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["wait timeout", "catalog becomes ready"] as const)(
     "keeps a pending plugin slash in its old draft when %s replays under the composer lock",
     async (replay) => {
