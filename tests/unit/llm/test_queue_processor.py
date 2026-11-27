@@ -350,6 +350,40 @@ class TestQueueProcessor(unittest.TestCase):
         [complete] = [e for e in tap.get_snapshot() if e["type"] == "turn_complete"]
         self.assertEqual(complete.get("stop_reason"), "end_turn")
 
+    def test_a_stop_during_a_tool_call_ends_the_turn(self):
+        """Stop or Send Now while a tool runs: the cut-off tool still returns a
+        result, but the turn ends here instead of waiting on another model call."""
+        from kollabor_tui.display_tap import DisplayTap
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self._reply_with("")
+        self.native_tools_handler.tool_calling_enabled = True
+        self.api_service.has_pending_tool_calls.return_value = True
+        self.api_service.get_last_tool_calls = MagicMock(return_value=[
+            SimpleNamespace(id="call-1", name="terminal", input={"command": "sleep 9"}),
+        ])
+        self.api_service.get_last_provider_reasoning = MagicMock(return_value=None)
+        self.api_service.format_tool_result = MagicMock(
+            return_value={"role": "tool", "content": "cancelled"}
+        )
+
+        async def run_tools(*_args, **_kwargs):
+            self.processor.cancel_processing = True  # the Stop lands mid-tool
+            return [ToolExecutionResult("call-1", "terminal", False, error="cancelled")]
+
+        self.native_tools_handler.execute_tool_calls = AsyncMock(side_effect=run_tools)
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        self.assertTrue(self.processor.turn_completed)
+        [complete] = [e for e in tap.get_snapshot() if e["type"] == "turn_complete"]
+        self.assertEqual(complete.get("stop_reason"), "cancelled")
+
     def test_native_stop_publishes_cancelled_despite_stale_provider_reason(self):
         self.api_service.last_stop_reason = "stop"
         self.processor.cancel_processing = True
