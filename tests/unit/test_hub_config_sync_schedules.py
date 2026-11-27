@@ -243,7 +243,6 @@ def test_snapshot_keeps_cached_roster_when_row_is_not_an_object(tmp_path):
 def test_snapshot_keeps_cached_roster_when_agent_name_is_invalid(tmp_path, agents):
     root = tmp_path / ".kollab"
     root.mkdir()
-    path = root / "schedules.json"
     _write_schedules(root, [_row_dict()])
     builder = SnapshotBuilder(root=root)
     assert builder.build().schedules[0]["agents"] == ["lapis"]
