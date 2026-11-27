@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
+import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { learnPhoneMediaPlugin } from "./scripts/learn-phone-media-plugin";
@@ -11,6 +12,17 @@ import pkg from "./package.json";
 
 
 const frontendDir = path.dirname(fileURLToPath(import.meta.url));
+
+// Suites written for Node's built-in runner (`node --test`) import "node:test";
+// Vitest skips them. Found on disk so a new test file never edits this config.
+function nodeTestSuites(): string[] {
+  return ["tests", "src"].flatMap((dir) =>
+    (readdirSync(path.join(frontendDir, dir), { recursive: true }) as string[])
+      .filter((file) => /\.test\.(ts|tsx|mjs)$/.test(file))
+      .map((file) => `${dir}/${file.split(path.sep).join("/")}`)
+      .filter((file) => readFileSync(path.join(frontendDir, file), "utf8").includes('from "node:test"')),
+  );
+}
 
 // The web bundle version tracks the release version (frontend package.json,
 // gated by scripts/check_version_parity.py). Injected at build time so the
@@ -187,93 +199,13 @@ const mainConfig = defineConfig({
     // Vitest suites; Node's built-in test runner remains for older tests.
     maxWorkers: 4,
     include: [
-      "tests/media-tokens.test.ts",
-      "tests/media-thumb.test.tsx",
-      "tests/attachment-token-strip.test.ts",
-      "tests/prompts-page.test.ts",
-      "tests/terminal-ws-protocol.test.ts",
-      "tests/lazy-file-list.test.ts",
-      "tests/code-fetch-session.test.ts",
-      "tests/terminal-env.test.ts",
-      "tests/file-save.test.ts",
-      "tests/pr-chain.test.ts",
-      "tests/history-cache.test.ts",
-      "tests/phone-frame.test.ts",
-      "tests/phone-audio.test.ts",
-      "tests/phone-transport.test.ts",
-      "tests/phone-relay-guards.test.ts",
-      "tests/build-provenance.test.ts",
-      "tests/voice-turn-groups.test.ts",
-      "tests/history-reconciliation.test.ts",
-      "tests/user-row-request-ids.test.ts",
-      "tests/path-text.test.ts",
-      "tests/todo-list-cache.test.ts",
-      "tests/gem-headshot.test.ts",
-      "tests/field-renderer-textarea.test.tsx",
-      "tests/hub-note-recipient.test.tsx",
-      "tests/thread-pending-images.test.ts",
-      "tests/composer-keeper.test.ts",
-      "src/components/assistant-ui/tool-fallback.test.tsx",
-      "src/components/assistant-ui/user-text.test.tsx",
-      "src/engine-version.test.ts",
-      "tests/agent-type-glyph.test.tsx",
-      "tests/kollab-logo.test.tsx",
-      "tests/kollab-logo-recovery.test.tsx",
-      "tests/agent-version-notice.test.tsx",
-      "tests/web-queue-panel.test.tsx",
-      "tests/daemon-outdated-panels.test.tsx",
-      "tests/daemon-outdated-file-tree.test.tsx",
-      "tests/daemon-outdated-recovery.test.tsx",
-      "tests/mobile-invite.test.mjs",
-      "tests/phonelink-app-shell.test.ts",
-      "tests/trajectory-detail-title.test.ts",
-      "tests/sidebar-breakpoint.test.ts",
-      "tests/session-refresh-gate.test.ts",
-      "tests/compaction-ux.test.ts",
-      "tests/code-editor-store.test.ts",
-      "tests/code-open-file.test.ts",
-      "tests/workspace-ownership.test.ts",
-      "tests/file-mutations.test.ts",
-      "tests/editor-shortcuts.test.ts",
-      "tests/team-model.test.ts",
-      "tests/team-selection.test.ts",
-      "tests/team-launch-api.test.ts",
-      "tests/web-message-queue-api.test.ts",
-      "tests/model-choices.test.ts",
-      "tests/panel-dialog-surface.test.tsx",
-      "tests/whats-new-model.test.ts",
-      "tests/whats-new-boundaries.test.ts",
-      "tests/whats-new-dialog.test.tsx",
-      "tests/composer-image-restore.test.ts",
-      "tests/setup-guide-footer.test.tsx",
-      "tests/setup-guide-close.test.tsx",
-      "tests/setup-guide-first-run-persistence.test.tsx",
-      "tests/setup-guide-followups.test.tsx",
-      "tests/plugin-runtime.test.ts",
-      "tests/plugin-touch-size.test.ts",
-      "tests/settings-tabs-width.test.ts",
-      "tests/plugins-settings-tab.test.ts",
-      "src/plugins/registry.test.ts",
-      "src/plugins/sdk.test.ts",
-      "src/plugins/loader.test.ts",
-      "src/plugins/plugin-errors.test.ts",
-      "src/plugins/mount.test.tsx",
-      "src/plugins/settings-values.test.ts",
-      "src/plugins/settings-page.test.tsx",
-      "src/plugins/install-summary.test.ts",
-      "src/plugins/install-recovery.test.tsx",
-      "src/plugins/inventory-limits.test.ts",
-      "src/plugins/inventory.test.ts",
-      "src/plugins/surfaces.test.tsx",
-      "src/plugins/wiring.test.tsx",
-      "src/plugins/tagged-text.test.ts",
-      "src/plugins/renderer-select.test.ts",
-      "src/plugins/composer-commands.test.ts",
-      "src/plugins/plugin-tag-rendering.test.tsx",
-      "src/plugins/streaming-tag-renderer.test.tsx",
-      "src/plugins/tag-renderer-identity.test.tsx",
-      "src/plugins/hello-template.test.ts",
+      "tests/**/*.test.ts",
+      "tests/**/*.test.tsx",
+      "tests/**/*.test.mjs",
+      "src/**/*.test.ts",
+      "src/**/*.test.tsx",
     ],
+    exclude: [...configDefaults.exclude, ...nodeTestSuites()],
     environment: "node",
   },
 });
