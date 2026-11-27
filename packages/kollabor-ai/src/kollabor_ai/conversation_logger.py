@@ -1076,6 +1076,9 @@ class KollaborConversationLogger:
         delayed callback from modifying a reused request ID or another turn.
         ``remove_metadata_keys`` supports lifecycle transitions that retire
         private admission markers from the durable row.
+
+        Returns False when the row is missing or does not match; raises
+        ``OSError`` when the log file cannot be read or rewritten.
         """
         if (
             not isinstance(message_uuid, str)
@@ -1312,8 +1315,10 @@ class KollaborConversationLogger:
                             temp_path.unlink(missing_ok=True)
                     return True
                 except OSError:
-                    logger.exception("failed to update ACP dispatch metadata in %s", path)
-                    return False
+                    # A failed write is not a row mismatch: callers retry or
+                    # report it, so it must not be folded into False.
+                    logger.exception("failed to update user metadata in %s", path)
+                    raise
 
     async def log_assistant_message(
         self,
