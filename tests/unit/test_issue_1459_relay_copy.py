@@ -34,7 +34,7 @@ async def test_outdated_relay_error_uses_page_copy_only_for_web_sessions(monkeyp
     assert web_rejection == [
         (
             "helper@relay-test",
-            "This relay requires a newer engine version. Update the engine, then try again.",
+            "This engine version cannot connect to this relay. The message was not sent.",
         )
     ]
     assert "kollab --" not in web_rejection[0][1]
