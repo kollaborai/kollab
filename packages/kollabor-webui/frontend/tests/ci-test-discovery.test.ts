@@ -116,8 +116,8 @@ test("classifies suites by their framework import rather than matching text", ()
 
 test("type-only imports do not change runtime test runner classification", () => {
   const sources = [
-    'import type { TestContext } from "node:test";\nimport { test } from "vitest";\ntest("fixture", () => {});\n',
-    'import { type TestContext } from "node:test";\nimport { test } from "vitest";\ntest("fixture", () => {});\n',
+    ["import type { TestContext }", "from", '"node:test";', "import { test }", "from", '"vitest";', 'test("fixture", () => {});'].join("\n"),
+    ["import { type TestContext }", "from", '"node:test";', "import { test }", "from", '"vitest";', 'test("fixture", () => {});'].join("\n"),
   ];
   for (const [index, source] of sources.entries()) {
     const file = `tests/type-only-node-import-${index}.test.ts`;
