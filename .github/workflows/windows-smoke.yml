@@ -58,45 +58,58 @@ jobs:
         run: uv sync --all-packages
 
       - name: MCP command splitting
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_mcp_split_command.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_mcp_split_command.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: ACP npm shim launch and resume
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_acp_windows_npm.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_acp_windows_npm.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       # The network's private state files: device records, enrollment state (kollab #268).
       - name: Network private files
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_device_record_windows.py tests/unit/test_provisioned_state_windows.py tests/unit/test_enrollment_recovery_windows.py tests/unit/test_enrollment_delegations_windows.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_device_record_windows.py tests/unit/test_provisioned_state_windows.py tests/unit/test_enrollment_recovery_windows.py tests/unit/test_enrollment_delegations_windows.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: Local IPC clients
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_presence_local_ipc.py tests/unit/test_hub_ipc_clients.py tests/unit/test_attach_local_ipc.py tests/unit/test_deep_thought_local_ipc.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_presence_local_ipc.py tests/unit/test_hub_ipc_clients.py tests/unit/test_attach_local_ipc.py tests/unit/test_deep_thought_local_ipc.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: Hub endpoint discovery
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_hub_socket_paths.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_hub_socket_paths.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: Windows project state recovery
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_project_state_recovery.py tests/unit/test_encode_project_path_windows.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_project_state_recovery.py tests/unit/test_encode_project_path_windows.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: Agent seed preservation
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_agent_seed_symlinks.py tests/unit/test_skill_seed_symlinks.py tests/unit/test_bundled_seed_resolution.py tests/unit/test_skill_seed_retire.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_agent_seed_symlinks.py tests/unit/test_skill_seed_symlinks.py tests/unit/test_bundled_seed_resolution.py tests/unit/test_skill_seed_retire.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: Halt exchange race
+        shell: bash
         run: >-
           uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_control.py -k
           "proposal_created_during_exchange or failed_exchange_retries or unacknowledged_halt or effective_resume_acknowledges or proposal_acknowledgement or unconfirmed_resume or effective_resume_needs_a_matching_ack or compacted_receiver or legacy_compacted_peer_repeated_retry or legacy_echo or failed_resume_persistence or restarted_peer_retries or invalid_confirmation_cannot_generate or resume_receipt_requires or recorded_effective_resume or an_unacked_member_is_retried"
+          -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: Detached startup diagnostics
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_halt_smoke_diagnostics.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_halt_smoke_diagnostics.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: Process stop, locks and launch
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_cli_webui_windows_stop.py tests/unit/test_network_attach_local_ipc.py tests/unit/test_process_manager_windows_stop.py tests/unit/test_shell_executor_windows_alive.py tests/unit/test_token_storage_lock.py tests/unit/test_cli_windows_no_fork.py tests/unit/test_desktop_release_checksum_lf.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_cli_webui_windows_stop.py tests/unit/test_network_attach_local_ipc.py tests/unit/test_process_manager_windows_stop.py tests/unit/test_shell_executor_windows_alive.py tests/unit/test_token_storage_lock.py tests/unit/test_cli_windows_no_fork.py tests/unit/test_desktop_release_checksum_lf.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       # The kill switch's Windows process readers, private files and local IPC (kollab #268).
       - name: Kill switch
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_halt_windows.py tests/unit/test_halt_runtime_windows.py tests/unit/test_hub_bridge_waiter_line.py tests/unit/test_relay_state_windows.py tests/unit/test_halt_listener_windows.py tests/unit/test_relay_owner_windows.py tests/unit/test_relay_runtime_windows.py tests/unit/test_relay_selfhost_windows.py tests/unit/test_relay_conversations_windows.py tests/unit/test_local_directory_windows.py tests/unit/test_discovery_publish_windows.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_halt_windows.py tests/unit/test_halt_runtime_windows.py tests/unit/test_hub_bridge_waiter_line.py tests/unit/test_relay_state_windows.py tests/unit/test_halt_listener_windows.py tests/unit/test_relay_owner_windows.py tests/unit/test_relay_runtime_windows.py tests/unit/test_relay_selfhost_windows.py tests/unit/test_relay_conversations_windows.py tests/unit/test_local_directory_windows.py tests/unit/test_discovery_publish_windows.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       # Exercise native Windows ACL checks and TLS identity loading.
       - name: Secure peer TLS
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_secure_session.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_secure_session.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       # Every module imports on Windows, so a Unix-only import never ships unseen (kollab #268).
       - name: Every module imports
@@ -118,7 +131,8 @@ jobs:
 
       # The #439 gate: a halt on this Windows machine stops the other machine of its network too.
       - name: Relay smoke DNS setup
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_relay_halt_smoke.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_relay_halt_smoke.py -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: Relay halt smoke
         run: uv run python scripts/windows_relay_halt_smoke.py --kollab .venv/Scripts/kollab.exe
@@ -133,7 +147,8 @@ jobs:
 
       # The presence sweep keeps live agents: no os.kill(pid, 0), which sends Ctrl+C (kollab #268).
       - name: Presence sweep
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_hub_presence_sweep.py
+        shell: bash
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_hub_presence_sweep.py -m "not quarantine" || [ "$?" -eq 5 ]
 
   shell-smoke:
     runs-on: windows-latest

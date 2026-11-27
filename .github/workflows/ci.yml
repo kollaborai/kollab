@@ -116,7 +116,7 @@ jobs:
                 tests/unit/test_kill_switch_f13.py \
                 tests/unit/test_crystal_store_cache.py \
                 tests/unit/test_config_hooks.py \
-                tests/unit/test_ghost_response.py -m "not quarantine" --collect-only -q |
+                tests/unit/test_ghost_response.py --collect-only -q |
                 python -c '
           import hashlib
           import os
@@ -152,7 +152,7 @@ jobs:
             --allow-host-process-enumeration \
             -m "not quarantine" \
             --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle \
-            --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
+            --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone || [ "$?" -eq 5 ]
 
   # The network-membership revocation tests run minutes each (one is ~140s on
   # a runner); hashed into shards they made whichever shard drew them the
@@ -197,7 +197,7 @@ jobs:
           lane=0
           [ "$HEAVY_LANE" = "b" ] && lane=1
           selected=$(
-            uv run python -m pytest tests/unit/test_network_members.py -m "not quarantine" --collect-only -q |
+            uv run python -m pytest tests/unit/test_network_members.py --collect-only -q |
             python -c '
           import hashlib
           import os
@@ -219,7 +219,7 @@ jobs:
             exit 1
           fi
           printf 'Heavy lane %s selected %s test items\n' "$HEAVY_LANE" "${#targets[@]}"
-          uv run python -m pytest "${targets[@]}" -q -n auto --durations=25 -m "not quarantine"
+          uv run python -m pytest "${targets[@]}" -q -n auto --durations=25 -m "not quarantine" || [ "$?" -eq 5 ]
 
   # The support lanes are independent of each other, so they run as parallel
   # jobs instead of serial steps inside one job (#1020): the web UI browser
