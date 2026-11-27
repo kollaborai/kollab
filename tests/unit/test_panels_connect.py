@@ -225,6 +225,19 @@ async def test_join_finish_polls_and_the_code_stays_in_the_request():
     assert refused["ok"] is False and CODE not in json.dumps(refused)
 
 
+def test_join_failure_uses_web_copy_only_for_web_sessions(monkeypatch):
+    outcome = {"status": "failed", "reason": "update_required"}
+    cli_text = JOIN._outcome(outcome, "relay")
+    assert cli_text["message"] == connect_panel.JOIN_FAILURE_REASONS["update_required"]
+
+    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
+    web_text = JOIN._outcome(outcome, "relay")
+    assert web_text["message"] == (
+        "This engine version is too old for this relay. Update the engine, then retry the join here."
+    )
+    assert "kollab --" not in web_text["message"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status,ok,poll,text",
@@ -308,7 +321,9 @@ async def test_the_knocks_panel_says_when_knocks_are_unavailable():
 
 
 def test_registry_lists_the_three_network_panels():
-    assert set(connect_panel.PANELS) == {"connect", "connect-join", "connect-knocks", "connect-halt", "connect-halt-new"}
+    assert set(connect_panel.PANELS) == {
+        "connect", "connect-join", "connect-knocks", "connect-halt", "connect-halt-new"
+    }
     assert get_panel("connect-knocks") is KNOCKS and get_panel("connect-join") is JOIN
 
 
@@ -357,8 +372,6 @@ async def test_daemon_hub_connect_reports_the_reason_not_bare_failure():
 @pytest.mark.asyncio
 async def test_remote_hub_connect_surfaces_the_daemon_reason(caplog):
     """RemoteStateService raises the daemon's reason, not a generic string."""
-    from types import SimpleNamespace
-
     from kollabor.state.remote import RemoteStateService
 
     class _Rpc:
@@ -373,8 +386,6 @@ async def test_remote_hub_connect_surfaces_the_daemon_reason(caplog):
 @pytest.mark.asyncio
 async def test_remote_hub_connect_keeps_generic_reason_for_non_dict():
     """A malformed daemon reply still raises the old generic message."""
-    from types import SimpleNamespace
-
     from kollabor.state.remote import RemoteStateService
 
     class _Rpc:
