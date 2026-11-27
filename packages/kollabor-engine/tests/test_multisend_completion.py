@@ -103,8 +103,16 @@ async def test_two_separate_turns_keep_stream_open_until_both_finish(monkeypatch
         session.session_id,
         messages.AssistantRequest(
             commands=[
-                {"type": "add-message", "rowId": "user-session-test-0", "message": {"id": "first", "parts": [{"type": "text", "text": "one"}]}},
-                {"type": "add-message", "rowId": "user-session-test-1", "message": {"id": "second", "parts": [{"type": "text", "text": "two"}]}},
+                {
+                    "type": "add-message",
+                    "rowId": "user-session-test-0",
+                    "message": {"id": "first", "parts": [{"type": "text", "text": "one"}]},
+                },
+                {
+                    "type": "add-message",
+                    "rowId": "user-session-test-1",
+                    "message": {"id": "second", "parts": [{"type": "text", "text": "two"}]},
+                },
             ],
             state={"messages": []},
         ),
@@ -1329,7 +1337,12 @@ async def test_single_send_permission_handover_uses_capacity_until_terminal(monk
             "request_id": "single",
             "permission_id": permission_id,
         },
-        {"type": "permission_granted", "tool_id": "shell-single", "request_id": "single", "permission_id": permission_id},
+        {
+            "type": "permission_granted",
+            "tool_id": "shell-single",
+            "request_id": "single",
+            "permission_id": permission_id,
+        },
         {"type": "turn_complete", "request_id": "single"},
     ])
     session.send_message = AsyncMock(return_value={"accepted": True, "request_id": "single"})

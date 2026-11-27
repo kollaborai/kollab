@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
 from kollabor_engine.routes import permissions
 from kollabor_engine.server import get_session_registry
 from kollabor_engine.session import EngineSession
