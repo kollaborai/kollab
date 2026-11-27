@@ -407,6 +407,208 @@ async def test_dispatch_order_is_persisted_before_the_acp_prompt_starts(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_acp_send_now_waits_for_cancelled_partial_history(tmp_path):
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    batch_id = queue.new_batch_id()
+    send_now_id = queue.new_request_id()
+    await queue.enqueue_batch(
+        queue.new_operation_id(),
+        batch_id,
+        (WebMessage(send_now_id, json.dumps({"text": "next input"}).encode()),),
+    )
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, _request_id: True,
+    )
+    state, llm, logger, acp, runner = await _real_acp_state(
+        tmp_path, start_completions=True
+    )
+
+    cut_started = asyncio.Event()
+    cancel_received = asyncio.Event()
+    completion_waiting = asyncio.Event()
+    release_completion = asyncio.Event()
+    send_now_user_written = asyncio.Event()
+    send_now_manager_recorded = asyncio.Event()
+
+    async def cancel(*, session_id):
+        cancel_received.set()
+
+    runner._connection.cancel = cancel
+
+    async def run_prompt(admission, generation):
+        async def update(kind, **values):
+            result = runner.update_callback(
+                {
+                    "kind": kind,
+                    "request_id": admission.request_id,
+                    "turn_id": admission.turn_id,
+                    "source": admission.source,
+                    "thread_id": admission.thread_id,
+                    "generation": generation,
+                    "acp_turn_key": admission.history_key,
+                    **values,
+                }
+            )
+            if hasattr(result, "__await__"):
+                await result
+
+        await update("turn_start")
+        if admission.request_id == "cut-turn":
+            cut_started.set()
+            await cancel_received.wait()
+            await update("text", text="partial reply")
+            await update(
+                "tool_call",
+                payload={
+                    "toolCallId": "cut-tool",
+                    "title": "Read file",
+                    "kind": "read",
+                    "rawInput": {"path": "notes.txt"},
+                    "status": "completed",
+                    "rawOutput": "partial tool output",
+                },
+            )
+            await update("turn_finished")
+            stop_reason = "cancelled"
+            text = "partial reply"
+        else:
+            await update("turn_finished")
+            stop_reason = "end_turn"
+            text = "next reply"
+        return ACPResult(
+            generation=generation,
+            session_id="session-acp",
+            text=text,
+            stop_reason=stop_reason,
+            updates=(),
+            end_frame={"stopReason": stop_reason},
+            turn_id=admission.turn_id,
+            request_id=admission.request_id,
+            source=admission.source,
+            thread_id=admission.thread_id,
+            history_key=admission.history_key,
+        )
+
+    runner._run_prompt = run_prompt
+    cut = acp.admit("original input", request_id="cut-turn", source="web")
+    await asyncio.gather(*tuple(acp._history_tasks))
+
+    original_await_user_history = acp._await_user_history
+
+    async def pause_after_user_history(turn_key):
+        await original_await_user_history(turn_key)
+        if turn_key == (cut.generation, cut.turn_id):
+            completion_waiting.set()
+            await release_completion.wait()
+
+    acp._await_user_history = pause_after_user_history
+    original_log_user_message = logger.log_user_message
+
+    async def record_send_now_user(text, **kwargs):
+        result = await original_log_user_message(text, **kwargs)
+        metadata = kwargs.get("message_metadata") or {}
+        if metadata.get("request_id") == send_now_id:
+            send_now_user_written.set()
+        return result
+
+    logger.log_user_message = record_send_now_user
+    original_add_message = llm.conversation_manager.add_message
+
+    def record_send_now_manager_message(role, text, **kwargs):
+        result = original_add_message(role, text, **kwargs)
+        metadata = kwargs.get("metadata") or {}
+        if role == "user" and metadata.get("request_id") == send_now_id:
+            send_now_manager_recorded.set()
+        return result
+
+    llm.conversation_manager.add_message = record_send_now_manager_message
+    identity = ConversationIdentity(
+        llm._current_conversation_uid(), llm.get_conversation_revision()
+    )
+    worker = WebMessageQueueWorker(
+        queue,
+        identity,
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+    drain = asyncio.create_task(runner._drain_queue())
+    dispatch = None
+    try:
+        await asyncio.wait_for(cut_started.wait(), timeout=1)
+        dispatch = asyncio.create_task(worker.dispatch_batch(batch_id, send_now=True))
+        await asyncio.wait_for(completion_waiting.wait(), timeout=1)
+
+        for event in (send_now_user_written, send_now_manager_recorded):
+            try:
+                await asyncio.wait_for(event.wait(), timeout=0.2)
+            except asyncio.TimeoutError:
+                pass
+        manager_rows_while_paused = llm.conversation_manager.messages
+        manager_row_while_paused = any(
+            message.get("role") == "user"
+            and (message.get("metadata") or {}).get("request_id") == send_now_id
+            for message in manager_rows_while_paused
+        )
+        assert not (
+            send_now_user_written.is_set() or manager_row_while_paused
+        ), (
+            "Send Now reached history before the cancelled partial assistant row: "
+            f"jsonl={send_now_user_written.is_set()}, "
+            f"manager={manager_row_while_paused}"
+        )
+
+        release_completion.set()
+        result = await asyncio.wait_for(dispatch, timeout=2)
+        assert result.status is WorkerStatus.ADMITTED
+        await asyncio.wait_for(asyncio.gather(*tuple(acp._completion_tasks)), timeout=2)
+
+        records = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+        cut_assistant_index = next(
+            index
+            for index, row in enumerate(records)
+            if row.get("type") == "assistant"
+            and row.get("display_metadata", {}).get("request_id") == "cut-turn"
+        )
+        send_now_user_index = next(
+            index
+            for index, row in enumerate(records)
+            if row.get("type") == "user"
+            and row.get("message", {}).get("metadata", {}).get("request_id")
+            == send_now_id
+        )
+        assert cut_assistant_index < send_now_user_index
+        assert records[cut_assistant_index]["tool_calls"][0]["id"] == "cut-tool"
+
+        messages = llm.conversation_manager.messages
+        cut_assistant_position = next(
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "assistant"
+            and (message.get("metadata") or {}).get("request_id") == "cut-turn"
+        )
+        send_now_user_position = next(
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "user"
+            and (message.get("metadata") or {}).get("request_id") == send_now_id
+        )
+        assert cut_assistant_position < send_now_user_position
+    finally:
+        release_completion.set()
+        if dispatch is not None:
+            await asyncio.gather(dispatch, return_exceptions=True)
+        runner._closing = True
+        runner._queue_release.set()
+        runner._queue_changed.set()
+        drain.cancel()
+        await asyncio.gather(drain, return_exceptions=True)
+        await acp.close()
+
+
+@pytest.mark.asyncio
 async def test_acp_turn_start_waits_for_durable_dispatch_identity(tmp_path):
     from kollabor_tui.display_tap import DisplayTap
 
