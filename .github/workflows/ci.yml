@@ -150,8 +150,9 @@ jobs:
           # so a slow shard can be rebalanced from evidence instead of guesses.
           uv run python -m pytest "${test_targets[@]}" -q -n auto --durations=25 \
             --allow-host-process-enumeration \
+            -m "not quarantine" \
             --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle \
-            --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
+            --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone || [ "$?" -eq 5 ]
 
   # The network-membership revocation tests run minutes each (one is ~140s on
   # a runner); hashed into shards they made whichever shard drew them the
@@ -218,7 +219,7 @@ jobs:
             exit 1
           fi
           printf 'Heavy lane %s selected %s test items\n' "$HEAVY_LANE" "${#targets[@]}"
-          uv run python -m pytest "${targets[@]}" -q -n auto --durations=25
+          uv run python -m pytest "${targets[@]}" -q -n auto --durations=25 -m "not quarantine" || [ "$?" -eq 5 ]
 
   # The support lanes are independent of each other, so they run as parallel
   # jobs instead of serial steps inside one job (#1020): the web UI browser
@@ -281,14 +282,15 @@ jobs:
       - name: Run isolation-sensitive unit tests
         run: >-
           uv run python -m pytest -q
+          -m "not quarantine"
           --allow-host-process-enumeration
           tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle
-          tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
+          tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone || [ "$?" -eq 5 ]
 
       # The engine and rpc packages have their own tests that tests/unit never
       # collected, so engine changes merged without them.
       - name: Run engine and rpc package tests
-        run: uv run python -m pytest -o asyncio_mode=auto packages/kollabor-engine/tests packages/kollabor-rpc/tests -q
+        run: uv run python -m pytest -o asyncio_mode=auto packages/kollabor-engine/tests packages/kollabor-rpc/tests -q -m "not quarantine" || [ "$?" -eq 5 ]
 
       - name: Validate bundled Agent Skills layout
         run: uv run python scripts/validate_bundled_agent_skills.py
@@ -321,7 +323,7 @@ jobs:
           --with livekit==1.1.20 --with livekit-agents==1.8.8
           --with livekit-plugins-silero==1.8.8 --with onnxruntime==1.30.0
           --with livekit-local-inference==0.2.7
-          python -m pytest packages/kollabor-voice/tests -q
+          python -m pytest packages/kollabor-voice/tests -q -m "not quarantine" || [ "$?" -eq 5 ]
 
   # The web UI's own tests never ran in CI: four vitest files and the
   # node:test files (Node 24 strips the types). Node-only lane: no python,
@@ -372,7 +374,7 @@ jobs:
           npx tsc --noEmit
           node scripts/check-test-discovery.mjs
           npx vitest run
-          node --test $(grep -L 'from "vitest"' tests/*.test.ts)
+          node --test $(node scripts/node-test-files.mjs)
 
       - name: Install Chromium for browser acceptance
         working-directory: packages/kollabor-webui/frontend
@@ -414,9 +416,105 @@ jobs:
           path: ${{ runner.temp }}/kollab-browser-results
           if-no-files-found: ignore
 
+  repeat_changed_tests:
+    name: ci/tests (repeat changed tests)
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install workspace
+        run: uv sync --all-packages --extra dev
+
+      - name: Repeat changed Python test files
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: uv run python scripts/repeat_changed_tests.py --base "$BASE_REF" --runs 20
+
+      # The voice suite needs its own pinned environment (as in support_voice_tests);
+      # it is installed only when a voice test changed.
+      - name: Repeat changed voice test files
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --name-only --diff-filter=ACMR "$BASE_REF...HEAD" -- packages/kollabor-voice/tests | grep -q .; then
+            uv run --no-project --python 3.12 --with numpy==2.5.3 \
+              --with pytest --with pytest-asyncio \
+              --with livekit==1.1.20 --with livekit-agents==1.8.8 \
+              --with livekit-plugins-silero==1.8.8 --with onnxruntime==1.30.0 \
+              --with livekit-local-inference==0.2.7 \
+              python scripts/repeat_changed_tests.py --base "$BASE_REF" --runs 20 --suites packages/kollabor-voice/tests
+          else
+            echo "No changed voice test files; nothing to repeat."
+          fi
+
+  quarantine:
+    name: ci/quarantine
+    continue-on-error: true
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install workspace
+        run: uv sync --all-packages --extra dev
+
+      - name: Run quarantined tests
+        run: uv run python -m pytest tests -m quarantine -q -rs -p no:cacheprovider
+
+      # Exit 5 = nothing quarantined in that suite, which is the normal case.
+      - name: Run quarantined engine and rpc package tests
+        if: ${{ !cancelled() }}  # a failing earlier suite must not skip this one
+        run: >-
+          uv run python -m pytest -o asyncio_mode=auto
+          packages/kollabor-engine/tests packages/kollabor-rpc/tests
+          -m quarantine -q -rs -p no:cacheprovider || [ $? -eq 5 ]
+
+      - name: Run quarantined voice package tests
+        if: ${{ !cancelled() }}  # a failing earlier suite must not skip this one
+        run: >-
+          uv run --no-project --python 3.12 --with numpy==2.5.3
+          --with pytest --with pytest-asyncio
+          --with livekit==1.1.20 --with livekit-agents==1.8.8
+          --with livekit-plugins-silero==1.8.8 --with onnxruntime==1.30.0
+          --with livekit-local-inference==0.2.7
+          python -m pytest packages/kollabor-voice/tests -m quarantine -q -rs -p no:cacheprovider || [ $? -eq 5 ]
+
   # Keep the exact required "ci/tests" check name expected by branch
-  # protection. It succeeds only when change detection, every unit shard, and
-  # every support lane the change needs do; lanes the change skips are allowed.
+  # protection. It succeeds only when change detection, every unit shard, the
+  # PR repeat check, and every needed support lane pass; skipped lanes are allowed.
   # !cancelled() makes the aggregate run after upstream failures or skips so
   # the required check cannot resolve green without all tests running.
   required_tests:
@@ -424,7 +522,7 @@ jobs:
     # is free-form: this resolves as the check "ci/tests", which is the exact
     # name the required rule expects.
     name: ci/tests
-    needs: [tests, heavy_tests, supporting_tests, support_voice_tests, support_webui_tests]
+    needs: [tests, heavy_tests, supporting_tests, support_voice_tests, support_webui_tests, repeat_changed_tests]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -438,6 +536,8 @@ jobs:
           SUPPORT_VOICE_RESULT: ${{ needs.support_voice_tests.result }}
           RUN_WEBUI: ${{ needs.supporting_tests.outputs.webui }}
           SUPPORT_WEBUI_RESULT: ${{ needs.support_webui_tests.result }}
+          REPEAT_RESULT: ${{ needs.repeat_changed_tests.result }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           # A support lane passes when it succeeded, or when the change skipped it.
           voice_ok=no
@@ -448,11 +548,15 @@ jobs:
           case "$SUPPORT_WEBUI_RESULT:$RUN_WEBUI" in
             success:*|skipped:false) webui_ok=yes ;;
           esac
-          if [ "$CHANGES_RESULT" = success ] && [ "$UNIT_RESULT" = success ] && [ "$HEAVY_RESULT" = success ] && [ "$SUPPORT_PYTHON_RESULT" = success ] && [ "$voice_ok" = yes ] && [ "$webui_ok" = yes ]; then
+          repeat_ok=no
+          case "$REPEAT_RESULT:$EVENT_NAME" in
+            success:pull_request|skipped:*) repeat_ok=yes ;;
+          esac
+          if [ "$CHANGES_RESULT" = success ] && [ "$UNIT_RESULT" = success ] && [ "$HEAVY_RESULT" = success ] && [ "$SUPPORT_PYTHON_RESULT" = success ] && [ "$voice_ok" = yes ] && [ "$webui_ok" = yes ] && [ "$repeat_ok" = yes ]; then
             echo "ci/tests: all required test jobs succeeded"
             exit 0
           fi
-          echo "ci/tests: changes and support python '$CHANGES_RESULT'; unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"
+          echo "ci/tests: changes and support python '$CHANGES_RESULT'; unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'; repeat '$REPEAT_RESULT'"
           exit 1
 
   standards-check:
