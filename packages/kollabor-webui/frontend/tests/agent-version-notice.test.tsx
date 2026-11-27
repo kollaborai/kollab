@@ -57,9 +57,9 @@ describe("agentVersionNotice", () => {
     expect(notice?.detail).toContain("0.21.0+aaaa1111");
   });
 
-  it("points at /restart when the flag is off", () => {
+  it("offers a manual restart when automatic restarts are off", () => {
     expect(agentVersionNotice({ engineVersion: "0.21.0+aaaa1111", agent: { ...agent, version: "0.20.0+bbbb2222" }, restartAgents: false })).toEqual(
-      expect.objectContaining({ kind: "command" }),
+      expect.objectContaining({ kind: "button" }),
     );
   });
 
@@ -104,12 +104,12 @@ describe("AgentVersionNotice", () => {
     expect(html).toMatch(/<span id="[^"]+" class="[^"]*order-last w-full/);
   });
 
-  it("flag off: the /restart line and no button", () => {
+  it("flag off: still offers Restart Agent instead of a command", () => {
     const notice = agentVersionNotice({ ...differ, restartAgents: false })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
-    expect(html).toContain("Run /restart to update the agent version running.");
-    expect(html).not.toContain("Restart Agent");
-    expect(html).not.toContain("<button");
+    expect(html).toContain("This agent runs an older version of Kollab.");
+    expect(html).toContain("Restart Agent");
+    expect(html).not.toContain("/restart");
   });
 });
 
