@@ -13,16 +13,28 @@ const COOKIE_HEADER = /((?:^|[^A-Za-z0-9])(?:set-cookie|cookie)(?![A-Za-z0-9_])\
 const COOKIE_HEADERS = new RegExp(COOKIE_HEADER.source, "gim");
 const SESSION_ASSIGNMENT = /((?:^|[^A-Za-z0-9])session(?![A-Za-z0-9_])\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/i;
 const SESSION_ASSIGNMENTS = new RegExp(SESSION_ASSIGNMENT.source, "gi");
-const JWT_VALUE = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/i;
-const JWT_VALUES = new RegExp(JWT_VALUE.source, "gi");
 const PRIVATE_KEY_PEM_BLOCK = /-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*?-----END \1-----/i;
 const PRIVATE_KEY_PEM_BLOCKS = new RegExp(PRIVATE_KEY_PEM_BLOCK.source, "gi");
+const SECRET_VALUES = [
+  /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9_-]{16,}\b/i,
+  /\bsecret[-_]token[-_][A-Za-z0-9_-]{3,}\b/i,
+  /\bsk-[A-Za-z0-9_-]{20,}\b/i,
+  /\bxox[abprs]-[A-Za-z0-9-]{20,}\b/i,
+  /\bxapp-[A-Za-z0-9-]{20,}\b/i,
+  /\bgh[pousr]_(?:[A-Za-z0-9_-]{20,}|(?!([A-Za-z0-9_-])\1{18}\b)[A-Za-z0-9_-]{19})\b/i,
+  /\bgithub_pat_[A-Za-z0-9_-]{20,}\b/i,
+  /\bglpat-[A-Za-z0-9_-]{20,}\b/i,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/,
+  /\bAIza[A-Za-z0-9_-]{34,35}\b/,
+  /\bnpm_[A-Za-z0-9_-]{20,}\b/i,
+  /\bhf_[A-Za-z0-9_-]{20,}\b/i,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{8,}\b/,
+] as const;
 const SENSITIVE_KEY_NAME = String.raw`(?:api[ _-]?key|(?:oauth[ _-]?)?client[ _-]?(?:key|secret|token)|(?:private|signing|encryption|ssh|secret|access|master)[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|passphrase|passwd|pwd|password|credential|authorization|bearer)`;
 const SENSITIVE_ASSIGNMENT = new RegExp(
   String.raw`((?:^|[^A-Za-z0-9])(?:"${SENSITIVE_KEY_NAME}(?:[_-][A-Za-z0-9]+)*"|${SENSITIVE_KEY_NAME}(?:[_-][A-Za-z0-9]+)*)(?![A-Za-z0-9_])\s*[:=]\s*)(?:(?:bearer|basic)\s+)?("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)`,
   "gi",
 );
-const SECRET_VALUE = /\b(?:(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9_-]+|secret[-_]token[-_][A-Za-z0-9_-]+|sk-|gh[pousr]_|github_pat_|AIza[A-Za-z0-9_-]{34,35})[A-Za-z0-9_-]*/gi;
 const SAFE_TEXT_VALUES = new Set(["budget", "length", "required", "status"]);
 
 function isAuthCredential(value: string): boolean {
@@ -32,11 +44,11 @@ function isAuthCredential(value: string): boolean {
 /** Check the shared plugin text rules used by inventory normalization and error logging. */
 export function containsSensitiveText(value: string, allowSafeValues = false): boolean {
   if (
-    value.match(SECRET_VALUE) ||
+    SECRET_VALUES.some((pattern) => pattern.test(value)) ||
     PRIVATE_KEY_PEM_BLOCK.test(value) ||
     COOKIE_HEADER.test(value) ||
     SESSION_ASSIGNMENT.test(value) ||
-    JWT_VALUE.test(value) || AUTH_SCHEME_ASSIGNMENT.test(value)
+    AUTH_SCHEME_ASSIGNMENT.test(value)
   ) return true;
   for (const match of value.matchAll(AUTH_SCHEME)) {
     if (isAuthCredential(match[1] ?? "")) return true;
@@ -93,7 +105,7 @@ export function pluginRenderFailureMessage(renderer: string): string {
 
 /** Keep credential-shaped values out of the browser log while retaining useful failure context. */
 export function redactPluginError(error: unknown): string {
-  return describePluginError(error, true)
+  const redacted = describePluginError(error, true)
     .replace(URL_CREDENTIALS, "$1[redacted]@")
     .replace(FILE_URL, "[path]")
     .replace(URL_QUERY_OR_FRAGMENT, "$1")
@@ -102,9 +114,14 @@ export function redactPluginError(error: unknown): string {
     .replace(SESSION_ASSIGNMENTS, "$1[redacted]")
     .replace(SENSITIVE_ASSIGNMENT, "$1[redacted]")
     .replace(AUTH_SCHEME, "[redacted]")
-    .replace(SECRET_VALUE, "[redacted]")
-    .replace(JWT_VALUES, "[redacted]")
     .replace(ABSOLUTE_FILESYSTEM_PATH, "[path]");
+  return SECRET_VALUES.reduce(
+    (current, pattern) => current.replace(
+      new RegExp(pattern.source, `${pattern.flags}g`),
+      "[redacted]",
+    ),
+    redacted,
+  );
 }
 
 /** Log plugin failure details only after redacting them; plugin output never goes straight to the console. */

@@ -609,6 +609,9 @@ const Composer: FC<{
   // Text typed into a chat that is about to be swapped out would be lost, or
   // sent to the chat being left.
   const lock = useContext(ComposerLockContext);
+  // A delayed submit can outlive the render that scheduled it.
+  const lockRef = useRef(lock);
+  lockRef.current = lock;
   const { workspace, remote: remoteAgents } = useContext(ComposerHubContext);
   // The mic only exists where the session's live command list has /voice.
   const voiceAvailable = commands.some(
@@ -786,6 +789,7 @@ const Composer: FC<{
     if (!pending) return;
     cancelPendingPluginSubmit();
     if (
+      lockRef.current ||
       currentDraftKeyRef.current !== pending.session ||
       currentQueueSessionIdRef.current !== pending.queueSessionId ||
       aui.composer.getState().text !== pending.text

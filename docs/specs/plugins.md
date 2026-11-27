@@ -160,10 +160,12 @@ or removing the plugin.
 control, with no ids or version numbers in the text: `A pull request is waiting for your review.  [Open]`.
 
 **Composer and chat.** Plugin slash commands appear in the composer palette. Submitting a matching
-command without attachments consumes the draft and calls the plugin's `run(args)` locally. A plugin
-can draw a card for its tool or an inline card for its registered tag in assistant message text. Native
-command names and aliases remain reserved for native commands while the session command catalog loads
-or is unavailable.
+command without attachments consumes the draft and calls the plugin's `run(args)` locally, but only
+after the session command catalog is ready. While the catalog loads, Kollab keeps the submitted text
+in the composer for at most two seconds; if the catalog is unavailable or the wait expires, Kollab sends
+the text as a normal chat message. A plugin can draw a card for its tool or an inline card for its
+registered tag in assistant message text. Native command names and aliases remain reserved for native
+commands while the session command catalog loads or is unavailable.
 
 **Failures.** A plugin whose code fails while loading keeps its row as `PR Chain  Failed to Load`, and
 one that fails while drawing shows `Failed to Render`; both open a small kollab-drawn panel with Retry

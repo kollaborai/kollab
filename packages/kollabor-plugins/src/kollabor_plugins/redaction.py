@@ -17,8 +17,20 @@ _AUTH_SCHEME_ASSIGNMENT = re.compile(
 _COOKIE_HEADER = re.compile(
     r"(?i)(?:^|[^A-Za-z0-9])(?:set-cookie|cookie)(?![A-Za-z0-9_])\s*:\s*[^\r\n]*"
 )
-_SECRET_VALUE = re.compile(
-    r"(?i)\b(?:secret[-_]token[-_][A-Za-z0-9_-]{6,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_|github_pat_)[A-Za-z0-9_-]*"
+_SECRET_VALUES = (
+    re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE),
+    re.compile(r"\bsecret[-_]token[-_][A-Za-z0-9_-]{3,}\b", re.IGNORECASE),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b", re.IGNORECASE),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{20,}\b", re.IGNORECASE),
+    re.compile(r"\bxapp-[A-Za-z0-9-]{20,}\b", re.IGNORECASE),
+    re.compile(r"\bgh[pousr]_(?:[A-Za-z0-9_-]{20,}|(?!([A-Za-z0-9_-])\1{18}\b)[A-Za-z0-9_-]{19})\b", re.IGNORECASE),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_-]{20,}\b", re.IGNORECASE),
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b", re.IGNORECASE),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(r"\bAIza[A-Za-z0-9_-]{34,35}\b"),
+    re.compile(r"\bnpm_[A-Za-z0-9_-]{20,}\b", re.IGNORECASE),
+    re.compile(r"\bhf_[A-Za-z0-9_-]{20,}\b", re.IGNORECASE),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{8,}\b"),
 )
 _URL = re.compile(r"(?:https?|ssh)://[^\s'\"<>]+", re.IGNORECASE)
 _PATH = re.compile(
@@ -35,7 +47,7 @@ def _is_auth_credential(value: str) -> bool:
 def contains_sensitive_text(text: str, *, allow_safe_values: bool = False) -> bool:
     """Return whether text contains a credential or a credential-shaped value."""
     if (
-        _SECRET_VALUE.search(text)
+        any(pattern.search(text) for pattern in _SECRET_VALUES)
         or _AUTH_SCHEME_ASSIGNMENT.search(text)
         or _COOKIE_HEADER.search(text)
     ):
@@ -75,5 +87,6 @@ def redact_sensitive_text(
     text = _SECRET_ASSIGNMENT.sub(
         lambda match: f"{match.group('key')}: {replacement}", text
     )
-    text = _SECRET_VALUE.sub(replacement, text)
+    for pattern in _SECRET_VALUES:
+        text = pattern.sub(replacement, text)
     return _PATH.sub("[path]", text) if redact_paths else text

@@ -188,6 +188,7 @@ type NormalizedPluginContributions = {
   contributes: PluginEntry["contributes"];
   malformed: boolean;
   omissions: number;
+  truncated: boolean;
 };
 
 function normalizePluginContributions(value: unknown, requireAllKinds = false): NormalizedPluginContributions {
@@ -198,10 +199,12 @@ function normalizePluginContributions(value: unknown, requireAllKinds = false): 
       contributes: result as PluginEntry["contributes"],
       malformed: requireAllKinds,
       omissions: requireAllKinds ? 1 : 0,
+      truncated: false,
     };
   if (!raw)
-    return { contributes: result as PluginEntry["contributes"], malformed: true, omissions: 1 };
+    return { contributes: result as PluginEntry["contributes"], malformed: true, omissions: 1, truncated: false };
   let malformed = false;
+  let truncated = false;
   let omissions = Object.keys(raw).filter(
     (key) => !CONTRIBUTION_KINDS.includes(key as (typeof CONTRIBUTION_KINDS)[number]),
   ).length;
@@ -221,7 +224,9 @@ function normalizePluginContributions(value: unknown, requireAllKinds = false): 
       continue;
     }
     const seen = new Set<string>();
-    omissions += excessItems(items, PLUGIN_INVENTORY_LIMITS.contributions);
+    const excess = excessItems(items, PLUGIN_INVENTORY_LIMITS.contributions);
+    omissions += excess;
+    if (excess > 0) truncated = true;
     for (const item of items.slice(0, PLUGIN_INVENTORY_LIMITS.contributions)) {
       if (kind !== "menu") {
         if (kind === "renderers" && !pluginRendererDeclaration(item)) {
@@ -265,7 +270,21 @@ function normalizePluginContributions(value: unknown, requireAllKinds = false): 
       }
     }
   }
-  return { contributes: result as PluginEntry["contributes"], malformed, omissions };
+  return { contributes: result as PluginEntry["contributes"], malformed, omissions, truncated };
+}
+
+function keepLastGoodEmptyContributions(
+  current: PluginEntry["contributes"],
+  previous: PluginEntry["contributes"],
+): PluginEntry["contributes"] {
+  return {
+    menu: current.menu.length ? current.menu : previous.menu,
+    views: current.views.length ? current.views : previous.views,
+    pages: current.pages.length ? current.pages : previous.pages,
+    modals: current.modals.length ? current.modals : previous.modals,
+    slash: current.slash.length ? current.slash : previous.slash,
+    renderers: current.renderers.length ? current.renderers : previous.renderers,
+  };
 }
 
 export function normalizePluginContributes(value: unknown): PluginEntry["contributes"] {
@@ -455,7 +474,9 @@ export function normalizePluginEntry(value: unknown, previous?: PluginEntry): Pl
   const reportedContributionOmissions = safeInteger(reportedOmissions?.contributions) ?? 0;
   const contributionOmissions = reportedContributionOmissions + normalizedContributions.omissions;
   const retainPreviousContributions = previous !== undefined &&
-    (raw.contributes === undefined || normalizedContributions.malformed || contributionOmissions > 0);
+    (raw.contributes === undefined || normalizedContributions.truncated);
+  const retainMissingContributions = previous !== undefined &&
+    (normalizedContributions.malformed || contributionOmissions > 0);
   const omitted = {
     services: (safeInteger(reportedOmissions?.services) ?? 0)
       + Math.max(0, rawServices.length - PLUGIN_INVENTORY_LIMITS.services),
@@ -485,7 +506,9 @@ export function normalizePluginEntry(value: unknown, previous?: PluginEntry): Pl
     web,
     contributes: retainPreviousContributions && previous
       ? previous.contributes
-      : normalizedContributions.contributes,
+      : retainMissingContributions && previous
+        ? keepLastGoodEmptyContributions(normalizedContributions.contributes, previous.contributes)
+        : normalizedContributions.contributes,
     services,
     settings: normalizeSettings(raw.settings),
     settings_section: settingsSection ? { title: sectionTitle ?? "Settings" } : null,
