@@ -3340,8 +3340,13 @@ class AgentMessenger:
         expected_agent_id: Optional[str] = None,
         expected_pid: Optional[int] = None,
         expected_started_at: Optional[float] = None,
+        generation_check: bool = True,
     ) -> bool:
-        """Signal an agent to shut down gracefully (unix or remote). Returns True if acked."""
+        """Signal graceful shutdown; optionally skip the separate generation-check action.
+
+        With ``generation_check=False``, a receiver can validate the expected
+        generation on the legacy ``shutdown`` action itself.
+        """
         writer = None
         try:
             target = (expected_agent_id, expected_pid, expected_started_at)
@@ -3369,32 +3374,33 @@ class AgentMessenger:
                     "expected_pid": expected_pid,
                     "expected_started_at": expected_started_at,
                 }
-                check = {
-                    "action": "shutdown_generation_check",
-                    **generation,
-                }
-                writer.write((json.dumps(check) + "\n").encode())
-                await writer.drain()
-                check_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-                if not check_line:
-                    return False
-                check_response = json.loads(check_line.decode().strip())
-                if (
-                    not isinstance(check_response, dict)
-                    or check_response.get("type") != "generation_ok"
-                    or check_response.get("agent_id") != expected_agent_id
-                    or check_response.get("pid") != expected_pid
-                    or type(check_response.get("pid")) is not int
-                    or type(check_response.get("started_at")) not in (int, float)
-                ):
-                    return False
-                try:
-                    if float(check_response["started_at"]) != float(
-                        expected_started_at
+                if generation_check:
+                    check = {
+                        "action": "shutdown_generation_check",
+                        **generation,
+                    }
+                    writer.write((json.dumps(check) + "\n").encode())
+                    await writer.drain()
+                    check_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+                    if not check_line:
+                        return False
+                    check_response = json.loads(check_line.decode().strip())
+                    if (
+                        not isinstance(check_response, dict)
+                        or check_response.get("type") != "generation_ok"
+                        or check_response.get("agent_id") != expected_agent_id
+                        or check_response.get("pid") != expected_pid
+                        or type(check_response.get("pid")) is not int
+                        or type(check_response.get("started_at")) not in (int, float)
                     ):
                         return False
-                except (TypeError, ValueError, OverflowError):
-                    return False
+                    try:
+                        if float(check_response["started_at"]) != float(
+                            expected_started_at
+                        ):
+                            return False
+                    except (TypeError, ValueError, OverflowError):
+                        return False
             request = {"action": "shutdown", "reason": reason}
             request.update(generation)
             req = json.dumps(request) + "\n"

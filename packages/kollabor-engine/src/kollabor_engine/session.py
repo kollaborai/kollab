@@ -449,6 +449,7 @@ class EngineSession:
             daemon.socket_path,
             reason="Restart Agent requested by the web UI",
             timeout=3.0,
+            generation_check=False,
             **generation,
         )
         if not accepted:
