@@ -1,13 +1,20 @@
-export type PendingPermission = { toolId: string; requestId?: string; source?: string; parked?: boolean };
+import type { ChatRow } from "../chat-stream.ts";
+import {
+  isChatStreamPartPreviewMarker,
+  isChatStreamToolOutputPreviewMarker,
+} from "../chat-stream.ts";
+import {
+  permissionPromptPreviewKey,
+  recoveredPermissionPromptIsCurrent,
+  type RecoveredPermissionPrompt,
+} from "../permission-preview-state.ts";
 
-type PermissionMessage = {
-  status?: { type: string };
-  content: readonly {
-    type: string;
-    toolName?: string;
-    args?: unknown;
-    result?: unknown;
-  }[];
+export type PendingPermission = {
+  toolId: string;
+  requestId?: string;
+  source?: string;
+  parked?: boolean;
+  previewKey?: string;
 };
 
 export function permissionOwner(payload: unknown): PendingPermission | null {
@@ -15,26 +22,82 @@ export function permissionOwner(payload: unknown): PendingPermission | null {
   const args = payload as {
     tool_id?: unknown;
     request_id?: unknown;
+    source?: unknown;
+    parked?: unknown;
     details?: { source?: unknown; parked?: unknown };
   };
   if (typeof args.tool_id !== "string" || !args.tool_id) return null;
+  const details = args.details;
   return {
     toolId: args.tool_id,
     requestId: typeof args.request_id === "string" && args.request_id ? args.request_id : undefined,
-    source: typeof args.details?.source === "string" ? args.details.source : undefined,
-    ...(typeof args.details?.parked === "boolean" ? { parked: args.details.parked } : {}),
+    source: typeof args.source === "string" ? args.source : typeof details?.source === "string" ? details.source : undefined,
+    ...(typeof args.parked === "boolean"
+      ? { parked: args.parked }
+      : typeof details?.parked === "boolean" ? { parked: details.parked } : {}),
   };
 }
 
-/** Only unresolved permission parts with a parent owner expose Stop. */
-export function pendingPermissions(messages: readonly PermissionMessage[]): PendingPermission[] {
-  return messages.flatMap((message) => message.status?.type === "requires-action"
-    ? message.content.flatMap((part) => {
-      if (part.type !== "tool-call" || part.toolName !== "request_permission" || part.result !== undefined) return [];
-      const owner = permissionOwner(part.args);
-      return owner?.requestId ? [owner] : [];
-    })
-    : []);
+/**
+ * A permission part is pending while its request_permission tool call has no
+ * result. Only a pending part with a parent owner exposes Stop.
+ */
+export function pendingPermissions(
+  rows: readonly ChatRow[],
+  recoveredPrompts: readonly RecoveredPermissionPrompt[] = [],
+): PendingPermission[] {
+  const fromRows = rows.flatMap((row) => row.parts.flatMap((part) => {
+    let payload: unknown;
+    if (part.type === "tool-call") {
+      if (part.tool_name !== "request_permission" || part.result !== undefined ||
+          (isChatStreamToolOutputPreviewMarker(part.chat_stream_result_preview) &&
+            part.chat_stream_result_preview.tool_call_id === part.tool_call_id)) return [];
+      // A compact owner summary is only an association hint. The complete args
+      // must be fetched and the matching preview opened before Stop is enabled.
+      if (part.chat_stream_args_preview !== undefined) return [];
+      payload = part.args;
+    } else if (part.type === "prompt") {
+      if (row.kind !== "prompt" || row.role !== "system" || row.status !== "open" ||
+          (typeof part.data === "object" && part.data !== null && "resolution" in part.data)) return [];
+      payload = part.data;
+    } else {
+      return [];
+    }
+    const owner = permissionOwner(payload);
+    if (!owner?.requestId) return [];
+    if (part.type === "prompt" && isChatStreamPartPreviewMarker(part.chat_stream_part_preview)) {
+      return [{
+        ...owner,
+        previewKey: permissionPromptPreviewKey({
+          sessionId: part.chat_stream_part_preview.session_id,
+          promptId: part.prompt_id,
+          revision: part.chat_stream_part_preview.output_revision,
+        }),
+      }];
+    }
+    return [owner];
+  }));
+  const fromRecovered = recoveredPrompts.flatMap((prompt) => {
+    const data = prompt.data;
+    if (prompt.partType === "tool-call") {
+      if (!recoveredPermissionPromptIsCurrent(rows, prompt) || typeof data !== "object" || data === null || Array.isArray(data)) return [];
+      const owner = permissionOwner(data);
+      if (!owner?.requestId || !("permission_id" in data) || typeof data.permission_id !== "string" || !data.permission_id) return [];
+      return [{ ...owner, previewKey: permissionPromptPreviewKey(prompt) }];
+    }
+    if (
+      !recoveredPermissionPromptIsCurrent(rows, prompt) || typeof data !== "object" || data === null ||
+      Array.isArray(data) || !("permission_id" in data) || data.permission_id !== prompt.promptId ||
+      "resolution" in data
+    ) return [];
+    const owner = permissionOwner(data);
+    if (!owner?.requestId) return [];
+    return [{
+      ...owner,
+      previewKey: permissionPromptPreviewKey(prompt),
+    }];
+  });
+  return [...fromRows, ...fromRecovered];
 }
 
 /**
@@ -59,34 +122,20 @@ export async function cancelPendingPermission({
   if (!samePermissionOwner(selected, beforeRead)) return false;
   const daemon = await readPending();
   const afterRead = current();
-  const daemonOwner = daemon.find((candidate) => samePermissionOwner(selected, [candidate]));
+  const daemonOwner = daemon.find((candidate) => sameDaemonPermissionOwner(selected, candidate));
   if (!selected.requestId || !samePermissionOwner(selected, afterRead) || daemonOwner?.parked !== false) return false;
   return (await cancel(selected.requestId)).cancelled === true;
+}
+
+function sameDaemonPermissionOwner(expected: PendingPermission, candidate: PendingPermission): boolean {
+  return candidate.toolId === expected.toolId && candidate.requestId === expected.requestId &&
+    candidate.source === expected.source && candidate.parked === expected.parked;
 }
 
 function samePermissionOwner(expected: PendingPermission, candidates: readonly PendingPermission[]): boolean {
   return candidates.some((candidate) => candidate.toolId === expected.toolId &&
     candidate.requestId === expected.requestId && candidate.source === expected.source &&
-    candidate.parked === expected.parked);
-}
-
-type ShownMessage = { id?: unknown; status?: { type?: string }; content: unknown };
-type PromptPart = { type?: string; toolName?: string; result?: unknown; args?: { details?: { parked?: unknown } } };
-
-/**
- * The thread shows a prompt its own run exposed, and the reloaded history has
- * one its turn left open (a Stop, or 5 min unanswered). That run ended at the
- * prompt with no sync point, so only a whole reload shows what the turn did
- * after it: the call's "Not run yet" and the agent's ask for the OK.
- */
-export function promptParkedSinceShown(shown: readonly ShownMessage[], reloaded: readonly ShownMessage[]): boolean {
-  const last = shown.at(-1);
-  // A loaded prompt is its own message (`permission-<tool id>-<n>`) and came
-  // with the history: nothing is missing above it.
-  if (!last || last.status?.type !== "requires-action" || String(last.id ?? "").startsWith("permission-")) return false;
-  return reloaded.some((message) => message.status?.type === "requires-action" && Array.isArray(message.content) &&
-    (message.content as PromptPart[]).some((part) => part?.type === "tool-call" &&
-      part.toolName === "request_permission" && part.result === undefined && part.args?.details?.parked === true));
+    candidate.parked === expected.parked && candidate.previewKey === expected.previewKey);
 }
 
 export function samePendingPermission(a: readonly PendingPermission[], b: readonly PendingPermission[]): boolean {

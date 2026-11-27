@@ -32,8 +32,6 @@ from dataclasses import dataclass
 
 import aiohttp
 import numpy as np
-
-from kollabor_voice.turn_errors import rejected_detail
 from livekit import local_inference, rtc
 from livekit.agents import (
     Agent,
@@ -50,6 +48,8 @@ from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN
 from livekit.agents.voice import room_io
 from livekit.agents.voice.agent_activity import _SpeechHandleContextVar
 from livekit.plugins import silero
+
+from kollabor_voice.turn_errors import rejected_detail
 
 from .speech_adapter import AdapterError, AudioFrame, RoomBinding, SpeechAdapter
 

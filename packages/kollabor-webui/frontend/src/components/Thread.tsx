@@ -10,9 +10,10 @@ import {
   ComposerPlaceholderContext,
   ComposerLockContext,
   ComposerHubContext,
+  SystemMessage as AssistantSystemMessage,
   Thread as AssistantThread,
+  UserMessage as AssistantUserMessage,
 } from "@/components/assistant-ui/thread";
-import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { ToolFallback, toolErrorLine } from "@/components/assistant-ui/tool-fallback";
 import { ToolGroup } from "@/components/assistant-ui/tool-group";
 import {
@@ -21,11 +22,13 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
-import type { BusyWebMessageComposerRequest, BusyWebMessageResult } from "@/components/web-queue/submit";
 import { Avatar } from "@/components/agents/Avatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { resolveAgentSender, type HubNote } from "@/hub-notes";
+import { useChatStore } from "@/chat-store";
+import type { ChatPart, ChatRow } from "@/chat-stream";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
+import { PermissionPromptDataUI, PermissionToolUI } from "@/components/PermissionTool";
 import { agentName } from "@/utils/session-display";
 import { cn } from "@/lib/utils";
 import { composerDraftStorageKey } from "../composer-draft";
@@ -178,7 +181,7 @@ export const HubNoteView: FC<{
         <div className="text-muted-foreground mb-1 flex flex-wrap items-center gap-1 text-xs font-medium">
           <span>{label}</span>
         </div>
-        <div className="text-foreground leading-relaxed wrap-break-word pointer-fine:text-sm">{children}</div>
+        <div className="text-foreground leading-relaxed whitespace-pre-wrap wrap-break-word pointer-fine:text-sm">{children}</div>
         {footer}
       </div>
     </div>
@@ -242,16 +245,41 @@ const PresenceChip: FC<{ note: HubNote }> = ({ note }) => {
   );
 };
 
-// Another agent's hub message (runtime.tsx turns the daemon's agent HUD into
-// these). One this agent only saw go by is dimmed, like the terminal's ◇.
-const HubNoteMessage: FC = () => {
-  const note = useAuiState((s) => s.message.metadata.custom["hub"]) as HubNote | undefined;
+// Another agent's hub message comes from the ordered stream. One this agent
+// only saw go by is dimmed, like the terminal's ◇.
+/** The hub-note part a note row carries, or undefined for any other row (decision s, #1451). */
+export function hubNoteOf(row: ChatRow): Extract<ChatPart, { type: "hub-note" }> | undefined {
+  return row.parts.find((part): part is Extract<ChatPart, { type: "hub-note" }> => part.type === "hub-note");
+}
+
+/** The part as the hub box draws it, in the names the view uses. */
+function noteOf(part: Extract<ChatPart, { type: "hub-note" }>): HubNote {
+  return {
+    from: part.from,
+    to: part.to,
+    text: part.text,
+    observed: part.observed,
+    threadId: part.thread_id ?? undefined,
+    replyTo: part.reply_to ?? undefined,
+    isDirect: part.is_direct ?? undefined,
+    presence: part.presence ?? undefined,
+  };
+}
+
+export const HubNoteRowMessage: FC<{
+  row: ChatRow | undefined;
+  fallback: ReactNode;
+}> = ({ row, fallback }) => {
+  const part = row ? hubNoteOf(row) : undefined;
+  if (!row || !part) return <>{fallback}</>;
+  const note = noteOf(part);
   if (note?.presence) {
     // A run of presence chips stacks tight instead of taking a thread gap each.
     return (
       <MessagePrimitive.Root
         data-slot="kollab_hub-message"
-        data-role="system"
+        data-role={row.role}
+        data-chat-row-id={row.id}
         data-presence={note.presence}
         className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150 [[data-presence]+&]:-mt-5"
       >
@@ -262,18 +290,33 @@ const HubNoteMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="kollab_hub-message"
-      data-role="system"
+      data-role={row.role}
+      data-chat-row-id={row.id}
       className={cn(
         "fade-in slide-in-from-bottom-1 animate-in px-2 duration-150",
         note?.observed && "opacity-60",
       )}
     >
       <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo} isDirect={note?.isDirect}>
-        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
+        {note.text}
       </HubNoteView>
     </MessagePrimitive.Root>
   );
 };
+
+function useCurrentChatRow(): ChatRow | undefined {
+  const id = useAuiState((s) => s.message.id);
+  const { rows } = useChatStore();
+  return rows.find((candidate) => candidate.id === id);
+}
+
+export const HubNoteMessage: FC = () => (
+  <HubNoteRowMessage row={useCurrentChatRow()} fallback={<AssistantSystemMessage />} />
+);
+
+export const HubNoteInputMessage: FC = () => (
+  <HubNoteRowMessage row={useCurrentChatRow()} fallback={<AssistantUserMessage />} />
+);
 
 type HubSendArgs = { to?: string; target?: string; message?: string; content?: string; thread?: string; thread_id?: string; reply_to?: string; replyTo?: string };
 
@@ -315,10 +358,9 @@ const HUB_SEND_TOOL_UIS = ["hub_msg", "hub_reply", "hub_broadcast"].map((toolNam
   makeAssistantToolUI<HubSendArgs, unknown>({ toolName, display: "standalone", render: HubSent }),
 );
 
-// Thin adapter over the assistant-ui kit's Thread. Registered tool UIs
-// (PermissionToolUI, mounted in runtime.tsx) resolve via `part.toolUI` inside
-// the kit's own AssistantMessage and take precedence over ToolFallback — see
-// components/assistant-ui/thread.tsx line ~398.
+// Thin adapter over the assistant-ui kit's Thread. Registered tool UIs resolve
+// via `part.toolUI` inside the kit's own AssistantMessage and take precedence
+// over ToolFallback — see components/assistant-ui/thread.tsx.
 export const Thread: FC<{
   agents?: readonly AgentPoolEntry[];
   commands?: readonly SlashCommand[];
@@ -345,16 +387,11 @@ export const Thread: FC<{
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked?: string;
 
-  historyStatus?: { kind: string; message: string };
-  onLoadOlder?: () => Promise<boolean | void>;
-  onRetryHistory?: () => void;
-  historyStartIndex?: number;
   /** Daemon-backed queue mounted above the composer. */
   queuePanel?: ReactNode;
-  /** Current canonical conversation for local queue retry ownership. */
-  queueConversationUid?: string | null;
-  onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
-}> = ({ agents = [], commands = [], commandCatalogStatus = "ready", onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0, queuePanel, queueConversationUid, onQueueBusyMessage }) => (
+  /** A harness session takes no Send Now: it steers a message into its running turn. */
+  harness?: boolean;
+}> = ({ agents = [], commands = [], commandCatalogStatus = "ready", onRetryCommands, onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", queuePanel, harness = false }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -371,9 +408,17 @@ export const Thread: FC<{
         {HUB_SEND_TOOL_UIS.map((HubSendToolUI, index) => (
           <HubSendToolUI key={index} />
         ))}
+        <PermissionToolUI />
+        <PermissionPromptDataUI />
         <ComposerLockContext.Provider value={locked}>
           <AssistantThread
-            components={{ Welcome, ComposerLeading: ComposerGem, ToolGroup, SystemMessage: HubNoteMessage }}
+            components={{
+              Welcome,
+              ComposerLeading: ComposerGem,
+              ToolGroup,
+              UserMessage: HubNoteInputMessage,
+              SystemMessage: HubNoteMessage,
+            }}
             agents={agents}
             commands={commands}
             commandCatalogStatus={commandCatalogStatus}
@@ -382,15 +427,8 @@ export const Thread: FC<{
             onOpenWelcome={onOpenWelcome}
             attachmentsEnabled={attachmentsEnabled}
             draftKey={composerDraftStorageKey(identity, sessionId)}
-            queueSessionId={sessionId}
-            queueConversationUid={queueConversationUid}
-
-            historyStatus={historyStatus}
-            onLoadOlder={onLoadOlder}
-            onRetryHistory={onRetryHistory}
-            historyStartIndex={historyStartIndex}
             queuePanel={queuePanel}
-            onQueueBusyMessage={onQueueBusyMessage}
+            harness={harness}
           />
         </ComposerLockContext.Provider>
       </ComposerPlaceholderContext.Provider>

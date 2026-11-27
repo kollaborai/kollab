@@ -21,6 +21,7 @@ from kollabor_rpc import (
     RpcMethodNotFound,
 )
 
+from .. import media_store
 from ..server import get_session_registry
 
 router = APIRouter(prefix="/sessions", tags=["web-message-queue"])
@@ -254,15 +255,35 @@ async def get_queue_attachment(
     request_id: str,
     ref: str,
 ):
-    result = await _call_queue_rpc(
-        session_id,
-        "state.web_queue.open_attachment",
-        {
-            "expected_conversation_uid": conversation_uid,
-            "request_id": request_id,
-            "ref": ref,
-        },
-    )
+    try:
+        result = await _call_queue_rpc(
+            session_id,
+            "state.web_queue.open_attachment",
+            {
+                "expected_conversation_uid": conversation_uid,
+                "request_id": request_id,
+                "ref": ref,
+            },
+        )
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        from kollabor_config.config_utils import get_project_data_dir
+
+        try:
+            data, mime = media_store.open_queue_handoff_media(
+                get_project_data_dir() / "conversations",
+                session_id,
+                request_id=request_id,
+                source_ref=ref,
+            )
+        except FileNotFoundError:
+            raise exc
+        return Response(
+            content=data,
+            media_type=mime,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
     mime = result.get("mime")
     encoded = result.get("payload_b64")
     if mime not in _IMAGE_MIMES or not isinstance(encoded, str):
@@ -271,7 +292,7 @@ async def get_queue_attachment(
         )
     try:
         data = base64.b64decode(encoded, validate=True)
-    except binascii.Error, ValueError:
+    except (binascii.Error, ValueError):
         raise HTTPException(
             status_code=502, detail="The daemon returned invalid image data."
         ) from None

@@ -11,12 +11,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "packages" / "kollabor-agent" / "src"))
 
+import plugins.altview.mcp_wizard_altview as mcp_wizard
 from kollabor.altview.command_integration import AltViewCommandIntegrator
 from kollabor.commands.mcp_command import register_mcp_commands
 from kollabor.commands.registry import SlashCommandRegistry
 from kollabor.state.snapshots import McpServerInfo, McpSnapshot
 from kollabor_tui.key_parser import KeyPress
-import plugins.altview.mcp_wizard_altview as mcp_wizard
 from plugins.altview.mcp_wizard_altview import McpWizardAltView, build_mcp_entries
 
 

@@ -22,8 +22,8 @@ from kollabor.state.web_message_queue_worker import (
     WebMessageQueueWorker,
     WorkerStatus,
 )
-from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_agent.queue_processor import QueueProcessor
+from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_events import EventBus, EventType, Hook, HookPriority
 from kollabor_tui.display_tap import DisplayTap
 

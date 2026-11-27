@@ -1,0 +1,121 @@
+{
+ "description": "Compaction replaces the window; rows kept under the same ids stay the same rows.",
+ "complete": true,
+ "expect": [],
+ "events": [
+  {
+   "seq": 1,
+   "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
+   "type": "snapshot",
+   "data": {
+    "rows": [
+     {
+      "id": "web-a1",
+      "seq": 3,
+      "kind": "input",
+      "role": "user",
+      "turn_id": "t1",
+      "status": "done",
+      "parts": [
+       {
+        "type": "text",
+        "text": "hello"
+       }
+      ],
+      "created_at": "2026-11-25T12:00:00Z"
+     },
+     {
+      "id": "r1",
+      "seq": 6,
+      "kind": "reply",
+      "role": "assistant",
+      "turn_id": "t1",
+      "status": "complete",
+      "parts": [
+       {
+        "type": "text",
+        "text": "hi"
+       }
+      ],
+      "created_at": "2026-11-25T12:00:00Z"
+     }
+    ],
+    "next_seq": 10,
+    "older": null,
+    "turns": [
+     {
+      "turn_id": "t1",
+      "state": "ended",
+      "input_ids": [
+       "web-a1"
+      ]
+     }
+    ],
+    "inputs": [
+     {
+      "id": "web-a1",
+      "state": "ended",
+      "turn_id": "t1",
+      "outcome": "completed"
+     }
+    ]
+   }
+  },
+  {
+   "seq": 10,
+   "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
+   "type": "replace",
+   "data": {
+    "rows": [
+     {
+      "id": "m1",
+      "seq": 10,
+      "kind": "marker",
+      "role": "system",
+      "turn_id": null,
+      "status": "done",
+      "parts": [
+       {
+        "type": "text",
+        "text": "Earlier messages compacted"
+       }
+      ],
+      "created_at": "2026-11-25T12:00:00Z"
+     },
+     {
+      "id": "web-a1",
+      "seq": 3,
+      "kind": "input",
+      "role": "user",
+      "turn_id": "t1",
+      "status": "done",
+      "parts": [
+       {
+        "type": "text",
+        "text": "hello"
+       }
+      ],
+      "created_at": "2026-11-25T12:00:00Z"
+     },
+     {
+      "id": "r1",
+      "seq": 6,
+      "kind": "reply",
+      "role": "assistant",
+      "turn_id": "t1",
+      "status": "complete",
+      "parts": [
+       {
+        "type": "text",
+        "text": "hi"
+       }
+      ],
+      "created_at": "2026-11-25T12:00:00Z"
+     }
+    ]
+   }
+  }
+ ]
+}

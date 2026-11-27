@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from types import SimpleNamespace
 
 import pytest
 
+from kollabor.state.chat_stream import ChatStreamService
 from kollabor.state.web_message_queue_runtime import register_web_message_queue_runtime
 from kollabor_rpc import RpcCallerContext, RpcServer
 
@@ -47,6 +49,27 @@ class _DispatchState(_ConversationState):
 
     def finish_queue_handoff_batch(self, batch_lease, *, accepted_count, uncertain):
         return accepted_count == len(self.batch_starts[-1].request_ids) and not uncertain
+
+
+class _ServiceBus:
+    def __init__(self):
+        self.services = {}
+
+    def get_service(self, name):
+        return self.services.get(name)
+
+    def register_service(self, name, service):
+        self.services[name] = service
+
+
+class _ChatStreamState(_ConversationState):
+    def __init__(self, uid):
+        super().__init__(uid)
+        self._event_bus = _ServiceBus()
+        self._llm_service = SimpleNamespace(conversation_history=[])
+
+    def chat_stream_snapshot(self):
+        return {"rows": [], "turns": [], "inputs": []}
 
 
 async def _call(server: RpcServer, method: str, params: dict) -> dict:
@@ -205,6 +228,126 @@ async def test_runtime_rejects_declared_image_mime_that_disagrees_with_bytes():
 
     assert staged["error_kind"] == "handler"
     assert runtime.attachments.attachment_count == 0
+
+
+@pytest.mark.asyncio
+async def test_image_only_batch_retry_returns_the_original_idempotent_receipt():
+    server = RpcServer()
+    state = _ChatStreamState("conversation-a")
+    stream = ChatStreamService(state)
+    state._event_bus.register_service("chat_stream", stream)
+    runtime = register_web_message_queue_runtime(server, state)
+    binding = {"expected_conversation_uid": "conversation-a"}
+    allocated = await _call(
+        server,
+        "state.web_queue.allocate_ids",
+        {**binding, "item_count": 1, "operation_count": 1, "attachment_operation_count": 1},
+    )
+    ids = allocated["result"]
+    image = b"\x89PNG\r\n\x1a\nimage-only retry"
+    staged = await _call(
+        server,
+        "state.web_queue.stage_attachment",
+        {
+            **binding,
+            "operation_id": ids["attachment_operation_ids"][0],
+            "mime": "image/png",
+            "payload_b64": base64.b64encode(image).decode("ascii"),
+        },
+    )
+    assert staged["error"] is None
+    request = {
+        **binding,
+        "operation_id": ids["operation_ids"][0],
+        "batch_id": ids["batch_id"],
+        "items": [
+            {
+                "request_id": ids["request_ids"][0],
+                "payload_b64": base64.b64encode(
+                    json.dumps({"text": ""}, separators=(",", ":")).encode()
+                ).decode("ascii"),
+                "attachment_refs": [staged["result"]["ref"]],
+            }
+        ],
+    }
+
+    first = await _call(server, "state.web_queue.enqueue_batch", request)
+    retry = await _call(server, "state.web_queue.enqueue_batch", request)
+
+    assert first["error"] is None
+    assert retry["error"] is None
+    assert retry["result"] == first["result"]
+    rows = stream._snapshot("conversation-a")["rows"]
+    row = next(row for row in rows if row["id"] == ids["request_ids"][0])
+    assert row["parts"][0]["type"] == "image"
+    assert row["parts"][0]["url"].startswith("kollab-queue-image:?")
+    assert await runtime.close() is True
+
+
+@pytest.mark.asyncio
+async def test_large_image_batch_snapshot_uses_small_resolvable_image_references():
+    server = RpcServer()
+    state = _ChatStreamState("conversation-a")
+    stream = ChatStreamService(state)
+    state._event_bus.register_service("chat_stream", stream)
+    runtime = register_web_message_queue_runtime(server, state)
+    binding = {"expected_conversation_uid": "conversation-a"}
+    image_count = 5
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * (3 * 1024 * 1024)
+    allocated = await _call(
+        server,
+        "state.web_queue.allocate_ids",
+        {
+            **binding,
+            "item_count": 1,
+            "operation_count": 1,
+            "attachment_operation_count": image_count,
+        },
+    )
+    ids = allocated["result"]
+    refs = []
+    for operation_id in ids["attachment_operation_ids"]:
+        staged = await _call(
+            server,
+            "state.web_queue.stage_attachment",
+            {
+                **binding,
+                "operation_id": operation_id,
+                "mime": "image/png",
+                "payload_b64": base64.b64encode(image_bytes).decode("ascii"),
+            },
+        )
+        assert staged["error"] is None
+        refs.append(staged["result"]["ref"])
+    enqueued = await _call(
+        server,
+        "state.web_queue.enqueue_batch",
+        {
+            **binding,
+            "operation_id": ids["operation_ids"][0],
+            "batch_id": ids["batch_id"],
+            "items": [
+                {
+                    "request_id": ids["request_ids"][0],
+                    "payload_b64": base64.b64encode(
+                        json.dumps({"text": "inspect these"}, separators=(",", ":")).encode()
+                    ).decode("ascii"),
+                    "attachment_refs": refs,
+                }
+            ],
+        },
+    )
+
+    assert enqueued["error"] is None
+    snapshot = stream._snapshot("conversation-a")
+    serialized = json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
+    row = next(row for row in snapshot["rows"] if row["id"] == ids["request_ids"][0])
+    image_parts = [part for part in row["parts"] if part["type"] == "image"]
+
+    assert len(image_parts) == image_count
+    assert len(serialized) < 16 * 1024 * 1024
+    assert all(part["url"].startswith("kollab-queue-image:?") for part in image_parts)
+    assert await runtime.close() is True
 
 
 @pytest.mark.asyncio

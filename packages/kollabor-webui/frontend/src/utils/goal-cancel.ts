@@ -8,13 +8,17 @@ export function isGoalCommand(command: unknown): boolean {
     const value = part as { type?: unknown; text?: unknown };
     return value.type === "text" && typeof value.text === "string" ? [value.text] : [];
   }).join("\n");
+  return isGoalText(text);
+}
+
+/** Matches the authored command as sent through the new chat input store. */
+export function isGoalText(text: string): boolean {
   return /^\s*\/(?:goal|goals)(?:\s+|$)/i.test(text);
 }
 
-function newGoalReplyId(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return `goal-${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+/** An owner capability that stays local to the input retry and its initiating chat store. */
+export function newGoalReplyId(): string {
+  return `goal-${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
 /** Tracks the actual in-flight run, not whichever daemon turn is active. */
