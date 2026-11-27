@@ -88,7 +88,8 @@ def test_the_voice_suite_can_be_repeated_in_its_own_environment() -> None:
     assert repeat.build_parser().parse_args(["--base", "x"]).suites == repeat.DEFAULT_SUITES
 
 
-def test_root_suite_repeats_run_the_host_scan_tests_ci_runs() -> None:
+def test_root_suite_repeats_run_the_host_scan_tests_ci_runs(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     calls: list[list[str]] = []
 
     def runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
@@ -100,3 +101,17 @@ def test_root_suite_repeats_run_the_host_scan_tests_ci_runs() -> None:
 
     assert "--allow-host-process-enumeration" in calls[0]
     assert "--allow-host-process-enumeration" not in calls[1]  # the option lives in tests/conftest.py
+
+
+def test_local_repeats_leave_host_scans_off_so_conftest_does_not_refuse_the_run(monkeypatch) -> None:
+    # tests/conftest.py exits 4 when the option is passed outside the GitHub-hosted CI job.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    repeat.run_test_file("tests/unit/test_network_halt.py", 1, runner=runner)
+
+    assert "--allow-host-process-enumeration" not in calls[0]
