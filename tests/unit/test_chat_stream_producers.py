@@ -2035,3 +2035,45 @@ async def test_a_queued_input_moves_to_where_its_turn_starts():
             order.remove(row_id)
     assert len(tool_rows) == 2, order
     assert order.index("web-later") > max(order.index(row_id) for row_id in tool_rows), order
+
+
+@pytest.mark.asyncio
+async def test_a_queued_command_moves_to_where_its_turn_starts():
+    """A slash or goal command queued mid-turn moves after that turn's rows when its
+    own turn starts, the same as a queued message (#1451 review r5)."""
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    initial = stream.subscribe({"after": None, "conversation_uid": None})["events"][0]
+
+    def tool(turn_id, tool_id):
+        _publish(state, "tool_start", turn_id=turn_id, tool_id=tool_id,
+                 tool_name="terminal", input={"command": "ls"})
+        _publish(state, "tool_result", turn_id=turn_id, tool_id=tool_id,
+                 tool_name="terminal", input={"command": "ls"}, success=True, output="ok")
+
+    await _add(stream, "web-first", "look around")
+    _publish(state, "turn_start", request_id="web-first", turn_id="native-1", input_source="web")
+    tool("native-1", "tool-1")
+    await _add(stream, "web-help", "/help")
+    tool("native-1", "tool-2")
+    _publish(state, "turn_complete", request_id="web-first", turn_id="native-1", stop_reason="end_turn")
+    uid = stream._conversation_uid()
+    scope = stream._input_scopes[(uid, "web-help")]
+    assert stream.begin_ordered_command("web-help", uid, scope[0]) is not None
+
+    events = _events(stream, initial)
+    assert sequence_problems(events, complete=False) == []
+    order: list[str] = [row["id"] for row in events[0]["data"]["rows"]]
+    tool_rows: set[str] = set()
+    for event in events[1:]:
+        row_id = event["data"].get("id")
+        if event["type"] == "row.upsert":
+            if event["data"]["kind"] == "tool":
+                tool_rows.add(row_id)
+            if row_id not in order:
+                order.append(row_id)
+        elif event["type"] == "row.delete":
+            order.remove(row_id)
+    assert len(tool_rows) == 2, order
+    assert order.index("web-help") > max(order.index(row_id) for row_id in tool_rows), order
