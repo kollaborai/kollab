@@ -4284,7 +4284,17 @@ class LocalStateService(StateService):
 
                     async def emit_with_hooks(self, event_type, data, source):
                         safe = dict(data)
-                        subcommands = {"show", "pause", "resume", "clear", "history", "pending", "requests", "discard", "retry"}
+                        subcommands = {
+                            "show",
+                            "pause",
+                            "resume",
+                            "clear",
+                            "history",
+                            "pending",
+                            "requests",
+                            "discard",
+                            "retry",
+                        }
                         first = command.args[0].lower() if command.args else ""
                         safe_args = [first] if first in subcommands else []
                         safe_text = "/" + command.name + (" " + first if safe_args else "")
@@ -4365,7 +4375,10 @@ class LocalStateService(StateService):
                             "message": "Conversation changed; check the goal in its original conversation.",
                         }
                     return None
-                message = "Goal command could not complete in its original conversation; use /goal requests there to check it."
+                message = (
+                    "Goal command could not complete in its original conversation; "
+                    "use /goal requests there to check it."
+                )
             else:
                 logger.exception("slash command execution failed for web transport")
                 message = str(exc)

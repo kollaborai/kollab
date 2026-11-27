@@ -1995,12 +1995,25 @@ class ACPOrchestrator:
             publish_semantic(
                 self.event_bus,
                 kind,
-                **{k: v for k, v in update.items() if k not in {"kind", "request_id", "turn_id", "source", "thread_id"}},
+                **{
+                    k: v
+                    for k, v in update.items()
+                    if k not in {"kind", "request_id", "turn_id", "source", "thread_id"}
+                },
                 request_id=update.get("request_id"),
                 turn_id=update.get("turn_id"),
                 input_source=update.get("source", "acp"),
                 thread_id=update.get("thread_id"),
-                acp_passthrough=kind in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"},
+                acp_passthrough=(
+                    kind
+                    in {
+                        "tool_call",
+                        "tool_call_update",
+                        "agent_thought_chunk",
+                        "plan",
+                        "usage_update",
+                    }
+                ),
             )
 
         if kind == "turn_start" and persist_dispatch is not None:
