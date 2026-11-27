@@ -234,7 +234,20 @@ def test_snapshot_keeps_cached_roster_when_row_is_not_an_object(tmp_path):
     _write_schedules(root, [_row_dict()])
     builder = SnapshotBuilder(root=root)
     assert [row["id"] for row in builder.build().schedules] == ["s1"]
-
     path.write_text("[null]", encoding="utf-8")
 
     assert [row["id"] for row in builder.build().schedules] == ["s1"]
+
+
+@pytest.mark.parametrize("agents", [[""], ["   "], ["lapis@bad device"]])
+def test_snapshot_keeps_cached_roster_when_agent_name_is_invalid(tmp_path, agents):
+    root = tmp_path / ".kollab"
+    root.mkdir()
+    path = root / "schedules.json"
+    _write_schedules(root, [_row_dict()])
+    builder = SnapshotBuilder(root=root)
+    assert builder.build().schedules[0]["agents"] == ["lapis"]
+
+    _write_schedules(root, [_row_dict(agents=agents)])
+
+    assert builder.build().schedules[0]["agents"] == ["lapis"]
