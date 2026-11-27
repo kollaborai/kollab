@@ -40,7 +40,8 @@ Workspace filename discovery uses the agent package's `file-find` tool and
 `FileOperationsExecutor._execute_find`: a basename glob, a pinned workspace
 directory, and no subprocess or symlink traversal. Its result explicitly reports
 truncation. General terminal commands and session input remain unrestricted;
-see `docs/features/tools.md` for the search contract and platform limits.
+see [File Operations](../../features/tools/built-in-tools.md#file-operations)
+for the search contract and platform limits.
 
 ### Terminal UI Package (`kollabor_tui`)
 
