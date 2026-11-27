@@ -23,6 +23,7 @@ from kollabor_agent.queue_processor import (
     TaggedInput,
     batch_request_ids,
 )
+from kollabor_ai import conversation_logger as conversation_logger_module
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_ai.message_content import combine_message_contents
@@ -1246,10 +1247,15 @@ async def test_external_cancel_persists_plugin_input_terminal_outcome(
     write_started = asyncio.Event()
     release_write = asyncio.Event()
     update_metadata = logger.update_user_message_metadata
+    attempts = 0
 
     async def delayed_update(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
         write_started.set()
         await release_write.wait()
+        if attempts == 1:
+            raise OSError("transient full disk")
         return await update_metadata(*args, **kwargs)
 
     monkeypatch.setattr(logger, "update_user_message_metadata", delayed_update)
@@ -1268,10 +1274,83 @@ async def test_external_cancel_persists_plugin_input_terminal_outcome(
         )
         assert record["message"]["metadata"]["input_id"] == input_id
         assert record["message"]["metadata"]["chat_stream_outcome"] == "failed"
+        # The retry first checks the admission marker, then falls back to the
+        # already-retired marker after the earlier admission transition.
+        assert attempts == 3
         assert processor.processing_queue.empty()
     finally:
         release_write.set()
         await asyncio.gather(*tuple(processor._queued_terminal_tasks))
+
+
+@pytest.mark.asyncio
+async def test_external_cancel_warns_when_plugin_outcome_cannot_be_persisted(
+    tmp_path, monkeypatch, caplog
+):
+    state = _State()
+    logger, coordinator, processor, _stream, _rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=2
+    )
+    await _add_triggered_plugin_input(coordinator, "cancel with persistent disk error")
+    processor._cancel_generation = 0
+    attempts = 0
+    notices = []
+
+    async def failed_update(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OSError("disk full")
+
+    monkeypatch.setattr(logger, "update_user_message_metadata", failed_update)
+    monkeypatch.setattr(
+        processor.message_display_service, "display_error_message", notices.append
+    )
+
+    processor.request_cancellation(origin="external")
+    await asyncio.gather(*tuple(processor._queued_terminal_tasks))
+
+    assert attempts == 3
+    assert len(notices) == 1
+    assert "conversation history" in notices[0] and "disk full" in notices[0]
+    assert "Could not persist native input outcome" in caplog.text
+    assert processor.processing_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_external_cancel_retries_a_real_logger_write_failure(
+    tmp_path, monkeypatch
+):
+    # The real logger must surface a failed file write, not report it as a
+    # row mismatch, or the outcome write is never retried.
+    state = _State()
+    logger, coordinator, processor, _stream, _rpc = _prepare_triggered_plugin_stream(
+        state, tmp_path, max_queue_size=2
+    )
+    input_id = await _add_triggered_plugin_input(coordinator, "cancel with bad write")
+    processor._cancel_generation = 0
+    real_replace = conversation_logger_module.os.replace
+    replaces = 0
+
+    def fail_first_replace(source, target):
+        nonlocal replaces
+        replaces += 1
+        if replaces == 1:
+            raise OSError("transient replace failure")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(conversation_logger_module.os, "replace", fail_first_replace)
+    processor.request_cancellation(origin="external")
+    await asyncio.gather(*tuple(processor._queued_terminal_tasks))
+
+    record = next(
+        json.loads(line)
+        for line in logger.session_file.read_text().splitlines()
+        if json.loads(line).get("type") == "user"
+    )
+    assert record["message"]["metadata"]["input_id"] == input_id
+    assert record["message"]["metadata"]["chat_stream_outcome"] == "failed"
+    assert replaces > 1
+    assert processor.processing_queue.empty()
 
 
 @pytest.mark.asyncio
