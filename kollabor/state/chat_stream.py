@@ -1907,12 +1907,14 @@ class ChatStreamService:
 
         A row queued behind a running turn sits where it was sent. Once a turn
         takes it, it moves to the end, where the transcript and so every later
-        snapshot puts it: a row.delete, then a fresh row.upsert.
+        snapshot puts it: a row.delete, then a fresh row.upsert. It takes the
+        time the turn took it, since snapshots place live rows by created_at.
         """
         rows = self._rows.setdefault(uid, {})
         if row.get("status") == "queued" and next(reversed(rows), None) != row["id"]:
             rows.pop(row["id"], None)
             self._log(uid).publish("row.delete", {"id": row["id"]})
+            changes = {"created_at": self._timestamp(), **changes}
         self._upsert(uid, {**row, **changes})
 
     def _transcript_input_id(self, uid: str, text: str) -> str | None:
