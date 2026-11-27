@@ -86,9 +86,14 @@ class ScheduleRow:
     def from_dict(cls, data: dict) -> "ScheduleRow":
         if not isinstance(data, dict):
             raise TypeError("a schedule row must be an object")
+        agents = data.get("agents")
+        if not isinstance(agents, list) or any(
+            not isinstance(agent, str) for agent in agents
+        ):
+            raise ValueError("schedule agents must be a list of names")
         row = cls(
             id=str(data.get("id", "")),
-            agents=[str(a) for a in data.get("agents") or []],
+            agents=list(agents),
             prompt=str(data.get("prompt", "")),
             interval_seconds=float(data.get("interval_seconds", 0)),
             anchor=float(data.get("anchor", 0)),
