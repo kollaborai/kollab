@@ -3941,7 +3941,7 @@ class LocalStateService(StateService):
             return {"accepted": True, "reason": "slash command"}
 
         try:
-            submit_kwargs = {"source": input_source}
+            submit_kwargs = {"source": UserInputSource(input_source)}
             if request_id is not None or metadata.get("request_id") is not None:
                 submit_kwargs["request_id"] = request_id or metadata["request_id"]
             if thread_id is not None or metadata.get("thread_id") is not None:
