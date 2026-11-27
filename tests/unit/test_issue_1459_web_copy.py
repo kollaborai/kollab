@@ -1,7 +1,10 @@
 """#1459: browser errors and Hub replies do not direct users to a terminal."""
 
+from types import SimpleNamespace
+
 import pytest
-from kollabor_engine import daemon_pool, server, voice_livekit
+
+from kollabor_engine import server, voice_livekit
 
 from plugins.hub import plugin as hub_plugin
 
@@ -29,33 +32,29 @@ def test_missing_voice_server_copy_describes_the_page_state():
     assert "brew install" not in voice_livekit.LIVEKIT_MISSING
 
 
-def test_engine_marks_webui_spawned_agents_for_browser_specific_hub_copy():
-    env = {"KOLLAB_WEBUI_SESSION": "stale", "KEEP_ME": "yes"}
-
-    daemon_pool._set_webui_session_env(env, webui_owned=True)
-    assert env == {"KOLLAB_WEBUI_SESSION": "1", "KEEP_ME": "yes"}
-    daemon_pool._set_webui_session_env(env, webui_owned=False)
-    assert env == {"KEEP_ME": "yes"}
-
-
-def test_hub_copy_keeps_cli_text_and_uses_page_text_for_webui_sessions(monkeypatch):
+def test_hub_copy_uses_request_source_instead_of_daemon_environment(monkeypatch):
     cli_copy = "Run kollab --hub org from the terminal."
     page_copy = "Open Team Launch in the sidebar to choose a team."
+
+    monkeypatch.delenv("KOLLAB_WEBUI_SESSION", raising=False)
+    assert hub_plugin.HubPlugin._surface_copy(
+        cli_copy, page_copy, input_source="webui"
+    ) == page_copy
+
     monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
-
-    assert hub_plugin.HubPlugin._surface_copy(cli_copy, page_copy) == page_copy
-
-    monkeypatch.delenv("KOLLAB_WEBUI_SESSION")
-    assert hub_plugin.HubPlugin._surface_copy(cli_copy, page_copy) == cli_copy
+    assert hub_plugin.HubPlugin._surface_copy(
+        cli_copy, page_copy, input_source="state_rpc"
+    ) == cli_copy
 
 
 @pytest.mark.asyncio
-async def test_dns_unavailable_reply_has_browser_copy_without_changing_cli(monkeypatch):
+async def test_hub_slash_command_carries_request_source_to_dns_reply(monkeypatch):
     monkeypatch.setattr(hub_plugin, "_DNS_AVAILABLE", False)
     instance = object.__new__(hub_plugin.HubPlugin)
-    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
+    command = SimpleNamespace(args=["dns"], _input_source="webui")
+    monkeypatch.delenv("KOLLAB_WEBUI_SESSION", raising=False)
 
-    page_reply = await instance._handle_dns_command("")
+    page_reply = await instance._handle_hub_command(command)
 
     assert page_reply == (
         "Agent DNS is unavailable because this engine is missing a required dependency. "
@@ -63,5 +62,8 @@ async def test_dns_unavailable_reply_has_browser_copy_without_changing_cli(monke
     )
     assert "pip install" not in page_reply
 
-    monkeypatch.delenv("KOLLAB_WEBUI_SESSION")
-    assert await instance._handle_dns_command("") == "dns: PyNaCl not installed\nrun: pip install pynacl"
+    command._input_source = "state_rpc"
+    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
+    assert await instance._handle_hub_command(command) == (
+        "dns: PyNaCl not installed\nrun: pip install pynacl"
+    )

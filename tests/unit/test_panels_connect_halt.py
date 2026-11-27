@@ -144,24 +144,29 @@ async def test_halt_new_form_sends_reason_and_revoke_then_opens_the_halt_screen(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("panel", "action"), [(HALTP, "propose_resume"), (NEWP, "halt")])
 async def test_webui_confirmation_refusal_uses_page_copy_without_changing_cli(monkeypatch, panel, action):
-    monkeypatch.delenv("KOLLAB_WEBUI_SESSION", raising=False)
+    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
     cli = await panel.act(Ctx(snap()), action, {})
     assert cli["message"] == CONFIRM_REFUSAL
 
-    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
-    web = await panel.act(Ctx(snap()), action, {})
+    monkeypatch.delenv("KOLLAB_WEBUI_SESSION")
+    web = await panel.act(
+        Ctx(snap()), action, {"_kollab_input_source": "webui"}
+    )
     assert web["message"] == "Confirm this action in the page before continuing."
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("panel", "action"), [(HALTP, "propose_resume"), (NEWP, "halt")])
 async def test_webui_one_machine_refusal_uses_page_copy_without_changing_cli(monkeypatch, panel, action):
-    monkeypatch.delenv("KOLLAB_WEBUI_SESSION", raising=False)
+    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
     cli = await panel.act(Ctx(snap(), fail=ONE_MACHINE_REFUSAL), action, {"confirmed": True})
     assert cli["message"] == ONE_MACHINE_REFUSAL
 
-    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
-    web = await panel.act(Ctx(snap(), fail=ONE_MACHINE_REFUSAL), action, {"confirmed": True})
+    monkeypatch.delenv("KOLLAB_WEBUI_SESSION")
+    web = await panel.act(
+        Ctx(snap(), fail=ONE_MACHINE_REFUSAL), action,
+        {"confirmed": True, "_kollab_input_source": "webui"},
+    )
     assert web["message"] == (
         "A second device on this network must confirm the resume. Add one before trying again here."
     )
