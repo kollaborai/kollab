@@ -1,0 +1,137 @@
+"""#1459: old agents restart in place through the engine's existing launcher."""
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from kollabor_engine import session as engine_session
+from kollabor_engine.routes import sessions as session_routes
+from kollabor_engine.session import EngineSession
+
+OLD_AGENT_ERROR = "this agent is too old to restart itself: quit it and start it again"
+
+
+@pytest.mark.asyncio
+async def test_restart_route_uses_engine_fallback_for_only_the_old_agent_error(monkeypatch):
+    legacy_restart = AsyncMock(side_effect=ValueError(OLD_AGENT_ERROR))
+    engine_restart = AsyncMock(return_value={"restarting": True, "waiting_for_turn": False})
+    session = SimpleNamespace(
+        state=SimpleNamespace(restart_agent=legacy_restart),
+        restart_outdated_agent=engine_restart,
+    )
+    monkeypatch.setattr(session_routes, "get_session_registry", lambda: {"s1": session})
+
+    result = await session_routes.restart_agent("s1")
+
+    assert result == {
+        "ok": True,
+        "session_id": "s1",
+        "restarting": True,
+        "waiting_for_turn": False,
+    }
+    engine_restart.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_engine_fallback_signals_the_selected_generation_then_reuses_session_start(
+    monkeypatch, tmp_path
+):
+    class Handle:
+        identity = "lapis"
+        project = str(tmp_path)
+        socket_path = str(tmp_path / "lapis.sock")
+        pid = 1234
+        process_started_at = 12.5
+        _daemon_image = "image-1"
+        stopped = False
+
+        @property
+        def alive(self):
+            return not self.stopped
+
+    handle = Handle()
+    presence = {
+        "identity": "lapis",
+        "agent_id": "image-1",
+        "pid": 1234,
+        "started_at": 12.5,
+    }
+    bridge = SimpleNamespace(
+        get_agent_by_identity=lambda identity, use_cache, project: presence
+    )
+    monkeypatch.setattr(engine_session, "HubBridge", lambda: bridge, raising=False)
+
+    async def signal_shutdown(socket_path, **kwargs):
+        assert socket_path == handle.socket_path
+        handle.stopped = True
+        return True
+
+    from plugins.hub.messenger import AgentMessenger
+
+    signal = AsyncMock(side_effect=signal_shutdown)
+    monkeypatch.setattr(AgentMessenger, "signal_shutdown", signal)
+    session = EngineSession(
+        session_id="s1",
+        profile=SimpleNamespace(name="default", provider="custom"),
+        workspace=str(tmp_path),
+        identity="lapis",
+        webui_owned=True,
+    )
+    session.daemon = handle
+    session._borrowed_daemon = True
+    session.external = True
+    session.shutdown = AsyncMock()
+    session.initialize = AsyncMock()
+
+    result = await session.restart_outdated_agent()
+
+    assert result == {"restarting": True, "waiting_for_turn": False}
+    signal.assert_awaited_once_with(
+        handle.socket_path,
+        reason="Restart Agent requested by the web UI",
+        timeout=3.0,
+        expected_agent_id="image-1",
+        expected_pid=1234,
+        expected_started_at=12.5,
+    )
+    session.shutdown.assert_awaited_once_with()
+    session.initialize.assert_awaited_once_with()
+    assert session._borrowed_daemon is False
+    assert session.external is False
+
+
+@pytest.mark.asyncio
+async def test_engine_fallback_refuses_a_replaced_hub_identity(monkeypatch, tmp_path):
+    class Handle:
+        identity = "lapis"
+        project = str(tmp_path)
+        socket_path = str(tmp_path / "lapis.sock")
+        pid = 1234
+        process_started_at = 12.5
+        _daemon_image = "image-1"
+        alive = True
+
+    session = EngineSession(
+        session_id="s1",
+        profile=SimpleNamespace(name="default", provider="custom"),
+        workspace=str(tmp_path),
+        identity="lapis",
+    )
+    session.daemon = Handle()
+    session.shutdown = AsyncMock()
+    session.initialize = AsyncMock()
+    bridge = SimpleNamespace(
+        get_agent_by_identity=lambda identity, use_cache, project: {
+            "identity": "lapis",
+            "agent_id": "replacement-image",
+            "pid": 4321,
+            "started_at": 98.7,
+        }
+    )
+    monkeypatch.setattr(engine_session, "HubBridge", lambda: bridge, raising=False)
+
+    with pytest.raises(ValueError, match="changed"):
+        await session.restart_outdated_agent()
+
+    session.shutdown.assert_not_awaited()
+    session.initialize.assert_not_awaited()
