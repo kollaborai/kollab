@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { initialHistoryBanner, nextOlderBanner, OLDER_LOAD_FAILED, OLDER_LOADING } from "../src/history-banner.ts";
+import { initialHistoryBanner, nextOlderBanner, OLDER_LOAD_FAILED, OLDER_LOADING, threadBanner } from "../src/history-banner.ts";
 
 // The banner over the chat comes from the store's olderStatus (#1451). Loading
 // shows the loading line; failed shows the failure with a way to retry.
@@ -63,4 +63,16 @@ test("a failed stream with rows on screen says the connection is lost, with a re
     message: "Connection lost. Showing the last messages; retry to reconnect now.",
     retry: "reconnect",
   });
+});
+
+// A lost stream outranks a failed page of older rows: its line shows, and its Retry reconnects (#1451 review r7).
+test("a failed stream shows its own line even while an older-page failure is up", () => {
+  const older = nextOlderBanner(null, "failed");
+  expect(threadBanner(older, "failed", 3)).toEqual({
+    kind: "error",
+    message: "Connection lost. Showing the last messages; retry to reconnect now.",
+    retry: "reconnect",
+  });
+  // A live stream keeps the older-page line.
+  expect(threadBanner(older, "live", 3)).toBe(older);
 });
