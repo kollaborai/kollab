@@ -8,13 +8,36 @@ import yaml
 from scripts import flake_catcher as catcher
 
 
+def _pytest_summary_block(*results: str) -> str:
+    timestamp = "2026-11-27T06:41:09.8457290Z "
+    labels = {
+        "FAILED": "failed",
+        "ERROR": "error",
+        "SKIPPED": "skipped",
+        "XFAIL": "xfailed",
+        "XPASS": "xpassed",
+        "PASSED": "passed",
+    }
+    counts: dict[str, int] = {}
+    for result in results:
+        status = result.split(" ", 1)[0]
+        counts[status] = counts.get(status, 0) + 1
+    ending = ", ".join(f"{count} {labels[status]}" for status, count in counts.items())
+    lines = [
+        f"{timestamp}=========================== short test summary info ============================",
+        *(f"{timestamp}{result}" for result in results),
+        f"{timestamp}{ending} in 0.10s (0:00:00)",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def test_parse_failed_lines_extracts_and_deduplicates_pytest_node_ids() -> None:
-    logs = """2026-11-27T00:00:00Z Run pytest
-2026-11-27T00:00:01Z FAILED tests/unit/test_alpha.py::test_one - AssertionError
-FAILED tests/unit/test_beta.py::TestBeta::test_two[param 1] - RuntimeError
-FAILED tests/unit/test_alpha.py::test_one - AssertionError
-ERROR tests/unit/test_gamma.py::test_three - collection error
-"""
+    logs = _pytest_summary_block(
+        "FAILED tests/unit/test_alpha.py::test_one - AssertionError",
+        "FAILED tests/unit/test_beta.py::TestBeta::test_two[param 1] - RuntimeError",
+        "FAILED tests/unit/test_alpha.py::test_one - AssertionError",
+        "ERROR tests/unit/test_gamma.py::test_three - collection error",
+    )
 
     assert catcher.parse_failed_lines(logs) == [
         "tests/unit/test_alpha.py::test_one",
@@ -94,7 +117,7 @@ class FakeGh:
         if path == "repos/owner/repo/actions/runs/7/attempts/1/jobs?per_page=100":
             return json.dumps({"jobs": [{"id": 90, "conclusion": "failure"}]})
         if path == "repos/owner/repo/actions/jobs/90/logs":
-            return "FAILED tests/unit/test_alpha.py::test_one - AssertionError\n"
+            return _pytest_summary_block("FAILED tests/unit/test_alpha.py::test_one - AssertionError")
         if path == "repos/owner/repo/issues?state=all&per_page=100":
             return json.dumps([])
         if path == "repos/owner/repo/issues" and "--method" in args:
@@ -165,9 +188,43 @@ def test_a_duplicate_from_a_concurrent_run_folds_into_the_oldest_issue() -> None
 
 
 def test_parse_failed_lines_keeps_package_suite_tests() -> None:
-    logs = "FAILED packages/kollabor-engine/tests/test_e.py::test_x - AssertionError\n"
+    logs = _pytest_summary_block("FAILED packages/kollabor-engine/tests/test_e.py::test_x - AssertionError")
 
     assert catcher.parse_failed_lines(logs) == ["packages/kollabor-engine/tests/test_e.py::test_x"]
+
+
+def test_parse_failed_lines_ignores_captured_output_before_summary() -> None:
+    logs = (
+        "\ufeff2026-11-27T06:41:09.8453944Z FAILED "
+        "tests/unit/test_printed.py::test_not_failed - diagnostic output\n"
+        + _pytest_summary_block(
+            "FAILED tests/unit/test_actual.py::test_failure - AssertionError",
+        )
+    )
+
+    assert catcher.parse_failed_lines(logs) == ["tests/unit/test_actual.py::test_failure"]
+
+
+def test_parse_failed_lines_reads_each_summary_block_and_stops_at_non_result() -> None:
+    logs = _pytest_summary_block(
+        "FAILED tests/unit/test_first.py::test_failure - AssertionError",
+        "ERROR tests/unit/test_error.py::test_collection - ImportError",
+        "SKIPPED tests/unit/test_skip.py::test_skip - skipped",
+        "XFAIL tests/unit/test_xfail.py::test_expected_failure - expected",
+        "XPASS tests/unit/test_xpass.py::test_unexpected_pass - unexpected",
+        "PASSED tests/unit/test_pass.py::test_pass",
+    ) + (
+        "2026-11-27T06:41:10.0000000Z FAILED "
+        "tests/unit/test_between.py::test_not_failed - outside summary\n"
+        + _pytest_summary_block(
+            "FAILED packages/kollabor-engine/tests/test_second.py::test_link[network - reset] - RuntimeError",
+        )
+    )
+
+    assert catcher.parse_failed_lines(logs) == [
+        "tests/unit/test_first.py::test_failure",
+        "packages/kollabor-engine/tests/test_second.py::test_link[network - reset]",
+    ]
 
 
 def test_job_logs_are_read_even_when_they_hold_terminal_escape_codes() -> None:
@@ -190,7 +247,10 @@ def test_job_logs_are_read_even_when_they_hold_terminal_escape_codes() -> None:
 
 def test_gh_output_that_is_not_utf8_does_not_crash(tmp_path, monkeypatch) -> None:
     fake = tmp_path / "gh"
-    fake.write_text("#!/bin/sh\nprintf 'FAILED tests/unit/test_a.py::t \\377\\n'\n")
+    fake.write_text(
+        "#!/bin/sh\nprintf '================ short test summary info ================\\n"
+        "FAILED tests/unit/test_a.py::t \\377\\n1 failed in 0.01s\\n'\n"
+    )
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
 
@@ -198,9 +258,9 @@ def test_gh_output_that_is_not_utf8_does_not_crash(tmp_path, monkeypatch) -> Non
 
 
 def test_parse_failed_lines_keeps_parameter_ids_that_contain_the_separator() -> None:
-    logs = (
-        "FAILED tests/unit/test_net.py::test_link[network - timeout] - AssertionError\n"
-        "FAILED tests/unit/test_net.py::test_link[network - reset] - AssertionError\n"
+    logs = _pytest_summary_block(
+        "FAILED tests/unit/test_net.py::test_link[network - timeout] - AssertionError",
+        "FAILED tests/unit/test_net.py::test_link[network - reset] - AssertionError",
     )
 
     assert catcher.parse_failed_lines(logs) == [
