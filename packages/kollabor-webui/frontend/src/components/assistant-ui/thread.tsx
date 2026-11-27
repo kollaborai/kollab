@@ -379,7 +379,13 @@ const ThreadRoot: FC<{
 
           <div
             data-slot="aui_message-group"
-            className="mb-14 flex flex-col gap-y-6 empty:hidden"
+            // A reply streams as several rows (text, tool steps, more text). Pieces that follow one
+            // another read as one reply: tighter spacing, and only the last piece keeps the action row.
+            className={cn(
+              "mb-14 flex flex-col gap-y-6 empty:hidden",
+              "[&>[data-role=assistant]+[data-role=assistant]]:-mt-3.5",
+              "[&>[data-role=assistant]:has(+[data-role=assistant])_[data-slot=aui_assistant-message-footer]]:hidden",
+            )}
           >
             <ThreadPrimitive.Messages>
               {() => <ThreadMessage />}
