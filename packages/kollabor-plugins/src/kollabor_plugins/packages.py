@@ -194,6 +194,36 @@ def heartbeat_seconds(service: object) -> float | None:
         return None
     return float(value)
 _CONTRIBUTION_KEYS = {"menu", "views", "pages", "modals", "slash", "renderers"}
+_CONTRIBUTION_IDENTITY_FIELDS = ("id", "name", "tool", "tag")
+_CONTRIBUTION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z", re.ASCII)
+_RENDERER_TAG_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*\Z", re.ASCII)
+
+
+def _has_single_contribution_identity(value: object, *, required: str | None = None) -> bool:
+    if isinstance(value, str):
+        return bool(_CONTRIBUTION_ID.fullmatch(value)) and required is None
+    if not isinstance(value, dict):
+        return False
+    identities = [field for field in _CONTRIBUTION_IDENTITY_FIELDS if field in value]
+    if len(identities) != 1:
+        return False
+    identity = identities[0]
+    identity_value = value[identity]
+    return (
+        isinstance(identity_value, str)
+        and bool(_CONTRIBUTION_ID.fullmatch(identity_value))
+        and (required is None or identity == required)
+    )
+
+
+def _is_valid_renderer_declaration(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if _has_single_contribution_identity(value, required="tool"):
+        return isinstance(value.get("tool"), str) and bool(_CONTRIBUTION_ID.fullmatch(value["tool"]))
+    if _has_single_contribution_identity(value, required="tag"):
+        return isinstance(value.get("tag"), str) and bool(_RENDERER_TAG_NAME.fullmatch(value["tag"]))
+    return False
 
 
 def _within(root: Path, value: object, label: str) -> Path:
@@ -283,6 +313,15 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
             raise ManifestReviewLimitError(
                 f"Plugin manifest exceeds {_MAX_PLUGIN_CONTRIBUTIONS} {kind} contributions"
             )
+        if any(
+            not (
+                _is_valid_renderer_declaration(item)
+                if kind == "renderers"
+                else _has_single_contribution_identity(item, required="id" if kind == "menu" else None)
+            )
+            for item in items
+        ):
+            raise ValueError("Invalid contributes identity")
     services = manifest.get("services", {})
     if not isinstance(services, dict):
         raise ValueError("Invalid services")

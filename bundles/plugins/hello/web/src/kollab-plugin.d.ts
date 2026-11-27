@@ -74,12 +74,12 @@ export type PluginEntry = {
   error: string | null;
   web: { entry: string; style?: string | null; hash: string } | null;
   contributes: {
-    menu?: DeclaredRow[];
-    views?: Declared[];
-    pages?: Declared[];
-    modals?: Declared[];
-    slash?: Declared[];
-    renderers?: Declared[];
+    menu: DeclaredRow[];
+    views: Declared[];
+    pages: Declared[];
+    modals: Declared[];
+    slash: Declared[];
+    renderers: Declared[];
   };
   services: PluginService[];
   settings?: PanelField[];
@@ -99,8 +99,8 @@ export type PluginEntry = {
 
 /** `GET /plugins` response. `server_time` is Unix time in seconds. */
 export type PluginInventoryResponse = {
-  plugins?: unknown;
-  server_time?: unknown;
+  plugins: PluginEntry[];
+  server_time?: number;
 };
 
 /** The open chat, as a plugin view receives it. */
@@ -124,7 +124,21 @@ export type PageSpec = { id: string; title: string; tabs: PluginTab[] };
 export type ModalSpec = { id: string; title: string; tabs: PluginTab[] };
 export type SettingsSpec = { render: PluginComponent };
 export type CommandSpec = { name: string; description: string; run: (args: string) => unknown };
-export type RendererSpec = { tool?: string; tag?: string; render: ComponentType<{ k: PluginApi; data: unknown }> };
+/** What a chat renderer receives: `k` and its props, never a session. */
+export type PluginRendererProps = {
+  k: PluginApi;
+  toolCall?: { name: string; args: unknown; result?: unknown; status?: unknown };
+  tag?: { name: string; content: string };
+};
+export type PluginToolRendererProps = Pick<PluginRendererProps, "k"> & {
+  toolCall: NonNullable<PluginRendererProps["toolCall"]>;
+};
+export type PluginTagRendererProps = Pick<PluginRendererProps, "k"> & {
+  tag: NonNullable<PluginRendererProps["tag"]>;
+};
+export type RendererSpec =
+  | { tool: string; tag?: never; render: ComponentType<PluginToolRendererProps> }
+  | { tag: string; tool?: never; render: ComponentType<PluginTagRendererProps> };
 export type NoticeButton = { label: string; open?: OpenTarget; run?: () => unknown };
 export type NoticeSpec = { text: string; button?: NoticeButton };
 export type ApiOptions = { refreshOn?: string; everyMs?: number };
@@ -149,7 +163,7 @@ export type PluginApi = {
   };
   /** A composer slash command. */
   command(spec: CommandSpec): void;
-  /** A chat card for a tool or a message tag it owns. */
+  /** A chat card for a declared tool or tag. Kollab always keeps its native `request_permission` renderer. */
   renderer(spec: RendererSpec): void;
   /** One NoticeBar line with at most one button; returns its dismissal. */
   notice(spec: NoticeSpec): () => void;

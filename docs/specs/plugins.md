@@ -159,16 +159,27 @@ or removing the plugin.
 **Notices.** A plugin can raise a NoticeBar notice: one line and at most one action button, plus a dismiss
 control, with no ids or version numbers in the text: `A pull request is waiting for your review.  [Open]`.
 
-**Composer and chat.** Plugin slash commands appear in the composer palette. A plugin can draw its own
-card for a tool or message it owns, such as a PR status card.
+**Composer and chat.** Plugin slash commands appear in the composer palette. Submitting a matching
+command without attachments consumes the draft and calls the plugin's `run(args)` locally, but only
+after the session command catalog is ready. While the catalog loads, Kollab keeps the submitted text
+in the composer for at most two seconds; if the catalog is unavailable or the wait expires, Kollab sends
+the text as a normal chat message. A plugin can draw a card for its tool or an inline card for its
+registered tag in assistant message text. Native command names and aliases remain reserved for native
+commands while the session command catalog loads or is unavailable.
 
 **Failures.** A plugin whose code fails while loading keeps its row as `PR Chain  Failed to Load`, and
-one that fails while drawing shows `Failed to Render`; both open a small kollab-drawn panel with Retry,
-View Error and Turn Off, and everything else keeps working. A plugin whose last boot never finished (the
-tab froze or closed during it) is skipped on the next load with the notice `PR Chain was skipped: it
-froze the page last time.  [Turn On Again]`. `?plugins=off` in the page URL loads the web UI with no plugin code and Settings →
-Plugins says `Plugins are off for this page`. The configured agent-run caps are intended settings; the
-current engine does not enforce them yet.
+one that fails while drawing shows `Failed to Render`; both open a small kollab-drawn panel with Retry
+and View Error, and everything else keeps working. Every plugin view, tab, settings view, tool card and
+tag card has that render boundary and a Suspense fallback. Its five-second timeout covers suspended
+renders only, after React commits the fallback. Plugin code runs on the page's main thread; a synchronous
+loop freezes the tab and cannot be interrupted by the timeout. Plugin render failures and host-managed action
+failures show fixed safe text, with error details written only to the redacted browser log. Plugin-owned UI callbacks,
+including view button `onClick` handlers, are outside the render boundary and do not receive that safe-text handling.
+Event listener throws and rejections are caught and logged with redaction; they do not produce a UI message. A plugin whose last boot never finished (the tab froze
+or closed during it) is skipped on the next load with the notice `PR Chain was skipped: it froze the page
+last time.  [Turn On Again]`. `?plugins=off` in the page URL loads the web UI with no plugin code and
+Settings → Plugins says `Plugins are off for this page`. The configured agent-run caps are intended
+settings; the current engine does not enforce them yet.
 
 ### Terminal
 
@@ -254,7 +265,7 @@ as `kollab_plugin_pr_chain` and two packages never collide.
 | `engine` | `make_router(ctx: PluginContext) -> APIRouter`, mounted under `/plugins/{id}/api/` |
 | `services.<name>` | `<name>` matches `^[a-z0-9][a-z0-9-]{0,39}$`; `command` (run from the plugin folder); `autostart`; `restart` (`on-failure` default, `always`, `never`); `stop_timeout_s` (default 30); `heartbeat_s` (optional); both must be numbers above 0 and at most 86400 seconds; `secrets` (granted secrets the wrapper puts in its environment) |
 | `web` | the entry module and stylesheet, both inside `web/dist/` |
-| `contributes` | everything the plugin adds, by id: `menu` rows, `views`, `pages`, `modals`, `slash` commands and chat `renderers`. The sheet's Adds line and the app's rows come from here, so a row exists even when the bundle fails; the bundle's `k.*` calls bind to these ids, and an undeclared id is ignored with a warning |
+| `contributes` | everything the plugin adds: `menu` rows, `views`, `pages`, `modals`, `slash` commands and chat `renderers`. Each non-menu row has exactly one identity field (`id`, `name`, `tool` or `tag`); menu rows use `id`. Renderer rows must declare exactly one `{ "tool": "..." }` or `{ "tag": "..." }`; bare strings and `{ "id": ... }` or `{ "name": ... }` renderer rows are malformed and counted as omissions. Tag names use `[A-Za-z][A-Za-z0-9_-]*`. The sheet's Adds line and the app's rows come from here, so a row exists even when the bundle fails; the bundle's `k.*` calls bind to these ids, and an undeclared id is ignored with a warning |
 | `version`, `description` | strings |
 | `agents`, `skills`, `commands`, `hooks`, `mcp`, `settings` | paths inside the plugin, in the formats kollab already reads |
 | `uses` | see the next section |
@@ -507,9 +518,11 @@ export default definePlugin((k) => {
 });
 ```
 
-Every `render` is a React component that receives `{ k, session }` as props (`session` only inside a
-`view`). The `/badge` route answers `{text, hint}`. Paths in `k.api`, `k.useApi` and `count.path` are
-relative to `/plugins/{id}/api/`.
+View, page-tab, modal-tab, and settings render components receive `{ k, session? }`; `session` is
+provided for a `view`. A chat renderer registered with `k.renderer` receives `{ k, toolCall }` for a
+tool renderer or `{ k, tag }` for a tag renderer, never `session`. `toolCall` has `name`, `args`,
+`result`, and `status`; `tag` has `name` and `content`. The `/badge` route answers `{text, hint}`.
+Paths in `k.api`, `k.useApi` and `count.path` are relative to `/plugins/{id}/api/`.
 
 Contribution points. Each is one existing component that also reads the plugin registry:
 
@@ -520,9 +533,14 @@ Contribution points. Each is one existing component that also reads the plugin r
 | `k.page({id, title, tabs})` | the whole main area with a plugin tab bar | main column in `App.tsx` |
 | `k.modal({id, title, tabs})` | a dialog with tabs; full screen on a phone | `components/ui/dialog` |
 | `k.settings({render})` | Settings → Plugins → this plugin, under its generated form | `panel-model.ts`, `PanelHost.tsx` |
-| `k.command({name, description, run})` | the composer palette | the composer's slash palette |
-| `k.renderer({tool or tag, render})` | a chat card for that tool or message tag | `Thread.tsx` |
+| `k.command({name, description, run})` | the composer palette; submitting a matching draft without attachments calls `run(args)` locally | `composer-commands.ts`, `components/assistant-ui/thread.tsx` |
+| `k.renderer({tool or tag, render})` | a tool-call card or an inline card for a registered tag in assistant message text; the host always keeps its native `request_permission` renderer | `renderers.tsx`, `components/assistant-ui/thread.tsx` |
 | `k.notice({text, button})` | NoticeBar | `NoticeBar.tsx` |
+
+Tag renderer names use `[A-Za-z][A-Za-z0-9_-]*` and must match the tag's case. Assistant message
+text uses bare `<name>content</name>` tags with no attributes; unmatched or incomplete tags stay
+ordinary Markdown text. A tag renderer is mounted inline inside the Markdown paragraph, so its
+component must return phrasing content such as a `span`, not block content such as a `div`.
 
 `open` is `{page}`, `{modal}`, `{view}` (switches the open chat to that tab) or `{url}`.
 
@@ -546,8 +564,8 @@ streamed output sits in an `aria-live="polite"` region. Each plugin view mounts 
 `kollab plugin add` warns when `index.css` has rules outside it.
 
 Loading: at boot the app reads `GET /plugins`, `import()`s every enabled entry in parallel and awaits
-each plugin function. A 5 s limit covers the import and that await; it cannot stop a synchronous loop
-in plugin code, which freezes the tab, and `?plugins=off` is the way back in. Retry imports
+each plugin function. A 5 s limit covers the import and that await; it cannot interrupt a synchronous
+loop in plugin code, which freezes the tab, and `?plugins=off` is the way back in. Retry imports
 `index.js?v=<hash>&retry=<n>` so the browser does not hand back the failed module, and a timed-out
 import that resolves later is ignored. On `plugins-changed` the page reads `GET /plugins` again and
 adds or removes rows, tabs and pages without a reload.
@@ -662,6 +680,7 @@ already applies to `get_config_widgets()` sections, with current values from the
 that do not apply to a kind are `null`. The terminal's `/config` builds its Plugins part from it, the web
 reads it from `GET /plugins`, and the `config` panel stops adding plugin sections. `PluginConfigManager`
 folds into it; its readers (`kollabor_config/loader.py:310-315` and `:770`) move in the same change.
+The inventory always includes all six contribution arrays; a missing contribution kind makes that row incomplete, not empty.
 
 ### Background processes
 
@@ -839,8 +858,9 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 7. If an update is available, then `update` shows the sheet with the commit range and changed folders,
    and nothing changes until the user confirms the commit the sheet showed; the old version keeps running
    meanwhile.
-8. If two plugins register the same slash command, then the one enabled first keeps it and the other's
-   Settings row says `/deploy is taken by Deploy Bot`. Turning off the first frees it for the second.
+8. If two plugins register the same slash command, then the one enabled first keeps it, the composer
+   palette omits the other's command, and the browser console warns which plugin owns the name. Turning
+   off the first frees it for the second.
 9. If the page is open on a phone through PhoneLink, then plugin code is not imported, plugin inventory and
    allowed service logs are readable, and Settings → Plugins is read-only with `Manage plugins on this computer`.
 10. If a plugin needs a newer kollab than the one running, then `add` refuses with `PR Chain needs kollab
@@ -868,9 +888,9 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
 
 ## Failure modes
 
-1. **Web bundle throws or fails to render.** A per-plugin error boundary and a 5 s limit on the import
-   and the awaited function; the app boots without it. A synchronous hang freezes the tab; recovery is
-   a reload with `?plugins=off`.
+1. **Web bundle throws or fails to render.** A per-plugin error boundary, a 5 s limit on import and the
+   awaited function, and a 5 s timeout for suspended rendering after React commits the fallback; the
+   app boots without it. A synchronous hang freezes the tab; recovery is a reload with `?plugins=off`.
 2. **Engine router or `python` entry fails while loading.** That part is skipped, the process keeps
    running, and `/plugins` reports `state: "error"` with the message.
 3. **Background process crash loop.** The wrapper's backoff and five-crash stop, a notice, the menu count
@@ -975,7 +995,8 @@ Red first; each test lands failing before its code:
   the proxy and the PhoneLink bridge; a token in a log line comes back redacted; a second wrapper exits
   while the first holds the lock.
 - `packages/kollabor-webui/frontend/src/plugins/*.test.ts`: error boundary, Failed to Render, the 5 s
-  limit, Retry with a new URL, a late import ignored, `plugins-changed` adds and removes rows, a chat on
+  suspended-render timeout, Retry with a new URL, a late import ignored, `plugins-changed` adds and removes
+  rows, a chat on
   a removed tab goes to Chat, one React instance, text from GitHub rendered as text.
 - Browser acceptance `frontend/tests/acceptance/plugins.browser.mjs`: the hello plugin adds a row and
   opens a page, a modal and a tab at 1440 and 390 px; turning it off removes them live; a throwing plugin

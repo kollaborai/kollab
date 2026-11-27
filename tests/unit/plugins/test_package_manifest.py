@@ -19,6 +19,18 @@ import pytest
         ("service-name", "service"),
         ("undeclared-secret", "secret"),
         ("contributes", "contributes"),
+        ("invalid-contribution-menu", "contributes"),
+        ("invalid-contribution-views", "contributes"),
+        ("invalid-contribution-pages", "contributes"),
+        ("invalid-contribution-modals", "contributes"),
+        ("invalid-contribution-slash", "contributes"),
+        ("multiple-slash-identities", "contributes"),
+        ("multiple-renderer-identities", "contributes"),
+        ("renderer-string", "contributes"),
+        ("renderer-id", "contributes"),
+        ("renderer-name", "contributes"),
+        ("renderer-invalid-tag", "contributes"),
+        ("multiple-menu-identities", "contributes"),
     ],
 )
 def test_manifest_checks(change, message, tmp_path, monkeypatch):
@@ -61,12 +73,72 @@ def test_manifest_checks(change, message, tmp_path, monkeypatch):
         manifest["services"] = {"loop": {"command": ["python3"], "secrets": ["KEY"]}}
     elif change == "contributes":
         manifest["contributes"] = {"typo": []}
+    elif change.startswith("invalid-contribution-"):
+        kind = change.removeprefix("invalid-contribution-")
+        identity = "publish command"
+        manifest["contributes"] = {
+            kind: [identity] if kind == "slash" else [{"id": identity}]
+        }
+    elif change == "multiple-slash-identities":
+        manifest["contributes"] = {"slash": [{"id": "deploy", "name": "review"}]}
+    elif change == "multiple-renderer-identities":
+        manifest["contributes"] = {"renderers": [{"tool": "shell", "tag": "card"}]}
+    elif change == "renderer-string":
+        manifest["contributes"] = {"renderers": ["shell"]}
+    elif change == "renderer-id":
+        manifest["contributes"] = {"renderers": [{"id": "shell"}]}
+    elif change == "renderer-name":
+        manifest["contributes"] = {"renderers": [{"name": "shell"}]}
+    elif change == "renderer-invalid-tag":
+        manifest["contributes"] = {"renderers": [{"tag": "my.card"}]}
+    elif change == "multiple-menu-identities":
+        manifest["contributes"] = {
+            "menu": [{"id": "home", "name": "other", "label": "Home", "open": {"view": "home"}}]
+        }
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
     if message:
         with pytest.raises(ValueError, match=message):
             validate_manifest(root, "0.23.0")
     else:
         assert validate_manifest(root, "0.23.0") == manifest
+
+
+@pytest.mark.parametrize("kind", ["menu", "views", "pages", "modals", "slash", "renderers"])
+@pytest.mark.parametrize("field", ["id", "name", "tool", "tag"])
+def test_manifest_rejects_non_string_contribution_identities(kind, field, tmp_path, monkeypatch):
+    if kind == "menu" and field != "id":
+        pytest.skip("menu declarations require id")
+    if kind == "renderers" and field not in {"tool", "tag"}:
+        pytest.skip("renderer declarations require tool or tag")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import validate_manifest
+    from kollabor_plugins.registry import _normalize_declared
+
+    root = tmp_path / "package"
+    (root / "python").mkdir(parents=True)
+    (root / "python" / "entry.py").write_text("pass\n")
+    manifest = {
+        "format": 1,
+        "id": "hello",
+        "name": "Hello",
+        "version": "1.0.0",
+        "description": "Example",
+        "kollab": ">=0.23.0",
+        "python": "python/entry.py:Hello",
+        "uses": [],
+        "contributes": {kind: [{field: 42}]},
+    }
+    assert _normalize_declared({field: 42}) is None
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="contributes identity"):
+        validate_manifest(root, "0.23.0")
+
+
+def test_inventory_preserves_the_documented_sk_fetch_renderer_tag():
+    from kollabor_plugins.registry import _normalize_declared
+
+    assert _normalize_declared({"tag": "sk-fetch"}) == {"tag": "sk-fetch"}
 
 
 @pytest.mark.parametrize("key", ["stop_timeout_s", "heartbeat_s"])
