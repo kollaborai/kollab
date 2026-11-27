@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-11-27
+
+### Added
+- The weekly PR throughput report shows CI runs per merged PR: pull request `ci.yml` run attempts in the window divided by PRs merged in it (#1496).
+- Web UI plugins can render tool-call cards and inline cards for registered tags in assistant message text. Their slash commands appear in the composer palette and run locally from the composer (#1028).
+
+### Changed
+- Web UI test discovery uses stable patterns, and tool calling guidance is split by section to reduce unrelated edit conflicts (#1474).
+- CI now repeats changed tests on pull requests, tracks red-to-green flakes, and runs quarantined tests in a non-blocking lane (#1471).
+- Retired the `ci/base-fresh` workflow and its operations page while keeping the blast-radius analysis script (#1471).
+
+### Fixed
+- Invalid GitHub API JSON marks affected KPI metrics missing and keeps the report running (#1499).
+- Native input terminal outcomes retry transient history write failures and warn when the result cannot be saved (#1497).
+- Merge-flow window pull requests no longer trigger overlap notices with their source pull requests (#1495).
+- External cancellation outcome coverage waits for its persistence task (#1494).
+- Test files are selected by their `node:test` or Vitest import syntax (#1482).
+- Capturing a background terminal session right after its command exits returns the command's full output instead of sometimes nothing (#1465).
+- The Telegram voice cleanup tests pass on macOS: their fake whisper process now stops the way the non-Linux path stops it (#1463).
+- A chat stream that cannot reconnect now shows a plain retry notice instead of leaving a raw stream error in the conversation (#1452).
+- Web UI chat follows one daemon-owned transcript, so sent messages, replies and turn status stay in place as the stream updates (#1451).
+- Clearing history publishes the new conversation to every connected chat client so the prior transcript disappears immediately (#1451).
+- System initialization prompts stay in model context and are excluded from visible chat snapshots (#1451).
+- Transcript reloads hide model-only tool batches, HUD text and compaction summaries while preserving structured hub notes, native tool results, reply segments and private goal input IDs (#1451).
+- Keep native goal attempts associated with their running chat turns across a web page reload (#1451). Expose the persisted goal and attempt binding through an authenticated conversation-scoped engine read.
+- Web UI chat groups a turn's tool steps again, opens a saved picture in the viewer, shows a reopened chat's saved
+  messages while it cannot connect, and tells you how to restart an agent that runs older code than the chat (#1451).
+- Send Now and Stop during a tool call end the running turn, a message sent from the queue shows where its turn
+  starts, and a failed tool call no longer marks the whole step group as an error (#1451).
+- Send Now stops the running turn at once, even mid tool call, and starts the queued message as the next turn; the
+  stopped reply shows as cancelled and its tool results stay in the conversation (#1451).
+- A message removed from the queue leaves the chat, and the note that asks the model to continue a cut-off reply no
+  longer shows as your message (#1451).
+- A web chat whose connection drops for more than about half a minute, such as while the engine restarts, keeps
+  checking and comes back on its own; until then it says the connection is lost, with a Retry. A queued message's
+  stopped or finished state is now saved, so a reload no longer shows a stopped message as finished (#1451).
+- With an ACP agent, Send Now saves the stopped turn's reply and tool calls before your new message, so a reloaded
+  chat shows them in the order they happened. Queued slash commands move below the earlier turn like messages (#1451).
+- Hide visible scrollbar chrome across the web UI — native scrollbars (both axes, including portaled dialogs), the shared Radix ScrollArea scrollbar, Monaco editor and minimap sliders, and xterm's own scrollback scrollbar — while scrolling itself stays fully available through wheel, trackpad, touch, keyboard, and script (#1174).
+- Plugin commands reserve built-in names and follow declared enable order. Malformed contribution refreshes retain last-good declarations; dropped declarations count as omissions, and each contribution row binds exactly one identity. Renderer recovery tracks streamed args, unload ignores late failures, and tag renderers preserve code across lazy blockquote continuations. Inventory exposes all six normalized contributions; error logs redact suffixed credential names and PEM private-key blocks (#1028).
+- Plugin slash submits stay with their original draft during session switches, returned contribution updates take effect, and common credential formats are redacted consistently in the browser and plugin logs (#1028).
+
 ## [0.23.1] - 2026-11-24
 
 ### Added
