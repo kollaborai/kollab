@@ -448,6 +448,23 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
         run: uv run python scripts/repeat_changed_tests.py --base "$BASE_REF" --runs 20
 
+      # The voice suite needs its own pinned environment (as in support_voice_tests);
+      # it is installed only when a voice test changed.
+      - name: Repeat changed voice test files
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --name-only --diff-filter=ACMR "$BASE_REF...HEAD" -- packages/kollabor-voice/tests | grep -q .; then
+            uv run --no-project --python 3.12 --with numpy==2.5.3 \
+              --with pytest --with pytest-asyncio \
+              --with livekit==1.1.20 --with livekit-agents==1.8.8 \
+              --with livekit-plugins-silero==1.8.8 --with onnxruntime==1.30.0 \
+              --with livekit-local-inference==0.2.7 \
+              python scripts/repeat_changed_tests.py --base "$BASE_REF" --runs 20 --suites packages/kollabor-voice/tests
+          else
+            echo "No changed voice test files; nothing to repeat."
+          fi
+
   quarantine:
     name: ci/quarantine
     continue-on-error: true

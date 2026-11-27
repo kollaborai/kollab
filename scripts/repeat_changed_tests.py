@@ -12,17 +12,18 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parent.parent
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 # The Python suites CI runs with the root environment. The voice suite needs its own
-# pinned environment (ci.yml support_voice_tests), so it is not repeated here.
+# pinned environment (ci.yml support_voice_tests); the repeat job runs it with --suites there.
 ROOT_SUITE = "tests"
 PACKAGE_SUITES = ("packages/kollabor-engine/tests", "packages/kollabor-rpc/tests")
+DEFAULT_SUITES = (ROOT_SUITE, *PACKAGE_SUITES)
 
 
-def select_test_files(paths: Sequence[str]) -> list[str]:
+def select_test_files(paths: Sequence[str], suites: Sequence[str] = DEFAULT_SUITES) -> list[str]:
     """Keep added or changed Python tests in the suites CI runs, in stable order."""
     selected = {
         path
         for raw in paths
-        if (path := str(PurePosixPath(raw))).startswith(tuple(f"{s}/" for s in (ROOT_SUITE, *PACKAGE_SUITES)))
+        if (path := str(PurePosixPath(raw))).startswith(tuple(f"{s}/" for s in suites))
         and len(PurePosixPath(path).parts) > 1
         and PurePosixPath(path).name.startswith("test_")
         and PurePosixPath(path).suffix == ".py"
@@ -30,7 +31,9 @@ def select_test_files(paths: Sequence[str]) -> list[str]:
     return sorted(selected)
 
 
-def changed_test_files(base_ref: str, *, runner: Runner | None = None) -> list[str]:
+def changed_test_files(
+    base_ref: str, *, runner: Runner | None = None, suites: Sequence[str] = DEFAULT_SUITES
+) -> list[str]:
     """Return test files added or changed between base_ref and HEAD."""
     command = [
         "git",
@@ -39,8 +42,7 @@ def changed_test_files(base_ref: str, *, runner: Runner | None = None) -> list[s
         "--diff-filter=ACMR",
         f"{base_ref}...HEAD",
         "--",
-        ROOT_SUITE,
-        *PACKAGE_SUITES,
+        *suites,
     ]
     result = (runner or subprocess.run)(
         command,
@@ -49,7 +51,7 @@ def changed_test_files(base_ref: str, *, runner: Runner | None = None) -> list[s
         text=True,
         check=True,
     )
-    return [path for path in select_test_files(result.stdout.splitlines()) if (ROOT / path).is_file()]
+    return [path for path in select_test_files(result.stdout.splitlines(), suites) if (ROOT / path).is_file()]
 
 
 def run_test_file(
@@ -103,12 +105,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True, help="base ref for the PR diff")
     parser.add_argument("--runs", type=positive_int, default=20)
+    parser.add_argument(
+        "--suites",
+        type=lambda value: tuple(filter(None, value.split(","))),
+        default=DEFAULT_SUITES,
+        help="comma-separated test suites to diff and repeat (the voice suite runs in its own environment)",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    paths = changed_test_files(args.base)
+    paths = changed_test_files(args.base, suites=args.suites)
     if not paths:
         print("No changed test files; nothing to repeat.")
         return 0

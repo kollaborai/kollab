@@ -20,6 +20,8 @@ def _run_gh(args: Sequence[str]) -> str:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",  # job logs are not guaranteed to be valid UTF-8
     )
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "gh api failed")
@@ -70,7 +72,13 @@ def _rows(payload: Any, key: str | None = None) -> list[dict[str, Any]]:
 
 
 def _api_text(gh: Gh, path: str) -> str:
-    payload = gh(["api", path])
+    # gh refuses to print text with terminal escape codes (CI logs have colors) unless told to.
+    try:
+        payload = gh(["api", path, "--allow-escape-sequences"])
+    except RuntimeError as exc:
+        if "unknown flag" not in str(exc):
+            raise
+        payload = gh(["api", path])  # older gh has no such flag and no such refusal
     if not isinstance(payload, str):
         raise RuntimeError(f"{path} did not return plain-text logs")
     return payload
@@ -86,7 +94,7 @@ def parse_failed_lines(logs: str) -> list[str]:
             continue
         summary = line[marker + len("FAILED ") :].strip()
         nodeid = summary.partition(" - ")[0].strip()
-        if not nodeid.startswith("tests/") or ".py::" not in nodeid:
+        if not re.match(r"(tests|packages/[\w-]+/tests)/", nodeid) or ".py::" not in nodeid:
             continue
         if nodeid not in seen:
             seen.add(nodeid)
