@@ -157,6 +157,96 @@ def plan(repo: Path, base: str, heads: list[Head], agents: int = FIX_AGENTS) -> 
     }
 
 
+def verify(repo: Path, base: str, heads: dict[int, str], window: str) -> list[str]:
+    """Problems that stop ``window`` from landing; empty when it is exactly ``heads`` merged onto ``base``."""
+    problems = []
+    if git(repo, "rev-parse", f"{window}^1", ok=(0, 128))[1] != base:
+        problems.append(f"window {window[:9]} does not sit directly on base {base[:9]}")
+    for n, sha in sorted(heads.items()):
+        if git(repo, "merge-base", "--is-ancestor", sha, window, ok=(0, 1))[0]:
+            problems.append(f"#{n} head {sha[:9]} is not in the window")
+    replay = plan(repo, base, [Head(n, sha, changed_files(repo, base, sha)) for n, sha in sorted(heads.items())])
+    if replay["landed"] != sorted(heads) or replay["window_commit"] is None:
+        problems.append(f"the listed heads no longer merge cleanly: lands {replay['landed']}")
+    elif _tree(repo, replay["window_commit"]) != _tree(repo, window):
+        problems.append("the window's files differ from the listed heads merged onto base")
+    return problems
+
+
+def _tree(repo: Path, commit: str) -> str:
+    return git(repo, "rev-parse", f"{commit}^{{tree}}")[1]
+
+
+_MARKER = "<!-- merge-flow "
+
+
+def window_body(base: str, heads: dict[int, str]) -> str:
+    rows = "\n".join(f"| #{n} | `{sha[:12]}` |" for n, sha in sorted(heads.items()))
+    data = json.dumps({"base": base, "heads": {str(n): sha for n, sha in sorted(heads.items())}})
+    return (
+        f"Lands {len(heads)} approved PRs in one merge onto `{base[:12]}`. Each PR keeps its reviewed head; "
+        f"this PR adds no change of its own (checked by `scripts/merge_flow.py --land`).\n\n"
+        f"| PR | Head |\n| --- | --- |\n{rows}\n\n{_MARKER}{data} -->\n"
+    )
+
+
+def parse_window_body(body: str) -> tuple[str, dict[int, str]] | None:
+    start = body.find(_MARKER)
+    if start < 0:
+        return None
+    data = json.loads(body[start + len(_MARKER) : body.index("-->", start)])
+    return data["base"], {int(n): sha for n, sha in data["heads"].items()}
+
+
+def _gh(*args: str) -> str:
+    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+
+
+def open_window(root: Path, remote: str, repo: str, base: str, result: dict[str, Any], heads: list[Head]) -> str:
+    """Push the planned window commit and open its PR; returns the PR URL."""
+    landed = {h.number: h.sha for h in heads if h.number in result["landed"]}
+    branch = f"merge-flow/window-{result['window_commit'][:12]}"
+    git(root, "push", "-q", remote, f"{result['window_commit']}:refs/heads/{branch}")
+    title = "merge-flow: land " + ", ".join(f"#{n}" for n in sorted(landed))
+    return _gh(
+        "pr", "create", "--repo", repo, "--base", "main", "--head", branch, "--title", title,
+        "--body", window_body(base, landed),
+    ).strip()  # fmt: skip
+
+
+def land_window(root: Path, remote: str, repo: str, number: int) -> int:
+    """Re-check a window PR against GitHub and git, then approve and merge it (run with the merging account)."""
+    pr = json.loads(_gh("pr", "view", str(number), "--repo", repo, "--json", "body,statusCheckRollup,state"))
+    parsed = parse_window_body(pr["body"])
+    if pr["state"] != "OPEN" or parsed is None:
+        print(f"#{number} is not an open merge-flow window")
+        return 1
+    base, heads = parsed
+    refspecs = ["+refs/heads/main:refs/merge-flow/base", f"+refs/pull/{number}/head:refs/merge-flow/window"]
+    refspecs += [f"+refs/pull/{n}/head:refs/merge-flow/pr/{n}" for n in heads]
+    git(root, "fetch", "-q", remote, *refspecs)
+    problems = []
+    if git(root, "rev-parse", "refs/merge-flow/base")[1] != base:
+        problems.append("main moved since the window was planned; plan a new window")
+    for n, sha in sorted(heads.items()):
+        if git(root, "rev-parse", f"refs/merge-flow/pr/{n}")[1] != sha:
+            problems.append(f"#{n} has a new head since it was approved")
+    not_ready = sorted(set(heads) - set(ready_prs(_gh_open_prs(repo))))
+    if not_ready:
+        problems.append("not ready any more: " + ", ".join(f"#{n}" for n in not_ready))
+    if not set(REQUIRED_CHECKS) <= {name for name, ok in map(_passed, pr["statusCheckRollup"] or []) if ok}:
+        problems.append("the window's required checks are not all green yet")
+    problems += verify(root, base, heads, git(root, "rev-parse", "refs/merge-flow/window")[1])
+    if problems:
+        print("\n".join(f"not landing #{number}: {p}" for p in problems))
+        return 1
+    note = f"Verified: exactly the approved heads of {', '.join(f'#{n}' for n in sorted(heads))} merged onto main."
+    _gh("pr", "review", str(number), "--repo", repo, "--approve", "--body", note)
+    _gh("pr", "merge", str(number), "--repo", repo, "--merge")
+    print(f"landed #{number}: " + ", ".join(f"#{n}" for n in sorted(heads)))
+    return 0
+
+
 def _passed(check: dict[str, Any]) -> tuple[str, bool]:
     name = check.get("name") or check.get("context") or ""
     return name, (check.get("conclusion") or check.get("state")) == "SUCCESS"
@@ -205,9 +295,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base", default="main")
     parser.add_argument("--prs", help="comma-separated PR numbers in ready order; default: every ready PR")
     parser.add_argument("--json", type=Path, help="also write the plan here")
+    parser.add_argument("--open", action="store_true", help="push the window commit and open its PR")
+    parser.add_argument("--land", type=int, metavar="PR", help="verify a window PR, then approve and merge it")
     args = parser.parse_args(argv)
 
     root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel")[1])
+    if args.land:
+        return land_window(root, args.remote, args.repo, args.land)
     numbers = [int(n) for n in args.prs.split(",")] if args.prs else ready_prs(_gh_open_prs(args.repo))
     refspecs = [f"+refs/heads/{args.base}:refs/merge-flow/base"]
     refspecs += [f"+refs/pull/{n}/head:refs/merge-flow/pr/{n}" for n in numbers]
@@ -222,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
     print(_summary(result))
     if args.json:
         args.json.write_text(json.dumps(result, indent=1) + "\n")
+    if args.open and result["window_commit"]:
+        print(open_window(root, args.remote, args.repo, base, result, heads))
     return 0
 
 
