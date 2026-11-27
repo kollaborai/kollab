@@ -4,7 +4,7 @@
  * With no plugin loaded each of them draws nothing, so the app looks exactly as it does without plugins.
  */
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
-import { Loader2, X } from "lucide-react";
+import { Loader2, Puzzle, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -14,6 +14,7 @@ import { PanelDialogSurface } from "@/components/panels/PanelDialogSurface";
 import { cn } from "@/lib/utils";
 import { openTarget, retryPlugin } from "./loader";
 import { PluginFailure, PluginMount, PluginTabs, pluginIcon } from "./mount";
+import { logPluginFailure, SAFE_PLUGIN_ACTION_ERROR } from "./plugin-errors";
 import {
   parsePluginViewKey,
   pluginRegistry,
@@ -174,7 +175,7 @@ export function PluginPage({ pluginId, pageId, onExit }: { pluginId: string; pag
   else if (record.status === "failed")
     body = <PluginFailure title={`${name} Failed to Load`} error={record.error ?? ""} onRetry={() => retryPlugin(record.id)} />;
   else if (!page) body = <PageMessage onExit={onExit}>{`${name} has no page to show here.`}</PageMessage>;
-  else body = <PluginTabs record={record} tabs={page.tabs} />;
+  else body = <PluginTabs record={record} tabs={page.tabs} rendererPrefix="page-tab" surfaceId={page.id} />;
 
   return (
     <main aria-label={title} className="bg-background flex h-full min-h-0 min-w-0 flex-col text-sm">
@@ -204,10 +205,15 @@ function pressNotice(record: PluginRecord, notice: PluginNotice) {
   if (!button) return;
   dismissNotice(record.id, notice.key);
   if (button.open) return openTarget(record.id, button.open);
+  const fail = (error: unknown) => {
+    if (!pluginRegistry.getSnapshot().plugins.some((current) => current.id === record.id && current.k === record.k)) return;
+    logPluginFailure(record.id, "notice action failed", error);
+    record.k?.toast(SAFE_PLUGIN_ACTION_ERROR);
+  };
   try {
-    void Promise.resolve(button.run?.()).catch((error: unknown) => console.error(`${record.name} notice action failed`, error));
+    void Promise.resolve(button.run?.()).catch(fail);
   } catch (error) {
-    console.error(`${record.name} notice action failed`, error);
+    fail(error);
   }
 }
 
@@ -248,7 +254,7 @@ export function PluginModalHost() {
           <DialogTitle>{spec.title}</DialogTitle>
           <DialogDescription className="sr-only">{record.name}</DialogDescription>
         </DialogHeader>
-        <PluginTabs record={record} tabs={spec.tabs} />
+        <PluginTabs record={record} tabs={spec.tabs} rendererPrefix="modal-tab" surfaceId={spec.id} />
       </PanelDialogSurface>
     </Dialog>
   );
@@ -256,15 +262,72 @@ export function PluginModalHost() {
 
 export type PluginViewTab = readonly [PluginViewKey, string, ComponentType<{ className?: string }>];
 
+type CachedPluginViewIcon = {
+  record: PluginRecord;
+  viewId: string;
+  icon: unknown;
+  Component: ComponentType<{ className?: string }>;
+};
+
+const pluginViewIconCache = new Map<PluginViewKey, CachedPluginViewIcon>();
+
+function PluginViewIcon({
+  record,
+  viewId,
+  icon,
+  className,
+}: {
+  record: PluginRecord;
+  viewId: string;
+  icon: unknown;
+  className?: string;
+}) {
+  const Icon = pluginIcon(icon);
+  if (typeof icon !== "function") return <Icon className={className} />;
+  return (
+    <PluginMount
+      record={record}
+      renderer={`view-icon:${viewId}`}
+      resetKey={icon}
+      inline
+      errorFallback={<Puzzle className={className} aria-hidden="true" />}
+    >
+      <Icon className={className} />
+    </PluginMount>
+  );
+}
+
 /** The plugin tabs for the chat's view list; one that needs a folder hides for a chat with none. */
 export function pluginViews(snapshot: PluginsSnapshot, hasFolder: boolean): PluginViewTab[] {
-  return snapshot.plugins.flatMap((record) =>
-    record.status !== "ready"
-      ? []
-      : record.contributions.views
-          .filter((view) => hasFolder || !view.needs_folder)
-          .map((view) => [pluginViewKey(record.id, view.id), view.label, pluginIcon(view.icon)] as const),
-  );
+  const liveKeys = new Set<PluginViewKey>();
+  const tabs: PluginViewTab[] = [];
+  for (const record of snapshot.plugins) {
+    if (record.status !== "ready") continue;
+    for (const view of record.contributions.views) {
+      const key = pluginViewKey(record.id, view.id);
+      liveKeys.add(key);
+      let cached = pluginViewIconCache.get(key);
+      if (!cached) {
+        const Component: ComponentType<{ className?: string }> = (props) => {
+          const current = pluginViewIconCache.get(key);
+          return current ? (
+            <PluginViewIcon record={current.record} viewId={current.viewId} icon={current.icon} {...props} />
+          ) : null;
+        };
+        cached = { record, viewId: view.id, icon: view.icon, Component };
+        pluginViewIconCache.set(key, cached);
+      } else {
+        cached.record = record;
+        cached.viewId = view.id;
+        cached.icon = view.icon;
+      }
+      if (hasFolder || !view.needs_folder) tabs.push([key, view.label, cached.Component]);
+    }
+  }
+  for (const key of pluginViewIconCache.keys()) {
+    if (!liveKeys.has(key)) pluginViewIconCache.delete(key);
+  }
+  return tabs;
 }
 
 /** Whether a chat can show this plugin view now; a chat on a removed or unavailable one shows Chat. */
@@ -307,7 +370,7 @@ export function PluginViewHost({
   if (!record?.k || !view) return null;
   const View = view.render;
   return (
-    <PluginMount record={record}>
+    <PluginMount record={record} renderer={`view:${view.id}`} resetKey={session_id}>
       <View k={record.k} session={pluginSession} />
     </PluginMount>
   );

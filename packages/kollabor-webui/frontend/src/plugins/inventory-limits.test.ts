@@ -9,7 +9,7 @@ const CONTRIBUTION_KINDS = ["menu", "views", "pages", "modals", "slash", "render
 function contributionItems(kind: typeof CONTRIBUTION_KINDS[number], count: number): unknown[] {
   return Array.from({ length: count }, (_, index) => kind === "menu"
     ? { id: `row-${index}`, label: `Row ${index}`, open: { page: "main" } }
-    : `declaration-${index}`);
+    : kind === "renderers" ? { tool: `tool-${index}` } : `declaration-${index}`);
 }
 
 const inventoryOmissionCases: Array<{
@@ -69,7 +69,12 @@ const inventoryOmissionCases: Array<{
   },
   ...CONTRIBUTION_KINDS.map((kind) => ({
     name: `contributes.${kind}`,
-    input: () => ({ contributes: { [kind]: contributionItems(kind, 257) } }),
+    input: () => ({
+      contributes: Object.fromEntries(CONTRIBUTION_KINDS.map((candidate) => [
+        candidate,
+        candidate === kind ? contributionItems(kind, 257) : [],
+      ])),
+    }),
     omitted: (entry: ReturnType<typeof normalizePluginEntry>) => entry?.omitted.contributions ?? 0,
   })),
 ];
@@ -258,6 +263,7 @@ describe("plugin inventory collection bounds", () => {
   it("reports omissions in the installed inventory row", () => {
     const entry = normalizePluginEntry({
       id: "example-plugin",
+      contributes: { menu: [], views: [], pages: [], modals: [], slash: [], renderers: [] },
       services: [
         { name: "worker", secrets: Array.from({ length: 65 }, (_, index) => `ENV_${index}`) },
         ...Array.from({ length: 128 }, (_, index) => ({ name: `worker-${index}`, secrets: [] })),
@@ -334,5 +340,33 @@ describe("plugin inventory collection bounds", () => {
     ["complete", null, null],
   ] as const)("explains whether dismissing a %s job is blocked", (status, error, expected) => {
     expect(installDismissalMessage(status, error)).toBe(expected);
+  });
+
+  it("F1/F5 counts malformed and SDK-unmatchable renderer declarations in inventory and consent", () => {
+    const renderers = [
+      "shell",
+      { id: "shell" },
+      { name: "shell" },
+      { tool: "shell", tag: "status" },
+      { tool: "shell" },
+      { tag: "status-card" },
+      { tag: "my.card" },
+    ];
+    const contributes = {
+      menu: [], views: [], pages: [], modals: [], slash: [], renderers,
+    };
+    const inventory = normalizePluginEntry({ id: "example-plugin", contributes });
+    const review = normalizeReviewJob({
+      job_id: "review-1",
+      status: "ready",
+      manifest: { name: "Example", contributes },
+    })?.manifest;
+
+    expect(inventory?.contributes.renderers).toEqual([{ tool: "shell" }, { tag: "status-card" }]);
+    expect(inventory?.omitted.contributions).toBe(5);
+    expect(review?.contributes).toMatchObject({ renderers: [{ tool: "shell" }, { tag: "status-card" }] });
+    expect(review?.omitted).toMatchObject({ contributions: 5 });
+    expect(describePluginAdds(review!)).toContain("2 chat renderers");
+    expect(describePluginAdds(review!)).toContain("5 additional contributions omitted from this review");
   });
 });

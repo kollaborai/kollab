@@ -7,11 +7,11 @@ import { Switch } from "@/components/ui/switch";
 import { inPhoneApp } from "@/utils/page-route";
 import { PLUGIN_TRUST_NOTICE, PluginInstallDialog, describeUses } from "./install";
 import { listedPluginEntries, refreshPlugins, retryPlugin, usePluginInventory } from "./loader";
-import { PluginMount, PluginFailure } from "./mount";
+import { PluginMount, PluginFailure, PluginRendererSurface } from "./mount";
 import { type PluginRecord, usePlugins } from "./registry";
 import type { PluginEntry, PluginService } from "./sdk";
+import { logPluginFailure, SAFE_PLUGIN_SETTINGS_ERROR } from "./plugin-errors";
 
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const pathFor = (id: string) => `/plugins/${encodeURIComponent(id)}`;
 const entryKey = (entry: PluginEntry) => `${entry.kind}:${entry.id}:${entry.source ?? ""}`;
 
@@ -130,7 +130,8 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
       await refreshPlugins();
       onError(null);
     } catch (caught) {
-      onError(message(caught));
+      logPluginFailure(id, `settings process ${action} failed`, caught);
+      onError(SAFE_PLUGIN_SETTINGS_ERROR);
       await refreshPlugins();
     } finally {
       setBusy(false);
@@ -145,7 +146,8 @@ function ServiceRow({ service, api, id, now, canControl, enabled, disabled, oper
       const response = await api.request(`${base}/log`);
       setLog(await response.text());
     } catch (caught) {
-      onError(message(caught));
+      logPluginFailure(id, "settings process log failed", caught);
+      onError(SAFE_PLUGIN_SETTINGS_ERROR);
     } finally {
       setBusy(false);
       onBusyChange(false);
@@ -238,7 +240,8 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
       setSettingsDraft({});
       await refreshPlugins();
     } catch (caught) {
-      setError(message(caught));
+      logPluginFailure(entry.id, "settings save failed", caught);
+      setError(SAFE_PLUGIN_SETTINGS_ERROR);
     } finally {
       setOperationBusy(false);
     }
@@ -254,7 +257,8 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
       await refreshPlugins();
       if (action === "remove") onRemoved();
     } catch (caught) {
-      setError(message(caught));
+      logPluginFailure(entry.id, `settings ${action} failed`, caught);
+      setError(SAFE_PLUGIN_SETTINGS_ERROR);
       await refreshPlugins();
       // Keep the dialog open while the plugin is still on, so the error shows there; otherwise close it and the page shows the error.
       const current = listedPluginEntries().find((item) => entryKey(item) === entryKey(entry));
@@ -363,9 +367,11 @@ function PluginDetail({ entry, record, api, remote, now, onUpdate, onBusyChange,
           </div>
         ) : null}
         {SettingsView && record?.k ? (
-          <PluginMount record={record}>
-            <SettingsView k={record.k} />
-          </PluginMount>
+          <PluginRendererSurface renderer="settings">
+            <PluginMount record={record}>
+              <SettingsView k={record.k} />
+            </PluginMount>
+          </PluginRendererSurface>
         ) : null}
       </div>
       <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open && !busy && !operationBusy) setConfirmation(null); }}>

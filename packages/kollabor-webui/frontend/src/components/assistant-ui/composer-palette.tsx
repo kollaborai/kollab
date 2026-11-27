@@ -37,6 +37,15 @@ export type ComposerPaletteItem = {
   args?: string;
 };
 
+export function paletteItemClassName(depth: number): string {
+  return cn(
+    "data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground group flex w-full items-center gap-3 text-left transition-colors hover:bg-accent/70 pointer-coarse:min-h-11 any-pointer-coarse:min-h-11",
+    depth > 0
+      ? "ml-2 rounded-lg py-1.5 pl-2 pr-2 sm:ml-7"
+      : "rounded-xl px-2.5 py-2",
+  );
+}
+
 type ComposerPaletteProps = {
   char: "/" | "@";
   items: readonly ComposerPaletteItem[];
@@ -206,12 +215,7 @@ const PaletteContent: FC<{
                     ) : null}
                     <ComposerPrimitive.Unstable_TriggerPopoverItem
                       item={item}
-                      className={cn(
-                        "data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground group flex w-full items-center gap-3 text-left transition-colors hover:bg-accent/70",
-                        depth > 0
-                          ? "ml-2 rounded-lg py-1.5 pl-2 pr-2 sm:ml-7"
-                          : "rounded-xl px-2.5 py-2",
-                      )}
+                      className={paletteItemClassName(depth)}
                     >
                       <PaletteIcon item={item} />
                       <span className="min-w-0 flex-1">

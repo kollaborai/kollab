@@ -30,6 +30,8 @@ from .packages import (
     _MAX_PLUGIN_SETTINGS,
     _MAX_PLUGIN_USES,
     _SYMBOL,
+    _has_single_contribution_identity,
+    _is_valid_renderer_declaration,
     _normalize_plugin_use,
     _read_registry,
     _within,
@@ -43,6 +45,8 @@ from .redaction import contains_sensitive_text, redact_sensitive_text
 logger = logging.getLogger(__name__)
 
 _INVENTORY_TEXT_LIMIT = 4096
+_DECLARATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_PLUGIN_CONTRIBUTION_KINDS = ("menu", "views", "pages", "modals", "slash", "renderers")
 _INVENTORY_INVISIBLE_CONTROLS = re.compile(r"[\u00ad\u200b-\u200d\u202a-\u202e\u2060\u2066-\u2069\ufeff]")
 _PLUGIN_INVENTORY_STATES = {"ok", "error", "off", "stopping", "stop-failed", "changed-on-disk", "skipped"}
 _SERVICE_INVENTORY_STATES = {
@@ -672,7 +676,14 @@ def _bounded_inventory_text(
 
 def _bounded_inventory_identifier(value: object, limit: int = _INVENTORY_TEXT_LIMIT) -> str | None:
     clean = _bounded_inventory_text(value, limit, reject_sensitive=False)
-    return None if clean is None or contains_sensitive_text(clean) else clean
+    if clean is None:
+        return None
+    if (
+        contains_sensitive_text(clean, allow_safe_values=True)
+        or any(contains_sensitive_text(part) for part in clean.split(":"))
+    ):
+        return None
+    return clean
 
 
 def _normalize_web_dist_path(value: object) -> str | None:
@@ -776,8 +787,8 @@ def _normalize_capability(value: object) -> str | None:
 def _normalize_declared(value: object) -> str | dict | None:
     if isinstance(value, str):
         safe = _bounded_inventory_identifier(value, 512)
-        return safe if safe and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", safe) else None
-    if not isinstance(value, dict):
+        return safe if safe and _DECLARATION_ID.fullmatch(safe) else None
+    if not _has_single_contribution_identity(value):
         return None
     result: dict[str, str] = {}
     for key in ("id", "name", "tool", "tag", "label", "title"):
@@ -785,39 +796,75 @@ def _normalize_declared(value: object) -> str | dict | None:
             continue
         normalizer = _bounded_inventory_text if key in {"label", "title"} else _bounded_inventory_identifier
         safe = normalizer(value[key], 512)
-        if not safe or (key not in {"label", "title"} and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", safe)):
+        if not safe or (key not in {"label", "title"} and not _DECLARATION_ID.fullmatch(safe)):
             return None
         result[key] = safe
     return result if any(key in result for key in ("id", "name", "tool", "tag")) else None
 
 
-def _normalize_contributes(value: object) -> dict:
-    kinds = ("menu", "views", "pages", "modals", "slash", "renderers")
+def _normalize_renderer_declaration(value: object) -> dict | None:
+    if not _is_valid_renderer_declaration(value):
+        return None
+    normalized = _normalize_declared(value)
+    return normalized if isinstance(normalized, dict) else None
+
+
+def _contribution_identity(kind: str, value: str | dict) -> str | None:
+    if kind == "renderers":
+        if "tool" in value:
+            return f"tool:{value['tool']}"
+        if "tag" in value:
+            return f"tag:{value['tag']}"
+        return None
+    identity = value if isinstance(value, str) else next(
+        (value[field] for field in ("id", "name", "tool", "tag") if field in value),
+        None,
+    )
+    if not isinstance(identity, str) or not identity:
+        return None
+    return identity.casefold() if kind == "slash" else identity
+
+
+def _normalize_contributes(value: object) -> tuple[dict, int]:
+    kinds = _PLUGIN_CONTRIBUTION_KINDS
     result = {kind: [] for kind in kinds}
     if not isinstance(value, dict):
-        return result
+        return result, 1
+    omissions = sum(1 for kind in value if kind not in kinds)
     for kind in kinds:
+        if kind not in value:
+            continue
         items = value.get(kind)
         if not isinstance(items, list):
+            omissions += 1
             continue
+        omissions += max(0, len(items) - _MAX_PLUGIN_CONTRIBUTIONS)
+        seen: set[str] = set()
         for item in items[:_MAX_PLUGIN_CONTRIBUTIONS]:
             if kind != "menu":
-                declared = _normalize_declared(item)
-                if declared is not None:
-                    result[kind].append(declared)
+                declared = _normalize_renderer_declaration(item) if kind == "renderers" else _normalize_declared(item)
+                identity = _contribution_identity(kind, declared) if declared is not None else None
+                if identity is None or identity in seen:
+                    omissions += 1
+                    continue
+                seen.add(identity)
+                result[kind].append(declared)
                 continue
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or not _has_single_contribution_identity(item, required="id"):
+                omissions += 1
                 continue
             row_id = _bounded_inventory_identifier(item.get("id"), 128)
             label = _bounded_inventory_text(item.get("label"), 256)
             raw_open = item.get("open")
-            if not row_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", row_id) or not label:
+            if not row_id or not _DECLARATION_ID.fullmatch(row_id) or not label:
+                omissions += 1
                 continue
             if (
                 not isinstance(raw_open, dict)
                 or len(raw_open) != 1
                 or next(iter(raw_open), None) not in {"page", "modal", "view", "url"}
             ):
+                omissions += 1
                 continue
             target_key = next(iter(raw_open))
             target_value = (
@@ -827,14 +874,19 @@ def _normalize_contributes(value: object) -> dict:
             )
             icon = _bounded_inventory_text(item.get("icon"), 64) if item.get("icon") is not None else None
             if not target_value or (item.get("icon") is not None and not icon):
+                omissions += 1
                 continue
+            if row_id in seen:
+                omissions += 1
+                continue
+            seen.add(row_id)
             result["menu"].append({
                 "id": row_id,
                 "label": label,
                 "open": {target_key: target_value},
                 **({"icon": icon} if icon else {}),
             })
-    return result
+    return result, omissions
 
 
 def _normalize_setting(value: object) -> dict | None:
@@ -1030,14 +1082,11 @@ def _normalize_plugin_entry(value: object) -> dict | None:
         labels = setting.get("option_labels")
         if isinstance(labels, dict):
             omitted_option_labels += max(0, len(labels) - _MAX_PLUGIN_OPTION_LABELS)
-    raw_contributes = value.get("contributes")
-    omitted_contributions = _reported_omissions(value, "contributions")
-    if isinstance(raw_contributes, dict):
-        omitted_contributions += sum(
-            max(0, len(items) - _MAX_PLUGIN_CONTRIBUTIONS)
-            for items in raw_contributes.values()
-            if isinstance(items, list)
-        )
+    raw_contributes = value.get("contributes", {})
+    contributes, dropped_contributions = _normalize_contributes(raw_contributes)
+    omitted_contributions = (
+        _reported_omissions(value, "contributions") + dropped_contributions
+    )
     version = _bounded_inventory_text(value.get("version"), 256)
     source = _bounded_inventory_text(value.get("source"))
     raw_commit = value.get("commit")
@@ -1061,7 +1110,7 @@ def _normalize_plugin_entry(value: object) -> dict | None:
         "state": state,
         "error": error,
         "web": web,
-        "contributes": _normalize_contributes(raw_contributes),
+        "contributes": contributes,
         "services": services,
         "settings": settings,
         "settings_section": {"title": section_title or "Settings", "widgets": section_widgets}

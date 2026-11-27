@@ -13,7 +13,7 @@ import { PanelHost } from "@/components/panels/PanelHost";
 import { PluginsSettings, pluginRowControls } from "./settings";
 import { createPluginLoader, listedPluginEntries } from "./loader";
 import { EMPTY_CONTRIBUTIONS, pluginRegistry, type PluginRecord } from "./registry";
-import type { PluginEntry } from "./sdk";
+import type { PluginEntry, PluginInventoryResponse } from "./sdk";
 
 const source = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "settings.tsx"), "utf8");
 
@@ -26,13 +26,14 @@ const plugin = (settings: unknown[]): PluginEntry => ({
   state: "off",
   error: null,
   web: null,
-  contributes: {},
+  contributes: { menu: [], views: [], pages: [], modals: [], slash: [], renderers: [] },
   services: [],
   omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
   settings,
 } as PluginEntry);
 
 const CANARY = "secret-token-canary-1397";
+const Suspends = () => { throw new Promise<void>(() => {}); };
 
 async function markupFor(
   entries: unknown[],
@@ -41,7 +42,7 @@ async function markupFor(
   runtimeRecords: PluginRecord[] = [],
 ): Promise<string> {
   const loader = createPluginLoader(pluginRegistry, {
-    list: async () => ({ plugins: entries, server_time: serverTime }),
+    list: async () => ({ plugins: entries as PluginInventoryResponse["plugins"], server_time: serverTime }),
     importModule: async () => ({}),
     fetchText: async () => "",
     loadCode: false,
@@ -231,6 +232,52 @@ describe("plugin settings page", () => {
   it("mounts custom plugin settings with the scoped portal root", () => {
     const settingsView = source.slice(source.indexOf("{SettingsView && record?.k ?"));
     expect(settingsView).toMatch(/<PluginMount record=\{record\}>\s*<SettingsView/);
+  });
+
+  it("contains a suspended settings renderer through the real PluginsSettings component", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const entry = { ...plugin([]), enabled: true, state: "ok" } as PluginEntry;
+    const loader = createPluginLoader(pluginRegistry, {
+      list: async () => ({ plugins: [entry], server_time: undefined }),
+      importModule: async () => ({}),
+      fetchText: async () => "",
+      loadCode: false,
+      api: { request: async () => new Response(), stream: async () => {} },
+    });
+    await loader.refresh();
+    const listed = listedPluginEntries()[0];
+    expect(listed).toBeDefined();
+    const record: PluginRecord = {
+      id: "hello",
+      name: "Hello",
+      entry: listed!,
+      status: "ready",
+      error: null,
+      retries: 0,
+      k: {} as PluginRecord["k"],
+      contributions: { ...EMPTY_CONTRIBUTIONS, settings: { render: Suspends } },
+    };
+    pluginRegistry.put(record);
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<PluginsSettings api={{} as never} />));
+      expect(host.textContent).toContain("Rendering plugin view");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(host.textContent).toContain("Hello Failed to Render");
+      const viewError = [...host.querySelectorAll("button")].find((button) => button.textContent === "View Error");
+      await act(async () => viewError?.click());
+      expect(host.textContent).toContain("settings renderer");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      pluginRegistry.reset();
+      await loader.stop();
+    }
   });
 
   it("uses Title Case for backend service states", async () => {
@@ -614,6 +661,48 @@ describe("plugin settings page", () => {
     } finally {
       await act(async () => root.unmount());
       host.remove();
+    }
+  });
+
+  it("keeps a plugin settings action failure fixed and sends only redacted detail to the log", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const voice = {
+      ...plugin([]), id: "voice", name: "Voice", kind: "built-in", enabled: false, state: "off",
+    } as PluginEntry;
+    const loader = createPluginLoader(pluginRegistry, {
+      list: async () => ({ plugins: [voice], server_time: undefined }),
+      importModule: async () => ({}),
+      fetchText: async () => "",
+      loadCode: false,
+      api: { request: async () => new Response(), stream: async () => {} },
+    });
+    await loader.refresh();
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await act(async () => root.render(<PluginsSettings api={{
+        json: async () => { throw new Error(`GITHUB_TOKEN=${CANARY}`); },
+      } as never} />));
+
+      const toggle = host.querySelector('[role="switch"]');
+      expect(toggle).toBeDefined();
+      await act(async () => {
+        toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(host.querySelector('[role="alert"]')?.textContent).toBe(
+        "Could not complete this plugin settings action. Check the browser console for redacted details.",
+      );
+      expect(log.mock.calls.flat().join(" ")).toContain("[redacted]");
+      expect(log.mock.calls.flat().join(" ")).not.toContain(CANARY);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      pluginRegistry.reset();
     }
   });
 

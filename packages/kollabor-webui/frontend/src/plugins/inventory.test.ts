@@ -12,7 +12,14 @@ const entry = (id: string, enabled: boolean, web: PluginEntry["web"] = null): Pl
   state: "ok",
   error: null,
   web,
-  contributes: web ? { views: ["panel"] } : {},
+  contributes: {
+    menu: [],
+    views: web ? ["panel"] : [],
+    pages: [],
+    modals: [],
+    slash: [],
+    renderers: [],
+  },
   services: [],
   omitted: { services: 0, uses: 0, granted: 0, settings: 0, setting_options: 0, option_labels: 0, contributions: 0 },
 });

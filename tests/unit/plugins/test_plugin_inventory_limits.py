@@ -191,8 +191,14 @@ def _over_limit_inventory_entry(surface):
             for index in range(257)
         ]
     else:
-        items = [f"declaration-{index}" for index in range(257)]
-    return {"id": "example-plugin", "contributes": {kind: items}}
+        items = (
+            [{"tool": f"declaration-{index}"} for index in range(257)]
+            if kind == "renderers"
+            else [f"declaration-{index}" for index in range(257)]
+        )
+    contributes = {name: [] for name in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes[kind] = items
+    return {"id": "example-plugin", "contributes": contributes}
 
 
 @pytest.mark.parametrize(
@@ -281,3 +287,217 @@ def test_plugin_web_entry_normalizes_manifest_relative_paths(path, expected):
 
     assert entry is not None
     assert (entry["web"]["entry"] if entry["web"] else None) == expected
+
+
+def test_plugin_slash_command_inventory_uses_ascii_declaration_names():
+    from kollabor_plugins.registry import _normalize_contributes
+
+    normalized, omitted = _normalize_contributes({"slash": ["publish", "_publish", "café"]})
+
+    assert normalized["slash"] == ["publish"]
+    assert omitted == 2
+
+
+def test_plugin_slash_command_inventory_keeps_colon_namespaced_ids():
+    from kollabor_plugins.registry import _normalize_contributes
+
+    normalized, omitted = _normalize_contributes({"slash": ["client-key:status"]})
+
+    assert normalized["slash"] == ["client-key:status"]
+    assert omitted == 0
+
+
+def test_plugin_inventory_does_not_count_absent_contribution_kinds_as_omitted():
+    entry = _normalize_plugin_entry(
+        {
+            "id": "example-plugin",
+            "contributes": {"pages": ["settings"], "slash": ["publish"]},
+        }
+    )
+
+    assert entry is not None
+    assert entry["contributes"]["pages"] == ["settings"]
+    assert entry["contributes"]["slash"] == ["publish"]
+    assert entry["omitted"]["contributions"] == 0
+
+
+def test_plugin_inventory_redacts_credential_shaped_renderer_namespaced_ids():
+    token = "ghp_" + "A" * 36
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [{"tool": f"{token}:fetch"}]
+
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
+def test_plugin_inventory_redacts_long_sk_credential_shaped_renderer_ids():
+    token = "sk-" + "A" * 40
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [{"tool": f"{token}:fetch"}]
+
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
+@pytest.mark.parametrize("label", ["Set-Cookie: sid=canary", "cookie: sid=canary"])
+def test_plugin_inventory_rejects_cookie_headers_in_menu_labels(label):
+    from kollabor_plugins.registry import _normalize_contributes
+
+    normalized, omitted = _normalize_contributes(
+        {"menu": [{"id": "session", "label": label, "open": {"page": "settings"}}]}
+    )
+
+    assert normalized["menu"] == []
+    assert omitted == 1
+
+
+def test_plugin_inventory_redacts_colon_delimited_sensitive_assignments():
+    entry = _normalize_plugin_entry(
+        {
+            "id": "example-plugin",
+            "contributes": {"slash": ["token:abc123SensitiveValue"]},
+        }
+    )
+
+    assert entry is not None
+    assert entry["contributes"]["slash"] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
+def test_plugin_inventory_preserves_the_documented_sk_fetch_renderer_tag():
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [{"tag": "sk-fetch"}]
+
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == [{"tag": "sk-fetch"}]
+    assert entry["omitted"]["contributions"] == 0
+
+
+def test_plugin_inventory_preserves_short_sk_declaration_identifiers():
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["slash"] = ["sk-admin"]
+    contributes["views"] = [{"id": "sk-admin", "label": "Admin"}]
+    contributes["renderers"] = [{"tag": "sk-card"}, {"tool": "sk-admin"}]
+
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"]["slash"] == ["sk-admin"]
+    assert entry["contributes"]["views"] == [{"id": "sk-admin", "label": "Admin"}]
+    assert entry["contributes"]["renderers"] == [{"tag": "sk-card"}, {"tool": "sk-admin"}]
+    assert entry["omitted"]["contributions"] == 0
+
+
+def test_plugin_inventory_drops_duplicate_contribution_identities_per_kind():
+    from kollabor_plugins.registry import _normalize_contributes
+
+    normalized, omitted = _normalize_contributes(
+        {
+            "menu": [
+                {"id": "home", "label": "Home", "open": {"view": "home"}},
+                {"id": "home", "label": "Home again", "open": {"view": "home"}},
+            ],
+            "views": [{"id": "peek"}, {"id": "peek"}],
+            "pages": [{"id": "main"}, {"id": "main"}],
+            "modals": [{"id": "confirm"}, {"id": "confirm"}],
+            "slash": ["deploy", {"name": "DEPLOY"}],
+            "renderers": [{"tool": "shell"}, {"tool": "shell"}, {"tag": "shell"}],
+        }
+    )
+
+    assert normalized["menu"] == [{"id": "home", "label": "Home", "open": {"view": "home"}}]
+    assert normalized["views"] == [{"id": "peek"}]
+    assert normalized["pages"] == [{"id": "main"}]
+    assert normalized["modals"] == [{"id": "confirm"}]
+    assert normalized["slash"] == ["deploy"]
+    assert normalized["renderers"] == [{"tool": "shell"}, {"tag": "shell"}]
+    assert omitted == 6
+
+
+def test_plugin_inventory_normalizer_accepts_internal_underscores_in_renderer_names():
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [{"tool": "todo_write"}, {"tag": "status_card"}]
+    entry = _normalize_plugin_entry(
+        {
+            "id": "example-plugin",
+            "contributes": contributes,
+        }
+    )
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == [
+        {"tool": "todo_write"},
+        {"tag": "status_card"},
+    ]
+    assert entry["omitted"]["contributions"] == 0
+
+
+def test_plugin_inventory_omits_untyped_and_unmatchable_renderer_declarations():
+    """F1 F5: renderer declarations must be typed and SDK-matchable."""
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["renderers"] = [
+        "shell",
+        {"id": "shell"},
+        {"name": "shell"},
+        {"tool": "shell", "tag": "status"},
+        {"tool": "shell"},
+        {"tag": "status-card"},
+        {"tag": "my.card"},
+    ]
+    entry = _normalize_plugin_entry(
+        {
+            "id": "example-plugin",
+            "contributes": contributes,
+        }
+    )
+
+    assert entry is not None
+    assert entry["contributes"]["renderers"] == [{"tool": "shell"}, {"tag": "status-card"}]
+    assert entry["omitted"]["contributions"] == 5
+
+
+@pytest.mark.parametrize(
+    ("surface", "declaration"),
+    [
+        ("menu", {"id": "home", "name": "other", "label": "Home", "open": {"view": "home"}}),
+        ("slash", {"id": "deploy", "name": "review"}),
+        ("renderers", {"tool": "shell", "tag": "card"}),
+    ],
+)
+def test_plugin_inventory_drops_multiple_identity_declarations(surface, declaration):
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes[surface] = [declaration]
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"][surface] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
+@pytest.mark.parametrize("surface", ["menu", "views", "pages", "modals", "slash", "renderers"])
+def test_plugin_inventory_reports_malformed_contribution_rows(surface):
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes[surface] = [None]
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"][surface] == []
+    assert entry["omitted"]["contributions"] == 1
+
+
+def test_plugin_inventory_reports_malformed_contribution_kind():
+    contributes = {kind: [] for kind in ("menu", "views", "pages", "modals", "slash", "renderers")}
+    contributes["slash"] = "publish"
+    entry = _normalize_plugin_entry({"id": "example-plugin", "contributes": contributes})
+
+    assert entry is not None
+    assert entry["contributes"]["slash"] == []
+    assert entry["omitted"]["contributions"] == 1

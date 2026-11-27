@@ -40,6 +40,26 @@ gracefully signal and verify a whole process tree with its current Node-only
 mechanism. It reports cleanup as unverified and does not count that suite as
 passed.
 
+The `scrollbar-chrome` suite launches headed Chromium on Linux to measure
+classic scrollbars. The CI core lane installs `xvfb` and `xauth` and runs the
+suite under `xvfb-run`. The runner forwards `DISPLAY` and `XAUTHORITY` only to
+suites marked `requiresXvfb`, and only when CI opts in with
+`KOLLAB_BROWSER_XVFB=1`. Keep that opt-in on the `xvfb-run` invocation; do not
+point it at a desktop X session. For local interactive checks, run the single
+`npm run test:e2e:scrollbar-chrome` script directly.
+
+The global stylesheet owns the scrollbar hiding policy, including the known
+Radix, Monaco (normal/diff and minimap) and xterm custom chrome. The fixture
+mounts production `EditorPane` and `TerminalViewer` components. After checking
+hidden chrome and retained scrolling, it removes only the stylesheet's
+scrollbar rules and requires those same implementations to render visible
+chrome. This positive control also requires measurable classic native
+scrollbars on an overflowing document and both native container axes; missing
+elements cannot substitute for coverage. Browser readiness probes await their
+conditions, including asynchronous results. The fixture's dialog is nonmodal so
+its body scroll lock cannot mask the document scrollbar. The suite captures no
+screenshots and does not exercise a live engine, touch input or assistive technology.
+
 The sidebar footer proof opens the mocked shell at 390px and 820px, checks all
 eight controls are at least 44x44 CSS pixels, and checks that the footer and
 page fit without horizontal overflow. At 1280px it checks that all eight

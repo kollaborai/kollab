@@ -1,5 +1,6 @@
 import { StrictMode, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { REDACTED_ROOT_ERROR_OPTIONS } from "@/plugins/plugin-errors";
 import "../styles.css";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import { GEM_MOTIONS, gemEngine, type GemMotion } from "@/components/gems/gem-engine";
@@ -186,7 +187,7 @@ function Lab() {
   );
 }
 
-const root = createRoot(document.getElementById("root")!);
+const root = createRoot(document.getElementById("root")!, REDACTED_ROOT_ERROR_OPTIONS);
 root.render(
   <StrictMode>
     <Lab />
