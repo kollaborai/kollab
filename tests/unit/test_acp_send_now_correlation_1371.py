@@ -384,6 +384,9 @@ def test_orchestrator_forwards_generation_to_projected_acp_events(
             )
         if kind == "permission_request":
             assert all(payload.get("tool_id") == "tool-A" for payload in event_payloads)
-            assert waiting_callbacks == [("active-request-A", True, payload)]
+            # #1459: the hub picks CLI or page wording from the turn's request source.
+            assert waiting_callbacks == [
+                ("active-request-A", True, {**payload, "_kollab_input_source": "state_rpc"})
+            ]
         if kind == "permission_resolved":
             assert waiting_callbacks == [("active-request-A", False, {})]
