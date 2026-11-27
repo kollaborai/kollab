@@ -163,6 +163,8 @@ function continuesToolRun(prev: ChatRow, next: ChatRow): boolean {
 export function toRepository(rows: readonly ChatRow[], turns: Readonly<Record<string, TurnInfo>> = {}): ExportedMessageRepository {
   const merged: ChatRow[] = [];
   for (const row of rows) {
+    // Removed from the queue before any turn took it: the daemon keeps the record, the chat drops it.
+    if (row.kind === "input" && row.status === "cancelled" && row.turn_id === null) continue;
     const prev = merged.at(-1);
     if (prev && continuesToolRun(prev, row)) {
       merged[merged.length - 1] = {
