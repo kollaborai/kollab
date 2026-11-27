@@ -1,5 +1,6 @@
 """#1459: old agents restart in place through the engine's existing launcher."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -227,6 +228,79 @@ async def test_engine_fallback_persists_replacement_as_soon_as_it_spawns(
     await session.restart_outdated_agent()
 
     assert persisted_pids == [5678]
+
+
+@pytest.mark.asyncio
+async def test_engine_fallback_coalesces_concurrent_restarts(monkeypatch, tmp_path):
+    class Handle:
+        identity = "lapis"
+        project = str(tmp_path)
+        socket_path = str(tmp_path / "lapis.sock")
+        pid = 1234
+        process_started_at = 12.5
+        _daemon_image = "image-1"
+        stopped = False
+
+        @property
+        def alive(self):
+            return not self.stopped
+
+    handle = Handle()
+    presence = {
+        "identity": "lapis",
+        "agent_id": "image-1",
+        "pid": 1234,
+        "started_at": 12.5,
+    }
+    bridge = SimpleNamespace(
+        get_agent_by_identity=lambda identity, use_cache, project: presence
+    )
+    monkeypatch.setattr(engine_session, "HubBridge", lambda: bridge, raising=False)
+
+    from plugins.hub.messenger import AgentMessenger
+
+    monkeypatch.setattr(
+        AgentMessenger,
+        "request_status",
+        AsyncMock(return_value={"type": "status", "state": "idle"}),
+    )
+    shutdown_gate = asyncio.Event()
+
+    async def signal_shutdown(*_args, **_kwargs):
+        await shutdown_gate.wait()
+        handle.stopped = True
+        return True
+
+    signal = AsyncMock(side_effect=signal_shutdown)
+    monkeypatch.setattr(AgentMessenger, "signal_shutdown", signal)
+
+    session = EngineSession(
+        session_id="s1",
+        profile=SimpleNamespace(name="default", provider="custom"),
+        workspace=str(tmp_path),
+        identity="lapis",
+    )
+    session.daemon = handle
+    session._borrowed_daemon = True
+    session.shutdown = AsyncMock()
+    session.initialize = AsyncMock()
+
+    first = asyncio.create_task(session.restart_outdated_agent())
+    while signal.await_count == 0:
+        await asyncio.sleep(0)
+    second = asyncio.create_task(session.restart_outdated_agent())
+    await asyncio.sleep(0)
+    shutdown_gate.set()
+
+    results = await asyncio.gather(first, second)
+
+    assert results == [
+        {"restarting": True, "waiting_for_turn": False},
+        {"restarting": True, "waiting_for_turn": False},
+    ]
+    signal.assert_awaited_once()
+    session.shutdown.assert_awaited_once_with()
+    session.initialize.assert_awaited_once()
 
 
 @pytest.mark.asyncio
