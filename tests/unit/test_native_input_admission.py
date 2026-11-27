@@ -1,7 +1,7 @@
 """Native input is reported as accepted only when the queue admitted it (#589).
 
 The queue can drop a message after the caller was told it was queued: a block
-timeout, a drop_oldest race for the freed slot, or a Stop that sweeps it while it
+timeout, a drop_oldest race for the freed slot, or a Stop that fences it while it
 waits for room. Each drop ends the request's stream once, and the caller must
 also get a rejection instead of ``accepted: true``.
 """
@@ -148,7 +148,7 @@ async def test_drop_oldest_race_for_the_freed_slot_is_rejected_not_queued():
 
 
 @pytest.mark.asyncio
-async def test_a_stop_that_sweeps_a_waiting_input_rejects_it():
+async def test_a_stop_preserves_queued_input_and_promptly_rejects_waiting_input():
     processor = _queue("block", block_timeout=5)
     events = processor.renderer.subscribe("test")
     processor.processing_queue.put_nowait(TaggedInput("original", ("first",)))
@@ -160,11 +160,20 @@ async def test_a_stop_that_sweeps_a_waiting_input_rejects_it():
             break
         await asyncio.sleep(0)
     processor.request_cancellation(origin="human")
-    result = await send
+    result = await asyncio.wait_for(send, timeout=0.2)
 
     assert result["accepted"] is False, result
+    assert processor.processing_queue.get_nowait() == TaggedInput(
+        "original", ("first",)
+    )
     assert processor.processing_queue.empty()
-    assert _ended(events, "queue-probe") == [("error", None), ("turn_complete", "error")]
+    ended = _drain(events)
+    assert not any("first" in event.get("request_ids", ()) for event in ended)
+    assert [
+        (event["type"], event.get("stop_reason"))
+        for event in ended
+        if "queue-probe" in event.get("request_ids", ())
+    ] == [("error", None), ("turn_complete", "error")]
 
 
 @pytest.mark.asyncio

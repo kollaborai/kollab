@@ -14,6 +14,8 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/core/react";
 import { ComposerLockContext, Thread } from "@/components/assistant-ui/thread";
+import { ChatStoreProvider, type ChatSnapshot, type LiveStore } from "@/chat-store";
+import type { InputRequest } from "@/chat-stream";
 import { DEFAULT_SLASH_COMMANDS, type SlashCommand } from "@/api";
 import { PANEL_COMMAND_NAMES } from "@/components/panels/panel-model";
 import { loadComposerDraft, saveComposerDraft } from "../composer-draft";
@@ -163,13 +165,55 @@ vi.mock("@/voice/voice-room", () => ({
   VoiceRoomBar: () => null,
 }));
 
-vi.mock("@/runtime", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/runtime")>();
+// The thread sends through the chat store. This fake records each send the way the
+// tests count them: a send reaches the agent (modelRuns) and is listed in queueRequests;
+// Send Now marks that entry. `running` stands in for a turn the daemon is running.
+const chatStoreState = vi.hoisted(() => ({
+  running: false,
+  listeners: new Set<() => void>(),
+}));
+function fakeChatStore(): LiveStore {
+  let snap = {
+    rows: [], inputs: {}, running: chatStoreState.running, connection: "live",
+    hasEarlier: false, olderStatus: "idle", goalReplies: {},
+  } as unknown as ChatSnapshot;
   return {
-    ...actual,
-    useSendWaitingNow: () => sendCapture.sendWaitingNow,
-  };
-});
+    subscribe: (listener: () => void) => {
+      chatStoreState.listeners.add(listener);
+      return () => chatStoreState.listeners.delete(listener);
+    },
+    getSnapshot: () => {
+      if (snap.running !== chatStoreState.running) snap = { ...snap, running: chatStoreState.running };
+      return snap;
+    },
+    send: vi.fn(async (input: InputRequest) => {
+      sendCapture.modelRuns += 1;
+      sendCapture.queueRequests.push({ text: input.text, sendNow: false });
+    }),
+    sendNow: vi.fn(async () => {
+      const last = sendCapture.queueRequests.at(-1);
+      if (last) last.sendNow = true;
+    }),
+    cancel: vi.fn(async () => {}),
+    stop: vi.fn(async () => {}),
+    loadOlder: vi.fn(async () => {}),
+    retry: vi.fn(),
+    checkGoalReply: vi.fn(),
+    start: vi.fn(),
+    dispose: vi.fn(),
+  } as unknown as LiveStore;
+}
+/** Lets the composer's async send reach the fake store. */
+async function flushSends() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+function sentToAgent(text: string): boolean {
+  return sendCapture.queueRequests.some((request) => request.text === text);
+}
+function setStoreRunning(running: boolean) {
+  chatStoreState.running = running;
+  chatStoreState.listeners.forEach((listener) => listener());
+}
 
 const k = {} as PluginApi;
 const run = () => undefined;
@@ -514,13 +558,11 @@ function LocalThreadHarness({
   commands,
   commandCatalogStatus,
   draftKey,
-  queueSessionId,
   locked,
 }: {
   commands: SlashCommand[];
   commandCatalogStatus?: "loading" | "ready" | "empty" | "unavailable" | "fallback";
   draftKey?: string | null;
-  queueSessionId?: string | null;
   locked?: string;
 }) {
   const runtime = useLocalRuntime(threadAdapter);
@@ -536,25 +578,14 @@ function LocalThreadHarness({
         commands,
         commandCatalogStatus,
         draftKey,
-        queueSessionId,
         attachmentsEnabled: false,
-        onQueueBusyMessage: async (request: { text: string; sendNow: boolean }) => {
-          sendCapture.queueRequests.push({ text: request.text, sendNow: request.sendNow });
-          return {
-            admitted: true as const,
-            batchId: "b",
-            requestId: "r",
-            operationId: "o",
-            scopeId: "s",
-            incarnation: "i",
-            planKey: "p",
-            sendNowStatus: request.sendNow ? ("accepted" as const) : ("not-requested" as const),
-          };
-        },
       }),
     ),
   );
 }
+
+// One fake chat store per engine session: a replacement session is a new store, as in the app.
+const storesBySession = new Map<string, LiveStore>();
 
 const ThreadHarness: ComponentType<{
   commands?: SlashCommand[];
@@ -567,13 +598,23 @@ const ThreadHarness: ComponentType<{
     messages: [],
     onNew: async () => { sendCapture.newMessages += 1; },
   });
+  const sessionKey = queueSessionId ?? "default";
+  let store = storesBySession.get(sessionKey);
+  if (!store) {
+    store = fakeChatStore();
+    storesBySession.set(sessionKey, store);
+  }
   return createElement(
-    AssistantRuntimeProvider,
-    { runtime: host },
+    ChatStoreProvider,
+    { store },
     createElement(
-      ThreadListItemRuntimeProvider,
-      { runtime: host.threads.mainItem },
-      createElement(LocalThreadHarness, { commands, commandCatalogStatus, draftKey, queueSessionId, locked }),
+      AssistantRuntimeProvider,
+      { runtime: host },
+      createElement(
+        ThreadListItemRuntimeProvider,
+        { runtime: host.threads.mainItem },
+        createElement(LocalThreadHarness, { commands, commandCatalogStatus, draftKey, locked }),
+      ),
     ),
   );
 };
@@ -597,6 +638,9 @@ afterEach(() => {
   sendCapture.queueRequests.length = 0;
   sendCapture.newMessages = 0;
   sendCapture.modelRuns = 0;
+  storesBySession.clear();
+  chatStoreState.running = false;
+  chatStoreState.listeners.clear();
 });
 
 describe("plugin command composer labels", () => {
@@ -828,7 +872,7 @@ describe("plugin command composer labels", () => {
 describe("native command reservations", () => {
   it.each(["loading", "unavailable", "fallback"] as const)(
     "keeps plugin commands out of submit and the palette while the catalog is %s",
-    (commandCatalogStatus) => {
+    async (commandCatalogStatus) => {
       const execute = vi.fn();
       sendCapture.text = "/exit";
       putThreadCommand("exit", execute);
@@ -838,15 +882,18 @@ describe("native command reservations", () => {
       expect(submit).toBeTypeOf("function");
       let prevented = false;
       submit?.({ preventDefault: () => { prevented = true; } });
+      await flushSends();
 
       expect(execute).not.toHaveBeenCalled();
-      expect(sendCapture.text).toBe("/exit");
-      expect(prevented).toBe(false);
+      // The composer sends every message through the chat store, so the event is always
+      // prevented; the plugin did not take it, the agent got it.
+      expect(prevented).toBe(true);
+      expect(sentToAgent("/exit")).toBe(true);
       expect(sendCapture.slashPaletteIds).not.toContain("exit");
     },
   );
 
-  it("reserves native aliases from the loaded catalog", () => {
+  it("reserves native aliases from the loaded catalog", async () => {
     const execute = vi.fn();
     sendCapture.text = "/exit";
     putThreadCommand("exit", execute);
@@ -858,9 +905,11 @@ describe("native command reservations", () => {
     const submit = sendCapture.handlers.at(-1);
     let prevented = false;
     submit?.({ preventDefault: () => { prevented = true; } });
+    await flushSends();
 
     expect(execute).not.toHaveBeenCalled();
-    expect(prevented).toBe(false);
+    expect(prevented).toBe(true);
+    expect(sentToAgent("/exit")).toBe(true);
     expect(sendCapture.slashPaletteIds).not.toContain("exit");
   });
 
@@ -886,12 +935,8 @@ describe("native command reservations", () => {
           getState(): { isRunning: boolean };
         };
       };
-      await act(async () => {
-        runtime.thread.composer.setText("start a turn");
-        runtime.thread.composer.send();
-        await Promise.resolve();
-      });
-      expect(runtime.thread.getState().isRunning).toBe(true);
+      // A turn the daemon is running.
+      await act(async () => setStoreRunning(true));
       expect(sendCapture.busySubmit).toBeTypeOf("function");
 
       publishComposerText("/exit");
@@ -933,6 +978,7 @@ describe("early plugin command submission", () => {
     renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus: "loading" }));
 
     expect(invokeFormSubmit()).toBe(true);
+    expect(sendCapture.queueRequests).toHaveLength(0);
     expect(sendCapture.text).toBe("/probe");
   });
 
@@ -1025,6 +1071,53 @@ describe("early plugin command submission", () => {
     }
   });
 
+  it("does not replay a held slash into the next session when no lock covers the switch", async () => {
+    // The app's draft key is agent plus session id, so a new engine session is a new
+    // draft key. With no composer lock, that key change alone must cancel the held send.
+    vi.useFakeTimers();
+    prepareMountedThread();
+    const draft = "/zzz explain this";
+    pluginRegistry.setListed(null);
+    putLoadingThreadCommand("probe");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        draftKey: "agent:session-before",
+        queueSessionId: "session-before",
+      })));
+      const runtime = sendCapture.runtime as {
+        thread: { composer: { setText(text: string): void } };
+      };
+      await act(async () => {
+        runtime.thread.composer.setText(draft);
+        publishComposerText(draft);
+      });
+      await act(async () => host.querySelector("form")?.requestSubmit());
+      expect(sendCapture.modelRuns).toBe(0);
+
+      // The next session restores the same text, so only the session check can stop the replay.
+      saveComposerDraft("agent:session-after", draft);
+      await act(async () => root.render(createElement(ThreadHarness, {
+        commandCatalogStatus: "loading",
+        draftKey: "agent:session-after",
+        queueSessionId: "session-after",
+      })));
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+
+      expect(sendCapture.modelRuns).toBe(0);
+      expect(sendCapture.queueRequests).toHaveLength(0);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      saveComposerDraft("agent:session-before", "");
+      saveComposerDraft("agent:session-after", "");
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["wait timeout", "catalog becomes ready"] as const)(
     "keeps a pending plugin slash in its old draft when %s replays under the composer lock",
     async (replay) => {
@@ -1092,13 +1185,14 @@ describe("early plugin command submission", () => {
     },
   );
 
-  it("does not hold an unknown slash draft when the plugin inventory has no entries", () => {
+  it("does not hold an unknown slash draft when the plugin inventory has no entries", async () => {
     sendCapture.text = "/probe";
 
     renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus: "ready" }));
 
-    expect(invokeFormSubmit()).toBe(false);
-    expect(sendCapture.text).toBe("/probe");
+    invokeFormSubmit();
+    await flushSends();
+    expect(sentToAgent("/probe")).toBe(true);
   });
 
   it("does not lose ordinary slash prose when the session changes during catalog loading", async () => {
@@ -1154,6 +1248,7 @@ describe("early plugin command submission", () => {
     renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus: "ready" }));
 
     expect(invokeFormSubmit()).toBe(true);
+    expect(sendCapture.queueRequests).toHaveLength(0);
     expect(sendCapture.text).toBe("/probe");
   });
 
@@ -1188,12 +1283,8 @@ describe("early plugin command submission", () => {
       const runtime = sendCapture.runtime as {
         thread: { composer: { setText(text: string): void; send(): void }; getState(): { isRunning: boolean } };
       };
-      await act(async () => {
-        runtime.thread.composer.setText("start a turn");
-        runtime.thread.composer.send();
-        await Promise.resolve();
-      });
-      expect(runtime.thread.getState().isRunning).toBe(true);
+      // A turn the daemon is running.
+      await act(async () => setStoreRunning(true));
 
       publishComposerText("/probe");
       let prevented = false;
@@ -1211,7 +1302,7 @@ describe("early plugin command submission", () => {
         type: "add-message",
         message: { role: "user", parts: [{ type: "text", text: "/probe" }] },
       }));
-      expect(runAdapter).toHaveBeenCalledTimes(1);
+      expect(sentToAgent("/probe")).toBe(false);
     } finally {
       resolveRun({ content: [] });
       await act(async () => root.unmount());
@@ -1223,8 +1314,6 @@ describe("early plugin command submission", () => {
   it("sends Cmd+Enter slash prose immediately when no plugins are present", async () => {
     prepareMountedThread();
     pluginRegistry.setListed(null);
-    const sendWaitingNow = vi.fn();
-    sendCapture.sendWaitingNow = sendWaitingNow;
     let resolveRun!: (value: ChatModelRunResult) => void;
     const activeRun = new Promise<ChatModelRunResult>((resolve) => { resolveRun = resolve; });
     const runAdapter = vi.spyOn(threadAdapter, "run").mockReturnValue(activeRun);
@@ -1245,12 +1334,14 @@ describe("early plugin command submission", () => {
           getState(): { isRunning: boolean };
         };
       };
+      // A turn the daemon is running; assistant-ui's runtime runs too, as in the app, so
+      // its input leaves Enter to the composer's busy-turn handler.
       await act(async () => {
+        setStoreRunning(true);
         runtime.thread.composer.setText("start a turn");
         runtime.thread.composer.send();
         await Promise.resolve();
       });
-      expect(runtime.thread.getState().isRunning).toBe(true);
 
       const input = host.querySelector("textarea[aria-label='Message input']");
       expect(input).not.toBeNull();
@@ -1262,7 +1353,7 @@ describe("early plugin command submission", () => {
           metaKey: true,
           bubbles: true,
         }));
-        await Promise.resolve();
+        await flushSends();
       });
       expect(sendCapture.queueRequests).toContainEqual(expect.objectContaining({ text, sendNow: true }));
 
@@ -1284,7 +1375,7 @@ describe("early plugin command submission", () => {
   it.each([
     ["inventory listing failure", "unavailable" as const, "inventory" as const],
     ["plugin import failure", "ready" as const, "plugin" as const],
-  ])("releases the slash gate after %s", (_label, commandCatalogStatus, failure) => {
+  ])("releases the slash gate after %s", async (_label, commandCatalogStatus, failure) => {
     sendCapture.text = "/probe";
     if (failure === "inventory") pluginRegistry.setListed("Plugin inventory is unavailable.");
     else {
@@ -1293,7 +1384,9 @@ describe("early plugin command submission", () => {
     }
     renderToStaticMarkup(createElement(ThreadHarness, { commandCatalogStatus }));
 
-    expect(invokeFormSubmit()).toBe(false);
+    invokeFormSubmit();
+    await flushSends();
+    expect(sentToAgent("/probe")).toBe(true);
   });
 });
 

@@ -749,6 +749,39 @@ class WebMessageAttachmentRegistry:
                 stored.ref, stored.mime, stored.data, stored.filename
             )
 
+    async def _open_for_admission(
+        self,
+        binding: AttachmentScopeBinding,
+        owner_id: str,
+        ref: str,
+    ) -> StagedAttachment:
+        """Read a staged image for the queue's pre-admission stream row."""
+        owner_id = self._validate_owner_id(owner_id)
+        if not self._owner_is_valid(binding, owner_id):
+            raise AttachmentAuthorizationError("attachment owner denied")
+        if not self._valid_reference(binding, ref):
+            raise AttachmentNotFound("attachment not found")
+        async with self._lock:
+            now_ns = self._now_ns()
+            self._prune_expired_unlocked(now_ns)
+            stored = self._attachments.get(ref)
+            if (
+                stored is None
+                or stored.binding != binding
+                or stored.owner_id not in (None, owner_id)
+                or (
+                    stored.owner_id is None
+                    and (
+                        stored.expires_at_ns is None
+                        or stored.expires_at_ns <= now_ns
+                    )
+                )
+            ):
+                raise AttachmentNotFound("attachment not found")
+            return StagedAttachment(
+                stored.ref, stored.mime, stored.data, stored.filename
+            )
+
     async def _release_owner(
         self,
         binding: AttachmentScopeBinding,
@@ -829,6 +862,12 @@ class _BoundAttachmentScope:
     async def open_for_owner(self, owner_id: str, ref: str) -> StagedAttachment:
         """Resolve bytes only for the exact retained item owner."""
         return await self._registry._open_for_owner(self._binding, owner_id, ref)
+
+    async def open_for_admission(self, owner_id: str, ref: str) -> StagedAttachment:
+        """Read a staged image for the row of its pending queue admission."""
+        return await self._registry._open_for_admission(
+            self._binding, owner_id, ref
+        )
 
     async def release_owner(self, owner_id: str) -> int:
         """Release one owner's refs after a definite terminal queue outcome."""

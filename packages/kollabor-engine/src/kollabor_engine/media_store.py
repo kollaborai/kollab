@@ -40,6 +40,7 @@ DATA_URL_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp|gif);base64,(.+)$", re
 MAX_DECODED_BYTES = 10 * 1024 * 1024
 
 REF_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{4}$")
+MANAGED_UPLOAD_ID_RE = re.compile(r"^img_[0-9a-f]{32}$")
 INDEX_NAME = "index.json"
 _IndexResult = TypeVar("_IndexResult")
 
@@ -169,6 +170,84 @@ def save(
 
     _modify_index(conversations_dir, session_id, add_record)
     return record
+
+
+def save_managed_upload_media(
+    conversations_dir: Path,
+    session_id: str,
+    media_id: str,
+    data_url: str,
+) -> MediaRecord:
+    """Durably store one bounded native upload under its ephemeral media ID.
+
+    Snapshots and turn completion can race to make the same upload addressable.
+    The upload ID makes both paths idempotent, while the index digest prevents
+    an ID from being rebound to different bytes.
+    """
+    if not isinstance(media_id, str) or not MANAGED_UPLOAD_ID_RE.fullmatch(media_id):
+        raise MediaError("managed upload id is invalid")
+    ext, decoded = decode_data_url(data_url)
+    mime = MIME_BY_EXT[ext]
+    digest = hashlib.sha256(decoded).hexdigest()
+
+    def save_or_reuse(entries: List[Dict[str, object]]) -> MediaRecord:
+        existing = next(
+            (
+                entry
+                for entry in entries
+                if entry.get("managed_upload_id") == media_id
+            ),
+            None,
+        )
+        if existing is not None:
+            ref = existing.get("ref")
+            if (
+                not isinstance(ref, str)
+                or existing.get("sha256") != digest
+                or existing.get("mime") != mime
+            ):
+                raise MediaError("managed upload id is already bound to other media")
+            try:
+                stored, stored_mime = open_media(
+                    Path(conversations_dir), ref, session_id=session_id
+                )
+            except FileNotFoundError:
+                raise MediaError("managed upload media file is missing") from None
+            if stored_mime != mime or hashlib.sha256(stored).hexdigest() != digest:
+                raise MediaError("managed upload media integrity check failed")
+            ts = existing.get("ts")
+            return MediaRecord(
+                ref,
+                mime,
+                ts if isinstance(ts, (int, float)) else 0.0,
+                digest,
+            )
+
+        media_root = Path(conversations_dir) / "media"
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        while True:
+            ref = timestamp + "-" + secrets.token_hex(2)
+            if not any(media_root.glob(f"*/{ref}.*")):
+                break
+        target = session_media_dir(conversations_dir, session_id) / f"{ref}.{ext}"
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_bytes(decoded)
+        temporary.replace(target)
+
+        ts = time.time()
+        entries.append(
+            {
+                "ref": ref,
+                "mime": mime,
+                "ts": ts,
+                "sha256": digest,
+                "managed_upload_id": media_id,
+            }
+        )
+        return MediaRecord(ref, mime, ts, digest)
+
+    return _modify_index(conversations_dir, session_id, save_or_reuse)
 
 
 def _verified_mime(payload: bytes) -> str:
@@ -639,6 +718,45 @@ def open_media(
             or hashlib.sha256(data).hexdigest() != expected
         ):
             raise MediaError("media integrity check failed")
+    return data, mime
+
+
+def open_queue_handoff_media(
+    conversations_dir: Path,
+    session_id: str,
+    *,
+    request_id: str,
+    source_ref: str,
+) -> Tuple[bytes, str]:
+    """Resolve one queue attachment only after it is bound to saved history."""
+    if (
+        not isinstance(request_id, str)
+        or not request_id
+        or len(request_id) > 256
+        or not isinstance(source_ref, str)
+        or not source_ref
+        or len(source_ref) > 128
+    ):
+        raise FileNotFoundError(source_ref)
+    entries = [
+        entry
+        for entry in _read_index(Path(conversations_dir), session_id)
+        if entry.get("queue_request_id") == request_id
+        and entry.get("queue_source_ref") == source_ref
+        and isinstance(entry.get("history_row_uuid"), str)
+        and entry.get("history_row_uuid")
+        and type(entry.get("queue_attachment_index")) is int
+        and isinstance(entry.get("ref"), str)
+        and REF_RE.fullmatch(entry["ref"])
+    ]
+    if len(entries) != 1:
+        raise FileNotFoundError(source_ref)
+    entry = entries[0]
+    data, mime = open_media(
+        Path(conversations_dir), entry["ref"], session_id=session_id
+    )
+    if entry.get("mime") != mime:
+        raise MediaError("queue handoff media MIME does not match stored file")
     return data, mime
 
 

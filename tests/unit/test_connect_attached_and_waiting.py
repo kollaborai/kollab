@@ -109,7 +109,8 @@ class _Bus:
         self.services = services
 
     def get_service(self, name):
-        return self.services[name]
+        # Like the real EventBus: an unregistered service is None, not an error.
+        return self.services.get(name)
 
 
 # --------------------------------------------------------------------- #

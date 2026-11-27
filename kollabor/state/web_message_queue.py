@@ -35,6 +35,7 @@ DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024
 DEFAULT_MAX_QUEUE_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_OPERATIONS = 4096
 DEFAULT_OPERATION_RETRY_LEASE_SECONDS = 900.0
+MAX_REQUEST_ID_LENGTH = 256
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 
@@ -319,6 +320,7 @@ class WebMessageQueue:
         self._item_attempt_states: dict[str, str] = {}
         self._batch_owners: dict[str, str] = {}
         self._item_owners: dict[str, str] = {}
+        self._item_owner_issued_at_ns: dict[str, int] = {}
         self._active_claim: str | None = None
         self._active_batch_id: str | None = None
         self._active_item_attempt_id: str | None = None
@@ -332,6 +334,16 @@ class WebMessageQueue:
     @staticmethod
     def _validate_identifier(value: str) -> None:
         if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
+            raise InvalidIdentifier("invalid queue identifier")
+
+    @staticmethod
+    def _validate_request_id(value: str) -> None:
+        """Validate an input ID using the public chat stream contract."""
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > MAX_REQUEST_ID_LENGTH
+        ):
             raise InvalidIdentifier("invalid queue identifier")
 
     def _new_token(self, kind: str) -> str:
@@ -407,6 +419,27 @@ class WebMessageQueue:
             raise StaleIdentifier("entity ID creation lease has expired")
         return issued_at_ns
 
+    def _validate_new_item_id(self, value: str) -> int:
+        """Validate an input ID or authenticate a daemon-minted item token."""
+        self._validate_request_id(value)
+        parts = value.split("-")
+        if (
+            len(parts) == 5
+            and parts[0] == "item"
+            and re.fullmatch(r"[0-9a-f]{32}", parts[1]) is not None
+            and re.fullmatch(r"[0-9]+", parts[2]) is not None
+            and re.fullmatch(r"[0-9a-f]{32}", parts[3]) is not None
+            and re.fullmatch(r"[0-9a-f]{32}", parts[4]) is not None
+        ):
+            return self._validate_new_entity_id(value, "item")
+        return time.monotonic_ns()
+
+    def _existing_item_issue_time(self, request_id: str) -> int:
+        issued_at_ns = self._item_owner_issued_at_ns.get(request_id)
+        if issued_at_ns is not None:
+            return issued_at_ns
+        return self._token_issue_time(request_id, "item")
+
     @staticmethod
     def _payload_fingerprint(payload: bytes) -> str:
         return hashlib.sha256(payload).hexdigest()
@@ -458,12 +491,15 @@ class WebMessageQueue:
             ):
                 del self._batch_owners[batch_id]
         for request_id in tuple(self._item_owners):
-            issued_at_ns = self._token_issue_time(request_id, "item")
+            issued_at_ns = self._item_owner_issued_at_ns.get(request_id)
+            if issued_at_ns is None:
+                issued_at_ns = self._token_issue_time(request_id, "item")
             if (
                 request_id not in pending_items
                 and now_ns - issued_at_ns >= self._operation_retry_lease_ns
             ):
                 del self._item_owners[request_id]
+                self._item_owner_issued_at_ns.pop(request_id, None)
 
         for claim_id, reservation in tuple(self._claim_reservations.items()):
             if not self._is_operation_pinned(claim_id):
@@ -645,7 +681,10 @@ class WebMessageQueue:
             decoded = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return ""
-        if not isinstance(decoded, dict) or set(decoded) != {"text"}:
+        if not isinstance(decoded, dict) or set(decoded) not in (
+            {"text"},
+            {"text", "goal_reply_id"},
+        ):
             return ""
         text = decoded.get("text")
         if not isinstance(text, str):
@@ -698,7 +737,7 @@ class WebMessageQueue:
         for item in messages:
             if not isinstance(item, WebMessage):
                 raise CapacityExceeded("invalid batch item")
-            self._validate_identifier(item.request_id)
+            self._validate_request_id(item.request_id)
             if item.request_id in request_ids:
                 raise ItemConflict("duplicate request ID in batch")
             request_ids.add(item.request_id)
@@ -744,8 +783,10 @@ class WebMessageQueue:
             if replay is not None:
                 return replay
             self._validate_new_entity_id(batch_id, "batch")
-            for item in messages:
-                self._validate_new_entity_id(item.request_id, "item")
+            item_issue_times = {
+                item.request_id: self._validate_new_item_id(item.request_id)
+                for item in messages
+            }
             self._ensure_operation_capacity()
             if batch_id in self._batch_owners:
                 raise BatchConflict("batch ID is already in use")
@@ -774,6 +815,9 @@ class WebMessageQueue:
             self._batch_owners[batch_id] = operation_id
             for item in messages:
                 self._item_owners[item.request_id] = batch_id
+                self._item_owner_issued_at_ns[item.request_id] = item_issue_times[
+                    item.request_id
+                ]
             self._pending_items += len(messages)
             self._pending_bytes += batch_bytes
             self._revision += 1
@@ -837,8 +881,10 @@ class WebMessageQueue:
             if replay is not None:
                 return replay
             self._validate_new_entity_id(batch_id, "batch")
-            for item in messages:
-                self._validate_new_entity_id(item.request_id, "item")
+            item_issue_times = {
+                item.request_id: self._validate_new_item_id(item.request_id)
+                for item in messages
+            }
             self._ensure_operation_capacity()
             if batch_id in self._batch_owners:
                 raise BatchConflict("batch ID is already in use")
@@ -901,6 +947,9 @@ class WebMessageQueue:
                 self._batch_owners[batch_id] = operation_id
                 for item in messages:
                     self._item_owners[item.request_id] = batch_id
+                    self._item_owner_issued_at_ns[item.request_id] = item_issue_times[
+                        item.request_id
+                    ]
                 self._pending_items += len(messages)
                 self._pending_bytes += batch_bytes
                 self._revision = receipt.revision
@@ -912,8 +961,10 @@ class WebMessageQueue:
         operation_id: str,
         batch: _StoredBatch,
         fingerprint: str,
+        items: Sequence[_StoredItem] | None = None,
     ) -> QueueReceipt:
-        self._reserve_claim_lifecycle(operation_id, batch.items)
+        items = batch.items if items is None else items
+        self._reserve_claim_lifecycle(operation_id, items)
         batch.status = BatchStatus.DISPATCHING
         batch.claim_id = operation_id
         self._active_claim = operation_id
@@ -924,7 +975,7 @@ class WebMessageQueue:
             operation_id,
             BatchStatus.DISPATCHING.value,
             batch_id=batch.batch_id,
-            request_ids=tuple(item.request_id for item in batch.items),
+            request_ids=tuple(item.request_id for item in items),
             claim_id=operation_id,
         )
         return self._record(fingerprint, receipt, kind="batch_claim")
@@ -961,17 +1012,23 @@ class WebMessageQueue:
         batch_id: str,
         *,
         send_now: bool = False,
+        request_id: str | None = None,
     ) -> QueueReceipt:
         """Claim a named envelope, optionally promoting it ahead of the queue.
 
-        Send Now promotion and claim happen under the same lock. The envelope
-        keeps its internal order and remains one active claim until settled.
+        Send Now promotion and claim happen under the same lock. A selected
+        item alone is reserved; its siblings stay in their original order.
+        Whole-batch claims retain their existing promotion behavior.
         """
         self._validate_identifier(operation_id)
         self._validate_identifier(batch_id)
         if not isinstance(send_now, bool):
             raise ValueError("send_now must be a bool")
-        input_fingerprint = self._fingerprint("claim_batch", batch_id, send_now)
+        if request_id is not None:
+            self._validate_request_id(request_id)
+            if not send_now:
+                raise ValueError("a selected item requires send_now")
+        input_fingerprint = self._fingerprint("claim_batch", batch_id, send_now, request_id)
         async with self._lock:
             replay = self._replay(operation_id, input_fingerprint)
             if replay is not None:
@@ -998,11 +1055,16 @@ class WebMessageQueue:
             )
             if not send_now and first_queued is not batch:
                 raise OutOfOrderClaim("normal claims must preserve queue order")
-            if send_now:
+            items = batch.items
+            if request_id is not None:
+                items = [item for item in batch.items if item.request_id == request_id]
+                if not items:
+                    raise ItemNotFound("item is not pending in this batch")
+            if send_now and request_id is None:
                 self._ensure_operation_capacity(2 + 3 * len(batch.items))
                 batch.priority_rank = self._next_priority_rank
                 self._next_priority_rank += 1
-            return self._claim_receipt(operation_id, batch, input_fingerprint)
+            return self._claim_receipt(operation_id, batch, input_fingerprint, items)
 
     async def claim_next_item(
         self,
@@ -1030,11 +1092,14 @@ class WebMessageQueue:
                 raise ClaimNotDispatchable("batch claim is not dispatching")
             if self._active_item_attempt_id is not None:
                 raise ClaimBusy("another item in the batch is unresolved")
+            reservation = self._claim_reservations.get(claim_id)
             item = next(
                 (
                     candidate
                     for candidate in batch.items
                     if candidate.status is ItemStatus.QUEUED
+                    and reservation is not None
+                    and candidate.request_id in reservation.item_slots
                 ),
                 None,
             )
@@ -1380,6 +1445,13 @@ class WebMessageQueue:
                 batch.status = BatchStatus.DISPATCHING
                 self._claim_states[batch_claim_id] = BatchStatus.DISPATCHING.value
                 self._free_item_reservation(batch_claim_id, request_id)
+                if reservation is not None and not reservation.item_slots:
+                    batch.status = BatchStatus.QUEUED
+                    batch.claim_id = None
+                    self._active_claim = None
+                    self._active_batch_id = None
+                    self._claim_states[batch_claim_id] = ClaimOutcome.ACCEPTED.value
+                    self._free_claim_reservation(batch_claim_id)
             else:
                 del self._batches[batch.batch_id]
                 self._active_claim = None
@@ -1439,13 +1511,16 @@ class WebMessageQueue:
     ) -> QueueReceipt:
         """Remove exactly one queued item; claimed batches cannot be edited."""
         self._validate_identifier(operation_id)
-        self._validate_identifier(request_id)
+        self._validate_request_id(request_id)
         input_fingerprint = self._fingerprint("remove_item", request_id)
         async with self._lock:
             replay = self._replay(operation_id, input_fingerprint)
             if replay is not None:
                 return replay
-            self._token_issue_time(request_id, "item")
+            if request_id in self._item_owners:
+                self._existing_item_issue_time(request_id)
+            else:
+                self._token_issue_time(request_id, "item")
             self._ensure_operation_capacity()
             owner = self._item_owners.get(request_id)
             if owner is None:
@@ -1489,7 +1564,7 @@ class WebMessageQueue:
     ) -> QueueReceipt:
         """Remove one queued item and release only its attachment refs."""
         self._validate_identifier(operation_id)
-        self._validate_identifier(request_id)
+        self._validate_request_id(request_id)
         self._validate_attachment_scope(attachment_scope)
         input_fingerprint = self._fingerprint(
             "remove_item_with_attachments", request_id
@@ -1498,7 +1573,10 @@ class WebMessageQueue:
             replay = self._replay(operation_id, input_fingerprint)
             if replay is not None:
                 return replay
-            self._token_issue_time(request_id, "item")
+            if request_id in self._item_owners:
+                self._existing_item_issue_time(request_id)
+            else:
+                self._token_issue_time(request_id, "item")
             self._ensure_operation_capacity()
             owner = self._item_owners.get(request_id)
             if owner is None:

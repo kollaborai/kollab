@@ -6,12 +6,13 @@ import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from kollabor.llm.streaming_handler import StreamingHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import (
     QueuedInput,
+    QueueHandoffInput,
     QueueProcessor,
     TaggedInput,
     _tool_results_requiring_followup,
@@ -306,6 +307,120 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(reply.metadata.get("voice_turn_id"), "turn-9")
         self.processor.active_origin_context = None
         self.assertEqual(self.processor._voice_turn_metadata(), {})
+
+    def test_native_assistant_history_keeps_the_active_turn_id(self):
+        from kollabor_tui.turn_context import current_turn
+
+        self._reply_with("The build is green.")
+        token = current_turn.set(
+            {"turn_id": "native-turn-9", "input_source": "native"}
+        )
+        try:
+            self.loop.run_until_complete(
+                self.processor._execute_llm_turn_inner(
+                    user_message_provided=True, current_parent_uuid="t",
+                )
+            )
+        finally:
+            current_turn.reset(token)
+
+        [reply] = self._assistant_messages()
+        self.assertEqual(reply.metadata["turn_id"], "native-turn-9")
+        self.assertEqual(
+            self.conversation_logger.log_assistant_message.await_args.kwargs[
+                "turn_id"
+            ],
+            "native-turn-9",
+        )
+
+    def test_native_provider_stop_reason_is_normalized_to_completed(self):
+        from kollabor_tui.display_tap import DisplayTap
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self._reply_with("The build is green.")
+        self.api_service.last_stop_reason = "stop"
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        [complete] = [e for e in tap.get_snapshot() if e["type"] == "turn_complete"]
+        self.assertEqual(complete.get("stop_reason"), "end_turn")
+
+    def test_the_continue_note_after_a_cut_reply_is_hidden_from_the_chat(self):
+        """The model still reads the note; the chat never shows it as the user's message."""
+        self._reply_with("whole reply")
+        seen = []
+
+        async def call_llm(**_kwargs):
+            if not seen:
+                seen.append("first")
+                self.api_service.last_stop_reason = "length"
+                return "whole "
+            notes = [
+                m for m in self.conversation_history
+                if m.role == "user" and "truncated due to output" in str(m.content)
+            ]
+            seen.append([m.metadata.get("hidden") for m in notes])
+            self.api_service.last_stop_reason = "stop"
+            return "reply"
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+        self.assertEqual(seen, ["first", [True]])
+
+    def test_a_stop_during_a_tool_call_ends_the_turn(self):
+        """Stop or Send Now while a tool runs: the cut-off tool still returns a
+        result, but the turn ends here instead of waiting on another model call."""
+        from kollabor_tui.display_tap import DisplayTap
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self._reply_with("")
+        self.native_tools_handler.tool_calling_enabled = True
+        self.api_service.has_pending_tool_calls.return_value = True
+        self.api_service.get_last_tool_calls = MagicMock(return_value=[
+            SimpleNamespace(id="call-1", name="terminal", input={"command": "sleep 9"}),
+        ])
+        self.api_service.get_last_provider_reasoning = MagicMock(return_value=None)
+        self.api_service.format_tool_result = MagicMock(
+            return_value={"role": "tool", "content": "cancelled"}
+        )
+
+        async def run_tools(*_args, **_kwargs):
+            self.processor.cancel_processing = True  # the Stop lands mid-tool
+            return [ToolExecutionResult("call-1", "terminal", False, error="cancelled")]
+
+        self.native_tools_handler.execute_tool_calls = AsyncMock(side_effect=run_tools)
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        self.assertTrue(self.processor.turn_completed)
+        [complete] = [e for e in tap.get_snapshot() if e["type"] == "turn_complete"]
+        self.assertEqual(complete.get("stop_reason"), "cancelled")
+
+    def test_native_stop_publishes_cancelled_despite_stale_provider_reason(self):
+        self.api_service.last_stop_reason = "stop"
+        self.processor.cancel_processing = True
+        self._stop_after_streaming("visible partial")
+
+        events = [
+            call.args[0]
+            for call in self.renderer.get_service.return_value.publish.call_args_list
+        ]
+        [complete] = [e for e in events if e["type"] == "turn_complete"]
+        self.assertEqual(complete.get("stop_reason"), "cancelled")
 
     def test_every_event_of_a_voice_turn_carries_its_id(self):
         """The Engine streams a voice turn's reply by its id: a talked-over turn's
@@ -1127,6 +1242,100 @@ class TestQueueProcessor(unittest.TestCase):
         # turn_completed set to True in setUp to prevent infinite loops
         self.assertFalse(self.processor.cancel_processing)
 
+    def test_full_queue_ends_a_refused_voice_request(self):
+        self.processor.max_queue_size = 1
+        self.processor.processing_queue = asyncio.Queue(maxsize=1)
+        self.processor.processing_queue.put_nowait("already queued")
+        voice = QueuedInput("Check the tests", {}, request_ids=("voice-overflow",))
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            with self.assertRaises(asyncio.QueueFull):
+                self.loop.run_until_complete(self.processor.enqueue(voice))
+
+        self.assertEqual(
+            publish.call_args_list,
+            [
+                call(
+                    self.renderer,
+                    "error",
+                    request_ids=["voice-overflow"],
+                    message=(
+                        "The agent's queue was full, so this message was dropped. "
+                        "Send it again."
+                    ),
+                ),
+                call(
+                    self.renderer,
+                    "turn_complete",
+                    stop_reason="error",
+                    request_ids=["voice-overflow"],
+                ),
+            ],
+        )
+        self.assertEqual(
+            list(self.processor.processing_queue._queue), ["already queued"]
+        )
+
+    def test_stop_preserves_a_queued_voice_request(self):
+        voice = QueuedInput("Check the tests", {}, request_ids=("voice-stop",))
+        self.processor.processing_queue.put_nowait(voice)
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            self.processor.request_cancellation(origin="human")
+
+        self.assertIs(self.processor.processing_queue.get_nowait(), voice)
+        publish.assert_not_called()
+
+    def test_stop_preserves_a_queued_voice_input_without_request_id(self):
+        voice = QueuedInput("Check the tests", {})
+        self.processor.processing_queue.put_nowait(voice)
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            self.processor.request_cancellation(origin="human")
+
+        self.assertIs(self.processor.processing_queue.get_nowait(), voice)
+        publish.assert_not_called()
+
+    def test_stop_restores_an_untagged_voice_input_with_protected_handoff(self):
+        voice = QueuedInput("Check the tests", {})
+        handoff = QueueHandoffInput(
+            content="Run the queued job",
+            request_ids=("handoff-id",),
+            queue_request_id="handoff-id",
+            attempt_id="attempt-1",
+        )
+        self.processor._drained_batch_messages = (voice, handoff)
+        self.processor.processing_queue.put_nowait("already queued")
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            self.processor.request_cancellation(origin="human")
+
+        queued = list(self.processor.processing_queue._queue)
+        self.assertEqual(queued, [voice, handoff, "already queued"])
+        self.assertIs(queued[0], voice)
+        self.assertIs(queued[1], handoff)
+        publish.assert_not_called()
+
+    def test_stop_restores_local_inputs_with_protected_handoff(self):
+        voice = QueuedInput("Check the tests", {}, request_ids=("voice-stop",))
+        chat = TaggedInput("Queued chat", ("chat-stop",))
+        handoff = QueueHandoffInput(
+            content="Run the queued job",
+            request_ids=("handoff-id",),
+            queue_request_id="handoff-id",
+            attempt_id="attempt-1",
+        )
+        self.processor._drained_batch_messages = (voice, chat, handoff)
+
+        with patch("kollabor_agent.queue_processor.publish_semantic") as publish:
+            self.processor.request_cancellation(origin="human")
+
+        self.assertEqual(
+            list(self.processor.processing_queue._queue), [voice, chat, handoff]
+        )
+        self.assertEqual(self.processor._drained_batch_messages, ())
+        publish.assert_not_called()
+
     def test_remote_cancellation_requires_idle_matching_generation(self):
         self.processor.is_processing = True
         generation = self.processor.request_cancellation(origin="remote_task")
@@ -1521,6 +1730,12 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(assistant.role, "assistant")
         self.assertEqual(assistant.content, raw)
         self.assertEqual(assistant.metadata.get("display_content"), "Running it.")
+        self.assertEqual(
+            self.conversation_logger.log_assistant_message.call_args.kwargs.get(
+                "display_content"
+            ),
+            "Running it.",
+        )
         self.assertEqual(
             assistant.metadata.get("xml_tool_calls"),
             [

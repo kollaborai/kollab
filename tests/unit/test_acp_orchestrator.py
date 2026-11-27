@@ -9,12 +9,14 @@ import pytest
 from kollabor_voice.voice_context import VOICE_NUDGE, VOICE_RULES_MARK, voice_preamble
 
 from kollabor.llm import acp_orchestrator as mod
+from kollabor.state.chat_stream import ChatStreamService
 from kollabor.state.local import LocalStateService
 from kollabor_agent.voice_admission import issue_voice_admission_context
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_events.data_models import ConversationMessage
+from kollabor_events.chat_stream import sequence_problems
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.models import HubMessage
 
@@ -78,6 +80,95 @@ async def test_operator_input_provenance_is_persisted_only_for_trusted_sources(
         assert human_row["metadata"]["operator_inputs"] == [record]
         assert "operator_inputs" not in peer_row["metadata"]
         assert llm.conversation_history[0].metadata["operator_inputs"] == [record]
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "outcome"),
+    [("ACP turn cancelled", "cancelled"), ("provider failed", "failed")],
+)
+async def test_no_result_acp_failure_persists_ended_lifecycle_for_resume(
+    tmp_path, monkeypatch, failure, outcome
+):
+    class InterruptedRunner(FakeRunner):
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None):
+            future = asyncio.get_running_loop().create_future()
+            return mod.ACPAdmission(
+                request_id,
+                source,
+                thread_id,
+                1,
+                9,
+                text,
+                future,
+                origin or {},
+                history_key="no-result-turn-key",
+            )
+
+    monkeypatch.setattr(mod, "ACPRunner", InterruptedRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
+    )
+    logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, logger)
+    history = []
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=logger,
+        conversation_history=history,
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        admission = orchestrator.admit(
+            "cancel before output", request_id="no-result-request", source="rpc"
+        )
+        await asyncio.gather(*tuple(orchestrator._history_tasks))
+        admission.future.set_exception(mod.ACPError(failure))
+        await asyncio.gather(*tuple(orchestrator._completion_tasks))
+
+        resumed_manager = ConversationManager(configuration)
+        assert resumed_manager.load_session(logger.session_id)
+        resumed_history = [
+            ConversationMessage(
+                role=message["role"],
+                content=message["content"],
+                metadata=message["metadata"],
+            )
+            for message in resumed_manager.messages
+        ]
+        resumed_llm = SimpleNamespace(
+            conversation_manager=resumed_manager,
+            conversation_history=resumed_history,
+        )
+        resumed_state = SimpleNamespace(
+            _event_bus=bus,
+            _llm_service=resumed_llm,
+            get_conversation_uid=lambda: logger.session_id,
+        )
+        snapshot = ChatStreamService(resumed_state).subscribe(
+            {"after": None, "conversation_uid": None}
+        )["events"][0]
+
+        assert sequence_problems([snapshot]) == []
+        assert snapshot["data"]["inputs"] == [
+            {
+                "id": "no-result-request",
+                "state": "ended",
+                "turn_id": "9",
+                "outcome": outcome,
+            }
+        ]
+        assert snapshot["data"]["turns"] == [
+            {"turn_id": "9", "state": "ended", "input_ids": ["no-result-request"]}
+        ]
+        user = next(message for message in resumed_manager.messages if message["role"] == "user")
+        assert user["metadata"]["chat_stream_outcome"] == outcome
     finally:
         await orchestrator.close()
 
@@ -163,9 +254,12 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         # Replies and broadcasts that arrive during a turn share one bounded
         # model prompt. Each was already rendered by Hub on arrival.
         orchestrator.runner.is_processing = True
+        observation_ids = []
         for index in range(22):
+            message_id = f"peer-note-{index}"
+            observation_ids.append(message_id)
             orchestrator.observe_notification(HubMessage(
-                action="message", from_agent=f"peer-id-{index}",
+                id=message_id, action="message", from_agent=f"peer-id-{index}",
                 from_identity=f"peer-{index}", to="receiver" if index % 2 else "*",
                 content=f"PEER_NOTE_{index}\n\nDetails {index}",
                 thread_id=f"thread-{index}", reply_to=f"request-{index}" if index % 2 else "",
@@ -186,7 +280,7 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         context = next(
             update["text"]
             for update in orchestrator.runner._updates
-            if str(update["request_id"]).startswith("observations-")
+            if update["request_id"] == observation_ids[-1]
         )
         assert context.startswith("<agent_hud>\n") and context.endswith("\n</agent_hud>")
         assert "2 older observations omitted." in context
@@ -209,6 +303,38 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         assert restored.load_session(conversation_logger.session_id)
         restored_inputs = [message["content"] for message in restored.messages if message["role"] == "user"]
         assert restored_inputs == [row.content for row in inputs] + [human]
+
+        resumed_history = [
+            ConversationMessage(
+                role=message["role"],
+                content=message["content"],
+                metadata=message.get("metadata", {}),
+            )
+            for message in restored.messages
+        ]
+        resumed_llm = SimpleNamespace(
+            conversation_manager=restored,
+            conversation_history=resumed_history,
+        )
+        resumed_state = SimpleNamespace(
+            _event_bus=bus,
+            _llm_service=resumed_llm,
+            get_conversation_uid=lambda: conversation_logger.session_id,
+        )
+        resumed_snapshot = ChatStreamService(resumed_state).subscribe(
+            {"after": None, "conversation_uid": None}
+        )["events"][0]["data"]
+        note = next(row for row in resumed_snapshot["rows"] if row["id"] == observation_ids[0])
+        assert note["kind"] == "note"
+        assert note["role"] == "system"
+        assert note["parts"][0]["type"] == "hub-note"
+        assert note["parts"][0]["text"] == "PEER_NOTE_0\n\nDetails 0"
+        restored_note = next(
+            message
+            for message in restored.messages
+            if message["metadata"].get("hub_message_id") == observation_ids[0]
+        )
+        assert restored_note["metadata"]["hub_admission"] == "note"
     finally:
         await orchestrator.close()
 
@@ -1165,9 +1291,13 @@ async def test_an_arrival_row_that_fails_is_written_at_the_flush(tmp_path, monke
 
         monkeypatch.setattr(orchestrator, "_record_user", flaky_record)
         orchestrator.runner.is_processing = True
-        for note in ("FIRST_NOTE", "SECOND_NOTE"):
+        for message_id, note in (
+            ("arrival-first", "FIRST_NOTE"),
+            ("arrival-second", "SECOND_NOTE"),
+        ):
             orchestrator.observe_notification(
                 HubMessage(
+                    id=message_id,
                     action="message",
                     from_agent="peer-id-1",
                     from_identity="peer-1",
@@ -1196,11 +1326,13 @@ async def test_an_arrival_row_that_fails_is_written_at_the_flush(tmp_path, monke
         assert sum("FIRST_NOTE" in m.content for m in rows) == 1
         assert sum("SECOND_NOTE" in m.content for m in rows) == 1
         batches = [
-            update["text"]
+            update
             for update in orchestrator.runner._updates
-            if str(update["request_id"]).startswith("observations-")
+            if update["request_id"] in {"arrival-first", "arrival-second"}
         ]
-        assert len(batches) == 1 and "FIRST_NOTE" in batches[0]
+        assert len(batches) == 1
+        assert batches[0]["request_id"] == "arrival-second"
+        assert "FIRST_NOTE" in batches[0]["text"]
     finally:
         await orchestrator.close()
 
@@ -1237,9 +1369,10 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
                 raise failures.pop()
             return real_record(*args, **kwargs)
 
-        def note(content):
+        def note(message_id, content):
             orchestrator.observe_notification(
                 HubMessage(
+                    id=message_id,
                     action="message",
                     from_agent="peer-id-1",
                     from_identity="peer-1",
@@ -1252,10 +1385,10 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
 
         monkeypatch.setattr(orchestrator, "_record_user", flaky_record)
         orchestrator.runner.is_processing = True
-        note("FIRST_NOTE")  # the arrival row fails
+        note("arrival-first", "FIRST_NOTE")  # the arrival row fails
         orchestrator.runner.is_processing = False
         orchestrator._flush_observations()  # the retry fails, the batch row lands
-        note("LATER_NOTE")  # idle: its own row, sent at once
+        note("arrival-later", "LATER_NOTE")  # idle: its own row, sent at once
         await asyncio.gather(*orchestrator._completion_tasks)
 
         rows = [
@@ -1265,12 +1398,12 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
         ]
         assert sum("FIRST_NOTE" in m.content for m in rows) == 1
         assert sum("LATER_NOTE" in m.content for m in rows) == 1
-        batches = [
-            update["text"]
-            for update in orchestrator.runner._updates
-            if str(update["request_id"]).startswith("observations-")
-        ]
-        assert len(batches) == 2 and "FIRST_NOTE" not in batches[1]
+        batches = orchestrator.runner._updates
+        assert len(batches) == 2
+        assert batches[0]["request_id"] == "arrival-first"
+        assert "FIRST_NOTE" in batches[0]["text"]
+        assert batches[1]["request_id"] == "arrival-later"
+        assert "FIRST_NOTE" not in batches[1]["text"]
     finally:
         await orchestrator.close()
 

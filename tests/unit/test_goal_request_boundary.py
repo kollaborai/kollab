@@ -876,3 +876,106 @@ async def test_private_image_replay_after_daemon_restart_retains_discard_fence(b
         private_goal_reply_id="goal-" + "f" * 32, goal_conversation_uid="conversation-a",
     )
     assert not discarded["accepted"] and "discarded" in discarded["reason"]
+
+
+@pytest.mark.asyncio
+async def test_private_goal_result_is_not_written_to_shared_history(boundary):
+    boundary.service.stage_attachment_request(
+        "conversation-a", "/goal secret-private-preview", [{"ref": "secret-ref"}]
+    )
+    accepted = await boundary.state.send_message(
+        "/goal requests", private_goal_reply=True,
+        private_goal_reply_id="goal-" + "b" * 32,
+        goal_conversation_uid="conversation-a",
+    )
+    assert accepted["accepted"]
+    await finish(boundary)
+    reply = boundary.state._goal_reply_mailbox.poll(accepted["goal_reply_id"], "conversation-a")
+    assert "secret-private-preview" in reply["message"]
+    assert "secret-private-preview" not in repr(boundary.history)
+    assert reply["history_recorded"] is False
+
+@pytest.mark.asyncio
+async def test_ordered_input_dispatches_private_goal_once_and_is_owner_scoped(boundary):
+    from kollabor.state.chat_stream import ChatStreamService
+    from kollabor.state.handlers import register_state_handlers
+    from kollabor.state.web_message_queue_runtime import register_web_message_queue_runtime
+    from kollabor_rpc import RpcCallerContext, RpcServer
+
+    server = RpcServer()
+    runtime = register_web_message_queue_runtime(server, boundary.state)
+    boundary.bus.services['web_message_queue_runtime'] = runtime
+    stream = ChatStreamService(boundary.state)
+    boundary.state.chat_stream = stream
+    register_state_handlers(server, boundary.state)
+    boundary.bus.services['chat_stream'] = stream
+    capability = 'goal-' + 'a' * 32
+    body = {'id': 'web-private-1', 'text': '/goal show', 'attachments': [],
+            'goal_reply_id': capability}
+
+    async def call(method, params, uid=501):
+        return await server.handle_wire(
+            {'action': 'rpc_request', 'request_id': 'test',
+             'method': method, 'params': params},
+            caller_context=RpcCallerContext.from_unix_peer(uid))
+
+    try:
+        first = await call('state.chat_stream.add_input', body)
+        assert first['result'] == {'id': body['id'], 'state': 'queued'}
+        for _ in range(100):
+            if getattr(boundary.state, '_goal_reply_mailbox', None):
+                break
+            await asyncio.sleep(.01)
+        await finish(boundary)
+        mailbox = boundary.state._goal_reply_mailbox
+        assert mailbox.poll(capability, 'conversation-a')['status'] == 'complete'
+        owner_reply = await call('state.poll_goal_reply', {'reply_id': capability})
+        assert owner_reply['result']['status'] == 'complete'
+        assert 'no active goal' in owner_reply['result']['message']
+        foreign_reply = await call(
+            'state.poll_goal_reply', {'reply_id': capability}, uid=502
+        )
+        assert foreign_reply['result']['status'] == 'missing'
+        assert (await call('state.chat_stream.add_input', body))['result']['id'] == body['id']
+        assert (await call('state.chat_stream.add_input', {
+            **body, 'goal_reply_id': 'goal-' + 'b' * 32
+        }))['result']['error']
+        assert (await call('state.chat_stream.add_input', body, uid=502))['result']['error']
+
+        boundary.bus.block_on = EventType.SLASH_COMMAND_DETECTED
+        second_capability = 'goal-' + 'b' * 32
+        second_body = {
+            'id': 'web-private-2', 'text': '/goal requests', 'attachments': [],
+            'goal_reply_id': second_capability,
+        }
+        assert (await call('state.chat_stream.add_input', second_body))['result']['id'] == second_body['id']
+        await asyncio.wait_for(boundary.bus.reached.wait(), 2)
+        assert (await call(
+            'state.poll_goal_reply', {'reply_id': second_capability}
+        ))['result']['status'] == 'pending'
+        assert (await call(
+            'state.poll_goal_reply', {'reply_id': second_capability}, uid=502
+        ))['result']['status'] == 'missing'
+        foreign_cancel = await call(
+            'state.cancel_goal_reply', {'reply_id': second_capability}, uid=502
+        )
+        assert foreign_cancel['result']['cancelled'] is False
+        assert (await call(
+            'state.poll_goal_reply', {'reply_id': second_capability}
+        ))['result']['status'] == 'pending'
+        cancelled = await call(
+            'state.cancel_goal_reply', {'reply_id': second_capability}
+        )
+        assert cancelled['result']['cancelled'] is True
+        boundary.bus.release.set()
+        await finish(boundary)
+        cancelled_reply = await call(
+            'state.poll_goal_reply', {'reply_id': second_capability}
+        )
+        assert cancelled_reply['result']['status'] == 'complete'
+        assert cancelled_reply['result']['success'] is False
+        assert capability not in repr(stream.subscribe({})) + repr(boundary.events)
+        assert second_capability not in repr(stream.subscribe({})) + repr(boundary.events)
+        boundary.llm.submit_human_input.assert_not_awaited()
+    finally:
+        await runtime.close()
