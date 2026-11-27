@@ -1435,7 +1435,18 @@ async def restart_agent(session_id: str):
     try:
         outcome = await session.state.restart_agent()
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if str(exc) != "this agent is too old to restart itself: quit it and start it again":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            outcome = await session.restart_outdated_agent()
+        except ValueError as restart_error:
+            raise HTTPException(status_code=409, detail=str(restart_error)) from restart_error
+        except Exception as restart_error:
+            logger.exception("session %s could not restart its older agent", session_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The agent could not be restarted by this engine.",
+            ) from restart_error
     return {"ok": True, "session_id": session_id, **outcome}
 
 

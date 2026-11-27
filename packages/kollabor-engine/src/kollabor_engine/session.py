@@ -37,6 +37,7 @@ from .daemon_pool import DaemonHandle, get_daemon_pool
 from .history_provenance import mark_system_initialization
 from .history_store import anchor_digest, read_history_from_disk_async
 from .history_xml_tools import web_history
+from .hub_bridge import HubBridge
 from .session_context import SessionReadContext
 
 logger = logging.getLogger(__name__)
@@ -399,6 +400,85 @@ class EngineSession:
             self._track_events(), name=f"session-track-{self.session_id}"
         )
         await self.refresh_history()
+
+    async def restart_outdated_agent(self) -> Dict[str, bool]:
+        """Stop a pre-restart-RPC agent through Hub and start this session again."""
+        if self.device:
+            raise ValueError(
+                "This agent is on another computer and cannot be restarted by this engine."
+            )
+        daemon = self.daemon
+        if daemon is None or not daemon.identity or not daemon.socket_path:
+            raise ValueError("This agent is not connected to this engine.")
+
+        bridge = HubBridge()
+        presence = bridge.get_agent_by_identity(
+            daemon.identity, use_cache=False, project=daemon.project or self.workspace
+        )
+        if not presence:
+            raise ValueError("This agent could not be found in the hub.")
+
+        agent_id = presence.get("agent_id")
+        pid = presence.get("pid")
+        started_at = presence.get("started_at")
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or agent_id != daemon._daemon_image
+            or type(pid) is not int
+            or pid <= 0
+            or pid != daemon.pid
+        ):
+            raise ValueError("This agent's identity changed before it could be restarted.")
+
+        from plugins.hub.messenger import AgentMessenger
+
+        generation = AgentMessenger.shutdown_generation(agent_id, pid, started_at)
+        if not generation:
+            raise ValueError("This agent's identity could not be confirmed.")
+        accepted = await AgentMessenger.signal_shutdown(
+            daemon.socket_path,
+            reason="Restart Agent requested by the web UI",
+            timeout=3.0,
+            **generation,
+        )
+        if not accepted:
+            raise ValueError("This agent did not accept the restart request.")
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10.0
+        while daemon.alive and loop.time() < deadline:
+            await asyncio.sleep(0.1)
+        if daemon.alive:
+            raise ValueError("This agent did not shut down. Try again.")
+
+        current = bridge.get_agent_by_identity(
+            daemon.identity, use_cache=False, project=daemon.project or self.workspace
+        )
+        if current and (
+            current.get("agent_id") != agent_id
+            or current.get("pid") != pid
+            or current.get("started_at") != started_at
+        ):
+            raise ValueError("Another agent with this identity is already running.")
+
+        await self.shutdown()
+        self._borrowed_daemon = False
+        self.external = False
+        try:
+            # initialize() uses DaemonPool.spawn(), the same kollab_argv()-based
+            # launcher used for an Offline row in the sidebar.
+            await self.initialize()
+        except Exception as exc:
+            logger.warning(
+                "session %s stopped its old agent but could not restart it (%s)",
+                self.session_id,
+                type(exc).__name__,
+            )
+            raise ValueError(
+                "The agent stopped, but the engine could not start it again."
+            ) from exc
+        return {"restarting": True, "waiting_for_turn": False}
 
     async def _await_acp_startup(self) -> None:
         """A connected daemon is usable only after its adapter has started."""
