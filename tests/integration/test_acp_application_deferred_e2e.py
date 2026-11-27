@@ -288,9 +288,7 @@ async def test_real_terminal_deferred_acp_hub_lifecycle(scenario):
                     # ACP profile and an active SDK process. The existing
                     # ordinary Hub turn below must still reach that process.
                     before = owner.runner._next_turn_id
-                    goal = await app._local_state_service.goal_command(
-                        "/goal examine the isolated test workspace"
-                    )
+                    goal = await app._local_state_service.goal_command("/goal examine the isolated test workspace")
                     print(json.dumps({"goal_command": goal}))
                     assert goal["success"] is False
                     assert "ACP" in goal["message"]
@@ -373,12 +371,13 @@ async def test_real_terminal_deferred_acp_hub_lifecycle(scenario):
                     assert all(t.done() for t in tap.tasks)
                     assert len(app.permission_manager._session_approvals) == 0
                     assert len(app.permission_manager._acp_session_grants) == (1 if scenario == "local-first" else 0)
-                notices = [item for item in received if item.reply_to == message.id and item.metadata.get("acp_waiting")]
+                notices = [
+                    item for item in received if item.reply_to == message.id and item.metadata.get("acp_waiting")
+                ]
                 assert len(notices) == (0 if scenario == "lifecycle" else 1)
                 assert all(item.action == "message" and item.thread_id == message.thread_id for item in notices)
                 matching = [
-                    item for item in received
-                    if item.reply_to == message.id and not item.metadata.get("acp_waiting")
+                    item for item in received if item.reply_to == message.id and not item.metadata.get("acp_waiting")
                 ]
                 result = {
                     "ordinary_socket_request_acked": accepted,

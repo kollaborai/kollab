@@ -16,10 +16,30 @@ from tests.unit.llm.voice_admission_helpers import make_device_voice_context, ma
 
 @pytest.mark.parametrize(
     "text",
-    ["yes", "Yes.", "yeah", "Yep!", "yes please", "Yeah, go ahead.", "OK", "okay", "sure",
-     "approve it", "do it", "Go for it.", "yes, do it please", "Yes, run it.",
-     "Okay, you don't have to ask, just do it.", "Yeah, go ahead and run it.", "sure, run those",
-     "go", "alright, do it", "please run it", "I approve", "sounds good"],
+    [
+        "yes",
+        "Yes.",
+        "yeah",
+        "Yep!",
+        "yes please",
+        "Yeah, go ahead.",
+        "OK",
+        "okay",
+        "sure",
+        "approve it",
+        "do it",
+        "Go for it.",
+        "yes, do it please",
+        "Yes, run it.",
+        "Okay, you don't have to ask, just do it.",
+        "Yeah, go ahead and run it.",
+        "sure, run those",
+        "go",
+        "alright, do it",
+        "please run it",
+        "I approve",
+        "sounds good",
+    ],
 )
 def test_a_short_yes_is_a_yes(text):
     assert human_answer(text) == "yes"
@@ -32,9 +52,24 @@ def test_a_short_no_is_a_no(text):
 
 @pytest.mark.parametrize(
     "text",
-    ["yes and check the logs too", "what?", "", "please", "yes no", "is it safe?",
-     "yesterday", "not yet", "ok thanks", "yes, do it, thanks", "thank you", "yes but wait",
-     "yes, don't run it", "no, run it", "go away", "you don't have to ask what"],
+    [
+        "yes and check the logs too",
+        "what?",
+        "",
+        "please",
+        "yes no",
+        "is it safe?",
+        "yesterday",
+        "not yet",
+        "ok thanks",
+        "yes, do it, thanks",
+        "thank you",
+        "yes but wait",
+        "yes, don't run it",
+        "no, run it",
+        "go away",
+        "you don't have to ask what",
+    ],
 )
 def test_anything_else_is_a_normal_turn(text):
     assert human_answer(text) is None
@@ -63,9 +98,7 @@ def test_a_yes_closes_only_the_parked_card_from_the_reply_it_answers():
     approvals = YesApprovals()
     call = dict(CHECK_PRS)
     closed = []
-    approvals.close_card = lambda tool_id, permission_id, allowed: closed.append(
-        (tool_id, permission_id, allowed)
-    )
+    approvals.close_card = lambda tool_id, permission_id, allowed: closed.append((tool_id, permission_id, allowed))
 
     approvals.park(call, "permission-A")
     approvals.ask(call)
@@ -85,9 +118,7 @@ def test_a_later_yes_does_not_close_an_older_card_for_the_same_call():
     approvals = YesApprovals()
     call = dict(CHECK_PRS)
     closed = []
-    approvals.close_card = lambda tool_id, permission_id, allowed: closed.append(
-        (tool_id, permission_id, allowed)
-    )
+    approvals.close_card = lambda tool_id, permission_id, allowed: closed.append((tool_id, permission_id, allowed))
 
     approvals.park(call, "permission-A")
     approvals.ask(call)
@@ -101,6 +132,8 @@ def test_a_later_yes_does_not_close_an_older_card_for_the_same_call():
     assert set(approvals._cards) == {("call-1", "permission-A")}
     assert approvals.answered_on_card(call, True) == ""
     assert set(approvals._cards) == {("call-1", "permission-A")}
+
+
 ASKING_MODES = pytest.mark.parametrize("mode", ["confirm_all", "default", "auto_approve_edits"])
 EVERY_VOICE = pytest.mark.parametrize(
     "voice_origin", [make_voice_origin_context, make_device_voice_context], ids=["livekit", "device"]
@@ -146,8 +179,15 @@ def test_a_yes_approves_the_exact_command_of_the_exact_tool():
 
 def test_a_native_call_matches_by_its_arguments():
     approvals = YesApprovals()
-    native = {"type": "terminal", "id": "a", "name": "terminal", "command": "gh pr list",
-              "input": {"command": "gh pr list"}, "arguments": {"command": "gh pr list"}, "index": 0}
+    native = {
+        "type": "terminal",
+        "id": "a",
+        "name": "terminal",
+        "command": "gh pr list",
+        "input": {"command": "gh pr list"},
+        "arguments": {"command": "gh pr list"},
+        "index": 0,
+    }
     asked(approvals, native)
     approvals.on_human_input("yes")
     assert approvals.take({**native, "id": "b", "index": 1})
@@ -537,7 +577,8 @@ def _continued(manager):
     from kollabor_events.models import EventType
 
     triggers = [
-        call for call in manager._event_bus.emit_with_hooks.await_args_list
+        call
+        for call in manager._event_bus.emit_with_hooks.await_args_list
         if call.args and call.args[0] == EventType.TRIGGER_LLM_CONTINUE
     ]
     hud = manager._event_bus.get_service.return_value.queue_agent_hud
@@ -565,7 +606,13 @@ def test_allow_on_a_parked_card_runs_the_call_and_the_agent_goes_on():
     assert second.success and second.output == "#318 open"
     executor._execute_terminal_command.assert_awaited_once()
     permission_id = events[0]["details"]["permission_id"]
-    assert events[-1] == {"type": "permission_granted", "tool_id": "call-1", "scope": "once", "parked": True, "permission_id": permission_id}
+    assert events[-1] == {
+        "type": "permission_granted",
+        "tool_id": "call-1",
+        "scope": "once",
+        "parked": True,
+        "permission_id": permission_id,
+    }
 
 
 def test_deny_on_a_parked_card_never_runs_it_and_the_agent_stays_quiet():
@@ -599,7 +646,13 @@ def test_a_typed_yes_closes_the_parked_card_and_runs_the_call():
     executor, pending, triggers, second, events = asyncio.run(scenario())
     assert not pending  # its card closed, approved
     permission_id = events[0]["details"]["permission_id"]
-    assert events[-1] == {"type": "permission_granted", "tool_id": "call-1", "scope": "once", "parked": True, "permission_id": permission_id}
+    assert events[-1] == {
+        "type": "permission_granted",
+        "tool_id": "call-1",
+        "scope": "once",
+        "parked": True,
+        "permission_id": permission_id,
+    }
     assert triggers == []  # the yes is its own turn: it runs the call there
     assert second.success
     executor._execute_terminal_command.assert_awaited_once()
@@ -616,7 +669,12 @@ def test_a_typed_no_closes_the_parked_card_denied():
     pending, events = asyncio.run(scenario())
     assert not pending
     permission_id = events[0]["details"]["permission_id"]
-    assert events[-1] == {"type": "permission_denied", "tool_id": "call-1", "parked": True, "permission_id": permission_id}
+    assert events[-1] == {
+        "type": "permission_denied",
+        "tool_id": "call-1",
+        "parked": True,
+        "permission_id": permission_id,
+    }
 
 
 def test_a_new_chat_closes_the_old_ones_parked_cards():
@@ -631,4 +689,10 @@ def test_a_new_chat_closes_the_old_ones_parked_cards():
     pending, events = asyncio.run(scenario())
     assert not pending
     permission_id = events[0]["details"]["permission_id"]
-    assert events[-1] == {"type": "permission_denied", "tool_id": "call-1", "outcome": "cancelled", "parked": True, "permission_id": permission_id}
+    assert events[-1] == {
+        "type": "permission_denied",
+        "tool_id": "call-1",
+        "outcome": "cancelled",
+        "parked": True,
+        "permission_id": permission_id,
+    }
