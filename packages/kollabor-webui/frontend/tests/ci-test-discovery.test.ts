@@ -138,6 +138,19 @@ test("type-only imports do not change runtime test runner classification", () =>
   }
 });
 
+test("runtime import forms still count, including a side-effect import", () => {
+  for (const source of [
+    'import "node:test";',
+    'import test from "node:test";',
+    'import * as nodeTest from "node:test";',
+    'import { test } from "node:test";',
+    'import { type TestContext, test } from "node:test";',
+    'const { test } = require("node:test");',
+  ]) {
+    assert.equal(hasTestFrameworkImport(source, "node:test", "tests/runtime.test.ts"), true, source);
+  }
+});
+
 test("parses each test file using its own syntax kind and names parse failures", () => {
   assert.doesNotThrow(() => hasTestFrameworkImport('const value: string = <string>"ok";', "vitest", "tests/assertion.test.ts"));
   assert.doesNotThrow(() => hasTestFrameworkImport("@suite class Example {}", "vitest", "tests/decorator.test.ts"));
