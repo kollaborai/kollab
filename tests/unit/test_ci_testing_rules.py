@@ -79,3 +79,23 @@ def test_every_suite_kept_out_of_blocking_runs_runs_in_the_quarantine_job() -> N
 
     assert excluded >= {"tests", "packages/kollabor-engine/tests", "packages/kollabor-voice/tests"}
     assert excluded - quarantined == set()
+
+
+def test_every_blocking_suite_is_covered_by_the_repeat_job() -> None:
+    from scripts.repeat_changed_tests import DEFAULT_SUITES
+
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    blocking: set[str] = set()
+    for job_id, job in jobs.items():
+        if job_id in {"quarantine", "required_tests", "repeat_changed_tests"}:
+            continue
+        for step in job.get("steps", []):
+            if '-m "not quarantine"' in (command := step.get("run", "")):
+                blocking |= _test_roots(command)
+    repeated = set(DEFAULT_SUITES)
+    for step in jobs["repeat_changed_tests"]["steps"]:
+        command = step.get("run", "")
+        if "repeat_changed_tests.py" in command and "--suites" in command:
+            repeated |= _test_roots(command.split("--suites", 1)[1])
+
+    assert blocking - repeated == set()

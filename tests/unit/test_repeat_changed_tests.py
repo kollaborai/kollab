@@ -77,3 +77,12 @@ def test_package_test_files_repeat_with_the_asyncio_mode_ci_uses() -> None:
 
     assert repeat.run_test_file("packages/kollabor-engine/tests/test_x.py", 1, runner=runner) == 0
     assert calls[0][calls[0].index("-o") + 1] == "asyncio_mode=auto"
+
+
+def test_the_voice_suite_can_be_repeated_in_its_own_environment() -> None:
+    voice = "packages/kollabor-voice/tests/test_z.py"
+
+    assert repeat.select_test_files([voice], suites=("packages/kollabor-voice/tests",)) == [voice]
+    args = repeat.build_parser().parse_args(["--base", "x", "--suites", "packages/kollabor-voice/tests"])
+    assert args.suites == ("packages/kollabor-voice/tests",)
+    assert repeat.build_parser().parse_args(["--base", "x"]).suites == repeat.DEFAULT_SUITES

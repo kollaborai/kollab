@@ -139,3 +139,36 @@ def test_a_duplicate_from_a_concurrent_run_folds_into_the_oldest_issue() -> None
     updates = dict(gh.updated)
     assert "https://example.test/runs/7" in updates["repos/owner/repo/issues/11"]["body"]
     assert updates["repos/owner/repo/issues/12"]["state"] == "closed"
+
+
+def test_parse_failed_lines_keeps_package_suite_tests() -> None:
+    logs = "FAILED packages/kollabor-engine/tests/test_e.py::test_x - AssertionError\n"
+
+    assert catcher.parse_failed_lines(logs) == ["packages/kollabor-engine/tests/test_e.py::test_x"]
+
+
+def test_job_logs_are_read_even_when_they_hold_terminal_escape_codes() -> None:
+    calls: list[list[str]] = []
+
+    def gh(args: list[str]) -> str:
+        calls.append(list(args))
+        return "log text"
+
+    assert catcher._api_text(gh, "repos/o/r/actions/jobs/1/logs") == "log text"
+    assert "--allow-escape-sequences" in calls[0]
+
+    def old_gh(args: list[str]) -> str:
+        if "--allow-escape-sequences" in args:
+            raise RuntimeError("unknown flag: --allow-escape-sequences")
+        return "old log"
+
+    assert catcher._api_text(old_gh, "repos/o/r/actions/jobs/1/logs") == "old log"
+
+
+def test_gh_output_that_is_not_utf8_does_not_crash(tmp_path, monkeypatch) -> None:
+    fake = tmp_path / "gh"
+    fake.write_text("#!/bin/sh\nprintf 'FAILED tests/unit/test_a.py::t \\377\\n'\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+
+    assert "FAILED tests/unit/test_a.py::t" in catcher._run_gh(["api", "x"])
