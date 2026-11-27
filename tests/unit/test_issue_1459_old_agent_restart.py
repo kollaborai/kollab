@@ -161,6 +161,75 @@ async def test_legacy_shutdown_action_keeps_generation_fields_without_preflight(
 
 
 @pytest.mark.asyncio
+async def test_engine_fallback_persists_replacement_as_soon_as_it_spawns(
+    monkeypatch, tmp_path
+):
+    class Handle:
+        identity = "lapis"
+        project = str(tmp_path)
+        socket_path = str(tmp_path / "lapis.sock")
+        pid = 1234
+        process_started_at = 12.5
+        _daemon_image = "image-1"
+        stopped = False
+
+        @property
+        def alive(self):
+            return not self.stopped
+
+    handle = Handle()
+    presence = {
+        "identity": "lapis",
+        "agent_id": "image-1",
+        "pid": 1234,
+        "started_at": 12.5,
+    }
+    bridge = SimpleNamespace(
+        get_agent_by_identity=lambda identity, use_cache, project: presence
+    )
+    monkeypatch.setattr(engine_session, "HubBridge", lambda: bridge, raising=False)
+
+    from plugins.hub.messenger import AgentMessenger
+
+    monkeypatch.setattr(
+        AgentMessenger,
+        "request_status",
+        AsyncMock(return_value={"type": "status", "state": "idle"}),
+    )
+    monkeypatch.setattr(
+        AgentMessenger,
+        "signal_shutdown",
+        AsyncMock(side_effect=lambda *_args, **_kwargs: setattr(handle, "stopped", True) or True),
+    )
+
+    session = EngineSession(
+        session_id="s1",
+        profile=SimpleNamespace(name="default", provider="custom"),
+        workspace=str(tmp_path),
+        identity="lapis",
+        webui_owned=True,
+    )
+    session.daemon = handle
+    session._borrowed_daemon = True
+    persisted_pids = []
+    session.on_persistence_changed = lambda candidate: persisted_pids.append(
+        candidate.daemon.pid
+    )
+    session.shutdown = AsyncMock()
+
+    async def initialize(*, on_spawned=None, **_kwargs):
+        session.daemon = SimpleNamespace(pid=5678)
+        if on_spawned is not None:
+            await on_spawned(session)
+
+    session.initialize = AsyncMock(side_effect=initialize)
+
+    await session.restart_outdated_agent()
+
+    assert persisted_pids == [5678]
+
+
+@pytest.mark.asyncio
 async def test_engine_fallback_waits_for_active_turn_before_signalling_shutdown(
     monkeypatch, tmp_path
 ):
