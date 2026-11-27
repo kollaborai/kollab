@@ -138,7 +138,7 @@ def build_issue_body(nodeid: str, run_url: str, attempt: int) -> str:
 
 
 def decide_issue_action(issues: list[dict[str, Any]], title: str, body: str) -> tuple[str, dict[str, Any] | None, str]:
-    """Choose create, update, or no-op while retaining prior run observations."""
+    """Choose create, record, or no-op without changing an existing issue body."""
     matches = [issue for issue in issues if "pull_request" not in issue and issue.get("title") == title]
     if not matches:
         return "create", None, body
@@ -149,7 +149,39 @@ def decide_issue_action(issues: list[dict[str, Any]], title: str, body: str) -> 
         raise ValueError("issue body must include a run observation")
     if observation in existing_body:
         return "noop", issue, existing_body
-    return "update", issue, f"{existing_body.rstrip()}\n\n{observation}"
+    return "record", issue, body
+
+
+def _has_observation(gh: Gh, repo: str, issue: dict[str, Any], observation: str) -> bool:
+    """Check the issue body and every comment for a previously recorded observation."""
+    body = str(issue.get("body") or "")
+    comments = _rows(
+        _api(
+            gh,
+            f"repos/{repo}/issues/{issue['number']}/comments?per_page=100",
+            paginate=True,
+        )
+    )
+    return observation in body or any(observation in str(comment.get("body") or "") for comment in comments)
+
+
+def _record_observation(gh: Gh, repo: str, issue: dict[str, Any], body: str) -> dict[str, Any]:
+    """Append one observation comment and reopen a closed issue without editing its body."""
+    _, separator, observation = body.partition("\n\n")
+    if not separator or not observation:
+        raise ValueError("issue body must include a run observation")
+    if not _has_observation(gh, repo, issue, observation):
+        _api(
+            gh,
+            f"repos/{repo}/issues/{issue['number']}/comments",
+            method="POST",
+            fields={"body": observation},
+        )
+    if issue.get("state") == "closed":
+        reopened = _api(gh, f"repos/{repo}/issues/{issue['number']}", method="PATCH", fields={"state": "open"})
+        if isinstance(reopened, dict):
+            return reopened
+    return issue
 
 
 def _fold_duplicate(gh: Gh, repo: str, title: str, created: dict[str, Any], body: str) -> dict[str, Any]:
@@ -167,17 +199,20 @@ def _fold_duplicate(gh: Gh, repo: str, title: str, created: dict[str, Any], body
     oldest = min(others, key=lambda r: int(r.get("number", 0)), default=None)
     if oldest is None or int(oldest["number"]) > int(created.get("number", 0)):
         return created
-    action, _, merged = decide_issue_action([oldest], title, body)
-    fields = {"body": merged}
-    if oldest.get("state") == "closed":
-        fields["state"] = "open"
+    action, _, _ = decide_issue_action([oldest], title, body)
     if action != "noop":
-        oldest = _api(gh, f"repos/{repo}/issues/{oldest['number']}", method="PATCH", fields=fields)
+        oldest = _record_observation(gh, repo, oldest, body)
+    _api(
+        gh,
+        f"repos/{repo}/issues/{created['number']}/comments",
+        method="POST",
+        fields={"body": f"Duplicate of #{oldest['number']}."},
+    )
     _api(
         gh,
         f"repos/{repo}/issues/{created['number']}",
         method="PATCH",
-        fields={"state": "closed", "body": f"{body}\n\nDuplicate of #{oldest['number']}."},
+        fields={"state": "closed"},
     )
     return oldest
 
@@ -249,18 +284,9 @@ def open_or_update_flaky_tests(
                 continue
 
             assert existing is not None
-            fields = {"body": next_body}
-            if existing.get("state") == "closed":
-                fields["state"] = "open"
-            issue = _api(
-                gh,
-                f"repos/{repo}/issues/{existing['number']}",
-                method="PATCH",
-                fields=fields,
-            )
-            if isinstance(issue, dict):
-                issues = [issue if row.get("number") == existing.get("number") else row for row in issues]
-                changed.append(issue)
+            issue = _record_observation(gh, repo, existing, next_body)
+            issues = [issue if row.get("number") == existing.get("number") else row for row in issues]
+            changed.append(issue)
     return changed
 
 
