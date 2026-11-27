@@ -139,6 +139,14 @@ export function toThreadMessageLike(row: ChatRow, turns: Readonly<Record<string,
   };
 }
 
+/** A grouped run's status: running while any tool runs, else failed if any failed, else the newest. */
+function groupStatus(prev: ChatRow["status"], next: ChatRow["status"]): ChatRow["status"] {
+  for (const active of ["running", "streaming"] as const) {
+    if (prev === active || next === active) return active;
+  }
+  return prev === "failed" ? prev : next;
+}
+
 /** Whether `next` continues `prev`'s run of tool calls: both tool rows of one turn, with no parts preview. */
 function continuesToolRun(prev: ChatRow, next: ChatRow): boolean {
   return prev.kind === "tool" && next.kind === "tool" && prev.role === "assistant" && next.role === "assistant" &&
@@ -159,7 +167,7 @@ export function toRepository(rows: readonly ChatRow[], turns: Readonly<Record<st
       merged[merged.length - 1] = {
         ...prev,
         parts: [...prev.parts, ...row.parts],
-        status: prev.status === "failed" ? prev.status : row.status,
+        status: groupStatus(prev.status, row.status),
       };
     } else {
       merged.push(row);
