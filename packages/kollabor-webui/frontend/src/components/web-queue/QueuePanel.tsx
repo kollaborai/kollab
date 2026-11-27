@@ -45,21 +45,8 @@ export function QueuePanel({ canSendNow = true }: { canSendNow?: boolean }) {
   // cannot recover leaves the list out of date, so the panel says so. Delivery needs a live stream.
   const stale = chat.connection === "failed";
   const dispatchAvailable = chat.connection === "live";
-  if (queued.length === 0) {
-    if (!stale) return null;
-    return (
-      <section className="rounded-2xl bg-card/80 px-3 py-3 sm:px-3.5" data-slot="web-queue-panel" data-stale="true">
-        <div className="flex items-center justify-between gap-3">
-          <p role="alert" className="text-destructive text-xs leading-4">
-            Could not load queued messages.
-          </p>
-          <Button type="button" size="sm" variant="outline" onClick={() => void chat.retry()}>
-            Retry
-          </Button>
-        </div>
-      </section>
-    );
-  }
+  // Nothing queued: a failed stream is the chat's own notice to give, beside this panel.
+  if (queued.length === 0) return null;
 
   const busy = chat.running;
   const earliest: QueuedInput | undefined = queued[0];

@@ -22,6 +22,7 @@ export const INITIAL_LOADING = "Loading conversation history…";
 export const CONVERSATION_LOAD_FAILED = "Couldn't load conversation history. Check the connection and retry.";
 
 export const SAVED_CONVERSATION_SHOWN = "Couldn't refresh history; showing the saved conversation. Retry to update.";
+export const CONNECTION_LOST = "Connection lost. Showing the last messages; retry to reconnect now.";
 
 // Module-level, so a banner that is already shown keeps its identity.
 const LOADING: HistoryBanner = { kind: "loading", message: OLDER_LOADING };
@@ -30,15 +31,17 @@ const INITIAL: HistoryBanner = { kind: "loading", message: INITIAL_LOADING };
 const CONNECT_FAILED: HistoryBanner = { kind: "error", message: CONVERSATION_LOAD_FAILED, retry: "reconnect" };
 
 const SAVED_SHOWN: HistoryBanner = { kind: "error", message: SAVED_CONVERSATION_SHOWN, retry: "reconnect" };
+const LOST: HistoryBanner = { kind: "error", message: CONNECTION_LOST, retry: "reconnect" };
 
 /**
  * The line for a chat with nothing on screen yet: while its stream connects, the load line; once the stream
- * has failed for good, the load failure with a retry that reconnects. Rows on screen show no line (#1451),
- * except the browser's saved rows once the stream has failed: they say so, with the same retry.
+ * has failed, the load failure with a retry that reconnects. Rows on screen show no line while the stream is up
+ * or reconnecting (#1451). Once it has failed, rows on screen are the last ones it had: the browser's saved rows
+ * and the live rows each say so, with the same retry (the store also keeps checking on its own).
  */
 export function initialHistoryBanner(connection: ConnectionState, rowCount: number, saved = false): HistoryBanner | null {
   if (saved && connection === "failed") return SAVED_SHOWN;
-  if (rowCount > 0) return null;
+  if (rowCount > 0) return connection === "failed" ? LOST : null;
   if (connection === "connecting") return INITIAL;
   return connection === "failed" ? CONNECT_FAILED : null;
 }

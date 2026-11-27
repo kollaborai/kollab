@@ -255,6 +255,7 @@ export class LiveChatStore implements LiveStore {
   private readonly retryBaseMs: number;
   private readonly maxAttempts: number;
   private readonly outdatedRetryMs: number;
+  private readonly failedRetryMs: number;
   private readonly maxUnconfirmedGoalPolls: number;
   private readonly goalReplyPollIntervalMs: number;
   private snapshot: ChatSnapshot;
@@ -266,6 +267,7 @@ export class LiveChatStore implements LiveStore {
       retryBaseMs?: number;
       maxAttempts?: number;
       outdatedRetryMs?: number;
+      failedRetryMs?: number;
       maxUnconfirmedGoalPolls?: number;
       goalReplyPollIntervalMs?: number;
       cache?: ChatRowCache;
@@ -278,6 +280,7 @@ export class LiveChatStore implements LiveStore {
     this.retryBaseMs = options.retryBaseMs ?? 500;
     this.maxAttempts = options.maxAttempts ?? 8;
     this.outdatedRetryMs = options.outdatedRetryMs ?? 15_000;
+    this.failedRetryMs = options.failedRetryMs ?? 15_000;
     this.maxUnconfirmedGoalPolls = options.maxUnconfirmedGoalPolls ?? MAX_UNCONFIRMED_GOAL_POLLS;
     this.goalReplyPollIntervalMs = options.goalReplyPollIntervalMs ?? GOAL_REPLY_POLL_INTERVAL_MS;
     this.snapshot = this.snapshotOf();
@@ -332,12 +335,16 @@ export class LiveChatStore implements LiveStore {
     this.publish();
   }
 
-  /** Connects again after the connection has failed for good. */
+  /** Connects again now, instead of at the failed chat's next slow check. */
   retry(): void {
     if (this.disposed || this.connectionState !== "failed") return;
     this.attempts = 0;
-    this.started = true;
-    void this.run();
+    this.connectionState = "connecting";
+    this.publish();
+    clearTimeout(this.timer);
+    const wake = this.wake;
+    this.wake = null;
+    wake?.();
   }
 
   dispose(): void {
@@ -793,8 +800,8 @@ export class LiveChatStore implements LiveStore {
             conversation_uid: this.state.conversationUid,
             generation: this.state.generation,
           };
-      // An outdated chat stays outdated while it checks again, so its notice does not flicker.
-      if (this.connectionState !== "outdated") {
+      // An outdated or failed chat keeps its state while it checks again, so its notice does not flicker.
+      if (this.connectionState !== "outdated" && this.connectionState !== "failed") {
         this.connectionState = "connecting";
         this.publish();
       }
@@ -829,9 +836,13 @@ export class LiveChatStore implements LiveStore {
       if (openedAt !== null && performance.now() - openedAt >= HEALTHY_CONNECTION_MS) this.attempts = 0;
       this.attempts += 1;
       if (this.attempts >= this.maxAttempts) {
-        this.connectionState = "failed";
-        this.publish();
-        return;
+        if (this.connectionState !== "failed") {
+          this.connectionState = "failed";
+          this.publish();
+        }
+        // Keep checking slowly: an engine that comes back makes the next connection go live, with no click.
+        await this.sleep(this.failedRetryMs);
+        continue;
       }
       this.connectionState = "reconnecting";
       this.publish();
