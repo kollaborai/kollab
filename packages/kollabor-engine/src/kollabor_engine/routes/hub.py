@@ -259,7 +259,14 @@ async def list_cron_jobs(
         # set; keep its rows but surface the failure too.
         if reply.get("error"):
             errors[identity] = str(reply["error"])
-        for job in reply.get("jobs") or []:
+        job_rows = reply.get("jobs")
+        if not isinstance(job_rows, list):
+            errors[identity] = "cron jobs response contained a non-list jobs field"
+            continue
+        for job in job_rows:
+            if not isinstance(job, dict):
+                errors[identity] = "cron jobs response contained an invalid job row"
+                continue
             row = dict(job)
             row["agent"] = identity
             jobs.append(row)
