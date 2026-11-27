@@ -108,6 +108,8 @@ class TerminalSession:
     ring_buffer: Optional[RingBuffer] = None
     pid: int = 0
     created_at: datetime = field(default_factory=datetime.now)
+    # The thread that copies the process's output into ring_buffer.
+    reader: Optional[threading.Thread] = None
 
     def is_alive(self) -> bool:
         """Check if the subprocess is still running."""
@@ -355,6 +357,7 @@ Aliases: /t, /term, /tmux"""
                 proc=proc,
                 ring_buffer=ring_buf,
                 pid=proc.pid,
+                reader=pump,
             )
 
             msg = (
@@ -571,6 +574,11 @@ Aliases: /t, /term, /tmux"""
         session = self.sessions.get(session_name)
         if session is None or session.ring_buffer is None:
             return [f"(session '{session_name}' not found)"]
+
+        # A process that has exited may still have output in the pipe: let its
+        # reader finish copying it first (#1465). A live process is read as is.
+        if session.reader is not None and not session.is_alive():
+            session.reader.join(timeout=2.0)
 
         n = max_lines or 200
         lines = session.ring_buffer.get_last(n)
@@ -875,6 +883,7 @@ Aliases: /t, /term, /tmux"""
                 daemon=True,
                 name=f"pump-bg-{name}",
             )
+            session.reader = pump
             pump.start()
 
             if timeout:
