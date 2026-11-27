@@ -139,10 +139,59 @@ def test_ci_shard_and_heavy_lane_collect_before_filtering_quarantine() -> None:
         assert '|| [ "$?" -eq 5 ]' in command
 
 
+def test_every_blocking_quarantine_filtered_pytest_step_accepts_exit_five() -> None:
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    filtered_steps = []
+    for job_id, job in jobs.items():
+        if job_id == "quarantine":
+            continue
+        for step in job.get("steps", []):
+            command = step.get("run", "")
+            if '-m "not quarantine"' in command and _pytest_invocations(command):
+                filtered_steps.append((job_id, step.get("name"), command))
+
+    assert filtered_steps
+    for job_id, name, command in filtered_steps:
+        assert '|| [ "$?" -eq 5 ]' in command, f"{job_id}/{name} does not accept pytest exit 5"
+
+
+def _pytest_test_files(command: str) -> set[str]:
+    files = set()
+    for invocation in _pytest_invocations(command):
+        files.update(re.findall(r"(?:tests|packages/[\w-]+/tests)/[\w./-]+\.py", invocation))
+    return files
+
+
+def test_windows_quarantine_steps_cover_the_same_files_as_windows_pytest_steps() -> None:
+    cases = (
+        ("windows-smoke.yml", "import-smoke"),
+        ("windows-locks.yml", "lock-tests"),
+    )
+    for filename, job_id in cases:
+        workflow = _workflow(f".github/workflows/{filename}")
+        job = workflow["jobs"][job_id]
+        steps = job["steps"]
+        quarantine = [step for step in steps if step.get("name") == "Quarantined Windows tests (non-blocking)"]
+
+        assert len(quarantine) == 1, filename
+        quarantine_step = quarantine[0]
+        assert quarantine_step["continue-on-error"] is True
+        command = quarantine_step.get("run", "")
+        assert "-m quarantine" in command
+        assert "-q -rs -p no:cacheprovider --noconftest" in command
+        assert "if ($LASTEXITCODE -eq 5) { exit 0 }" in command
+
+        normal_files = set()
+        for step in steps:
+            if step is not quarantine_step:
+                normal_files |= _pytest_test_files(step.get("run", ""))
+        assert _pytest_test_files(command) == normal_files, filename
+
+
 def test_python_repeat_rule_is_scoped_to_required_ci_test_suites() -> None:
     sentence = (
         "Run each new or changed Python test file in the suites the required ci/tests gate runs "
-        "(tests/, the engine, rpc and voice package suites) 20 times in its PR; one non-quarantined "
+        "(tests/unit/, the engine, rpc and voice package suites) 20 times in its PR; one non-quarantined "
         "failure blocks the PR. Tests that run only in non-required workflows (desktop signing, "
         "Windows smoke) are outside this gate."
     )

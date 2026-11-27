@@ -10,12 +10,13 @@ def test_select_test_files_keeps_only_nested_python_test_files() -> None:
         [
             "README.md",
             "tests/unit/test_alpha.py",
-            "tests/test_beta.py",
+            "tests/integration/test_beta.py",
+            "tests/visual/test_visual.py",
             "tests/unit/helper.py",
             "tests/unit/test_gamma.txt",
             "packages/tests/test_delta.py",
         ]
-    ) == ["tests/test_beta.py", "tests/unit/test_alpha.py"]
+    ) == ["tests/unit/test_alpha.py"]
 
 
 def test_repeat_file_stops_at_first_failure_and_names_the_run(capsys) -> None:
