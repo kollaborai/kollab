@@ -69,7 +69,7 @@ test("shellName is the last path part of the configured shell", () => {
 });
 
 test("the outdated notice is the plain sentence with no version or code in it", () => {
-  expect(OUTDATED_NOTICE).toBe("This agent runs older code. Restart it to use Code, Git and Terminal.");
+  expect(OUTDATED_NOTICE).toBe("This agent uses older code. Code, Git and Terminal are unavailable in this session.");
   expect(OUTDATED_NOTICE).not.toMatch(/\d+\.\d+|daemon_outdated/);
 });
 
