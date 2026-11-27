@@ -56,6 +56,22 @@ def test_select_test_files_includes_the_package_suites_ci_runs() -> None:
     ) == ["packages/kollabor-engine/tests/test_x.py", "packages/kollabor-rpc/tests/sub/test_y.py"]
 
 
+def test_select_test_files_includes_pytest_suffix_pattern_for_engine_suite() -> None:
+    path = "packages/kollabor-engine/tests/x_test.py"
+
+    assert repeat.select_test_files([path]) == [path]
+
+
+def test_select_test_files_includes_pytest_suffix_pattern_for_voice_suite() -> None:
+    path = "packages/kollabor-voice/tests/y_test.py"
+
+    assert repeat.select_test_files([path], suites=("packages/kollabor-voice/tests",)) == [path]
+
+
+def test_select_test_files_keeps_pytest_suffix_pattern_out_of_unit_suite() -> None:
+    assert repeat.select_test_files(["tests/unit/z_test.py"]) == []
+
+
 def test_changed_test_files_diffs_the_package_suites_too() -> None:
     commands: list[list[str]] = []
 
