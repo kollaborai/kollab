@@ -64,6 +64,9 @@ JOIN_FAILURE_REASONS = {
     "update_required": "this version of kollab is too old for that relay; run kollab --upgrade",
 }
 
+WEBUI_JOIN_FAILURE_REASONS = {
+    "update_required": "This engine version is too old for this relay. Update the engine, then retry the join here.",
+}
 
 def join_failure_reason(code: Any) -> str:
     """One short line saying why a join failed, for a fixed failure code."""
