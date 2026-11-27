@@ -657,7 +657,8 @@ def _ci_runs_per_merge(
         result["merged_in_window"] = sum(
             1
             for pr in closed_in_range
-            if (m := parse_time(pr.get("merged_at"))) is not None and m > stop_before
+            if (m := parse_time(pr.get("merged_at"))) is not None
+            and stop_before < m <= now
         )
     else:
         errors.append(
