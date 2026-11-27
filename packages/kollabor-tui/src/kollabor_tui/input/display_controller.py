@@ -4,7 +4,6 @@ Responsible for coordinating terminal display updates during input handling.
 This is a thin wrapper that manages rendering state and delegates to the terminal renderer.
 """
 
-import asyncio
 import inspect
 import logging
 from typing import Any, Optional

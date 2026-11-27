@@ -21,10 +21,9 @@ import logging
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from ..goal_image_scope import safe_goal_error_cause
-
 from ..generated_image_artifacts import redact_generated_image_data
-from ..message_content import redact_error_media, content_to_text, serialize_openai_responses_content
+from ..goal_image_scope import safe_goal_error_cause
+from ..message_content import content_to_text, redact_error_media, serialize_openai_responses_content
 from .base import LLMProvider
 from .errors import ProviderError, map_http_status_error, map_openai_error
 from .message_sanitizer import strip_local_message_metadata_from_message

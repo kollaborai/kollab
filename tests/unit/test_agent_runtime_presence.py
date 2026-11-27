@@ -7,7 +7,6 @@ import pytest
 from kollabor_agent.runtime import AgentRuntime
 from plugins.hub.presence import PresenceManager
 
-
 PUBLIC_TAGS = {
     "harness": "Codex CLI",
     "provider": "acp",

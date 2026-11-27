@@ -1,0 +1,27 @@
+{
+  "name": "issue-1451-lane5-recorder-matrix-arguments",
+  "description": "Reject an incomplete chat-recorder runtime matrix before token or browser startup",
+  "config": {
+    "command": "true",
+    "app_init_sleep": 0.1,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "shell",
+      "command": "node packages/kollabor-webui/frontend/scripts/chat-recorder.mjs plain --runtime-matrix native=native-recorder",
+      "allow_failure": true,
+      "description": "Check CLI matrix validation without starting a browser or agent"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "invalid --runtime-matrix: missing runtime entries: codex-cli, claude-code",
+      "description": "The CLI reports the missing runtime mappings"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "ENOENT",
+      "description": "The CLI rejects the matrix before reading the engine token"
+    }
+  ]
+}

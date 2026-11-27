@@ -49,6 +49,40 @@ async def test_daemon_resume_preserves_tool_voice_and_structured_message_data():
 
 
 @pytest.mark.asyncio
+async def test_daemon_resume_restores_request_id_from_saved_jsonl(tmp_path):
+    from kollabor.state.local import LocalStateService
+
+    session_id = "saved-request-id"
+    request_id = "client-request-42"
+    logger = KollaborConversationLogger(tmp_path)
+    logger.reset_session(session_id)
+    await logger.log_user_message(
+        "saved input", message_metadata={"request_id": request_id}
+    )
+
+    saved_record = json.loads(logger.session_file.read_text().splitlines()[0])
+    assert saved_record["message"]["metadata"]["request_id"] == request_id
+
+    config = Mock()
+    config._conversations_dir = tmp_path
+    config.get.side_effect = lambda _key, default=None: default
+    manager = ConversationManager(config)
+    history = []
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_history=history,
+        conversation_logger=logger,
+        session_stats={},
+    )
+
+    result = await LocalStateService(llm, None).resume_conversation(session_id)
+
+    assert result["message_count"] == 1
+    assert manager.messages[0]["metadata"]["request_id"] == request_id
+    assert history[0].metadata["request_id"] == request_id
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("saved", [
     "2022-03-04T05:06:07.123456",
     "2022-03-04T05:06:07.123456+05:30",

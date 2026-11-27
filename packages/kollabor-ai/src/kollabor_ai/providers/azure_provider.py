@@ -10,7 +10,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from ..goal_image_scope import safe_goal_error_cause
 from ..message_content import redact_error_media
-
 from .base import LLMProvider
 from .models import (
     AzureOpenAIConfig,
