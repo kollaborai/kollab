@@ -92,7 +92,16 @@ def test_every_pull_request_workflow_excludes_quarantine_from_pytest_runs() -> N
             for step in job.get("steps", []):
                 command = step.get("run", "")
                 for invocation in _pytest_invocations(command):
-                    if "--collect-only" not in invocation and '-m "not quarantine"' not in invocation:
+                    windows_quarantine = (
+                        path.name in windows_workflows
+                        and step.get("name") == "Quarantined Windows tests (non-blocking)"
+                        and "-m quarantine" in invocation
+                    )
+                    if (
+                        "--collect-only" not in invocation
+                        and '-m "not quarantine"' not in invocation
+                        and not windows_quarantine
+                    ):
                         violations.append(f"{path.name}: {job_id}/{step.get('name')}: {invocation}")
                     if path.name in windows_workflows:
                         if step.get("shell") == "bash":
@@ -207,7 +216,10 @@ def test_base_fresh_workflow_and_current_docs_are_retired() -> None:
 
 
 def _test_roots(command: str) -> set[str]:
-    return set(re.findall(r"(?<![\w/.-])(packages/[\w-]+/tests|tests)(?=[/\s]|$)", command))
+    command = "\n".join(line for line in command.splitlines() if not line.lstrip().startswith("#"))
+    return set(
+        re.findall(r"(?<![\w/.-])(packages/[\w-]+/tests|tests/unit|tests(?!/unit))(?=[/\s]|$)", command)
+    )
 
 
 def test_every_suite_kept_out_of_blocking_runs_runs_in_the_quarantine_job() -> None:
@@ -226,8 +238,10 @@ def test_every_suite_kept_out_of_blocking_runs_runs_in_the_quarantine_job() -> N
         if "-m quarantine" in command:
             quarantined |= _test_roots(command)
 
-    assert excluded >= {"tests", "packages/kollabor-engine/tests", "packages/kollabor-voice/tests"}
-    assert excluded - quarantined == set()
+    assert excluded >= {"tests/unit", "packages/kollabor-engine/tests", "packages/kollabor-voice/tests"}
+    assert {
+        root for root in excluded if not any(root == covered or root.startswith(f"{covered}/") for covered in quarantined)
+    } == set()
 
 
 def test_every_blocking_suite_is_covered_by_the_repeat_job() -> None:
