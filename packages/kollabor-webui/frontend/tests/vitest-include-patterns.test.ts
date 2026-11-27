@@ -20,7 +20,8 @@ test("Vitest skips every Node suite, whichever quotes it imports node:test with"
     mkdirSync(path.join(root, "src"));
     writeFileSync(path.join(root, "tests/double.test.ts"), 'import { test } from "node:test";\n');
     writeFileSync(path.join(root, "tests/single.test.ts"), "import { test } from 'node:test';\n");
-    writeFileSync(path.join(root, "tests/vitest.test.ts"), 'import { it } from "vitest";\n');
+    // Built, not written out: CI runs this file under node --test only while it never contains the Vitest import text.
+    writeFileSync(path.join(root, "tests/vitest.test.ts"), `import { it } from ${JSON.stringify("vitest")};\n`);
     assert.deepEqual(nodeTestSuites(root).sort(), ["tests/double.test.ts", "tests/single.test.ts"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
