@@ -104,7 +104,7 @@ class ACPOrchestrator:
         self._transition_depth = 0
         self._conversation_transition = False
         self._completion_tasks: set[asyncio.Task[Any]] = set()
-        self._completion_tasks_by_turn: dict[tuple[int, int], asyncio.Task[Any]] = {}
+        self._history_settled_by_turn: dict[tuple[int, int], asyncio.Event] = {}
         self._delivery_tasks: set[asyncio.Task[Any]] = set()
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
         # Closes that outlived RUNNER_CLOSE_TIMEOUT: their runner is no longer
@@ -819,29 +819,35 @@ class ACPOrchestrator:
             return False
         self._completion_keys.add(turn_key)
         try:
+            self._history_settled_by_turn[turn_key] = asyncio.Event()
             task = asyncio.create_task(
                 self._complete(admission), name=f"acp-turn-{admission.request_id}"
             )
         except BaseException:
+            self._history_settled_by_turn.pop(turn_key, None)
             self._completion_keys.discard(turn_key)
             raise
         self._completion_tasks.add(task)
-        self._completion_tasks_by_turn[turn_key] = task
         task.add_done_callback(self._completion_tasks.discard)
         task.add_done_callback(
             lambda _task, key=turn_key: self._completion_keys.discard(key)
         )
         task.add_done_callback(
-            lambda _task, key=turn_key: self._completion_tasks_by_turn.pop(key, None)
+            lambda _task, key=turn_key: self._history_settled_by_turn.pop(key, None)
         )
         return True
 
-    async def wait_for_turn_completion(self, admission: ACPAdmission) -> None:
-        """Wait until this admission's result and history writes have settled."""
+    async def wait_for_turn_history(self, admission: ACPAdmission) -> None:
+        """Wait until this admission's conversation history writes have settled."""
         turn_key = (admission.generation, admission.turn_id)
-        task = self._completion_tasks_by_turn.get(turn_key)
-        if task is not None:
-            await asyncio.shield(task)
+        settled = self._history_settled_by_turn.get(turn_key)
+        if settled is not None:
+            await settled.wait()
+
+    def _mark_turn_history_settled(self, turn_key: tuple[int, int]) -> None:
+        settled = self._history_settled_by_turn.get(turn_key)
+        if settled is not None:
+            settled.set()
 
     def activate_queue_handoff_admission(
         self,
@@ -1748,6 +1754,7 @@ class ACPOrchestrator:
             )
             self._save_binding()
             await self._record_result(result, turn_key)
+            self._mark_turn_history_settled(turn_key)
         except BaseException as exc:
             # Admission is immediately acknowledged, so every admitted request
             # must still receive one correlated terminal event on close/failure.
@@ -1845,6 +1852,7 @@ class ACPOrchestrator:
                     await self._record_result(partial, turn_key)
                 except BaseException as history_exc:
                     logger.warning("ACP interrupted transcript write failed (%s)", type(history_exc).__name__)
+            self._mark_turn_history_settled(turn_key)
             if stop_reason == "error":
                 llm = self.event_bus.get_service("llm_service")
                 display = getattr(llm, "message_display_service", None)
@@ -1893,6 +1901,7 @@ class ACPOrchestrator:
                     "request_id": admission.request_id,
                     "stop_reason": stop_reason, "end_frame": end_frame}
         finally:
+            self._mark_turn_history_settled(turn_key)
             self._turn_parents.pop(turn_key, None)
             self._turn_user_tasks.pop(turn_key, None)
             self._pending_turn_user_tasks.pop(turn_key, None)

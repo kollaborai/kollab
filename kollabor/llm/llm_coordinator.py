@@ -885,7 +885,7 @@ class LLMService:
                         # Runner cancellation settles before the completion
                         # observer writes the partial transcript.
                         wait_for_completion = getattr(
-                            acp, "wait_for_turn_completion", None
+                            acp, "wait_for_turn_history", None
                         )
                         if not callable(wait_for_completion):
                             raise RuntimeError(
