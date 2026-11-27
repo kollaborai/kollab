@@ -496,12 +496,14 @@ jobs:
 
       # Exit 5 = nothing quarantined in that suite, which is the normal case.
       - name: Run quarantined engine and rpc package tests
+        if: ${{ !cancelled() }}  # a failing earlier suite must not skip this one
         run: >-
           uv run python -m pytest -o asyncio_mode=auto
           packages/kollabor-engine/tests packages/kollabor-rpc/tests
           -m quarantine -q -rs -p no:cacheprovider || [ $? -eq 5 ]
 
       - name: Run quarantined voice package tests
+        if: ${{ !cancelled() }}  # a failing earlier suite must not skip this one
         run: >-
           uv run --no-project --python 3.12 --with numpy==2.5.3
           --with pytest --with pytest-asyncio

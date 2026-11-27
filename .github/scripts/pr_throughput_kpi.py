@@ -497,6 +497,11 @@ def _main_ci_runs(
     )
 
 
+# A job that failed or ran out of time; a cancelled attempt is someone stopping
+# it, not a flake.
+RED_JOB_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure"})
+
+
 def _main_ci_red_to_green(
     api: GhApi,
     repo: str,
@@ -523,7 +528,7 @@ def _main_ci_red_to_green(
                     f"main CI run {run_id} attempt {attempt} returned invalid jobs"
                 )
             if any(
-                isinstance(job, dict) and job.get("conclusion") == "failure"
+                isinstance(job, dict) and job.get("conclusion") in RED_JOB_CONCLUSIONS
                 for job in jobs
             ):
                 failed_attempts.add((run_id, attempt))

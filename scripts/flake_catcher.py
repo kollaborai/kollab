@@ -93,7 +93,9 @@ def parse_failed_lines(logs: str) -> list[str]:
         if marker < 0:
             continue
         summary = line[marker + len("FAILED ") :].strip()
-        nodeid = summary.partition(" - ")[0].strip()
+        # A parameter id may itself hold " - ", so the id ends at its closing bracket when it has one.
+        match = re.match(r"\S+?\.py::[^\s\[]+(?:\[[^\]]*\])?", summary)
+        nodeid = match.group(0) if match else summary.partition(" - ")[0].strip()
         if not re.match(r"(tests|packages/[\w-]+/tests)/", nodeid) or ".py::" not in nodeid:
             continue
         if nodeid not in seen:
@@ -195,7 +197,7 @@ def open_or_update_flaky_tests(
             paginate=True,
         )
         for job in _rows(jobs, "jobs"):
-            if job.get("conclusion") != "failure" or not job.get("id"):
+            if job.get("conclusion") not in {"failure", "timed_out"} or not job.get("id"):
                 continue
             logs = _api_text(gh, f"repos/{repo}/actions/jobs/{job['id']}/logs")
             for nodeid in parse_failed_lines(logs):
