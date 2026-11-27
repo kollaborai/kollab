@@ -217,9 +217,7 @@ def test_base_fresh_workflow_and_current_docs_are_retired() -> None:
 
 def _test_roots(command: str) -> set[str]:
     command = "\n".join(line for line in command.splitlines() if not line.lstrip().startswith("#"))
-    return set(
-        re.findall(r"(?<![\w/.-])(packages/[\w-]+/tests|tests/unit|tests(?!/unit))(?=[/\s]|$)", command)
-    )
+    return set(re.findall(r"(?<![\w/.-])(packages/[\w-]+/tests|tests/unit|tests(?!/unit))(?=[/\s]|$)", command))
 
 
 def test_every_suite_kept_out_of_blocking_runs_runs_in_the_quarantine_job() -> None:
@@ -240,7 +238,9 @@ def test_every_suite_kept_out_of_blocking_runs_runs_in_the_quarantine_job() -> N
 
     assert excluded >= {"tests/unit", "packages/kollabor-engine/tests", "packages/kollabor-voice/tests"}
     assert {
-        root for root in excluded if not any(root == covered or root.startswith(f"{covered}/") for covered in quarantined)
+        root
+        for root in excluded
+        if not any(root == covered or root.startswith(f"{covered}/") for covered in quarantined)
     } == set()
 
 
