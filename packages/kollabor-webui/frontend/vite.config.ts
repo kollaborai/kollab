@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
@@ -8,21 +8,12 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { learnPhoneMediaPlugin } from "./scripts/learn-phone-media-plugin";
 import { pluginRuntimePlugin } from "./scripts/plugin-runtime-plugin.ts";
+import { nodeTestSuites } from "./scripts/vitest-skips.ts";
 import pkg from "./package.json";
 
 
 const frontendDir = path.dirname(fileURLToPath(import.meta.url));
 
-// Suites written for Node's built-in runner (`node --test`) import "node:test";
-// Vitest skips them. Found on disk so a new test file never edits this config.
-function nodeTestSuites(): string[] {
-  return ["tests", "src"].flatMap((dir) =>
-    (readdirSync(path.join(frontendDir, dir), { recursive: true }) as string[])
-      .filter((file) => /\.test\.(ts|tsx|mjs)$/.test(file))
-      .map((file) => `${dir}/${file.split(path.sep).join("/")}`)
-      .filter((file) => readFileSync(path.join(frontendDir, file), "utf8").includes('from "node:test"')),
-  );
-}
 
 // The web bundle version tracks the release version (frontend package.json,
 // gated by scripts/check_version_parity.py). Injected at build time so the
@@ -205,7 +196,7 @@ const mainConfig = defineConfig({
       "src/**/*.test.ts",
       "src/**/*.test.tsx",
     ],
-    exclude: [...configDefaults.exclude, ...nodeTestSuites()],
+    exclude: [...configDefaults.exclude, ...nodeTestSuites(frontendDir)],
     environment: "node",
   },
 });
