@@ -2,11 +2,12 @@
 // the loader has checked the computer's signature on these exact bytes.
 import { createRoot } from "react-dom/client";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { REDACTED_ROOT_ERROR_OPTIONS } from "@/plugins/plugin-errors";
 import App from "@/App";
 import "@/styles.css";
 
 document.documentElement.classList.add("dark");
-createRoot(document.getElementById("root")!).render(
+createRoot(document.getElementById("root")!, REDACTED_ROOT_ERROR_OPTIONS).render(
   <TooltipProvider>
     <div className="h-dvh min-h-0 overflow-hidden">
       <App contained />

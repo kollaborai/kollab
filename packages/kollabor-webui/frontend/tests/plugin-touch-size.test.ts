@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 const settingsSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/plugins/settings.tsx"), "utf8");
 const installSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/plugins/install.tsx"), "utf8");
+const threadSource = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/components/assistant-ui/thread.tsx"), "utf8");
 
 // The rule that makes plugin controls touch-sized (docs/specs/plugins.md, "Right-hand menu").
 const css = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/styles.css"), "utf8");
@@ -37,6 +38,19 @@ describe("touch size inside [data-plugin]", () => {
   });
 });
 
+describe("slash palette touch targets", () => {
+  it("keeps top-level and nested rows at least 44px tall on coarse pointers", async () => {
+    const module = (await import("../src/components/assistant-ui/composer-palette")) as unknown as {
+      paletteItemClassName?: (depth: number) => string;
+    };
+    expect(module.paletteItemClassName).toBeTypeOf("function");
+    if (!module.paletteItemClassName) return;
+
+    for (const depth of [0, 1, 2])
+      expect(module.paletteItemClassName(depth), `palette depth ${depth}`).toContain("any-pointer-coarse:min-h-11");
+  });
+});
+
 describe("plugin on/off switch hit area", () => {
   it("sits in a 44x44 wrapper at a coarse pointer, so the clickable box is touch sized while the track stays 32x18", () => {
     const wrapper = /<label[^>]*className="([^"]*)"[^>]*>\s*<Switch\b/.exec(settingsSource);
@@ -55,6 +69,15 @@ describe("Add Plugin touch targets", () => {
     expect(inputs).toHaveLength(2);
     for (const input of inputs)
       expect(input).toContain("pointer-coarse:min-h-11");
+  });
+});
+
+describe("command catalog retry touch target", () => {
+  it("keeps Try Again at least 44px high on coarse pointers", () => {
+    const button = /<Button type="button" size="sm" variant="outline" onClick=\{onRetryCommands\} className="([^"]*)">\s*Try Again/.exec(threadSource);
+
+    expect(button, "the command catalog retry button with a coarse-pointer minimum").not.toBeNull();
+    expect(button?.[1]).toContain("pointer-coarse:min-h-11");
   });
 });
 

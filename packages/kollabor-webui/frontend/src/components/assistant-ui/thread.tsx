@@ -9,7 +9,6 @@ import {
   ComposerPalette,
   type ComposerPaletteItem,
 } from "@/components/assistant-ui/composer-palette";
-import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import {
   ChatStreamContentPreview,
   ChatStreamStreamingContent,
@@ -78,6 +77,22 @@ import { newInputId, type ChatRow, type InputRequest } from "@/chat-stream";
 import { composerAction, isWaitingRow } from "@/queue-state";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
+  matchPluginCommand,
+  pluginCommandCatalogReady,
+  pluginCommandConflicts,
+  pluginCommandEntries,
+  pluginCommandFailure,
+  pluginCommandItems,
+  pluginCommandSubmissionPending,
+  reservedCommandKeys,
+  warnPluginCommandConflicts,
+  canRestorePluginCommandDraft,
+} from "@/plugins/composer-commands";
+import { PluginTaggedText, PluginToolPart } from "@/plugins/renderers";
+import { slashCatalogNotice } from "./slash-catalog-notice";
+import { pluginRegistry, usePlugins } from "@/plugins/registry";
+import { logPluginFailure } from "@/plugins/plugin-errors";
+import {
   panelCommandRequest,
   type PanelOpenRequest,
 } from "@/components/panels/panel-model";
@@ -111,6 +126,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useLayoutEffect,
   useRef,
@@ -121,6 +137,14 @@ import {
   type PropsWithChildren,
   type ReactNode,
 } from "react";
+
+const PLUGIN_COMMAND_SUBMISSION_WAIT_MS = 2_000;
+type PendingPluginSubmission = {
+  text: string;
+  session: string | null;
+  timer: number;
+  sendsNow: boolean;
+};
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 
@@ -168,6 +192,10 @@ export type ThreadProps = {
   harness?: boolean | undefined;
 };
 
+
+function composerRevisionSignature(text: string, attachments: readonly { id: string }[]): string {
+  return JSON.stringify([text, attachments.map(({ id }) => id)]);
+}
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
 
@@ -512,6 +540,9 @@ const Composer: FC<{
   // Text typed into a chat that is about to be swapped out would be lost, or
   // sent to the chat being left.
   const lock = useContext(ComposerLockContext);
+  // A delayed submit can outlive the render that scheduled it.
+  const lockRef = useRef(lock);
+  lockRef.current = lock;
   const { workspace, remote: remoteAgents } = useContext(ComposerHubContext);
   // The mic only exists where the session's live command list has /voice.
   const voiceAvailable = commands.some(
@@ -528,6 +559,9 @@ const Composer: FC<{
   const slotMode = composerSlotMode(composerEmpty, store.running, voiceAvailable ? voice : null, Boolean(permissionStop));
   const isRunning = store.running;
   const composerText = useAuiState((s) => s.composer.text);
+  const composerRevisionKey = useAuiState((s) =>
+    composerRevisionSignature(s.composer.text, s.composer.attachments),
+  );
   const composerImages = useAuiState(
     useShallow((s) => s.composer.attachments),
   );
@@ -540,7 +574,7 @@ const Composer: FC<{
   } | null>(null);
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
   const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
-  const skipEmptyDraftPersist = useRef(false);
+  const skipEmptyDraftPersist = useRef<{ key: string } | null>(null);
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
@@ -556,7 +590,6 @@ const Composer: FC<{
     const restored = stripImageTokens(draftText);
     setDraftRestoreSnapshot({ key, text: draftText });
     restoredDraft.current = { key, text: restored.text };
-    skipEmptyDraftPersist.current = false;
     if (aui.composer.getState().text !== restored.text) {
       aui.composer.setText(restored.text);
     }
@@ -647,15 +680,74 @@ const Composer: FC<{
       restoredDraft.current = null;
     }
     if (!key) return;
-    if (composerText.length === 0 && skipEmptyDraftPersist.current) {
+    if (composerText.length === 0 && skipEmptyDraftPersist.current?.key === key) {
       // assistant-ui clears the input as soon as submit starts. Keep the
       // durable copy until transport or daemon queue admission is confirmed.
-      skipEmptyDraftPersist.current = false;
+      skipEmptyDraftPersist.current = null;
       return;
     }
-    if (composerText.length > 0) skipEmptyDraftPersist.current = false;
+    if (composerText.length > 0 && skipEmptyDraftPersist.current?.key === key) {
+      skipEmptyDraftPersist.current = null;
+    }
     saveComposerDraft(key, composerText);
   }, [composerText, draftKey]);
+
+  const composerRevisionRef = useRef(0);
+  const observedComposerRevisionKeyRef = useRef(composerRevisionKey);
+  if (observedComposerRevisionKeyRef.current !== composerRevisionKey) {
+    composerRevisionRef.current += 1;
+    observedComposerRevisionKeyRef.current = composerRevisionKey;
+  }
+  const currentDraftKeyRef = useRef(draftKey ?? null);
+  currentDraftKeyRef.current = draftKey ?? null;
+  const composerFormId = useId();
+  const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const pendingPluginSubmitRef = useRef<PendingPluginSubmission | null>(null);
+  const normalPluginFallbackRef = useRef<{ text: string; session: string | null } | null>(null);
+  const cancelPendingPluginSubmit = () => {
+    const pending = pendingPluginSubmitRef.current;
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    pendingPluginSubmitRef.current = null;
+  };
+  const replayPendingPluginSubmit = (normalFallback: boolean) => {
+    const pending = pendingPluginSubmitRef.current;
+    if (!pending) return;
+    cancelPendingPluginSubmit();
+    if (
+      lockRef.current ||
+      currentDraftKeyRef.current !== pending.session ||
+      aui.composer.getState().text !== pending.text
+    ) return;
+    if (normalFallback) normalPluginFallbackRef.current = pending;
+    submitSendsNow.current = pending.sendsNow;
+    try {
+      const form = composerFormRef.current ?? document.getElementById(composerFormId);
+      if (form instanceof HTMLFormElement) form.requestSubmit();
+    } finally {
+      submitSendsNow.current = false;
+      if (normalFallback) normalPluginFallbackRef.current = null;
+    }
+  };
+  const composerWithOptionalSubscribe = aui.composer as typeof aui.composer & {
+    subscribe?: (listener: () => void) => () => void;
+  };
+  useLayoutEffect(() => {
+    const observeComposerChange = () => {
+      const state = aui.composer.getState();
+      const key = composerRevisionSignature(state.text, state.attachments);
+      if (observedComposerRevisionKeyRef.current !== key) {
+        composerRevisionRef.current += 1;
+        observedComposerRevisionKeyRef.current = key;
+      }
+    };
+    const unsubscribeClient = aui.subscribe(observeComposerChange);
+    const unsubscribeComposer = composerWithOptionalSubscribe.subscribe?.(observeComposerChange);
+    return () => {
+      unsubscribeClient();
+      unsubscribeComposer?.();
+    };
+  }, [aui, aui.composer]);
 
   // A bare /welcome opens the local guide; panel commands open Settings and post
   // no text. Any other line is sent exactly as typed. Runs on form submit and Send.
@@ -679,6 +771,140 @@ const Composer: FC<{
     aui.composer.setText("");
     onOpenPanel(request);
   };
+
+  const pluginSnapshot = usePlugins();
+  const { plugins } = pluginSnapshot;
+  const pluginCommandsReady = pluginCommandCatalogReady(commandCatalogStatus);
+  const reserved = useMemo(
+    () => reservedCommandKeys(commands),
+    [commands],
+  );
+  const pluginEntries = useMemo(
+    () => pluginCommandsReady ? pluginCommandEntries(plugins, reserved) : [],
+    [pluginCommandsReady, plugins, reserved],
+  );
+  const pluginConflicts = useMemo(
+    () => pluginCommandsReady ? pluginCommandConflicts(plugins, reserved) : [],
+    [pluginCommandsReady, plugins, reserved],
+  );
+  const reportedPluginConflicts = useRef(new Set<string>());
+  useEffect(() => {
+    const current = new Set<string>();
+    const newConflicts = pluginConflicts.filter((conflict) => {
+      const key = JSON.stringify([
+        conflict.commandName.toLowerCase(),
+        conflict.winnerPluginId,
+        conflict.pluginId,
+      ]);
+      current.add(key);
+      return !reportedPluginConflicts.current.has(key);
+    });
+    reportedPluginConflicts.current = current;
+    warnPluginCommandConflicts(newConflicts);
+  }, [pluginConflicts]);
+
+  // A loaded plugin's /command typed in the composer runs here instead of
+  // going to the agent. Returns true when it handled the submit.
+  const runPluginCommand = (event: { preventDefault: () => void }) => {
+    const state = aui.composer.getState();
+    if (state.attachments.length > 0) return false;
+    const draft = state.text;
+    const commandSession = draftKey ?? null;
+    const normalFallback = normalPluginFallbackRef.current;
+    if (normalFallback?.session === commandSession && normalFallback.text === draft) return false;
+    if (normalFallback) normalPluginFallbackRef.current = null;
+    const pending = pendingPluginSubmitRef.current;
+    if (pending && (pending.session !== commandSession || pending.text !== draft)) {
+      cancelPendingPluginSubmit();
+    }
+    if (pluginCommandSubmissionPending(draft, commandCatalogStatus, pluginSnapshot, reserved, Boolean(draftKey))) {
+      event.preventDefault();
+      const pendingSubmission = pendingPluginSubmitRef.current;
+      if (!pendingSubmission) {
+        const timer = window.setTimeout(
+          () => replayPendingPluginSubmit(true),
+          PLUGIN_COMMAND_SUBMISSION_WAIT_MS,
+        );
+        pendingPluginSubmitRef.current = {
+          text: draft,
+          session: commandSession,
+          timer,
+          sendsNow: submitSendsNow.current,
+        };
+      } else if (submitSendsNow.current) {
+        pendingSubmission.sendsNow = true;
+      }
+      return true;
+    }
+    cancelPendingPluginSubmit();
+    const match = matchPluginCommand(draft, pluginEntries);
+    if (!match) return false;
+    event.preventDefault();
+    if (commandSession) {
+      saveComposerDraft(commandSession, draft);
+      skipEmptyDraftPersist.current = { key: commandSession };
+    }
+    aui.composer.setText("");
+    composerRevisionRef.current += 1;
+    observedComposerRevisionKeyRef.current = composerRevisionSignature("", state.attachments);
+    const clearedRevision = composerRevisionRef.current;
+    const fail = (error: unknown) => {
+      const current = pluginRegistry.getSnapshot().plugins.find((record) => record.id === match.entry.pluginId);
+      if (current?.k !== match.entry.k) return;
+      if (
+        canRestorePluginCommandDraft(
+          composerRevisionRef.current,
+          clearedRevision,
+          currentDraftKeyRef.current,
+          commandSession,
+        ) &&
+        aui.composer.getState().text === ""
+      ) {
+        aui.composer.setText(draft);
+      }
+      logPluginFailure(match.entry.pluginId, `command /${match.entry.name} failed`, error);
+      match.entry.k.toast(pluginCommandFailure(match.entry.name, error));
+    };
+    const clearSavedDraft = () => {
+      if (
+        commandSession &&
+        canRestorePluginCommandDraft(
+          composerRevisionRef.current,
+          clearedRevision,
+          currentDraftKeyRef.current,
+          commandSession,
+        ) &&
+        loadComposerDraft(commandSession) === draft
+      ) {
+        saveComposerDraft(commandSession, "");
+      }
+    };
+    try {
+      const result = match.entry.run(match.args);
+      void Promise.resolve(result).then(clearSavedDraft, fail);
+    } catch (error) {
+      fail(error);
+    }
+    return true;
+  };
+
+  useEffect(() => {
+    const pending = pendingPluginSubmitRef.current;
+    if (!pending) return;
+    const state = aui.composer.getState();
+    if (pending.session !== (draftKey ?? null) || pending.text !== state.text) {
+      cancelPendingPluginSubmit();
+      return;
+    }
+    if (!pluginCommandSubmissionPending(pending.text, commandCatalogStatus, pluginSnapshot, reserved, Boolean(draftKey))) {
+      replayPendingPluginSubmit(false);
+    }
+  }, [aui, commandCatalogStatus, composerText, draftKey, pluginSnapshot, reserved]);
+
+  useEffect(() => () => {
+    const pending = pendingPluginSubmitRef.current;
+    if (pending) window.clearTimeout(pending.timer);
+  }, []);
 
   const submitBusyMessage = (event: {
     preventDefault: () => void;
@@ -757,6 +983,7 @@ const Composer: FC<{
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
+    if (runPluginCommand(event)) return;
     openPanelFromComposer(event);
     if (event.defaultPrevented) return;
     event.preventDefault();
@@ -782,6 +1009,8 @@ const Composer: FC<{
     id: string;
     metadata?: Record<string, unknown> | undefined;
   }) => {
+    // Plugin commands are inserted as text and run on submit, not from here.
+    if (item.metadata?.category === "plugins") return;
     const insert = item.metadata?.insertText;
     const commandText = `/${typeof insert === "string" ? insert : item.id}`;
     if (
@@ -907,6 +1136,24 @@ const Composer: FC<{
     },
     [commands],
   );
+
+  const pluginItems = useMemo(
+    () => pluginCommandItems(pluginEntries, prettyCommandName),
+    [pluginEntries],
+  );
+  const paletteItems = useMemo<readonly ComposerPaletteItem[]>(
+    () => [...commandItems, ...pluginItems],
+    [commandItems, pluginItems],
+  );
+  const slashNotice = pluginCommandSubmissionPending(
+    composerText,
+    commandCatalogStatus,
+    pluginSnapshot,
+    reserved,
+    Boolean(draftKey),
+  ) && commandCatalogStatus !== "loading"
+    ? "Loading plugin commands."
+    : slashCatalogNotice(commandCatalogStatus, pluginItems.length > 0);
 
   const nestedCommandNames = useMemo(() => {
     const names = new Set<string>();
@@ -1054,31 +1301,25 @@ const Composer: FC<{
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
       <ComposerPrimitive.Root
+        id={composerFormId}
+        ref={composerFormRef}
         className="aui-composer-root group/composer relative flex min-w-0 flex-1 flex-col"
         data-mode={slotMode}
         onSubmit={handleComposerSubmit}
       >
         <ComposerPalette
           char="/"
-          items={commandItems}
+          items={paletteItems}
           title="Commands"
           emptyMessage="No matching commands"
           emptyHint="Keep typing to refine the command search."
           onInserted={openPanelForItem}
         />
-        {composerText.trimStart().startsWith("/") && commandCatalogStatus !== "ready" ? (
+        {slashNotice && composerText.trimStart().startsWith("/") ? (
           <div role="status" className="bg-muted/50 text-muted-foreground flex items-center justify-between gap-3 px-3 py-2 text-xs">
-            <span className="min-w-0">
-              {commandCatalogStatus === "loading"
-                ? "Loading commands for this session."
-                : commandCatalogStatus === "empty"
-                  ? "No commands are available for this session. You can still type a slash command."
-                  : commandCatalogStatus === "fallback"
-                    ? "This engine does not provide a live command catalog. Showing built-in commands as a compatibility fallback."
-                    : "Commands couldn't be loaded for this session. Your draft is preserved."}
-            </span>
+            <span className="min-w-0">{slashNotice}</span>
             {(commandCatalogStatus === "fallback" || commandCatalogStatus === "unavailable") && onRetryCommands ? (
-              <Button type="button" size="sm" variant="outline" onClick={onRetryCommands}>
+              <Button type="button" size="sm" variant="outline" onClick={onRetryCommands} className="pointer-coarse:min-h-11">
                 Try Again
               </Button>
             ) : null}
@@ -1169,7 +1410,7 @@ function prettyCommandName(name: string): string {
       }
       return lower.charAt(0).toUpperCase() + lower.slice(1);
     })
-    .join(" ");
+    .join(" ") || name;
 }
 
 type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
@@ -1461,7 +1702,7 @@ const AssistantMessage: FC = () => {
                 const preview = chatStreamContentPreviewFromMetadata(part.providerMetadata, "text");
                 const renderText = (text: string) => (
                   <TextMessagePartProvider text={text}>
-                    <MarkdownText />
+                    <PluginTaggedText text={text} />
                   </TextMessagePartProvider>
                 );
                 return preview && rowStatus === "streaming" ? (
@@ -1475,7 +1716,7 @@ const AssistantMessage: FC = () => {
                   <ChatStreamContentPreview key={chatStreamContentIdentity(preview)} marker={preview}>
                     {renderText}
                   </ChatStreamContentPreview>
-                ) : <MarkdownText />;
+                ) : <PluginTaggedText text={part.text} />;
               }
               case "reasoning": {
                 const preview = chatStreamContentPreviewFromMetadata(part.providerMetadata, "reasoning");
@@ -1506,7 +1747,10 @@ const AssistantMessage: FC = () => {
                     data-chat-tool-call-id={part.toolCallId}
                     data-chat-tool-name={part.toolName}
                   >
-                    {part.toolUI ?? <ToolFallbackComponent {...part} />}
+                    <PluginToolPart
+                      part={part}
+                      fallback={part.toolUI ?? <ToolFallbackComponent {...part} />}
+                    />
                   </div>
                 );
               case "image":

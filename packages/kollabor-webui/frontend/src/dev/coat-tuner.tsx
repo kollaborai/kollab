@@ -1,5 +1,6 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { REDACTED_ROOT_ERROR_OPTIONS } from "@/plugins/plugin-errors";
 import "../styles.css";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import { gemEngine } from "@/components/gems/gem-engine";
@@ -210,7 +211,7 @@ function Tuner() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(
+createRoot(document.getElementById("root")!, REDACTED_ROOT_ERROR_OPTIONS).render(
   <StrictMode>
     <Tuner />
   </StrictMode>,

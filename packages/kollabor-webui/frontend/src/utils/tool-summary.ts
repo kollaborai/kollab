@@ -173,14 +173,19 @@ export function humanizeToolName(toolName: string): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
+/**
+ * Live names are the daemon's display names ("terminal: ls", "web-search: q");
+ * history carries the bare native name. Reduce both to the native name.
+ */
+export function nativeToolName(toolName: string): string {
+  return toolName.match(/^([\w-]+):(?:\s|$)/)?.[1] ?? toolName.trim();
+}
+
 /** Keep tool rows scannable while leaving the full request in the detail panel. */
 export function summarizeToolCall(toolName: string, argsText?: string): string {
   const args = parseArgs(argsText);
-  // Live names are the daemon's display names ("terminal: ls", "web-search: q");
-  // history carries the bare native name. Reduce both to the native name.
-  const displayName = toolName.match(/^([\w-]+):(?:\s|$)/)?.[1] ?? toolName.trim();
   const normalizedName =
-    normalizeHubMcpToolName(displayName).replaceAll("-", "_") || "tool";
+    normalizeHubMcpToolName(nativeToolName(toolName)).replaceAll("-", "_") || "tool";
 
   if (normalizedName === "terminal" && typeof args.command === "string") {
     return summarizeTerminalCommand(args.command);
