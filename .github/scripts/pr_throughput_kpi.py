@@ -927,6 +927,11 @@ def main(
     if now is None:
         print("pr_throughput_kpi: --now must be ISO 8601", file=sys.stderr)
         return 2
+    now = (
+        now.replace(tzinfo=timezone.utc)
+        if now.tzinfo is None
+        else now.astimezone(timezone.utc)
+    )
 
     report = collect(GhApi(runner), config, now)
     markdown = render_markdown(report)
