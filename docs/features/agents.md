@@ -400,15 +400,17 @@ the state RPC `state.restart_agent`) restarts the agent in place:
    path on its own and the open chat needs no reload.
 
 If an older agent does not implement `state.restart_agent`, the engine asks it
-to shut down through the hub and starts the session again through the normal
-agent launcher. This keeps recovery in the page and preserves the chat history.
+to shut down through the hub and starts the same web session through the normal
+agent launcher. The page keeps the existing session open while the agent
+reconnects.
 
 `/restart` no longer clears the conversation. `/new` (alias `/clear`) does that.
 A window started with `--no-daemon` has no daemon to replace: `/restart` there
 says so and changes nothing; quit and start Kollab again. An agent started
-before `/restart` existed answers that it is too old to restart itself. The web chat
-shows that agent the stop-and-start line above, with no button. A failed ask gets
-Try Again, except the engine's too-old answer, which gets the same line with Dismiss only.
+before `/restart` existed answers that it is too old to restart itself. The web
+chat's Restart Agent button asks the engine to stop that agent through the hub
+and start the same session with the normal launcher. A failed restart shows the
+error in the notice with a Try Again button.
 
 A terminal window attached to the agent stays open through the restart. Just
 before it shuts down, the agent publishes `daemon_restarting` to its attached

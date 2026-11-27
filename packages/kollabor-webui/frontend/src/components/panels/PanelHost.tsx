@@ -25,6 +25,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { SESSIONLESS_PANELS } from "@/api";
 import { confirmedPayload } from "./confirm";
+import { webUiPanelCopy } from "./panel-web-copy";
 import { serializeDraft, type Draft } from "./FieldRenderer";
 import { FormPanel } from "./FormPanel";
 import { NetworkPanel, type NetworkSection } from "./NetworkPanel";
@@ -113,7 +114,7 @@ function formChanges(panel: PanelForm, draft: Draft): Record<string, unknown> {
   return { ...values, ...edits };
 }
 const errorText = (error: unknown) =>
-  error instanceof Error ? error.message : String(error);
+  webUiPanelCopy(error instanceof Error ? error.message : String(error));
 
 /** A one-time secret with a countdown. Deliberately no copy button. */
 function RevealCard({
@@ -330,7 +331,7 @@ export function PanelHost({
       submitted?: PanelControlSubmission,
     ) => {
       const message: Message | null = result.message
-        ? { ok: result.ok, text: result.message }
+        ? { ok: result.ok, text: webUiPanelCopy(result.message) }
         : result.ok
           ? null
           : { ok: false, text: "That did not work." };
