@@ -2108,3 +2108,45 @@ async def test_a_fresh_snapshot_keeps_a_moved_input_after_the_earlier_turn():
     tools = [index for index, row in enumerate(rows) if row["kind"] == "tool"]
     assert len(tools) == 2, order
     assert order.index("web-later") > max(tools), order
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_taken_during_a_move_still_has_the_row():
+    """A browser connecting on another thread while a queued command moves gets
+    either the old or the new position, never a snapshot without the row whose
+    cursor still expects its delete (#1451 review r6)."""
+    import threading
+
+    state = _State()
+    stream = ChatStreamService(state)
+    stream.attach_display_tap()
+    stream.subscribe({"after": None, "conversation_uid": None})
+
+    await _add(stream, "web-first", "look around")
+    _publish(state, "turn_start", request_id="web-first", turn_id="native-1", input_source="web")
+    await _add(stream, "web-help", "/help")
+    _publish(state, "tool_start", turn_id="native-1", tool_id="tool-1",
+             tool_name="terminal", input={"command": "ls"})
+    _publish(state, "turn_complete", request_id="web-first", turn_id="native-1", stop_reason="end_turn")
+    uid = stream._conversation_uid()
+    log = stream._log(uid)
+    seen: list[list[dict]] = []
+    original = log.publish
+
+    def publish(event_type, data, *args, **kwargs):
+        if event_type == "row.delete" and not seen:
+            reader = threading.Thread(target=lambda: seen.append(log.read(after=None)))
+            reader.start()
+            reader.join(timeout=0.3)  # a reader that is not held back finishes here
+        return original(event_type, data, *args, **kwargs)
+
+    log.publish = publish
+    scope = stream._input_scopes[(uid, "web-help")]
+    assert stream.begin_ordered_command("web-help", uid, scope[0]) is not None
+    deadline = 50
+    while not seen and deadline:
+        await asyncio.sleep(0.02)
+        deadline -= 1
+
+    snapshot = seen[0][0]
+    assert "web-help" in [row["id"] for row in snapshot["data"]["rows"]]
