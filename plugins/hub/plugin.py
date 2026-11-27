@@ -9698,7 +9698,11 @@ class HubPlugin(BasePlugin):
             turns = self._acp_network_turns = {}
         sender = message.from_identity or message.from_agent or ""
         acp = self.event_bus.get_service("acp_orchestrator")
-        if acp is not None and acp.active and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}):
+        if (
+            acp is not None
+            and acp.active
+            and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"})
+        ):
             if not acp.observe_notification(message):
                 return {"status": "refused", "request_id": message.id}
             return {"status": "queued", "request_id": message.id}
@@ -18316,8 +18320,11 @@ class HubPlugin(BasePlugin):
             handle = remote.get("handle") or format_handle(remote.get("name", "?"), remote.get("device", "?"))
             rows[handle] = {**rows.get(handle, {}),
                            "identity": handle, "state": remote.get("state"), "device": remote.get("device"),
-                           "tags": {"harness": remote.get("harness") or "", "provider": "acp" if remote.get("harness") else "",
-                                    "acp_waiting": bool(remote.get("acp_waiting"))}}
+                           "tags": {
+                               "harness": remote.get("harness") or "",
+                               "provider": "acp" if remote.get("harness") else "",
+                               "acp_waiting": bool(remote.get("acp_waiting")),
+                           }}
         if self._identity:
             current = self._identity.to_dict()
             identity = str(current.get("identity") or current.get("agent_id") or "")
@@ -18331,7 +18338,11 @@ class HubPlugin(BasePlugin):
         return self._acp_hub_tools
 
     async def _handle_acp_hub_call(self, *, token, generation, name, arguments):
-        if not token or not secrets.compare_digest(str(token), self._acp_hub_token) or str(generation) != str(self._acp_hub_generation):
+        if (
+            not token
+            or not secrets.compare_digest(str(token), self._acp_hub_token)
+            or str(generation) != str(self._acp_hub_generation)
+        ):
             return {"error": "stale or invalid ACP hub binding"}
         relay = getattr(self, "_relay_agent", None)
         acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
@@ -18364,7 +18375,11 @@ class HubPlugin(BasePlugin):
                 self._presence.publish()
         turn = getattr(self, "_acp_network_turns", {}).get(request_id)
         if waiting and turn is not None:
-            line = f"{self._identity.identity} is waiting for your OK: {payload.get('title') or 'Tool permission'} · open it: kollab --attach {self._identity.identity}"
+            line = (
+                f"{self._identity.identity} is waiting for your OK: "
+                f"{payload.get('title') or 'Tool permission'} · open it: "
+                f"kollab --attach {self._identity.identity}"
+            )
             message = HubMessage(action="message", from_agent=self._identity.agent_id,
                 from_identity=self._identity.identity, to=turn.handle, content=line,
                 thread_id=turn.thread_id, reply_to=turn.message_id, metadata={"acp_waiting": True})
@@ -18396,7 +18411,11 @@ class HubPlugin(BasePlugin):
             turn.started = True
             turn.bound_ask = True
             relay = getattr(self, "_relay_agent", None)
-            relay_token = relay._turn.set(message.metadata["_relay_turn_id"]) if relay is not None and message.metadata.get("_relay_turn_id") else None
+            relay_token = (
+                relay._turn.set(message.metadata["_relay_turn_id"])
+                if relay is not None and message.metadata.get("_relay_turn_id")
+                else None
+            )
             token = current_turn.set({"request_id": message.id, "thread_id": message.thread_id,
                                       "input_source": "agent"})
             try:
