@@ -384,7 +384,7 @@ const ThreadRoot: FC<{
             className={cn(
               "mb-14 flex flex-col gap-y-6 empty:hidden",
               "[&>[data-role=assistant]+[data-role=assistant]]:-mt-3.5",
-              "[&>[data-role=assistant]:has(+[data-role=assistant])_[data-slot=aui_assistant-message-footer]]:hidden",
+              "[&>[data-role=assistant]:has(+[data-role=assistant])_[data-slot=aui\\_assistant-message-footer]]:hidden",
             )}
           >
             <ThreadPrimitive.Messages>
