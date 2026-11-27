@@ -460,6 +460,20 @@ describe("toThreadMessageLike", () => {
 });
 
 describe("toRepository", () => {
+  it("a grouped tool message stays running while any of its tools runs (#1451 review)", () => {
+    const tool = (id: string, status: string) => ({
+      ...row(id, [{ type: "tool-call" as const, tool_call_id: `call-${id}`, tool_name: "read_file", args: {} }]),
+      kind: "tool" as const,
+      turn_id: "t1",
+      status,
+    }) as ChatRow;
+    const running = { t1: { turn_id: "t1", state: "running" as const, input_ids: [] } };
+    const statusOf = (rows: ChatRow[]) => toRepository(rows, running).messages[0].message.status.type;
+    expect(statusOf([tool("a", "failed"), tool("b", "running")])).toBe("running");
+    expect(statusOf([tool("a", "running"), tool("b", "complete")])).toBe("running");
+    expect(statusOf([tool("a", "complete"), tool("b", "failed")])).toBe("incomplete");
+  });
+
   it("puts a turn's consecutive tool rows in one message so the thread groups them (#1451)", () => {
     const tool = (id: string, turn: string | null) => ({
       ...row(id, [{ type: "tool-call" as const, tool_call_id: `call-${id}`, tool_name: "read_file", args: {} }]),
