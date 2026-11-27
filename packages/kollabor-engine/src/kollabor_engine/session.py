@@ -236,6 +236,8 @@ class EngineSession:
         self._history_lock = asyncio.Lock()
         # Serializes same-session MCP attach snapshot/apply/rollback transactions.
         self._mcp_lock = asyncio.Lock()
+        self._restart_guard = asyncio.Lock()
+        self._restart_task: Optional[asyncio.Task[Dict[str, bool]]] = None
         # The mirror holds a disk seed the daemon has not replaced yet. A seed
         # is no prefix of the daemon's history (hub messages are logged apart),
         # so a page showing it replaces its thread whole when the daemon answers.
@@ -408,6 +410,18 @@ class EngineSession:
         await self.refresh_history()
 
     async def restart_outdated_agent(self) -> Dict[str, bool]:
+        """Coalesce concurrent restart requests for this session."""
+        async with self._restart_guard:
+            task = self._restart_task
+            if task is None or task.done():
+                task = asyncio.create_task(
+                    self._restart_outdated_agent_once(),
+                    name=f"restart-{self.session_id}",
+                )
+                self._restart_task = task
+        return await asyncio.shield(task)
+
+    async def _restart_outdated_agent_once(self) -> Dict[str, bool]:
         """Stop a pre-restart-RPC agent through Hub and start this session again."""
         if self.device:
             raise ValueError(
