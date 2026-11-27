@@ -350,6 +350,32 @@ class TestQueueProcessor(unittest.TestCase):
         [complete] = [e for e in tap.get_snapshot() if e["type"] == "turn_complete"]
         self.assertEqual(complete.get("stop_reason"), "end_turn")
 
+    def test_the_continue_note_after_a_cut_reply_is_hidden_from_the_chat(self):
+        """The model still reads the note; the chat never shows it as the user's message."""
+        self._reply_with("whole reply")
+        seen = []
+
+        async def call_llm(**_kwargs):
+            if not seen:
+                seen.append("first")
+                self.api_service.last_stop_reason = "length"
+                return "whole "
+            notes = [
+                m for m in self.conversation_history
+                if m.role == "user" and "truncated due to output" in str(m.content)
+            ]
+            seen.append([m.metadata.get("hidden") for m in notes])
+            self.api_service.last_stop_reason = "stop"
+            return "reply"
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+        self.assertEqual(seen, ["first", [True]])
+
     def test_a_stop_during_a_tool_call_ends_the_turn(self):
         """Stop or Send Now while a tool runs: the cut-off tool still returns a
         result, but the turn ends here instead of waiting on another model call."""
