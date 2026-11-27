@@ -1,6 +1,5 @@
 """Command executor for slash command execution."""
 
-import asyncio
 import inspect
 import logging
 from typing import Any, Dict

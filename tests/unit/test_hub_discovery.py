@@ -278,9 +278,9 @@ async def test_private_discovery_scope_explicit_then_wildcard(
     scopes, expected, monkeypatch
 ):
     """An explicit origin entry wins; '*' covers any origin; default is deny."""
-    import kollabor_config.provisioned_state as provisioned_state
     from unittest.mock import AsyncMock
 
+    import kollabor_config.provisioned_state as provisioned_state
     import plugins.hub.relay_commands as relay_commands
     from plugins.hub.relay_commands import RelayCommands
 
@@ -335,9 +335,8 @@ def test_windows_key_check_uses_acl_not_posix_mode(monkeypatch, tmp_path):
     """On nt the st_mode bits (0o666, or 0o444 read-only) can never pass a
     0o077 mask, so the privacy check must consult private_fs.owned_private
     instead: a key with 'bad' POSIX bits passes, a failed ACL check raises."""
-    from kollabor_config import private_fs
-
     import plugins.hub.dns.discovery_publish as dp
+    from kollabor_config import private_fs
 
     key = tmp_path / "service.key"
     key.write_bytes(SigningKey.generate().encode())

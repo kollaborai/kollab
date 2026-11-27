@@ -51,8 +51,12 @@ async def test_standalone_runner_preserves_original_stderr_bytes(tmp_path, monke
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode,pipe_mode", [(TerminalMode.RAW, False), (TerminalMode.NORMAL, False), (TerminalMode.RAW, True)])
-async def test_application_routes_only_active_tui_diagnostics_to_file_log(tmp_path, monkeypatch, caplog, mode, pipe_mode):
+@pytest.mark.parametrize(
+    "mode,pipe_mode", [(TerminalMode.RAW, False), (TerminalMode.NORMAL, False), (TerminalMode.RAW, True)]
+)
+async def test_application_routes_only_active_tui_diagnostics_to_file_log(
+    tmp_path, monkeypatch, caplog, mode, pipe_mode
+):
     monkeypatch.setattr("kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path)
     output = io.BytesIO()
     # TTY alone is not an active TUI: detached and pipe paths still forward bytes.
@@ -70,5 +74,6 @@ async def test_application_routes_only_active_tui_diagnostics_to_file_log(tmp_pa
 
     assert runner.last_stderr == "Controlled startup diagnostic"
     assert "Controlled startup diagnostic" in caplog.text
-    assert output.getvalue() == (b"" if mode == TerminalMode.RAW and not pipe_mode
-                                 else b"[acp] Controlled startup diagnostic\n")
+    assert output.getvalue() == (
+        b"" if mode == TerminalMode.RAW and not pipe_mode else b"[acp] Controlled startup diagnostic\n"
+    )

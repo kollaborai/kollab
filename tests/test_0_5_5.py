@@ -91,7 +91,7 @@ except Exception as e:
 print("\n=== Pool Identity Loading ===")
 
 try:
-    from plugins.hub.rosters import Persona, find_persona, roster_personas
+    from plugins.hub.rosters import Persona, roster_personas
 
     POOL_IDENTITIES = roster_personas()
     POOL_BY_NAME = {g.name: g for g in POOL_IDENTITIES}
@@ -147,7 +147,7 @@ except Exception as e:
 print("\n=== Spawn Identity Resolution ===")
 
 try:
-    from plugins.hub.rosters import find_persona, roster_personas
+    from plugins.hub.rosters import roster_personas
 
     POOL_IDENTITIES = roster_personas()
     POOL_BY_NAME = {g.name: g for g in POOL_IDENTITIES}

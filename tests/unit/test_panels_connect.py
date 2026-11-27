@@ -12,24 +12,42 @@ CODE = "ABCD-EFGH"
 RECEIPT = "r" * 32
 SENDER = "ab" * 32
 SNAP = {
-    "network": "marco-home", "domain": "kollabor.ai", "trust": "open", "device": "mac-home",
-    "relay_online": True, "knocks": 1, "local_agents": ["lapis"], "remote_agents": ["ruby@box"],
-    "offline_devices": [], "read_only": False, "config_from": "",
+    "network": "marco-home",
+    "domain": "kollabor.ai",
+    "trust": "open",
+    "device": "mac-home",
+    "relay_online": True,
+    "knocks": 1,
+    "local_agents": ["lapis"],
+    "remote_agents": ["ruby@box"],
+    "offline_devices": [],
+    "read_only": False,
+    "config_from": "",
     "contact_route": "kollabor.ai/c/8f3a2c1d9e4b7a60",
-    "requests": [{"enrollment_id": "abc123", "device": "new-box", "fingerprint": "ab12…ef01",
-                  "categories": []}],
+    "requests": [{"enrollment_id": "abc123", "device": "new-box", "fingerprint": "ab12…ef01", "categories": []}],
 }
 OFFER = {"status": "offered", "offer_id": "a" * 32, "expires_at": "4102444800", "code": CODE}
-KNOCK = {"id": "1" * 32, "device": "other-box", "fingerprint": "ab12…ef01",
-         "route": "8f3a2c1d9e4b7a60", "text": "hi,\nit is  me", "left": 271}
+KNOCK = {
+    "id": "1" * 32,
+    "device": "other-box",
+    "fingerprint": "ab12…ef01",
+    "route": "8f3a2c1d9e4b7a60",
+    "text": "hi,\nit is  me",
+    "left": 271,
+}
 KNOCKS_SNAPSHOT = {
-    "online": True, "domain": "kollabor.ai", "mode": "everyone", "mode_until": 0,
+    "online": True,
+    "domain": "kollabor.ai",
+    "mode": "everyone",
+    "mode_until": 0,
     "ringing": [KNOCK],
-    "missed": [{**{k: v for k, v in KNOCK.items() if k != "left"}, "id": "2" * 32,
-                "device": "bob-desk", "at": 1_800_000_000}],
+    "missed": [
+        {**{k: v for k, v in KNOCK.items() if k != "left"}, "id": "2" * 32, "device": "bob-desk", "at": 1_800_000_000}
+    ],
     "missed_limit": 20,
-    "calls": [{"route": "1a2b3c4d5e6f7a8b", "target": "kollabor.ai/c/1a2b3c4d5e6f7a8b",
-               "state": "redialing", "left": 60}],
+    "calls": [
+        {"route": "1a2b3c4d5e6f7a8b", "target": "kollabor.ai/c/1a2b3c4d5e6f7a8b", "state": "redialing", "left": 60}
+    ],
     "blocked": [{"route": "0123456789abcdef", "device": "spam-box"}],
     "contacts": [{"route": "fedcba9876543210", "expected": True}],
 }
@@ -98,7 +116,9 @@ async def test_describe_shows_the_snapshot_and_never_mints_a_code():
     assert summary["This Device"] == "mac-home" and summary["Agents On Other Devices"] == "ruby@box"
     device_index = next(i for i, row in enumerate(panel["summary"]) if row["label"] == "This Device")
     assert panel["summary"][device_index + 1] == {
-        "label": "Knocks Address", "value": SNAP["contact_route"], "copyable": True,
+        "label": "Knocks Address",
+        "value": SNAP["contact_route"],
+        "copyable": True,
     }
     assert [row["label"] for row in panel["summary"] if row.get("copyable")] == ["Knocks Address"]
     assert [(r["id"], r["label"]) for r in panel["rows"]] == [("abc123", "new-box")]
@@ -137,7 +157,8 @@ async def test_no_network_offers_the_two_guide_choices_and_read_only_offers_none
     assert panel["notice"] and not panel["row_actions"] and ids(panel["toolbar_actions"]) == ["halt"]
     assert panel["read_only"] is True  # the engine routes to the folder's owner on this
     assert next(row for row in panel["summary"] if row["label"] == "Knocks Address") == {
-        "label": "Knocks Address", "value": "Unavailable",
+        "label": "Knocks Address",
+        "value": "Unavailable",
     }
     assert "read_only" not in await CONNECT.describe(Hub(SNAP), {})
     with pytest.raises(PanelError) as err:
@@ -154,7 +175,9 @@ async def test_accept_and_reject_decide_only_listed_requests():
     assert result["ok"] and result["message"] == "Accepted new-box." and result["panel"]["panel"] == "connect"
     await CONNECT.act(hub, "reject", {"id": "abc123"})
     assert [c for c in hub.calls if c[0] == "decide"] == [
-        ("decide", "abc123", "accept"), ("decide", "abc123", "reject")]
+        ("decide", "abc123", "accept"),
+        ("decide", "abc123", "reject"),
+    ]
     with pytest.raises(PanelError) as err:
         await CONNECT.act(hub, "accept", {"id": "nope"})
     assert err.value.status == 404
@@ -179,8 +202,11 @@ async def test_new_network_composes_hub_connect_like_the_guided_flow():
     assert result["ok"] and started.calls == [("connect", "kollabor.ai")]
     stuck = Hub({**SNAP, "domain": "", "remote_agents": []}, connect={"kollabor.ai": "connect: no relay"})
     result = await CONNECT.act(stuck, "new_network", {})
-    assert not result["ok"] and stuck.calls == [("connect", "kollabor.ai"), ("connect", "leave"),
-                                                ("connect", "kollabor.ai")]
+    assert not result["ok"] and stuck.calls == [
+        ("connect", "kollabor.ai"),
+        ("connect", "leave"),
+        ("connect", "kollabor.ai"),
+    ]
     busy = Hub(connect={"kollabor.ai": "connect: no relay"})
     assert not (await CONNECT.act(busy, "new_network", {}))["ok"]
     assert ("connect", "leave") not in busy.calls  # a network with other devices is never touched
@@ -216,8 +242,11 @@ async def test_join_finish_polls_and_the_code_stays_in_the_request():
     assert code_field["secret"] and code_field["value"] is None
     result = await JOIN.act(hub, "finish", {"domain": "kollabor.ai", "code": CODE})
     assert ("enroll", "kollabor.ai", CODE) in hub.calls and CODE not in json.dumps(result)
-    assert result["poll"] == {"action": "join_status", "payload": {"receipt_id": "rcpt1", "domain": "kollabor.ai"},
-                              "every_s": 2.0}
+    assert result["poll"] == {
+        "action": "join_status",
+        "payload": {"receipt_id": "rcpt1", "domain": "kollabor.ai"},
+        "every_s": 2.0,
+    }
     with pytest.raises(PanelError) as err:
         await JOIN.act(hub, "finish", {"domain": "", "code": ""})
     assert set(err.value.errors) == {"code"} or set(err.value.errors) == {"domain", "code"}
@@ -243,8 +272,12 @@ def test_join_failure_uses_web_copy_only_for_web_sessions(monkeypatch):
     "status,ok,poll,text",
     [
         ({"status": "pending", "receipt_id": "rcpt1"}, True, True, "Waiting"),
-        ({"status": "approved", "detail": "joined marco-home as mac", "note": "settings arrive"}, True, False,
-         "joined marco-home as mac settings arrive"),
+        (
+            {"status": "approved", "detail": "joined marco-home as mac", "note": "settings arrive"},
+            True,
+            False,
+            "joined marco-home as mac settings arrive",
+        ),
         ({"status": "rejected"}, False, False, "rejected"),
         ({"status": "failed", "reason": "unavailable"}, False, False, "not found"),
         (RuntimeError("relay down"), True, True, "Still waiting"),
@@ -264,20 +297,29 @@ async def test_the_knocks_panel_lists_every_kind_with_only_its_own_actions():
     json.dumps(panel)
     rows = {row["id"]: row for row in panel["rows"]}
     assert list(rows) == [
-        "ringing:" + "1" * 32, "call:1a2b3c4d5e6f7a8b", "missed:" + "2" * 32,
-        "blocked:0123456789abcdef", "contact:fedcba9876543210",
+        "ringing:" + "1" * 32,
+        "call:1a2b3c4d5e6f7a8b",
+        "missed:" + "2" * 32,
+        "blocked:0123456789abcdef",
+        "contact:fedcba9876543210",
     ]
     ringing = rows["ringing:" + "1" * 32]
     assert ringing["label"] == "other-box" and ringing["group"] == "Ringing"
     assert "hi, it is me" in ringing["detail"] and "4:31 left" in ringing["detail"]
     assert [row["actions"] for row in rows.values()] == [
-        ["accept", "reject", "block"], ["stop"], ["block", "delete"], ["unblock"], ["unexpect"],
+        ["accept", "reject", "block"],
+        ["stop"],
+        ["block", "delete"],
+        ["unblock"],
+        ["unexpect"],
     ]
     assert [row["group"] for row in rows.values()] == ["Ringing", "Knocking", "Missed", "Blocked", "Contacts"]
     summary = {row["label"]: row["value"] for row in panel["summary"]}
     assert summary == {"Missed": "1 of 20", "Who May Knock": "Everyone"}
     assert [(c["path"], c["action"]) for c in panel["controls"]] == [
-        ("mode", "mode"), ("expect_route", "expect"), ("block_route", "block_route"),
+        ("mode", "mode"),
+        ("expect_route", "expect"),
+        ("block_route", "block_route"),
     ]
     assert ids(panel["toolbar_actions"]) == ["clear"]
 
@@ -322,7 +364,11 @@ async def test_the_knocks_panel_says_when_knocks_are_unavailable():
 
 def test_registry_lists_the_three_network_panels():
     assert set(connect_panel.PANELS) == {
-        "connect", "connect-join", "connect-knocks", "connect-halt", "connect-halt-new"
+        "connect",
+        "connect-join",
+        "connect-knocks",
+        "connect-halt",
+        "connect-halt-new",
     }
     assert get_panel("connect-knocks") is KNOCKS and get_panel("connect-join") is JOIN
 
@@ -360,9 +406,7 @@ async def test_daemon_hub_connect_reports_the_reason_not_bare_failure():
 
     handlers = {}
     register_state_handlers(
-        SimpleNamespace(
-            register=lambda *a, **k: handlers.__setitem__(a[0], a[1])
-        ),
+        SimpleNamespace(register=lambda *a, **k: handlers.__setitem__(a[0], a[1])),
         _FailingHub(ValueError("address_denied: host is blocked")),
     )
     result = await handlers["state.hub_connect"]({"command": "leave"})
@@ -372,6 +416,7 @@ async def test_daemon_hub_connect_reports_the_reason_not_bare_failure():
 @pytest.mark.asyncio
 async def test_remote_hub_connect_surfaces_the_daemon_reason(caplog):
     """RemoteStateService raises the daemon's reason, not a generic string."""
+
     from kollabor.state.remote import RemoteStateService
 
     class _Rpc:
@@ -386,6 +431,7 @@ async def test_remote_hub_connect_surfaces_the_daemon_reason(caplog):
 @pytest.mark.asyncio
 async def test_remote_hub_connect_keeps_generic_reason_for_non_dict():
     """A malformed daemon reply still raises the old generic message."""
+
     from kollabor.state.remote import RemoteStateService
 
     class _Rpc:
@@ -394,4 +440,3 @@ async def test_remote_hub_connect_keeps_generic_reason_for_non_dict():
 
     with pytest.raises(ValueError, match="daemon beacon command failed"):
         await RemoteStateService(_Rpc()).hub_connect("leave")
-
