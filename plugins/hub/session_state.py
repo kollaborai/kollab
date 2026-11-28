@@ -416,9 +416,15 @@ class SessionStateManager:
                     if state is None:
                         state = SessionState()
 
+                    unknown_keys = updates.keys() - state.to_dict().keys()
+                    if unknown_keys:
+                        names = ", ".join(sorted(map(str, unknown_keys)))
+                        raise SessionStateError(
+                            f"Unknown session state update field(s): {names}."
+                        )
+
                     for key, value in updates.items():
-                        if hasattr(state, key):
-                            setattr(state, key, value)
+                        setattr(state, key, value)
 
                     if not self._save_state_unlocked(path, state):
                         raise SessionStateError(

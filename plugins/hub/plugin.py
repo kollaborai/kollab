@@ -17652,8 +17652,11 @@ class HubPlugin(BasePlugin):
         ledger_available = self._task_ledger is not None
 
         if self._task_ledger is not None:
+            read_errors: List[str] = []
             try:
-                open_cards = self._task_ledger.get_open()
+                open_cards = self._task_ledger.get_open(read_errors=read_errors)
+                if read_errors:
+                    ledger_available = False
             except Exception:
                 logger.warning("TaskLedger read failed while formatting hub work")
                 open_cards = None
@@ -17672,7 +17675,7 @@ class HubPlugin(BasePlugin):
         elif not ledger_available:
             lines.append("in-memory queue: empty (partial; TaskLedger unavailable)")
 
-        if ledger_available and open_cards:
+        if open_cards:
             lines.append(f"open ledger cards: {len(open_cards)}")
             for c in open_cards:
                 lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")

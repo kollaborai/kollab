@@ -1095,10 +1095,12 @@ class TaskLedger:
     def get_open(
         self, project: str = "", *, read_errors: Optional[List[str]] = None
     ) -> List[TaskCard]:
-        """Get open cards; append unreadable card IDs to ``read_errors``."""
+        """Get open (unassigned) cards, highest priority first.
+
+        When supplied, ``read_errors`` receives IDs of unreadable cards.
+        """
         result = [
-            c
-            for c in self.get_all(status="open", read_errors=read_errors)
+            c for c in self.get_all(status="open", read_errors=read_errors)
             if not c.assignee
         ]
         if project:
