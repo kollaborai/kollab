@@ -2,7 +2,7 @@
 title: "Unified Tool Loading"
 doc_type: architecture-rfc
 created: 2026-04-11
-modified: 2026-04-13
+modified: 2026-11-28
 status: shipped
 status: phases A-D implemented — registry + definitions + scope + grants
 owner: kollabor-agent
