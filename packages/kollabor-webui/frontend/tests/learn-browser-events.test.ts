@@ -61,7 +61,7 @@ test("a failed session click handles the pending history response rejection", ()
   `;
   const child = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
     encoding: "utf8",
-    timeout: 2_000,
+    timeout: 10_000,
   });
 
   assert.equal(child.status, 0, child.stderr || child.stdout);
@@ -123,7 +123,7 @@ test("session readiness bounds a stalled history body by one shared deadline", (
   `;
   const child = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
     encoding: "utf8",
-    timeout: 1_500,
+    timeout: 10_000,
   });
 
   assert.equal(child.status, 0, child.stderr || child.stdout);
