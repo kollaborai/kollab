@@ -28,7 +28,7 @@ jobs:
       tag_object: ${{ steps.source.outputs.tag_object }}
       controller_sha: ${{ steps.source.outputs.controller_sha }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -48,7 +48,7 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.source_sha }}
           persist-credentials: false
@@ -73,7 +73,7 @@ jobs:
     needs: [validate, binaries]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.source_sha }}
           persist-credentials: false
@@ -110,7 +110,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.controller_sha }}
           persist-credentials: false
@@ -161,7 +161,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.controller_sha }}
           persist-credentials: false

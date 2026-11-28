@@ -42,7 +42,7 @@ jobs:
     name: frontend/shared
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
@@ -97,7 +97,7 @@ jobs:
           - platform: linux-aarch64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
@@ -169,7 +169,7 @@ jobs:
               ;;
             *) echo 'Unknown Apple signing mode.' >&2; exit 1 ;;
           esac
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
@@ -334,7 +334,7 @@ jobs:
       # A scie holds an appended Python archive. Keep its packaged bytes intact.
       NO_STRIP: "1"
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
@@ -431,7 +431,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
@@ -524,7 +524,7 @@ jobs:
     needs: [build, desktop, desktop-linux, desktop-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
