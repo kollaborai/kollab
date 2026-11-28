@@ -578,7 +578,7 @@ export function SessionPanel({
               Tool access is scoped to this session.
             </DialogDescription>
           </DialogHeader>
-          <ScrollArea className="max-h-[50vh]">
+          <div className="max-h-[50vh] overflow-y-auto">
             <div className="flex flex-col gap-2 pr-3">
               {allServerNames.length ? (
                 allServerNames.map((name) => {
@@ -597,7 +597,7 @@ export function SessionPanel({
                       className="flex flex-col gap-2 rounded-lg bg-muted/30 p-3"
                     >
                       <div className="flex items-start justify-between gap-3">
-                        <div className="flex min-w-0 flex-col gap-1">
+                        <div className="flex min-w-0 flex-1 flex-col gap-1">
                           <span className="truncate text-sm font-medium">
                             {name}
                           </span>
@@ -690,7 +690,7 @@ export function SessionPanel({
                 </p>
               )}
             </div>
-          </ScrollArea>
+          </div>
           {mcpDraft ? (
             <div className="flex flex-col gap-2 rounded-lg bg-muted/30 p-3">
               <div className="flex items-center justify-between">
