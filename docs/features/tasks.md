@@ -19,7 +19,9 @@ Unreadable cards are skipped while readable cards remain available. Active-task
 context and `/hub tasks list` or `/hub tasks mine` show a warning when a read
 skips cards, so a partial view is not presented as complete. The cron scanner
 continues processing readable due cards and logs unreadable cards at warning
-level.
+level. `/hub work` also lists readable open cards and marks the TaskLedger
+result unavailable when any card cannot be read, so a partial list is not
+reported as complete or empty.
 
 `/hub status` and `/hub work` also mark their ledger counts partial when a card
 cannot be read. The displayed counts include readable cards only.

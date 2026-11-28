@@ -17657,6 +17657,8 @@ class HubPlugin(BasePlugin):
         if self._task_ledger is not None:
             try:
                 open_cards = self._task_ledger.get_open(read_errors=read_errors)
+                if read_errors:
+                    ledger_available = False
             except Exception:
                 logger.warning("TaskLedger read failed while formatting hub work")
                 open_cards = None
@@ -17677,7 +17679,7 @@ class HubPlugin(BasePlugin):
 
         unreadable_count = len(set(read_errors))
         partial = unreadable_count > 0
-        if ledger_available and open_cards:
+        if open_cards:
             suffix = (
                 f" (partial; {unreadable_count} unreadable "
                 f"{'card' if unreadable_count == 1 else 'cards'})"
