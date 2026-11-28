@@ -99,10 +99,15 @@ async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        whisper_process = psutil.Process(proc.pid)
+        try:
+            whisper_process = psutil.Process(proc.pid)
+        except psutil.Error:
+            whisper_process = None
         descendants = {}
 
         def remember_descendants() -> None:
+            if whisper_process is None:
+                return
             try:
                 children = whisper_process.children(recursive=True)
             except psutil.Error:
