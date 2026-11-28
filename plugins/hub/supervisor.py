@@ -72,7 +72,8 @@ class SupervisorDecision:
     """One action the hub plugin should take for the supervisor."""
 
     kind: str  # wake_coordinator | nudge_worker | requeue_stalled |
-    # retry_handoff | alert_handoff_unacked | alert_coordinator_stalled
+    # retry_handoff | alert_handoff_unacked | alert_handoff_unreadable |
+    # alert_coordinator_stalled
     card_id: str = ""
     worker: str = ""  # coordinator identity for wakes, assignee for nudges
     text: str = ""
@@ -158,10 +159,12 @@ def ack_handoff(ledger, task_id: str, by: str) -> bool:
     )
 
 
-def unacked_handoffs(ledger) -> List[Any]:
+def unacked_handoffs(
+    ledger, *, read_errors: Optional[List[str]] = None
+) -> List[Any]:
     """Active cards with a handoff nobody has acknowledged, oldest first."""
     out = []
-    for card in ledger.get_all(status="active"):
+    for card in ledger.get_all(status="active", read_errors=read_errors):
         sent_at, acked, _, _ = handoff_status(card)
         if sent_at and not acked:
             out.append((sent_at, card))
@@ -230,6 +233,8 @@ def evaluate(
                                  any): say
                                  so (issue #283). Both are recorded on the
                                  card here, so each fires once per handoff.
+      alert_handoff_unreadable — at least one task card could not be read, so
+                                 its handoff state is unknown.
       nudge_worker             — first stall of an active card whose worker
                                  is online; one nudge per stall window.
       requeue_stalled          — card still stalled after its nudge grace (or
@@ -251,7 +256,8 @@ def evaluate(
     state = state if state is not None else SupervisorState()
     decisions: List[SupervisorDecision] = []
 
-    for card in unacked_handoffs(ledger):
+    read_errors: List[str] = []
+    for card in unacked_handoffs(ledger, read_errors=read_errors):
         sent_at, _, retries, alerted = handoff_status(card)
         if now - sent_at < handoff_ack_timeout:
             continue
@@ -270,6 +276,7 @@ def evaluate(
                     text=str(card.directive or ""),
                 )
             )
+
         elif not alerted:
             ledger.checkpoint(
                 card.id, "handoff unacknowledged: alerted", {"handoff": "alert"}
@@ -288,6 +295,23 @@ def evaluate(
                     ),
                 )
             )
+
+    unreadable_ids = sorted(set(read_errors))
+    if unreadable_ids and now - state.last_alert >= alert_cooldown:
+        card_list = ", ".join(unreadable_ids)
+        card_label = "card" if len(unreadable_ids) == 1 else "cards"
+        decisions.append(
+            SupervisorDecision(
+                kind="alert_handoff_unreadable",
+                card_id=unreadable_ids[0],
+                text=(
+                    f"could not read task {card_label} {card_list}; their status "
+                    "and handoff acknowledgement are unknown, so an "
+                    "unacknowledged handoff may have been skipped"
+                ),
+            )
+        )
+        state.last_alert = now
 
     open_cards = ledger.get_open()
     stalled_cards = ledger.get_stalled(stall_threshold, now=now)

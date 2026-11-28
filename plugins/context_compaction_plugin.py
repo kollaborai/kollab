@@ -3194,16 +3194,17 @@ class ContextCompactionPlugin(BasePlugin):
             ):
                 return set()
 
-            cards = list(ledger.get_active_for(identity))
+            read_errors: List[str] = []
+            cards = list(ledger.get_active_for(identity, read_errors=read_errors))
             cards.extend(
                 card
-                for card in ledger.get_all(status="paused")
+                for card in ledger.get_all(status="paused", read_errors=read_errors)
                 if getattr(card, "status", None) == "paused"
                 and getattr(card, "assignee", "") == identity
             )
             cards.extend(
                 card
-                for card in ledger.get_open()
+                for card in ledger.get_open(read_errors=read_errors)
                 if getattr(card, "status", None) == "open"
                 and not getattr(card, "assignee", "")
                 and str(getattr(card, "directive", "")).startswith(f"{identity}:")
@@ -3212,7 +3213,7 @@ class ContextCompactionPlugin(BasePlugin):
                 str(card.id)
                 for card in cards
                 if getattr(card, "id", None)
-            }
+            } | set(read_errors)
         except Exception:
             logger.debug("Unable to read live TaskLedger IDs for compaction", exc_info=True)
             return set()
