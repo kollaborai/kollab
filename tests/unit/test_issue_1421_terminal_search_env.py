@@ -23,7 +23,10 @@ async def test_terminal_find_with_shell_assignment_cannot_search_outside(assignm
         if assignment == "SEARCH=1":
             command = f"{assignment} find {outside} -maxdepth 1 -name protected-marker.txt -print"
         else:
-            command = f'{assignment.format(outside=outside)} find "$OUTSIDE" -maxdepth 1 -name protected-marker.txt -print'
+            command = (
+                f'{assignment.format(outside=outside)} find "$OUTSIDE" '
+                "-maxdepth 1 -name protected-marker.txt -print"
+            )
 
         executor = ToolExecutor(
             mcp_integration=MagicMock(),
