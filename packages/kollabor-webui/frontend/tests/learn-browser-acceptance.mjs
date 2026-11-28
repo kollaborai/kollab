@@ -5,9 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { chromium } from "playwright-core";
-import { createServer } from "vite";
-
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
@@ -363,6 +360,7 @@ async function json(route, body, status = 200) {
 }
 
 export async function openVite() {
+  const { createServer } = await import("vite");
   const server = await createServer({
     configFile: path.join(frontendRoot, "vite.config.ts"),
     root: frontendRoot,
@@ -606,6 +604,7 @@ async function verifyMobileLearnLayout(browser, baseUrl) {
 // set, selects the binary; otherwise playwright's own registry install is used
 // (the CI install step populates it). Linux runners need --no-sandbox.
 export async function launchAcceptanceBrowser() {
+  const { chromium } = await import("playwright-core");
   const executablePath = process.env.CHROME_PATH;
   return chromium.launch({
     headless: true,
