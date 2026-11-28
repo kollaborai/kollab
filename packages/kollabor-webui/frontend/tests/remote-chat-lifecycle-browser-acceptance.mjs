@@ -10,6 +10,9 @@ import { chromium } from "playwright-core";
 import { makeFixtures, openVite, until, waitForSessionReady } from "./learn-browser-acceptance.mjs";
 
 const timeout = 15_000;
+// A refused stream retries eight times, backing off to 10 s, before it reports a failed
+// connection (chat-store.ts): about 36 s of outage before the saved-conversation line shows.
+const failedStreamTimeout = 60_000;
 const localSession = {
   session_id: "local-lifecycle-session",
   name: "Local Lifecycle Session",
@@ -225,7 +228,7 @@ async function main() {
     await shell.page.getByText(prompt, { exact: true }).first().waitFor({ timeout });
     assert.equal(snapshotsServed, servedBeforeOutage, "the reply shown during the outage must come from the saved rows");
     const historyAlert = shell.page.locator('[data-slot="history-status"][role="alert"]');
-    await shell.page.getByText("Couldn't refresh history; showing the saved conversation.", { exact: true }).waitFor({ timeout });
+    await shell.page.getByText("Couldn't refresh history; showing the saved conversation.", { exact: true }).waitFor({ timeout: failedStreamTimeout });
     assert.equal(await historyAlert.getByRole("button", { name: "Retry", exact: true }).count(), 1);
     await shell.page.setViewportSize({ width: 390, height: 844 });
     const screenshotDir = process.env.KOLLAB_BROWSER_ARTIFACT_DIR || os.tmpdir();
@@ -241,6 +244,8 @@ async function main() {
 
     // The remote answers again: the reconnect's snapshot replaces the saved rows in place.
     streamOutage = false;
+    // A failed chat checks again only every 15 s; its Retry reconnects now (chat-store.ts retry()).
+    await historyAlert.getByRole("button", { name: "Retry", exact: true }).click();
     await until(() => snapshotsServed > servedBeforeOutage, "the chat must reconnect after the outage", timeout);
     await shell.page.getByText(reply, { exact: true }).first().waitFor({ timeout });
     assert.equal(await shell.page.getByText(reply, { exact: true }).count(), 1, "the reply must stay one bubble");
