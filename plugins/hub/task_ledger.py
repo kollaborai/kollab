@@ -1108,7 +1108,11 @@ class TaskLedger:
         return sorted(result, key=lambda c: (-c.priority, c.created_at))
 
     def get_stalled(
-        self, threshold_seconds: float, now: Optional[float] = None
+        self,
+        threshold_seconds: float,
+        now: Optional[float] = None,
+        *,
+        read_errors: Optional[List[str]] = None,
     ) -> List[TaskCard]:
         """Get active cards with no worker activity past the threshold.
 
@@ -1117,7 +1121,7 @@ class TaskLedger:
         """
         now = time.time() if now is None else now
         stalled = []
-        for card in self.get_all(status="active"):
+        for card in self.get_all(status="active", read_errors=read_errors):
             # Snoozed cards explicitly opt out of reminder and stall handling
             # until the caller's clock reaches their expiry.
             if card.snoozed_until > now:

@@ -54,7 +54,8 @@ real stall time before alerting.
 Surfaces (issue #283): the alert is logged at ERROR, appended to a
 bounded alert list shown by `/hub status` (the supervisor section lists
 open/stalled counts, wakes without a completed turn, and recent alerts —
-shown while healthy too, not only on alert), published to attached web
+shown while healthy too, not only on alert; it also marks the task ledger
+incomplete when cards cannot be read), published to attached web
 clients as a `supervisor_alert` semantic event, and sent through the
 configured notifier channel when one exists.
 
