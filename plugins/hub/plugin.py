@@ -683,6 +683,7 @@ class HubPlugin(BasePlugin):
 
         # Session state (serialize/rehydrate working context)
         self._session_state_mgr = SessionStateManager()
+        self._session_state_restored = False
 
         # Scratchpad (live notes, survives compaction)
         self._scratchpad: Optional[Scratchpad] = None
@@ -5747,6 +5748,17 @@ class HubPlugin(BasePlugin):
             priority=HookPriority.POSTPROCESSING.value,
         )
         await self.event_bus.register_hook(idle_hook)
+
+        # Restore working context on the first model request, including solo
+        # agents that do not register the mesh context hooks below.
+        session_state_hook = Hook(
+            name="hub_session_state_restore",
+            plugin_name=self.name,
+            event_type=EventType.LLM_REQUEST_PRE,
+            callback=self._inject_session_state,
+            priority=HookPriority.PREPROCESSING.value,
+        )
+        await self.event_bus.register_hook(session_state_hook)
 
         # A solo agent serves its host (socket, presence, working/idle state)
         # and nothing else: no relay, roster, <hub_msg>, broadcast or nudges.
@@ -11050,6 +11062,57 @@ class HubPlugin(BasePlugin):
 
         return context
 
+    async def _inject_session_state(self, context, event=None):
+        """Restore saved working context once at the start of a session."""
+        if getattr(self, "_session_state_restored", False):
+            return context
+
+        vault = getattr(self, "_vault", None)
+        state_manager = getattr(self, "_session_state_mgr", None)
+        if vault is None or state_manager is None:
+            return context
+
+        try:
+            injection = state_manager.get_injection_prompt(vault._vault_dir)
+        except SessionStateError as error:
+            self._session_state_restored = True
+            logger.warning("Hub session state could not be restored: %s", error)
+            return context
+
+        if not injection:
+            self._session_state_restored = True
+            return context
+
+        context_service = (
+            self.event_bus.get_service("context_service")
+            if self.event_bus
+            else None
+        )
+        queue = getattr(context_service, "queue_ephemeral_injection", None)
+        if callable(queue) and type(context_service).__module__ != "unittest.mock":
+            queue(injection, key="hub_session_state")
+            self._session_state_restored = True
+            return context
+
+        llm_service = (
+            self.event_bus.get_service("llm_service") if self.event_bus else None
+        )
+        history = getattr(llm_service, "conversation_history", None)
+        if not isinstance(history, list):
+            return context
+
+        if history and getattr(history[0], "role", None) == "system":
+            first = history[0]
+            content = getattr(first, "content", "") or ""
+            first.content = f"{content}\n\n{injection}" if content else injection
+        else:
+            from kollabor_events.data_models import ConversationMessage
+
+            history.insert(0, ConversationMessage(role="system", content=injection))
+
+        self._session_state_restored = True
+        return context
+
     async def _hub_live_context(self) -> str:
         """Hub state that changes turn to turn; never part of the system prompt."""
         lines = ["--- hub status ---"]
@@ -11169,10 +11232,8 @@ class HubPlugin(BasePlugin):
                     f"{unreadable_count} task {card_label} could not be read."
                 )
 
-        # Scratchpad and session state are intentionally not injected here.
-        # They are mutable operational notes that can outlive their task and
-        # reintroduce stale ownership/reminder prose. Agents can request them
-        # explicitly; active TaskLedger cards remain injected above.
+        # Scratchpad remains intentionally absent here. Session state is
+        # restored separately once per process on its first model request.
 
         # Inject active lane claims for this agent
         if self._change_feed and self._identity:
