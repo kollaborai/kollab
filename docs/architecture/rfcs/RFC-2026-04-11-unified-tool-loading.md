@@ -724,7 +724,8 @@ _terminal = ToolDefinition(
         "Background sessions run via tmux and persist across turns. "
         "Use terminal-status/terminal-output/terminal-kill to manage "
         "them. Foreground commands use the configured terminal timeout "
-        "when timeout is omitted."
+        "when timeout is omitted. "
+        "Foreground terminal has a default timeout of 120 seconds."
     ),
 )
 
