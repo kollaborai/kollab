@@ -7902,6 +7902,11 @@ class HubPlugin(BasePlugin):
                 self._record_supervisor_alert(decision.text)
                 await self._notify_supervisor_alert(decision.text)
                 outcomes.append(f"alert: handoff {decision.card_id} unacked")
+            elif decision.kind == "alert_handoff_unreadable":
+                logger.error("idle supervisor: %s", decision.text)
+                self._record_supervisor_alert(decision.text)
+                await self._notify_supervisor_alert(decision.text)
+                outcomes.append("alert: handoff status unknown")
             elif decision.kind == "alert_coordinator_stalled":
                 # Wake efficacy failed: the coordinator got the wakes and
                 # still produced no turn. Say it loudly — this is the
@@ -12184,6 +12189,7 @@ class HubPlugin(BasePlugin):
         state = self._supervisor_state
         read_errors: List[str] = []
         open_cards = self._task_ledger.get_open(read_errors=read_errors)
+        handoffs = unacked_handoffs(self._task_ledger, read_errors=read_errors)
         stalled = self._task_ledger.get_stalled(
             self.config.get(
                 "plugins.hub.supervisor_stall_threshold", DEFAULT_STALL_THRESHOLD
@@ -12210,7 +12216,7 @@ class HubPlugin(BasePlugin):
                 f" turn; last completed turn {idle}m ago"
             )
         now = time.time()
-        for card in unacked_handoffs(self._task_ledger):
+        for card in handoffs:
             lines.append(
                 f"  handoff awaiting ack: {card.id} -> {card.assignee}"
             )
