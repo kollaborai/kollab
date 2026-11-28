@@ -499,8 +499,9 @@ class ShellExecutor:
             return
 
         try:
-            # Kill entire process group
-            pgid = os.getpgid(self._current_process.pid)
+            # The process starts a new session, so its PID is its process-group
+            # ID even after the shell exits and cannot be queried with getpgid.
+            pgid = self._current_process.pid
             os.killpg(pgid, signal.SIGTERM)
 
             # Wait briefly for graceful shutdown
