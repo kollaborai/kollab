@@ -99,6 +99,8 @@ def _terminal_find_workspace_error(
 
     def inspect_segment(argv: list[str]) -> Optional[str]:
         nonlocal current_cwd
+        while argv and argv[0] in {"then", "else", "do", "!", "{"}:
+            argv = argv[1:]
         if not argv:
             return None
         if Path(argv[0]).name.lower() == "cd":
