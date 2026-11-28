@@ -298,6 +298,14 @@ merge check.
 - Run the targeted suite while iterating, then the full unit suite before
   opening the PR.
 - Python 3.14 is the language floor and the launch runtime.
+- A CI run that turns red then green on the same commit is a flake record; the bot opens or updates one issue per test.
+- Quarantine a flaky test within 24 hours, then fix or delete it within 7 days.
+- Run each new or changed Python test file in the suites the required ci/tests gate runs (tests/unit/, the engine, rpc and voice package suites) 20 times in its PR; one non-quarantined failure blocks the PR. Tests that run only in non-required workflows (desktop signing, Windows smoke) are outside this gate.
+- A PR's new tests go in a new test file named for its issue, beside the suite's other tests (for example `tests/unit/test_issue_<N>_<topic>.py`, or `tests/<topic>-<N>.test.ts` in the web UI frontend); changes to existing tests stay in their file. Two PRs adding tests to one file clash at the same spot; separate files never do.
+- Unit tests never reach the internet; CI downloads use a pinned cache or retry.
+- Tests wait on events and injected clocks, not sleeps or tight timeouts.
+- Keep main-run flakes under 1%; track the share in the weekly throughput report.
+- Keep main green: rerun a red main CI run once; if it is red twice, revert the merge.
 
 ## Commits
 
@@ -343,8 +351,9 @@ and no PR code, and it is not a required merge check. A failing grade still keep
 the merge bot from merging. `signed_commits` stays out of it until agent commits
 are signed (#755).
 
-The throughput report (`.github/scripts/pr_throughput_kpi.py`, #729) is opt-in and
-runs by hand. It is not a check.
+The throughput report (`.github/scripts/pr_throughput_kpi.py`, #729) is opt-in,
+runs weekly and by hand, and is not a check. It reports main CI red-to-green
+flakes in its report window.
 
 The stale PR sweeper (`.github/workflows/stale-pr-sweeper.yml`) runs daily and
 on demand (`dry_run` reports without labeling). It lists open PRs with no new

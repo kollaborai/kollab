@@ -1425,14 +1425,10 @@ async def test_enrollment_http_unauthorized_response_is_marked_as_relay():
         ("reject", "rejected", False, False, False, False),
     ),
 )
-@pytest.mark.skip(
-    reason=(
-        "Quarantined as flaky (#1391): on CI the issuer task sometimes returns "
-        "without creating a pending request; not reproducible locally. "
-        "Remove once the silent return in EnrollmentIssuer._serve_offer is "
-        "identified."
-    )
-)
+# Quarantined as flaky (#1391): on CI the issuer task sometimes returns without
+# creating a pending request; not reproducible locally. Remove once the silent
+# return in EnrollmentIssuer._serve_offer is identified.
+@pytest.mark.quarantine
 @pytest.mark.asyncio
 async def test_issuer_requires_explicit_decision_after_proof(
     tmp_path,

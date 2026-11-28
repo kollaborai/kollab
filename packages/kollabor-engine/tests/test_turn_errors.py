@@ -104,6 +104,24 @@ async def test_acp_usage_follows_current_turn_and_ignores_late_completion(sessio
 
 
 @pytest.mark.asyncio
+async def test_native_string_turn_ids_keep_tracking_alive(session):
+    """Native turns carry ids like native-<hex> (#1451); tracking must not stop on them."""
+    tracker = asyncio.create_task(session._track_events())
+    session.events.put_nowait({"type": "turn_start", "request_id": "r1", "turn_id": "native-ab12", "generation": 1})
+    session.events.put_nowait({"type": "turn_complete", "request_id": "r1", "turn_id": "native-ab12",
+                               "turn_usage": {"total_tokens": 50}, "input_tokens": 4})
+    session.events.put_nowait({"type": "turn_complete", "request_id": "r2", "turn_id": "native-cd34",
+                               "input_tokens": 6})
+    await asyncio.sleep(0.05)
+    assert not tracker.done()
+    assert session.total_turns == 2
+    assert session.total_input_tokens == 10
+    assert session.to_dict()["acp_turn_usage"] == {"total_tokens": 50}
+    session.events.put_nowait({"type": "daemon_closed"})
+    await asyncio.wait_for(tracker, 1)
+
+
+@pytest.mark.asyncio
 async def test_history_returns_the_turn_error_in_place(client, session):
     session.last_turn_error = {"message": "provider down", "history_length": 3}
 

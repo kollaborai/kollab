@@ -1,0 +1,271 @@
+import { describe, expect, it, vi } from "vitest";
+import { splitPluginTags } from "./tagged-text";
+
+describe("plugin tagged text", () => {
+  it("extracts only registered complete tags without interpreting their contents", () => {
+    expect(splitPluginTags('before <todo_write><script>alert(1)</script></todo_write> after', ["todo_write"])).toEqual([
+      { type: "text", text: "before " },
+      { type: "tag", name: "todo_write", content: "<script>alert(1)</script>" },
+      { type: "text", text: " after" },
+    ]);
+  });
+  it("leaves unknown, incomplete, escaped and code-fenced tags alone", () => {
+    const text = "<unknown>x</unknown> \\<todo_write>escaped</todo_write>\n`<todo_write>inline</todo_write>`\n```\n<todo_write>fenced</todo_write>\n```\n<todo_write>partial";
+    expect(splitPluginTags(text, ["todo_write"])).toEqual([{ type: "text", text }]);
+  });
+  it("does not interpret tags inside indented Markdown code blocks", () => {
+    const text = "Example:\n\n    <todo_write>four spaces</todo_write>\n\t<todo_write>tab</todo_write>\n\nAfter <todo_write>real</todo_write>";
+    expect(splitPluginTags(text, ["todo_write"])).toEqual([
+      { type: "text", text: "Example:\n\n    <todo_write>four spaces</todo_write>\n\t<todo_write>tab</todo_write>\n\nAfter " },
+      { type: "tag", name: "todo_write", content: "real" },
+    ]);
+  });
+  it("does not interpret tags inside quote-indented Markdown code blocks", () => {
+    const text = ">     <card>example</card>";
+    expect(splitPluginTags(text, ["card"])).toEqual([{ type: "text", text }]);
+  });
+  it("keeps inline-code protection across a lazy blockquote continuation", () => {
+    const text = "> `<card>literal</card>\nlazy continuation\n> still inside code span`";
+    expect(splitPluginTags(text, ["card"])).toEqual([{ type: "text", text }]);
+  });
+  it("starts a new code-span scope when a blockquote interrupts top-level prose", () => {
+    const text = "`unclosed\n> <card>real</card>";
+    expect(splitPluginTags(text, ["card"])).toEqual([
+      { type: "text", text: "`unclosed\n> " },
+      { type: "tag", name: "card", content: "real" },
+    ]);
+  });
+  it("does not treat an indented paragraph continuation as a code block", () => {
+    const parts = splitPluginTags("Intro line\n    <todo_write>x</todo_write>\nAfter", ["todo_write"]);
+    expect(parts).toContainEqual({ type: "tag", name: "todo_write", content: "x" });
+  });
+  it("does not treat a nested list item as an indented code block", () => {
+    const parts = splitPluginTags("- top\n    - <todo_write>x</todo_write>", ["todo_write"]);
+    expect(parts).toContainEqual({ type: "tag", name: "todo_write", content: "x" });
+  });
+  it("parses tags after a fenced block in a numbered-list continuation", () => {
+    const text = "10. Summary\n\n    ```text\n    example\n    ```\n\n    <card>status</card>";
+    expect(splitPluginTags(text, ["card"])).toContainEqual({
+      type: "tag",
+      name: "card",
+      content: "status",
+    });
+  });
+  it("keeps partial renderer openers on the no-tag fast path", () => {
+    const text = "An incomplete <card prefix";
+    const matchAll = vi.spyOn(String.prototype, "matchAll");
+    const parts = splitPluginTags(text, ["card", "notice"]);
+    const pairingCalls = matchAll.mock.calls.length;
+    matchAll.mockRestore();
+
+    expect(parts).toEqual([{ type: "text", text }]);
+    expect(pairingCalls).toBe(0);
+  });
+  it("handles nested matching tags and multiple independent blocks", () => {
+    expect(splitPluginTags("<x>a<x>b</x>c</x> + <x>d</x>", ["x"])).toEqual([
+      { type: "tag", name: "x", content: "a<x>b</x>c" }, { type: "text", text: " + " }, { type: "tag", name: "x", content: "d" },
+    ]);
+  });
+  it("keeps a backtick run with no closer as text, so later tags still split", () => {
+    expect(splitPluginTags("a ` then <todo_write>demo</todo_write>", ["todo_write"])).toEqual([
+      { type: "text", text: "a ` then " },
+      { type: "tag", name: "todo_write", content: "demo" },
+    ]);
+  });
+  it("does not pair an escaped backtick run as a code-span closer", () => {
+    const text = "\u0060Before <card>ready</card> \\\u0060";
+
+    expect(splitPluginTags(text, ["card"])).toEqual([
+      { type: "text", text: "\u0060Before " },
+      { type: "tag", name: "card", content: "ready" },
+      { type: "text", text: " \\\u0060" },
+    ]);
+  });
+  it("scans many unmatched backtick runs in linear time", () => {
+    const text = Array.from({ length: 1100 }, (_, index) => "`".repeat(index + 1)).join("x") +
+      "<todo_write>demo</todo_write>";
+    const started = performance.now();
+    const parts = splitPluginTags(text, ["todo_write"]);
+    const elapsed = performance.now() - started;
+
+    expect(parts.at(-1)).toEqual({ type: "tag", name: "todo_write", content: "demo" });
+    expect(elapsed).toBeLessThan(1000);
+  });
+  it("measures streaming a 100 KB fenced literal-tag block across 500 chunks", () => {
+    const text = `\`\`\`text\n${"<card>literal</card>".repeat(5000)}\n\`\`\``;
+    const chunkCount = 500;
+    let accumulated = "";
+    let taggedUpdates = 0;
+    const started = performance.now();
+
+    for (let index = 0; index < chunkCount; index += 1) {
+      const start = Math.floor((text.length * index) / chunkCount);
+      const end = Math.floor((text.length * (index + 1)) / chunkCount);
+      accumulated += text.slice(start, end);
+      const parts = splitPluginTags(accumulated, ["card"]);
+      if (parts.some((part) => part.type === "tag")) taggedUpdates += 1;
+    }
+
+    const elapsed = performance.now() - started;
+    console.info(`[plugin-tag-stream] bytes=${text.length} chunks=${chunkCount} elapsed_ms=${elapsed.toFixed(1)}`);
+    expect(accumulated).toBe(text);
+    expect(taggedUpdates).toBe(0);
+  });
+  it("closes a code fence only on a bare marker line", () => {
+    const text = "~~~\n~~~text\n<todo_write>demo</todo_write>\n~~~";
+    expect(splitPluginTags(text, ["todo_write"])).toEqual([{ type: "text", text }]);
+  });
+  it("pairs many unclosed opens with one close in linear time", () => {
+    const started = performance.now();
+    const parts = splitPluginTags("<x>".repeat(200000) + "</x>", ["x"]);
+    expect(performance.now() - started).toBeLessThan(1500);
+    expect(parts).toEqual([
+      { type: "text", text: "<x>".repeat(199999) },
+      { type: "tag", name: "x", content: "" },
+    ]);
+  });
+  it("does not let a close inside a code span, escape or fence end a real tag", () => {
+    expect(splitPluginTags("<todo_write>a `</todo_write>` b</todo_write>", ["todo_write"])).toEqual([
+      { type: "tag", name: "todo_write", content: "a `</todo_write>` b" },
+    ]);
+    expect(splitPluginTags("<todo_write>a \\</todo_write> b</todo_write>", ["todo_write"])).toEqual([
+      { type: "tag", name: "todo_write", content: "a \\</todo_write> b" },
+    ]);
+    expect(splitPluginTags("<todo_write>a \\<todo_write>b</todo_write>", ["todo_write"])).toEqual([
+      { type: "tag", name: "todo_write", content: "a \\<todo_write>b" },
+    ]);
+    const fenced = "<todo_write>a\n```\n</todo_write>\n```";
+    expect(splitPluginTags(fenced, ["todo_write"])).toEqual([{ type: "text", text: fenced }]);
+  });
+  it("closes a code span only on a backtick run of the same length", () => {
+    const text = "`a ```<todo_write>x</todo_write>`";
+    expect(splitPluginTags(text, ["todo_write"])).toEqual([{ type: "text", text }]);
+  });
+  it("does not interpret tags inside fences that sit in a blockquote or a list item", () => {
+    const quoted = "> ~~~\n> <todo_write>quoted</todo_write>\n> ~~~";
+    expect(splitPluginTags(quoted, ["todo_write"])).toEqual([{ type: "text", text: quoted }]);
+    const listed = "- ~~~\n  <todo_write>listed</todo_write>\n  ~~~";
+    expect(splitPluginTags(listed, ["todo_write"])).toEqual([{ type: "text", text: listed }]);
+  });
+  it("reads a backtick run with text after it on the same line as an inline code span, not a fence", () => {
+    expect(splitPluginTags("```literal``` then <todo_write>real</todo_write>", ["todo_write"])).toEqual([
+      { type: "text", text: "```literal``` then " },
+      { type: "tag", name: "todo_write", content: "real" },
+    ]);
+  });
+  it("does not let a code span cross a blank line", () => {
+    expect(splitPluginTags("a `\n\n<todo_write>real</todo_write>\n\nb `", ["todo_write"])).toEqual([
+      { type: "text", text: "a `\n\n" },
+      { type: "tag", name: "todo_write", content: "real" },
+      { type: "text", text: "\n\nb `" },
+    ]);
+  });
+  it("does not pair code spans across a fenced block", () => {
+    const fenced = "Use ` here\n```\ncode `\n```\n<todo_write>outside</todo_write>";
+    expect(splitPluginTags(fenced, ["todo_write"])).toContainEqual({
+      type: "tag",
+      name: "todo_write",
+      content: "outside",
+    });
+  });
+  it("does not pair code spans across separate list items", () => {
+    const listed = "- use `a\n- <todo_write>x</todo_write> and `code`";
+    expect(splitPluginTags(listed, ["todo_write"])).toContainEqual({
+      type: "tag",
+      name: "todo_write",
+      content: "x",
+    });
+  });
+
+  it("pairs inline code across soft line breaks inside one blockquote", () => {
+    const text = "> `<card>literal</card>\n> still inside the same code span`";
+    expect(splitPluginTags(text, ["card"])).toEqual([{ type: "text", text }]);
+  });
+
+  it("skips Markdown and tag parsing when no registered tag can occur", () => {
+    const matchAll = vi.spyOn(String.prototype, "matchAll");
+    try {
+      const text = "streamed assistant text without tag delimiters ".repeat(200);
+      expect(splitPluginTags(text, ["card"])).toEqual([{ type: "text", text }]);
+      expect(matchAll).not.toHaveBeenCalled();
+    } finally {
+      matchAll.mockRestore();
+    }
+  });
+
+  it("does not scan the full message once per registered tag name", () => {
+    const text = "A long message with <unknown> tags and no registered opener. ".repeat(200);
+    const names = Array.from({ length: 200 }, (_, index) => `card_${index}`);
+    const includes = vi.spyOn(String.prototype, "includes");
+    let calls = 0;
+    try {
+      expect(splitPluginTags(text, names)).toEqual([{ type: "text", text }]);
+      calls = includes.mock.calls.length;
+    } finally {
+      includes.mockRestore();
+    }
+    expect(calls).toBeLessThan(10);
+  });
+
+  it("does not scan backward through every line of a long indented code block", () => {
+    const codeLines = Array.from({ length: 400 }, (_, index) => `    code-${index}`);
+    const text = `<card>summary</card>\n\n${codeLines.join("\n")}\n`;
+    const original = String.prototype.lastIndexOf;
+    let calls = 0;
+    String.prototype.lastIndexOf = function (this: string, search: string, position?: number) {
+      calls += 1;
+      return original.call(this, search, position);
+    };
+
+    try {
+      const parts = splitPluginTags(text, ["card"]);
+      expect(parts).toContainEqual({ type: "tag", name: "card", content: "summary" });
+      expect(parts.some((part) => part.type === "tag" && part.content.startsWith("code-"))).toBe(false);
+    } finally {
+      String.prototype.lastIndexOf = original;
+    }
+
+    expect(calls).toBeLessThan(codeLines.length * 20);
+  });
+
+  it("bounds rescanning across four-space paragraph continuations", () => {
+    const lineCount = 1200;
+    const continuationLines = Array.from({ length: lineCount }, (_, index) => `    continuation-${index}`);
+    const text = `<card>summary</card>\nIntro:\n${continuationLines.join("\n")}`;
+    const original = String.prototype.lastIndexOf;
+    let calls = 0;
+    String.prototype.lastIndexOf = function (this: string, search: string, position?: number) {
+      calls += 1;
+      return original.call(this, search, position);
+    };
+
+    try {
+      const parts = splitPluginTags(text, ["card"]);
+      expect(parts).toContainEqual({ type: "tag", name: "card", content: "summary" });
+    } finally {
+      String.prototype.lastIndexOf = original;
+    }
+
+    expect(calls).toBeLessThan(lineCount * 700);
+  });
+
+  it("does not pair an unmatched code opener in an ATX heading with the next paragraph", () => {
+    const text = "# `unfinished\n<card>render me</card> `";
+
+    expect(splitPluginTags(text, ["card"])).toContainEqual({
+      type: "tag",
+      name: "card",
+      content: "render me",
+    });
+  });
+
+  it.each([
+    ["ATX heading", "`unfinished\n# <card>heading</card> `", "heading"],
+    ["setext heading", "`unfinished\nTitle\n=====\nSee <card>example</card> after`", "example"],
+    ["thematic break", "`unfinished\n___\n<card>thematic</card> `", "thematic"],
+    ["list item", "`unfinished\n- <card>list</card> `", "list"],
+    ["blockquote line", "`unfinished\n> <card>quote</card> `", "quote"],
+  ])("does not pair inline code across a %s boundary", (_boundary, text, content) => {
+    expect(splitPluginTags(text, ["card"])).toContainEqual({ type: "tag", name: "card", content });
+  });
+});

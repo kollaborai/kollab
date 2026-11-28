@@ -1,20 +1,18 @@
 ---
 title: "Telegram Bridge Setup"
 created: 2026-04-05
-modified: 2026-08-06
+modified: 2026-11-24
 status: active
 ---
 # Telegram Bridge Setup
 
 Bidirectional messaging between your kollabor agents and Telegram.
-Send messages from your phone, receive agent responses, voice notes
-transcribed locally via whisper.
+Send text messages from your phone and receive agent responses.
 
 ## Prerequisites
 
 - A Telegram account (mobile or desktop app)
 - `kollab` installed and working
-- For voice messages: [openai-whisper](https://github.com/openai/whisper) installed locally
 
 ## Step 1: Create a Telegram Bot
 
@@ -88,20 +86,28 @@ To check the current state:
 
 ## Voice Messages
 
-When you send a voice note on Telegram, the bridge downloads the
-audio file and transcribes it locally using OpenAI's whisper CLI.
+On Linux, the bridge transcribes authorized Telegram voice notes and audio
+attachments locally with OpenAI Whisper. An isolated child subreaper writes each
+downloaded audio file into its own private temporary directory. It waits for all
+transcription descendants before reading the transcript and removing the run's
+files. On timeout or cancellation it kills and reaps those processes before
+cleanup. Diagnostics do not contain transcript text or credentials.
 
-**Install whisper:**
+On macOS and Windows the bridge runs `whisper` directly in a private temporary
+directory and removes that directory after the process exits. Those systems have
+no child subreaper, so processes that Whisper detaches cannot be tracked there; on
+timeout or cancellation only the Whisper process itself is killed and reaped.
+
+Install the Whisper CLI in the environment that runs Kollab. On Linux, `/proc`
+must be mounted and `python3` must be on `PATH`:
 
 ```bash
 pip install openai-whisper
 ```
 
-Voice messages appear in the hub as `[voice] transcribed text here`
-and are routed to agents like any other message.
-
-The bridge uses the `base` model by default for fast transcription.
-No API key or cloud service needed -- it runs entirely on your machine.
+Voice messages appear in the hub as `[voice] transcribed text here` and are
+routed to agents like other messages. The bridge uses the `base` model and
+English by default; no API key or cloud service is needed.
 
 ## Configuration Reference
 
@@ -169,12 +175,23 @@ the other instance.
 - Verify the chat ID matches your user: check with @userinfobot
 - Check that the token is correct: `/hub bridge setup` validates it
 
-### Voice Transcription Fails
+### Voice Message Transcription Fails
 
-- Ensure `whisper` CLI is installed: `which whisper`
-- Check that the `base` model is downloaded (whisper downloads it
-  on first use, needs internet)
-- Voice messages time out after 60 seconds of transcription
+Local Telegram transcription needs `whisper` on `PATH`; the log names it when it is
+missing. Install `openai-whisper` in the environment used by Kollab. On Linux,
+`python3` must also be on `PATH` and `/proc` must be mounted. An isolated child
+subreaper owns each private transcription directory; it waits for all CLI
+descendants, including detached writers, before reading the transcript. On
+cancellation or the 60-second deadline, it kills and reaps those processes before
+removing audio and partial output. Concurrent runs have separate directories. The
+bridge forwards a safe failure notice when transcription fails and continues
+processing text messages.
+
+On Linux, if an operating-system error prevents the owner from proving all children
+have exited, it reports failure and retains the private run directory. Remove that
+directory only after verifying the run's processes have exited; the Linux owner
+never deletes files while a writer may remain. macOS and Windows cannot make that
+proof, so they remove the directory once the Whisper process has exited.
 
 ### Bridge Stops Working After Restart
 

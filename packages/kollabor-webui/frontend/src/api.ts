@@ -1,3 +1,5 @@
+import type { ChatStreamContentField, ChatStreamCursor, ChatStreamEvent } from "./chat-stream";
+
 export type PhoneLinkState = {
   state: "ready" | "connect_needed" | "service_update" | "offline";
   message: string;
@@ -97,7 +99,13 @@ export type UpdateRelease = { version: string; tag_name: string; name: string; u
 export type UpdateCheckResponse = {
   current_version: string;
   available: boolean;
+  status: "current" | "available" | "disabled" | "failed";
   release: UpdateRelease | null;
+  checked_at: number | null;
+  last_successful_check: number | null;
+  retry_after_seconds: number | null;
+  retry_at: number | null;
+  retry_reason: "retry" | "rate_limit" | null;
   notes: Array<{ version: string; date: string; sections: Array<{ title: string; items: string[] }> }>;
 };
 export type UpdateApplyResponse = { success: boolean; changed: boolean; message: string; method: string };
@@ -158,6 +166,49 @@ export type HistoryPageOptions = {
   /** Tool output over 4 KB pages as a preview ("preview", the default) or whole. */
   toolOutput?: "preview" | "full";
 };
+
+export type ChatStreamToolOutputType = "text" | "json";
+
+/** One bounded slice of a stored text, reasoning or tool-argument part. */
+export type ChatStreamContentChunk = {
+  row_id: string;
+  part_index: number;
+  field: ChatStreamContentField;
+  output_revision: string;
+  offset: number;
+  next_offset: number;
+  total_chars: number;
+  output_type: ChatStreamToolOutputType;
+  content: string;
+  done: boolean;
+};
+
+/** One bounded count/byte page from a row whose part list needs paging. */
+export type ChatStreamPartsPage = {
+  row_id: string;
+  offset: number;
+  next_offset: number;
+  total_parts: number;
+  output_revision: string;
+  parts: unknown[];
+  done: boolean;
+};
+
+/** One bounded slice of a stored chat-stream tool result. Offsets count Unicode code points. */
+export type ChatStreamToolOutputChunk = {
+  row_id: string;
+  tool_call_id: string;
+  output_revision: string;
+  offset: number;
+  next_offset: number;
+  total_chars: number;
+  output_type: ChatStreamToolOutputType;
+  content: string;
+  done: boolean;
+};
+
+export const CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE = 32_768;
+export const CHAT_STREAM_PART_PAGE_SIZE = 32;
 
 export function historyContentToText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -845,12 +896,14 @@ export type PanelWizardStep = {
   id: string;
   title: string;
   fields: PanelField[];
+  actions?: PanelAction[];
 };
 
 export type PanelWizard = PanelBase & {
   kind: "wizard";
   steps: PanelWizardStep[];
   actions?: PanelAction[];
+  context?: Record<string, unknown>;
 };
 
 export type PanelDescription = PanelForm | PanelPicker | PanelWizard;
@@ -1166,8 +1219,9 @@ export class EngineApi {
   }
 
 
-  async checkForUpdate() {
-    const response = await fetch("/api/update/check", { cache: "no-store" });
+  async checkForUpdate(refresh = false) {
+    const query = refresh ? "?refresh=true" : "";
+    const response = await fetch(`/api/update/check${query}`, { cache: "no-store" });
     if (!response.ok) throw new ApiError(`Update check failed: ${response.status}`, response.status, undefined);
     return (await response.json()) as UpdateCheckResponse;
   }
@@ -1336,6 +1390,102 @@ export class EngineApi {
     );
   }
 
+  getChatStreamToolOutput(
+    sessionId: string,
+    rowId: string,
+    toolCallId: string,
+    outputRevision: string,
+    options: { offset: number; limit?: number } = { offset: 0 },
+  ) {
+    if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+      throw new RangeError("Tool output revision must be a SHA-256 hex digest.");
+    }
+    const offset = options.offset;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RangeError("Tool output offset must be a non-negative integer.");
+    }
+    const requestedLimit = options.limit ?? CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+      throw new RangeError("Tool output limit must be a positive integer.");
+    }
+    const limit = Math.min(requestedLimit, CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE);
+    const query = new URLSearchParams({
+      tool_call_id: toolCallId,
+      output_revision: outputRevision,
+      offset: String(offset),
+      limit: String(limit),
+    });
+    return this.json<ChatStreamToolOutputChunk>(
+      `/sessions/${encodeURIComponent(sessionId)}/chat-stream/rows/${encodeURIComponent(rowId)}/tool-output?${query}`,
+    );
+  }
+
+  getChatStreamContent(
+    sessionId: string,
+    rowId: string,
+    partIndex: number,
+    field: ChatStreamContentField,
+    outputRevision: string,
+    options: { offset: number; limit?: number } = { offset: 0 },
+  ) {
+    if (!Number.isSafeInteger(partIndex) || partIndex < 0) {
+      throw new RangeError("Chat stream content part index must be a non-negative integer.");
+    }
+    if (field !== "text" && field !== "reasoning" && field !== "args" && field !== "part") {
+      throw new RangeError("Chat stream content field is invalid.");
+    }
+    if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+      throw new RangeError("Chat stream content revision must be a SHA-256 hex digest.");
+    }
+    const offset = options.offset;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RangeError("Chat stream content offset must be a non-negative integer.");
+    }
+    const requestedLimit = options.limit ?? CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+      throw new RangeError("Chat stream content limit must be a positive integer.");
+    }
+    const limit = Math.min(requestedLimit, CHAT_STREAM_TOOL_OUTPUT_CHUNK_SIZE);
+    const query = new URLSearchParams({
+      part_index: String(partIndex),
+      field,
+      output_revision: outputRevision,
+      offset: String(offset),
+      limit: String(limit),
+    });
+    return this.json<ChatStreamContentChunk>(
+      `/sessions/${encodeURIComponent(sessionId)}/chat-stream/rows/${encodeURIComponent(rowId)}/content?${query}`,
+    );
+  }
+
+  getChatStreamParts(
+    sessionId: string,
+    rowId: string,
+    outputRevision: string,
+    options: { offset: number; limit?: number } = { offset: 0 },
+  ) {
+    if (!/^[0-9a-f]{64}$/.test(outputRevision)) {
+      throw new RangeError("Chat stream parts revision must be a SHA-256 hex digest.");
+    }
+    const offset = options.offset;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RangeError("Chat stream parts offset must be a non-negative integer.");
+    }
+    const requestedLimit = options.limit ?? CHAT_STREAM_PART_PAGE_SIZE;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+      throw new RangeError("Chat stream parts limit must be a positive integer.");
+    }
+    const limit = Math.min(requestedLimit, CHAT_STREAM_PART_PAGE_SIZE);
+    const query = new URLSearchParams({
+      output_revision: outputRevision,
+      offset: String(offset),
+      limit: String(limit),
+    });
+    return this.json<ChatStreamPartsPage>(
+      `/sessions/${encodeURIComponent(sessionId)}/chat-stream/rows/${encodeURIComponent(rowId)}/parts?${query}`,
+    );
+  }
+
   getHistoryMetadata(sessionId: string, reference: string) {
     const query = new URLSearchParams({ ref: reference });
     return this.json<{ session_id: string; metadata: Record<string, unknown> }>(
@@ -1436,6 +1586,32 @@ export class EngineApi {
     return this.streamSse<SessionEvent>(`/sessions/${encodeURIComponent(sessionId)}/events`, signal, onEvent, onOpen);
   }
 
+  /** Follow the daemon-owned ordered transcript, resuming only with a full cursor. */
+  streamChatEvents(
+    sessionId: string,
+    cursor: ChatStreamCursor | null,
+    signal?: AbortSignal,
+    onEvent?: (event: ChatStreamEvent) => void,
+    onOpen?: () => void,
+    onMalformedData?: () => void,
+  ): Promise<void> {
+    const query = new URLSearchParams();
+    if (cursor !== null) {
+      query.set("after", String(cursor.after));
+      query.set("conversation_uid", cursor.conversation_uid);
+      query.set("generation", cursor.generation);
+    }
+    const encoded = query.toString();
+    const suffix = encoded ? `?${encoded}` : "";
+    return this.streamSse<ChatStreamEvent>(
+      `/sessions/${encodeURIComponent(sessionId)}/stream${suffix}`,
+      signal,
+      onEvent,
+      onOpen,
+      onMalformedData,
+    );
+  }
+
   /**
    * Reads an engine SSE stream (`path`), calling `onEvent` with each frame's JSON `data`; resolves when the
    * stream ends. Shared by the session stream above and the plugin streams (`GET /plugins/events`,
@@ -1446,6 +1622,7 @@ export class EngineApi {
     signal?: AbortSignal,
     onEvent?: (event: T) => void,
     onOpen?: () => void,
+    onMalformedData?: () => void,
   ): Promise<void> {
     const response = await this.request(path, { method: "GET", signal });
     if (!response.body) throw new Error("event stream response has no body");
@@ -1470,7 +1647,8 @@ export class EngineApi {
           try {
             onEvent?.(JSON.parse(data) as T);
           } catch {
-            // Ignore keepalive/non-JSON frames while preserving the stream.
+            if (onMalformedData) { onMalformedData(); return; }
+            // Other stream consumers ignore non-JSON frames.
           }
         }
       }
@@ -1485,7 +1663,8 @@ export class EngineApi {
           try {
             onEvent?.(JSON.parse(data) as T);
           } catch {
-            // Ignore a partial trailing frame.
+            if (onMalformedData) onMalformedData();
+            // Other stream consumers ignore a partial trailing frame.
           }
         }
       }

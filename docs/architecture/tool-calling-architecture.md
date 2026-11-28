@@ -2057,7 +2057,7 @@ tree is:
 
 ## Related docs
 
-- `docs/features/tools.md` — user-facing tool overview
+- `docs/features/tools/overview.md` — user-facing tool overview
 - `docs/features/mcp.md` — MCP integration details
 - `docs/features/context-service.md` — ContextService spec (extends
   the xml mode surface with curate/context/evict tags)

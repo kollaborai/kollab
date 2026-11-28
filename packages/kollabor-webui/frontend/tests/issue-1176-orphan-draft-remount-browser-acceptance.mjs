@@ -17,11 +17,8 @@ const DRAFT = "Describe this picture [image1]";
 const DRAFT_KEY = "kollab:webui:composer-draft:v1:local-coder:issue-1176-orphan-session";
 
 function sentText(body) {
-  const commandMessage = body.commands?.find((command) => command.type === "add-message")?.message;
-  const message = commandMessage ?? body.message ?? body.messages?.at(-1);
-  const parts = message?.parts ?? message?.content;
-  assert.ok(Array.isArray(parts), "assistant transport must carry user message parts");
-  return parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+  assert.equal(typeof body.text, "string", "input transport must carry the composer text");
+  return body.text;
 }
 
 async function main() {
@@ -34,19 +31,24 @@ async function main() {
   });
 
   try {
+    const executablePath = process.env.CHROME_PATH
+      ?? (process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : undefined);
     browser = await chromium.launch({
       headless: true,
-      ...(process.platform === "darwin"
-        ? { executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" }
-        : {}),
+      ...(executablePath ? { executablePath } : {}),
       args: process.platform === "linux" ? ["--no-sandbox"] : [],
     });
     shell = await openPage(browser, baseUrl, makeFixtures({ sessions: [SESSION] }));
     await shell.page.route(
-      (url) => url.pathname.endsWith(`/${SESSION_ID}/assistant`),
+      (url) => url.pathname.endsWith(`/${SESSION_ID}/inputs`),
       async (route) => {
-        resolveTransport(sentText(route.request().postDataJSON()));
-        await route.abort();
+        const body = route.request().postDataJSON();
+        resolveTransport(sentText(body));
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ id: body.id, state: "queued" }),
+        });
       },
     );
 
@@ -76,7 +78,7 @@ async function main() {
     await composer.press("Enter");
     const outgoing = await Promise.race([
       transportRequest,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("assistant transport was not called")), 15_000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("input transport was not called")), 15_000)),
     ]);
     if (outgoing.includes("[image1]")) failures.push(`outgoing message kept orphan token: ${JSON.stringify(outgoing)}`);
     if (failures.length) throw new Error(failures.join("\n"));

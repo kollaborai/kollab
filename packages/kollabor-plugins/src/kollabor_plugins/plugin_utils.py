@@ -4,6 +4,8 @@ import inspect
 import logging
 from typing import Any, Dict, List, Optional, Type
 
+from .redaction import redact_sensitive_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +59,12 @@ def safe_call_method(obj: Any, method_name: str, *args, **kwargs) -> Optional[An
         method = getattr(obj, method_name)
         return method(*args, **kwargs)
     except Exception as e:
-        logger.error(f"Failed to call {type(obj).__name__}.{method_name}: {e}")
+        logger.error(
+            "Failed to call %s.%s: %s",
+            type(obj).__name__,
+            method_name,
+            redact_sensitive_text(str(e)),
+        )
         return None
 
 
@@ -172,7 +179,9 @@ def validate_plugin_interface(
             result["errors"].append(f"Constructor missing parameters: {missing_params}")
 
     except Exception as e:
-        result["errors"].append(f"Failed to inspect constructor: {e}")
+        result["errors"].append(
+            f"Failed to inspect constructor: {redact_sensitive_text(str(e))}"
+        )
 
     return result
 
@@ -200,7 +209,11 @@ def get_plugin_config_safely(plugin_class: Type) -> Dict[str, Any]:
                 f"Plugin {plugin_class.__name__} has no get_default_config method"
             )
     except Exception as e:
-        logger.error(f"Failed to get config from plugin {plugin_class.__name__}: {e}")
+        logger.error(
+            "Failed to get config from plugin %s: %s",
+            plugin_class.__name__,
+            redact_sensitive_text(str(e)),
+        )
 
     return {}
 
@@ -228,7 +241,11 @@ def instantiate_plugin_safely(plugin_class: Type, **kwargs) -> Optional[Any]:
         return instance
 
     except Exception as e:
-        logger.error(f"Failed to instantiate plugin {plugin_class.__name__}: {e}")
+        logger.error(
+            "Failed to instantiate plugin %s: %s",
+            plugin_class.__name__,
+            redact_sensitive_text(str(e)),
+        )
         return None
 
 
@@ -280,6 +297,10 @@ def collect_plugin_status_safely(
                 status_areas["A"].append(plugin_status.strip())
 
     except Exception as e:
-        logger.warning(f"Failed to get status from plugin {plugin_name}: {e}")
+        logger.warning(
+            "Failed to get status from plugin %s: %s",
+            plugin_name,
+            redact_sensitive_text(str(e)),
+        )
 
     return status_areas

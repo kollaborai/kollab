@@ -83,13 +83,17 @@ async def test_finished_turn_update_keeps_its_generation():
 
     await runner._run_prompt(admission, 7)
 
-    assert updates[-1] == {
+    finished = updates[-1]
+    assert {
+        key: value for key, value in finished.items() if key != "acp_turn_key"
+    } == {
         "kind": "turn_finished",
         "request_id": "active-request-A",
         "turn_id": 12,
         "generation": 7,
         "source": "state_rpc",
     }
+    assert isinstance(finished["acp_turn_key"], str) and finished["acp_turn_key"]
 
 
 @pytest.mark.asyncio
@@ -171,7 +175,13 @@ async def test_orchestrator_steering_preserves_the_client_id_and_joined_owner():
     orchestrator._runner = runner
     orchestrator._parents = {}
     recorded: list[tuple] = []
-    orchestrator._record_user = lambda *args: recorded.append(args)
+    recorded_kwargs: list[dict] = []
+
+    def record_user(*args, **kwargs):
+        recorded.append(args)
+        recorded_kwargs.append(kwargs)
+
+    orchestrator._record_user = record_user
 
     result = await orchestrator.steer(
         "message B",
@@ -181,6 +191,13 @@ async def test_orchestrator_steering_preserves_the_client_id_and_joined_owner():
     )
 
     assert recorded == [("client-request-B", "message B", "steering", "thread-B")]
+    assert recorded_kwargs == [
+        {
+            "hub_note": None,
+            "joined_request_id": "active-request-A",
+            "joined_turn_id": 12,
+        }
+    ]
     assert result == {
         "joined_request_id": "active-request-A",
         "joined_turn_id": 12,
@@ -196,7 +213,13 @@ async def test_legacy_steering_call_still_returns_bool():
     orchestrator._runner = runner
     orchestrator._parents = {}
     recorded: list[tuple] = []
-    orchestrator._record_user = lambda *args: recorded.append(args)
+    recorded_kwargs: list[dict] = []
+
+    def record_user(*args, **kwargs):
+        recorded.append(args)
+        recorded_kwargs.append(kwargs)
+
+    orchestrator._record_user = record_user
 
     result = await orchestrator.steer(
         "message B",
@@ -206,6 +229,46 @@ async def test_legacy_steering_call_still_returns_bool():
     assert result is True
     assert len(recorded) == 1
     assert recorded[0][0].startswith("steering-")
+    assert recorded_kwargs == [
+        {
+            "hub_note": None,
+            "joined_request_id": "active-request-A",
+            "joined_turn_id": 12,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_steering_records_hub_note():
+    runner, _ = _active_runner()
+    runner.steer = AsyncMock(return_value=True)
+    orchestrator = object.__new__(ACPOrchestrator)
+    orchestrator._runner = runner
+    orchestrator._parents = {}
+    recorded: list[tuple] = []
+    recorded_kwargs: list[dict] = []
+
+    def record_user(*args, **kwargs):
+        recorded.append(args)
+        recorded_kwargs.append(kwargs)
+
+    orchestrator._record_user = record_user
+    hub_note = {"text": "queued by Marco", "from": "Marco"}
+
+    await orchestrator.steer(
+        "message B",
+        origin={"operator": True, "hub_note": hub_note},
+        request_id="client-request-B",
+    )
+
+    assert recorded == [("client-request-B", "message B", "steering", None)]
+    assert recorded_kwargs == [
+        {
+            "hub_note": hub_note,
+            "joined_request_id": "active-request-A",
+            "joined_turn_id": 12,
+        }
+    ]
 
 
 @pytest.mark.asyncio

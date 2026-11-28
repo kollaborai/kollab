@@ -5,25 +5,39 @@ import "@assistant-ui/react-markdown/styles/dot.css";
 import {
   type CodeHeaderProps,
   MarkdownTextPrimitive,
+  type MarkdownTextPrimitiveProps,
   unstable_memoizeMarkdownComponents as memoizeMarkdownComponents,
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
 import { type FC, memo, useState } from "react";
+import type { TextMessagePartProps } from "@assistant-ui/react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 import { terminalDialectToMarkdown } from "@/utils/terminal-dialect";
 
-const MarkdownTextImpl = () => {
+export type MarkdownTextProps = Pick<
+  MarkdownTextPrimitiveProps,
+  "components" | "defer" | "preprocess" | "smooth"
+> &
+  Partial<TextMessagePartProps>;
+
+const MarkdownTextImpl = ({
+  components = defaultComponents,
+  defer = true,
+  preprocess = terminalDialectToMarkdown,
+  smooth,
+}: MarkdownTextProps) => {
   return (
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm]}
-      preprocess={terminalDialectToMarkdown}
+      preprocess={preprocess}
       className="aui-md"
-      components={defaultComponents}
-      defer
+      components={components}
+      defer={defer}
+      smooth={smooth}
     />
   );
 };
@@ -78,7 +92,7 @@ const useCopyToClipboard = ({
   return { isCopied, copyToClipboard };
 };
 
-const defaultComponents = memoizeMarkdownComponents({
+export const defaultComponents = memoizeMarkdownComponents({
   h1: ({ className, ...props }) => (
     <h1
       className={cn(

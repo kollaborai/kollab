@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { REDACTED_ROOT_ERROR_OPTIONS } from "./plugins/plugin-errors";
 import App from "./App";
 import "./styles.css";
 
@@ -15,7 +16,7 @@ document.documentElement.classList.add("dark");
 // the composer drops typed text. Production renders once either way.
 // @assistant-ui/react 0.15.25 (store 0.3.17, tap 0.9.21) types fine under
 // StrictMode; put it back with that upgrade.
-createRoot(document.getElementById("root")!).render(
+createRoot(document.getElementById("root")!, REDACTED_ROOT_ERROR_OPTIONS).render(
   <TooltipProvider>
     <App />
   </TooltipProvider>,

@@ -8,10 +8,10 @@ import pytest
 from nacl.signing import SigningKey
 
 from plugins.hub.relay_client import (
-    _ApplicationPending,
     PeerSessionEvent,
     RelayClient,
     RelayError,
+    _ApplicationPending,
 )
 
 

@@ -233,6 +233,20 @@ def test_run_with_retry_gives_up_and_raises_after_the_last_attempt(monkeypatch: 
     assert len(calls) == 4
 
 
+def test_run_with_retry_defaults_to_three_retries_and_short_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    run, calls = _failing_run(3)
+    delays: list[float] = []
+    monkeypatch.setattr(build_binary.time, "sleep", delays.append)
+
+    result = build_binary.run_with_retry(
+        ["uvx", "--from", "pex==2.103.4", "pex"], runner=run
+    )
+
+    assert result == "done"
+    assert len(calls) == 4
+    assert delays == [1, 2, 3]
+
+
 def test_floor_platform_retries_a_transient_inspect_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     inspected = {
         "marker_environment": {"platform_system": "Darwin"},

@@ -49,6 +49,8 @@ export type PluginRecord = {
   id: string;
   name: string;
   entry: PluginEntry;
+  /** Position in the latest GET /plugins response, retained while the snapshot is name-sorted. */
+  listedOrder?: number;
   status: PluginStatus;
   error: string | null;
   /** How many times Retry ran; the next import URL carries `&retry=<n>`. */

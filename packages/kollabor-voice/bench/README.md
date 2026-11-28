@@ -42,7 +42,7 @@ Seven real-model context probes are recorded in
 passes measured about 68–82 ms on this Mac. An installed-client RPC probe confirmed
 all 10 history IDs reached the persistent worker; separate real-provider checks
 kept a TV-context greeting silent and answered an explicit request to Kollab.
-See the [implementation evidence](../../../specs/voice-mode/implementation-status.md)
+See the [implementation evidence](../../../docs/specs/voice-mode/implementation-status.md)
 for the exact boundaries and artifacts. Recognition mistakes in Whisper's input
 remain a separate limitation.
 

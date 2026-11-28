@@ -809,7 +809,7 @@ async def test_logger_await_cannot_reparent_an_admitted_user_turn():
     logged_parents: list[str | None] = []
     captured_items: list[TaggedInput] = []
 
-    async def log_user_message(_content, *, parent_uuid=None):
+    async def log_user_message(_content, *, parent_uuid=None, message_metadata=None):
         logged_parents.append(parent_uuid)
         logger_started.set()
         await release_logger.wait()
@@ -882,13 +882,21 @@ async def test_older_batch_completion_does_not_restore_its_continue_ticket():
     service._turn_serial = 1
     service._cursor_winner_serial = -1
     service._continue_serial = None
+    captured_stream_inputs: dict[int, tuple[dict, ...]] = {}
 
     class GatedQueueProcessor:
         async def process_message_batch(
-            self, *, messages, current_parent_uuid, request_ids
+            self,
+            *,
+            messages,
+            current_parent_uuid,
+            request_ids,
+            stream_inputs=None,
+            stream_input_count=None,
         ):
             serial = messages[0].admission_serial
             assert service._continue_serial == serial
+            captured_stream_inputs[serial] = stream_inputs
             started, release = (
                 (first_started, release_first)
                 if serial == 1
@@ -927,6 +935,8 @@ async def test_older_batch_completion_does_not_restore_its_continue_ticket():
 
         release_second.set()
         await asyncio.wait_for(second_task, timeout=1)
+        assert captured_stream_inputs[1][0]["request_id"] == "first"
+        assert captured_stream_inputs[second_serial][0]["request_id"] == "second"
     finally:
         release_first.set()
         release_second.set()
@@ -1075,9 +1085,16 @@ def test_stale_untracked_nudge_cannot_overwrite_newer_hub_cursor() -> None:
             turn_completed = False
 
             async def process_message_batch(
-                self, *, messages, current_parent_uuid, request_ids
+                self,
+                *,
+                messages,
+                current_parent_uuid,
+                request_ids,
+                stream_inputs=None,
+                stream_input_count=None,
             ) -> str:
                 assert messages == [nudge]
+                assert stream_inputs == ()
                 assert nudge.admission_serial is None
                 assert current_parent_uuid == "parent-before-nudge"
                 nudge_started.set()
@@ -1162,14 +1179,22 @@ async def test_continuation_parents_on_chain_tail_not_a_drifted_pointer():
     shared pointer (#676): a later-admitted mention that completed mid-batch
     keeps the cursor while the batch's chain stays contiguous."""
     calls: list[tuple[str, str]] = []
+    captured_stream_inputs: list[dict] = []
 
     class RecordingQueueProcessor:
         turn_completed = False
 
         async def process_message_batch(
-            self, *, messages, current_parent_uuid, request_ids
+            self,
+            *,
+            messages,
+            current_parent_uuid,
+            request_ids,
+            stream_inputs=None,
+            stream_input_count=None,
         ) -> str:
             calls.append(("batch", current_parent_uuid))
+            captured_stream_inputs.extend(stream_inputs)
             return "batch-tail"
 
         async def continue_conversation(self, *, current_parent_uuid) -> str:
@@ -1193,6 +1218,8 @@ async def test_continuation_parents_on_chain_tail_not_a_drifted_pointer():
         admission_serial=1,
     )
     await service._process_message_batch([tracked])
+    assert captured_stream_inputs[0]["request_id"] == "req-1"
+    assert captured_stream_inputs[0]["content"] == "hello"
     assert service.current_parent_uuid == "batch-tail"
 
     # Mid-run drift: a later-admitted mention completes while LOOP 2 runs.
@@ -1235,8 +1262,15 @@ async def test_delayed_continuation_cannot_clobber_newer_batch_tail_or_cursor():
             return "stale-cont-1"
 
         async def process_message_batch(
-            self, *, messages, current_parent_uuid, request_ids
+            self,
+            *,
+            messages,
+            current_parent_uuid,
+            request_ids,
+            stream_inputs=None,
+            stream_input_count=None,
         ):
+            assert stream_inputs[0]["request_id"] == "second"
             return "assistant-2"
 
     service._queue_processor = GatedQueueProcessor()

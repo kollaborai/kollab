@@ -16,10 +16,12 @@ from urllib.parse import urlsplit
 
 import psutil
 
+from kollabor_config import proc_ctl
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file, try_lock, unlock
 
 from .packages import _ID, _SERVICE, _read_registry, files_sha256, stop_timeout
+from .redaction import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -60,21 +62,27 @@ def _engine_url(value: str | None = None) -> str:
     return value.rstrip("/")
 
 
-def redact_log(text: str, secret_values: list[str] | tuple[str, ...] = ()) -> str:
+def _signal_service_tree(pid: int, sig: int) -> None:
+    """Signal a service's isolated process tree on POSIX or Windows."""
+    if os.name == "nt":
+        proc_ctl.kill_tree(pid, sig)
+    else:
+        os.killpg(pid, sig)
+
+
+def redact_log(
+    text: str, secret_values: list[str] | tuple[str, ...] = (), *, redact_paths: bool = True
+) -> str:
     """Redact declared values and common credential forms from log text."""
-    for value in sorted((value for value in secret_values if value), key=len, reverse=True):
-        text = text.replace(value, "[redacted]")
-    text = re.sub(r"(?:https?|ssh)://[^\s'\"<>]+", "[redacted]", text, flags=re.IGNORECASE)
-    text = re.sub(r"(?i)\b(bearer|basic)\s+[^\s,;]+", r"\1 [redacted]", text)
-    text = re.sub(r"(?i)\b(authorization|password|token|secret|credential)\s*[:=]\s*[^\s,;]+", r"\1: [redacted]", text)
-    return re.sub(r"\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+", "[redacted]", text)
+    return redact_sensitive_text(text, secret_values, redact_paths=redact_paths)
 
 
 class _LogFilter:
     """Buffer lines across reads, suppressing output that cannot be safely bounded."""
 
-    def __init__(self, secrets: list[str]):
+    def __init__(self, secrets: list[str], *, redact_paths: bool = False):
         self.secrets = secrets
+        self.redact_paths = redact_paths
         self.pending = bytearray()
         self.discarding = False
         self.suppress = any("\n" in value or "\r" in value for value in secrets)
@@ -97,11 +105,21 @@ class _LogFilter:
                     output.extend(b"[redacted oversized log line]\n")
             if ended:
                 if not self.discarding:
-                    output.extend(redact_log(self.pending.decode("utf-8", "replace"), self.secrets).encode())
+                    output.extend(
+                        redact_log(
+                            self.pending.decode("utf-8", "replace"), self.secrets,
+                            redact_paths=self.redact_paths,
+                        ).encode()
+                    )
                 self.pending.clear()
                 self.discarding = False
         if final and self.pending and not self.discarding:
-            output.extend(redact_log(self.pending.decode("utf-8", "replace"), self.secrets).encode())
+            output.extend(
+                redact_log(
+                    self.pending.decode("utf-8", "replace"), self.secrets,
+                    redact_paths=self.redact_paths,
+                ).encode()
+            )
             self.pending.clear()
         return bytes(output)
 
@@ -145,6 +163,39 @@ def _write_log(path: Path, data: bytes) -> None:
         with path.open("ab") as stream:
             stream.write(chunk)
         data = data[len(chunk) :]
+
+
+def _write_failure_log(path: Path, detail: str, secret_values: list[str]) -> None:
+    """Keep start diagnostics in the service log, with the same redaction and bounds as child output."""
+    log_filter = _LogFilter(secret_values, redact_paths=True)
+    payload = (detail[:8192] + "\n").encode("utf-8", "replace")
+    filtered = log_filter.feed(payload, final=True)
+    if filtered:
+        _write_log(path, filtered)
+
+
+def _record_start_failure(
+    state_path: Path,
+    state: dict,
+    log_path: Path,
+    plugin_id: str,
+    service_name: str,
+    error: str,
+    diagnostic: str,
+    secret_values: list[str],
+) -> None:
+    state["status"] = "error"
+    state["error"] = error
+    _write_state(state_path, state)
+    try:
+        _write_failure_log(log_path, diagnostic, secret_values)
+    except OSError as exc:
+        logger.warning(
+            "Could not write failure log for plugin service %s/%s (%s)",
+            plugin_id,
+            service_name,
+            type(exc).__name__,
+        )
 
 
 def _valid_plugin_id(plugin_id: str) -> bool:
@@ -306,10 +357,17 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             engine_url = _engine_url()
             context = PluginContext(plugin_id, root, home / "plugin-data" / plugin_id, manifest, grants=granted)
             token = PluginTokenFiles().mint(context)
-        except Exception:
-            state["status"] = "error"
-            state["error"] = "Could not prepare plugin engine credentials"
-            _write_state(state_path, state)
+        except Exception as exc:
+            _record_start_failure(
+                state_path,
+                state,
+                log_path,
+                plugin_id,
+                service_name,
+                "Could not prepare plugin engine credentials",
+                f"Could not prepare plugin engine credentials ({type(exc).__name__}).",
+                list(secret_values.values()),
+            )
             return 1
         crashes: list[float] = []
         while not stopping:
@@ -326,19 +384,27 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             env["KOLLAB_PLUGIN_TOKEN"] = token
             env.update(secret_values)
             try:
-                child = subprocess.Popen(
-                    command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
+                child = proc_ctl.start_child(
+                    command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
                 )
             except OSError as exc:
-                state["status"] = "error"
-                state["error"] = f"Could not start {command[0]}: {exc.strerror or type(exc).__name__}"
-                _write_state(state_path, state)
+                _record_start_failure(
+                    state_path,
+                    state,
+                    log_path,
+                    plugin_id,
+                    service_name,
+                    "Could not start this process. View Log for details.",
+                    f"Could not start plugin process ({type(exc).__name__}).",
+                    [*secret_values.values(), token],
+                )
                 return 1
             assert child.stdout is not None
             try:
+                pgid = child.pid if os.name == "nt" else os.getpgid(child.pid)
                 identity["child"] = {
                     "pid": child.pid,
-                    "pgid": os.getpgid(child.pid),
+                    "pgid": pgid,
                     "start_time": _process_start(child.pid),
                 }
             except psutil.Error, ProcessLookupError:
@@ -361,17 +427,20 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                         except OSError as exc:
                             # Failure to publish must never prevent the actual stop.
                             logger.warning(
-                                "Could not publish service stopping state for %s/%s: %s", plugin_id, service_name, exc
+                                "Could not publish service stopping state for %s/%s: %s",
+                                plugin_id,
+                                service_name,
+                                redact_sensitive_text(str(exc)),
                             )
                         try:
-                            os.killpg(child.pid, signal.SIGTERM)
+                            _signal_service_tree(child.pid, proc_ctl.SOFT)
                         except ProcessLookupError:
                             pass
                         term_sent = True
                         deadline = time.monotonic() + grace
                     if deadline is not None and time.monotonic() >= deadline:
                         try:
-                            os.killpg(child.pid, signal.SIGKILL)
+                            _signal_service_tree(child.pid, proc_ctl.HARD)
                         except ProcessLookupError:
                             pass
                         deadline = None
@@ -386,7 +455,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                             if filtered:
                                 _write_log(log_path, filtered)
                             selector.unregister(key.fileobj)
-            if term_sent and deadline is not None:
+            if term_sent and deadline is not None and os.name != "nt":
                 # The leader may exit before descendants that ignored SIGTERM.
                 # Keep the wrapper alive until the group is gone or its grace expires.
                 while time.monotonic() < deadline:
@@ -397,7 +466,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                 else:
                     try:
-                        os.killpg(child.pid, signal.SIGKILL)
+                        _signal_service_tree(child.pid, proc_ctl.HARD)
                     except ProcessLookupError:
                         pass
             code = child.wait()
@@ -425,7 +494,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
     finally:
         if child is not None and child.poll() is None:
             try:
-                os.killpg(child.pid, signal.SIGKILL)
+                _signal_service_tree(child.pid, proc_ctl.HARD)
             except ProcessLookupError:
                 pass
             child.wait()
@@ -520,7 +589,7 @@ def supervisor_tick(*, engine_url: str | None = None) -> None:
             if not isinstance(services, dict):
                 raise ValueError("Invalid services")
         except (OSError, ValueError, TypeError) as exc:
-            logger.warning("Cannot load services for plugin %s: %s", plugin_id, exc)
+            logger.warning("Cannot load services for plugin %s (%s)", plugin_id, type(exc).__name__)
             continue
         for service_name, service in services.items():
             if (
@@ -553,17 +622,16 @@ def supervisor_tick(*, engine_url: str | None = None) -> None:
                     if _recorded_process_alive(run_dir / f"{service_name}.pid"):
                         continue
                     nonce = secrets.token_hex(16)
-                    subprocess.Popen(
+                    proc_ctl.start_child(
                         [*kollab_argv(), "plugin", "run-service", plugin_id, service_name, nonce],
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
-                        start_new_session=True,
                         close_fds=True,
                         env=wrapper_env,
                     )
                 except (OSError, ValueError, TypeError) as exc:
-                    logger.warning("Could not start service %s/%s: %s", plugin_id, service_name, exc)
+                    logger.warning("Could not start service %s/%s (%s)", plugin_id, service_name, type(exc).__name__)
                 finally:
                     unlock(fd)
             finally:
@@ -730,10 +798,18 @@ def _record_stop_state(state_path: Path, status: str, deadline: float | None, er
         state.update({"desired": "stopped", "status": status, "stop_deadline": deadline})
         state.pop("error", None)
         if error is not None:
-            state["error"] = error
+            allowed = {
+                "Could not stop this process. Retry stopping it.",
+                "Could not verify the stop. Check the process before retrying.",
+            }
+            state["error"] = (
+                error
+                if error in allowed
+                else "Could not verify the stop. Check the process before retrying."
+            )
         _write_state(state_path, state)
     except (OSError, ValueError, TypeError) as exc:
-        logger.warning("Could not record stop for %s: %s", state_path.name, exc)
+        logger.warning("Could not record stop for %s (%s)", state_path.name, type(exc).__name__)
 
 
 def _stop_unrecorded(run_dir: Path, pid_path: Path) -> bool:
@@ -747,7 +823,7 @@ def _stop_unrecorded(run_dir: Path, pid_path: Path) -> bool:
         if not isinstance(identity, dict):
             raise ValueError("Invalid service identity")
     except (OSError, ValueError, TypeError) as exc:
-        logger.warning("Could not read service %s: %s", pid_path.name, exc)
+        logger.warning("Could not read service %s (%s)", pid_path.name, type(exc).__name__)
         _record_stop_state(state_path, "stop-failed", None, unverified)
         return False
     wrapper, child = identity.get("wrapper"), identity.get("child")
@@ -760,7 +836,7 @@ def _stop_unrecorded(run_dir: Path, pid_path: Path) -> bool:
         except ProcessLookupError:
             _record_stop_state(state_path, "stopped", None)
         except OSError as exc:
-            logger.warning("Could not signal service %s: %s", pid_path.name, exc)
+            logger.warning("Could not signal service %s (%s)", pid_path.name, type(exc).__name__)
             _record_stop_state(state_path, "stop-failed", None, "Could not stop this process. Retry stopping it.")
             return False
         return True
@@ -790,12 +866,12 @@ def stop_services(plugin_id: str) -> list[str]:
         except ServiceSignalError as exc:
             # control_service already recorded stop-failed for this wrapper; do not signal it twice.
             failures.append(pid_path.stem)
-            logger.warning("Could not stop service %s: %s", pid_path.name, exc)
+            logger.warning("Could not stop service %s (%s)", pid_path.name, type(exc).__name__)
             continue
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             # Stopping a verified wrapper remains necessary even when its files
             # or state are damaged; never let a display failure orphan it.
-            logger.warning("Could not record stop for service %s: %s", pid_path.name, exc)
+            logger.warning("Could not record stop for service %s (%s)", pid_path.name, type(exc).__name__)
         if not _stop_unrecorded(run_dir, pid_path):
             failures.append(pid_path.stem)
     return failures
@@ -809,6 +885,10 @@ async def supervise_services(*, engine_url: str | None = None) -> None:
                 await asyncio.to_thread(supervisor_tick)
             else:
                 await asyncio.to_thread(supervisor_tick, engine_url=engine_url)
-        except Exception:
-            logger.exception("Plugin service supervisor sweep failed")
+        except Exception as exc:
+            logger.warning(
+                "Plugin service supervisor sweep failed (%s): %s",
+                type(exc).__name__,
+                redact_sensitive_text(str(exc)),
+            )
         await asyncio.sleep(30)

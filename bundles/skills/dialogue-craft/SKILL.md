@@ -41,7 +41,8 @@ check character voice consistency
 
   <terminal>find . -name "*.md" -type f | xargs grep -l "dialogue\|voice" 2>/dev/null | head -5</terminal>
 
-  <terminal>find . -name "*dialogue*" -o -name "*voice*" -type f 2>/dev/null | head -5</terminal>
+  <file-find><pattern>*dialogue*</pattern></file-find>
+  <file-find><pattern>*voice*</pattern></file-find>
 
 review existing character dialogue before writing new lines.
 match the established voice patterns.

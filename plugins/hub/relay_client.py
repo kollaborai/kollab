@@ -11,6 +11,7 @@ import base64
 import contextvars
 import hashlib
 import inspect
+import ipaddress
 import json
 import logging
 import math
@@ -798,8 +799,11 @@ class RelayClient:
             raise RelayError("run /connect leave before joining another directory")
         await self.close()
         self._ws_url, self._ca, self._private_cidrs = ws_url, ca, tuple(private_cidrs)
-        # Validate operator configuration before starting any background work.
-        _PublicResolver(dns.asyncresolver.Resolver(), self._private_cidrs)
+        # Validate operator configuration before starting any background work. The private
+        # ranges are parsed as _PublicResolver parses them; no resolver is built here, so a
+        # machine with no DNS configured still connects and the retry loop handles DNS errors.
+        for cidr in self._private_cidrs:
+            ipaddress.ip_network(cidr, strict=True)
         ssl.create_default_context(cafile=ca or None)
         self._adopt_bridge_fields()
         self.state.origin, self.state.enabled = origin, True

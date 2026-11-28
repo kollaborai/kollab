@@ -1,0 +1,54 @@
+{
+ "description": "Wrong: an event is missing. After seq 2 the next event is seq 4, so seq 3 was lost and the client must resync.",
+ "complete": false,
+ "expect": [
+  "expected seq 3"
+ ],
+ "events": [
+  {
+   "seq": 1,
+   "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
+   "type": "snapshot",
+   "data": {
+    "rows": [],
+    "next_seq": 2,
+    "older": null,
+    "turns": [],
+    "inputs": []
+   }
+  },
+  {
+   "seq": 2,
+   "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
+   "type": "row.upsert",
+   "data": {
+    "id": "r-reply",
+    "seq": 2,
+    "kind": "reply",
+    "role": "assistant",
+    "turn_id": "t1",
+    "status": "streaming",
+    "parts": [
+     {
+      "type": "text",
+      "text": "Hel"
+     }
+    ],
+    "created_at": "2026-11-25T10:00:00Z"
+   }
+  },
+  {
+   "seq": 4,
+   "conversation_uid": "conv-1",
+   "generation": "fixture-daemon-1",
+   "type": "row.append",
+   "data": {
+    "id": "r-reply",
+    "part": 0,
+    "text": "lo"
+   }
+  }
+ ]
+}

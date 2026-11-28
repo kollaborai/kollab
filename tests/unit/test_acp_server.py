@@ -52,9 +52,15 @@ def sdk_connection():
         parsed = SessionNotification.model_validate({"sessionId": session_id, "update": notification})
         updates.append(parsed.update.model_dump(by_alias=True, exclude_none=True))
 
-    return SimpleNamespace(session_update=update, updates=updates,
-                           request_permission=AsyncMock(return_value=RequestPermissionResponse.model_validate(
-                               {"outcome": {"outcome": "selected", "optionId": "once"}})))
+    return SimpleNamespace(
+        session_update=update,
+        updates=updates,
+        request_permission=AsyncMock(
+            return_value=RequestPermissionResponse.model_validate(
+                {"outcome": {"outcome": "selected", "optionId": "once"}}
+            )
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -70,9 +76,19 @@ async def test_native_live_tools_use_valid_sdk_notifications(engine_factory, tmp
             request_id = params["request_id"]
             for event in [
                 {"type": "turn_complete", "request_id": "mesh", "stop_reason": "end_turn"},
-                {"type": "tool_start", "tool_id": "native-write", "tool_name": "file_write", "input": {"path": "owned.txt"}},
-                {"type": "tool_result", "tool_id": "native-write", "success": True, "output": "saved",
-                 "metadata": {"diffs": [{"path": "owned.txt", "old_text": "before", "new_text": "after"}]}},
+                {
+                    "type": "tool_start",
+                    "tool_id": "native-write",
+                    "tool_name": "file_write",
+                    "input": {"path": "owned.txt"},
+                },
+                {
+                    "type": "tool_result",
+                    "tool_id": "native-write",
+                    "success": True,
+                    "output": "saved",
+                    "metadata": {"diffs": [{"path": "owned.txt", "old_text": "before", "new_text": "after"}]},
+                },
                 {"type": "token", "text": "owned answer"},
                 {"type": "turn_complete", "stop_reason": "end_turn"},
             ]:
@@ -96,11 +112,30 @@ async def test_native_replay_uses_same_sdk_tool_variants(engine_factory, tmp_pat
     await agent.initialize(1)
     session_id = (await agent.new_session(str(tmp_path))).sessionId
     engine = engine_factory.instances[-1]
-    engine.refresh_history.return_value = [{"role": "assistant", "content": "saved answer",
-        "metadata": {"tool_calls": [{"id": "saved-tool", "name": "terminal", "type": "terminal",
-                                     "input": {"command": "echo saved"}, "result": "saved", "status": "completed"}]}}]
+    engine.refresh_history.return_value = [
+        {
+            "role": "assistant",
+            "content": "saved answer",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "id": "saved-tool",
+                        "name": "terminal",
+                        "type": "terminal",
+                        "input": {"command": "echo saved"},
+                        "result": "saved",
+                        "status": "completed",
+                    }
+                ]
+            },
+        }
+    ]
     await agent.load_session(str(tmp_path), session_id)
-    assert [update["sessionUpdate"] for update in agent.connection.updates] == ["tool_call", "tool_call_update", "agent_message_chunk"]
+    assert [update["sessionUpdate"] for update in agent.connection.updates] == [
+        "tool_call",
+        "tool_call_update",
+        "agent_message_chunk",
+    ]
     await agent.shutdown()
 
 
@@ -112,10 +147,24 @@ async def test_native_replay_joins_function_call_to_separate_error_and_diff(engi
     await agent.initialize(1)
     session_id = (await agent.new_session(str(tmp_path))).sessionId
     engine_factory.instances[-1].refresh_history.return_value = [
-        {"role": "assistant", "content": "", "metadata": {"tool_calls": [
-            {"id": "native-tool", "type": "function", "function": {"name": "terminal", "arguments": arguments}}]}},
-        {"role": "tool", "content": "tool failed", "metadata": {"tool_call_id": "native-tool", "is_error": True,
-            "diffs": [{"path": "owned.txt", "old_text": "before", "new_text": "after"}]}},
+        {
+            "role": "assistant",
+            "content": "",
+            "metadata": {
+                "tool_calls": [
+                    {"id": "native-tool", "type": "function", "function": {"name": "terminal", "arguments": arguments}}
+                ]
+            },
+        },
+        {
+            "role": "tool",
+            "content": "tool failed",
+            "metadata": {
+                "tool_call_id": "native-tool",
+                "is_error": True,
+                "diffs": [{"path": "owned.txt", "old_text": "before", "new_text": "after"}],
+            },
+        },
         {"role": "assistant", "content": "saved answer"},
     ]
     await agent.load_session(str(tmp_path), session_id)
@@ -137,8 +186,18 @@ async def test_native_replay_cannot_join_reused_id_across_assistant_turns(engine
     agent.on_connect(sdk_connection())
     await agent.initialize(1)
     session_id = (await agent.new_session(str(tmp_path))).sessionId
-    calls = lambda command: {"tool_calls": [{"id": "reused", "type": "function",
-        "function": {"name": "terminal", "arguments": {"command": command}}}]}
+
+    def calls(command):
+        return {
+            "tool_calls": [
+                {
+                    "id": "reused",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": {"command": command}},
+                }
+            ]
+        }
+
     engine_factory.instances[-1].refresh_history.return_value = [
         {"role": "assistant", "content": "", "metadata": calls("first")},
         {"role": "assistant", "content": "interrupted before output"},
@@ -149,7 +208,12 @@ async def test_native_replay_cannot_join_reused_id_across_assistant_turns(engine
     await agent.load_session(str(tmp_path), session_id)
     updates = agent.connection.updates
     assert [entry["sessionUpdate"] for entry in updates] == [
-        "tool_call", "agent_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"]
+        "tool_call",
+        "agent_message_chunk",
+        "tool_call",
+        "tool_call_update",
+        "agent_message_chunk",
+    ]
     assert updates[0]["rawInput"] == {"command": "first"}
     assert updates[2]["rawInput"] == {"command": "second"}
     assert updates[3]["rawOutput"] == "second output" and updates[3]["status"] == "completed"
@@ -171,7 +235,9 @@ async def test_failed_new_save_shuts_down_owned_engine(engine_factory, tmp_path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["load_session", "resume_session"])
-async def test_failed_restore_write_cleans_engine_without_temporary_handle(engine_factory, tmp_path, monkeypatch, operation):
+async def test_failed_restore_write_cleans_engine_without_temporary_handle(
+    engine_factory, tmp_path, monkeypatch, operation
+):
     agent = KollabACPAgent()
     agent.on_connect(sdk_connection())
     await agent.initialize(1)
@@ -233,13 +299,16 @@ async def test_close_keeps_first_write_error_while_cleanup_is_cancelled(engine_f
 @pytest.mark.asyncio
 async def test_attach_selects_exact_folder_and_refuses_mode_change(engine_factory, tmp_path, monkeypatch):
     from kollabor_engine.hub_bridge import HubBridge
+
     workspace = tmp_path / "selected"
     workspace.mkdir()
     sibling = tmp_path / "sibling"
     sibling.mkdir()
-    rows = [{"identity": "claude", "workspace": str(sibling), "session_id": "wrong-folder"},
-            {"identity": "claude", "workspace": str(workspace), "session_id": "right-folder"},
-            {"identity": "claude", "workspace": str(workspace), "session_id": "remote", "device": "remote"}]
+    rows = [
+        {"identity": "claude", "workspace": str(sibling), "session_id": "wrong-folder"},
+        {"identity": "claude", "workspace": str(workspace), "session_id": "right-folder"},
+        {"identity": "claude", "workspace": str(workspace), "session_id": "remote", "device": "remote"},
+    ]
     monkeypatch.setattr(HubBridge, "discover_sessions", lambda *args, **kwargs: rows)
     agent = KollabACPAgent(attach="claude")
     await agent.initialize(1)
@@ -259,22 +328,33 @@ async def test_permission_scope_and_opaque_options(engine_factory, tmp_path, att
     engine = engine_factory("engine", workspace=str(tmp_path))
     engine.daemon.rpc.call.return_value = {"ok": True}
     session = ClientSession("client", engine, str(tmp_path), attached)
-    offered = [{"optionId": "vendor-once", "name": "Allow once", "kind": "allow_once"},
-               {"optionId": "vendor-always", "name": "Always", "kind": "allow_always"},
-               {"optionId": "vendor-deny", "name": "Deny", "kind": "reject_once"}]
+    offered = [
+        {"optionId": "vendor-once", "name": "Allow once", "kind": "allow_once"},
+        {"optionId": "vendor-always", "name": "Always", "kind": "allow_always"},
+        {"optionId": "vendor-deny", "name": "Deny", "kind": "reject_once"},
+    ]
     agent.connection.request_permission.return_value = RequestPermissionResponse.model_validate(
-        {"outcome": {"outcome": "selected", "optionId": "vendor-once"}})
-    await agent._permission(session, {"tool_id": "vendor", "permission_id": "owner-vendor", "details": {"acp_options": offered}})
+        {"outcome": {"outcome": "selected", "optionId": "vendor-once"}}
+    )
+    await agent._permission(
+        session, {"tool_id": "vendor", "permission_id": "owner-vendor", "details": {"acp_options": offered}}
+    )
     options = agent.connection.request_permission.call_args.kwargs["options"]
     assert ("allow_always" in {option.kind for option in options}) == (not attached)
-    assert engine.daemon.rpc.call.call_args.args == ("permission.respond_owned", {"tool_id": "vendor", "permission_id": "owner-vendor", "option_id": "vendor-once"})
+    assert engine.daemon.rpc.call.call_args.args == (
+        "permission.respond_owned",
+        {"tool_id": "vendor", "permission_id": "owner-vendor", "option_id": "vendor-once"},
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("permission_first", [False, True])
 async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_source_owner(
-    engine_factory, tmp_path, wrapped, permission_first,
+    engine_factory,
+    tmp_path,
+    wrapped,
+    permission_first,
 ):
     agent = KollabACPAgent()
     agent.on_connect(sdk_connection())
@@ -288,27 +368,50 @@ async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_s
     permission_done = asyncio.Event()
 
     async def select(**kwargs):
-        return RequestPermissionResponse.model_validate({"outcome": {
-            "outcome": "selected", "optionId": kwargs["options"][0].optionId}})
+        return RequestPermissionResponse.model_validate(
+            {"outcome": {"outcome": "selected", "optionId": kwargs["options"][0].optionId}}
+        )
 
     agent.connection.request_permission.side_effect = select
 
     async def produce(request_id):
         for index in range(2):
             permission_done.clear()
-            start = {"type": "tool_start", "tool_id": "terminal_0",
-                     "tool_name": "terminal", "tool_type": "terminal", "input": {"command": str(index)}}
+            start = {
+                "type": "tool_start",
+                "tool_id": "terminal_0",
+                "tool_name": "terminal",
+                "tool_type": "terminal",
+                "input": {"command": str(index)},
+            }
             permission_id = f"owner-{request_id}-{index}"
             permission_owner_tokens.append(permission_id)
-            permission = {"type": "permission_request", "tool_id": "terminal_0", "permission_id": permission_id, "tool_name": "terminal"}
+            permission = {
+                "type": "permission_request",
+                "tool_id": "terminal_0",
+                "permission_id": permission_id,
+                "tool_name": "terminal",
+            }
             if wrapped:
                 # The compatibility display event must not allocate a second invocation.
                 engine.events.put_nowait({"request_id": request_id, **start, "acp_passthrough": True})
-                start = {"type": "acp_update", "update": {"sessionUpdate": "tool_call",
-                    "toolCallId": "terminal_0", "title": "Vendor tool", "kind": "execute", "status": "pending"}}
-                permission["details"] = {"source": "acp", "acp_options": [
-                    {"optionId": "opaque-yes", "name": "Allow", "kind": "allow_once"},
-                    {"optionId": "opaque-no", "name": "Deny", "kind": "reject_once"}]}
+                start = {
+                    "type": "acp_update",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "terminal_0",
+                        "title": "Vendor tool",
+                        "kind": "execute",
+                        "status": "pending",
+                    },
+                }
+                permission["details"] = {
+                    "source": "acp",
+                    "acp_options": [
+                        {"optionId": "opaque-yes", "name": "Allow", "kind": "allow_once"},
+                        {"optionId": "opaque-no", "name": "Deny", "kind": "reject_once"},
+                    ],
+                }
             initial = [permission, start] if permission_first else [start, permission]
             for event in initial:
                 row = {"request_id": request_id, **event}
@@ -316,10 +419,24 @@ async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_s
                 engine.events.put_nowait(row)
             await asyncio.wait_for(permission_done.wait(), 1)
             if wrapped:
-                progress = {"type": "acp_update", "update": {"sessionUpdate": "tool_call_update",
-                    "toolCallId": "terminal_0", "status": "in_progress", "rawOutput": 0}}
-                result = {"type": "acp_update", "update": {"sessionUpdate": "tool_call_update",
-                    "toolCallId": "terminal_0", "status": "completed", "rawOutput": str(index)}}
+                progress = {
+                    "type": "acp_update",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "terminal_0",
+                        "status": "in_progress",
+                        "rawOutput": 0,
+                    },
+                }
+                result = {
+                    "type": "acp_update",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "terminal_0",
+                        "status": "completed",
+                        "rawOutput": str(index),
+                    },
+                }
                 engine.events.put_nowait({"request_id": request_id, **progress})
             else:
                 result = {"type": "tool_result", "tool_id": "terminal_0", "success": True, "output": str(index)}
@@ -344,16 +461,21 @@ async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_s
     start_ids = [row["toolCallId"] for row in starts]
     assert len(start_ids) == len(set(start_ids)) == 4
     assert [row["toolCallId"] for row in results] == start_ids
-    permission_ids = [call.kwargs["tool_call"].toolCallId
-                      for call in agent.connection.request_permission.call_args_list]
+    permission_ids = [
+        call.kwargs["tool_call"].toolCallId for call in agent.connection.request_permission.call_args_list
+    ]
     assert permission_ids == start_ids
     if wrapped:
-        assert [row["toolCallId"] for row in agent.connection.updates
-                if row.get("status") == "in_progress"] == start_ids
+        assert [
+            row["toolCallId"] for row in agent.connection.updates if row.get("status") == "in_progress"
+        ] == start_ids
         assert all(row.get("rawOutput") == 0 for row in agent.connection.updates if row.get("status") == "in_progress")
     assert permission_replies == [
-        {"tool_id": "terminal_0", "permission_id": permission_id, **(
-            {"option_id": "opaque-yes"} if wrapped else {"control": "APPROVE_ONCE"})}
+        {
+            "tool_id": "terminal_0",
+            "permission_id": permission_id,
+            **({"option_id": "opaque-yes"} if wrapped else {"control": "APPROVE_ONCE"}),
+        }
         for permission_id in permission_owner_tokens
     ]
     assert all(row == original for row, original in source_events)
@@ -362,7 +484,8 @@ async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_s
 
 @pytest.mark.asyncio
 async def test_permission_outcomes_cancel_only_the_matching_owner_when_tool_id_reused(
-    engine_factory, tmp_path,
+    engine_factory,
+    tmp_path,
 ):
     agent = KollabACPAgent()
     agent.on_connect(sdk_connection())
@@ -385,22 +508,22 @@ async def test_permission_outcomes_cancel_only_the_matching_owner_when_tool_id_r
     async def rpc(name, params):
         if name == "state.acp_submit":
             for permission_id in ("owner-A", "owner-B"):
-                engine.events.put_nowait({
-                    "request_id": params["request_id"],
-                    "type": "permission_request",
-                    "tool_id": "reused-tool",
-                    "permission_id": permission_id,
-                    "tool_name": "terminal",
-                })
+                engine.events.put_nowait(
+                    {
+                        "request_id": params["request_id"],
+                        "type": "permission_request",
+                        "tool_id": "reused-tool",
+                        "permission_id": permission_id,
+                        "tool_name": "terminal",
+                    }
+                )
             return {"accepted": True}
         if name == "permission.respond_owned":
             response_calls.append(params)
         return {"ok": True}
 
     engine.daemon.rpc.call.side_effect = rpc
-    prompt_task = asyncio.create_task(
-        agent.prompt(session_id, [TextContentBlock(type="text", text="run tools")])
-    )
+    prompt_task = asyncio.create_task(agent.prompt(session_id, [TextContentBlock(type="text", text="run tools")]))
     session = agent._session(session_id)
     try:
         await asyncio.wait_for(both_prompts_open.wait(), 1)
@@ -410,33 +533,43 @@ async def test_permission_outcomes_cancel_only_the_matching_owner_when_tool_id_r
             (request_id, "reused-tool", "owner-B"),
         }
 
-        engine.events.put_nowait({
-            "request_id": request_id,
-            "type": "permission_granted",
-            "tool_id": "reused-tool",
-            "permission_id": "owner-A",
-        })
+        engine.events.put_nowait(
+            {
+                "request_id": request_id,
+                "type": "permission_granted",
+                "tool_id": "reused-tool",
+                "permission_id": "owner-A",
+            }
+        )
         await asyncio.sleep(0)
         assert set(session.permission_tasks) == {(request_id, "reused-tool", "owner-B")}
 
-        responses[1].set_result(RequestPermissionResponse.model_validate({
-            "outcome": {"outcome": "selected", "optionId": "once"},
-        }))
+        responses[1].set_result(
+            RequestPermissionResponse.model_validate(
+                {
+                    "outcome": {"outcome": "selected", "optionId": "once"},
+                }
+            )
+        )
         for _ in range(50):
             if response_calls:
                 break
             await asyncio.sleep(0.01)
-        assert response_calls == [{
-            "tool_id": "reused-tool",
-            "permission_id": "owner-B",
-            "control": "APPROVE_ONCE",
-        }]
+        assert response_calls == [
+            {
+                "tool_id": "reused-tool",
+                "permission_id": "owner-B",
+                "control": "APPROVE_ONCE",
+            }
+        ]
 
-        engine.events.put_nowait({
-            "request_id": request_id,
-            "type": "turn_complete",
-            "stop_reason": "end_turn",
-        })
+        engine.events.put_nowait(
+            {
+                "request_id": request_id,
+                "type": "turn_complete",
+                "stop_reason": "end_turn",
+            }
+        )
         assert (await asyncio.wait_for(prompt_task, 1)).stopReason == "end_turn"
     finally:
         if not prompt_task.done():
@@ -448,7 +581,10 @@ async def test_permission_outcomes_cancel_only_the_matching_owner_when_tool_id_r
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrapped", [False, True])
 async def test_replay_tool_ids_are_unique_stable_and_disjoint_from_new_work_after_restart(
-    engine_factory, tmp_path, monkeypatch, wrapped,
+    engine_factory,
+    tmp_path,
+    monkeypatch,
+    wrapped,
 ):
     agent = KollabACPAgent()
     agent.on_connect(sdk_connection())
@@ -456,17 +592,42 @@ async def test_replay_tool_ids_are_unique_stable_and_disjoint_from_new_work_afte
     session_id = (await agent.new_session(str(tmp_path))).sessionId
     history = []
     for turn in range(2):
-        metadata = {"tool_calls": [{"id": source_id, "name": "terminal", "type": "terminal",
-            "input": {"command": str(turn)}, "result": str(turn), "status": "completed"}
-            for source_id in ["terminal_0", "terminal_1"]]}
+        metadata = {
+            "tool_calls": [
+                {
+                    "id": source_id,
+                    "name": "terminal",
+                    "type": "terminal",
+                    "input": {"command": str(turn)},
+                    "result": str(turn),
+                    "status": "completed",
+                }
+                for source_id in ["terminal_0", "terminal_1"]
+            ]
+        }
         if wrapped:
-            metadata = {"provider": "acp", "acp_updates": [
-                {"kind": kind, "payload": {"sessionUpdate": kind, "toolCallId": source_id,
-                    **({"title": str(turn), "kind": "execute", "status": "pending"}
-                       if kind == "tool_call" else {"status": "completed", "rawOutput": str(turn)})}}
-                for source_id in ["terminal_0", "terminal_1"] for kind in ["tool_call", "tool_call_update"]]}
-        history.append({"role": "assistant", "content": "", "metadata": metadata,
-                        "timestamp": f"2026-10-14T04:00:0{turn}"})
+            metadata = {
+                "provider": "acp",
+                "acp_updates": [
+                    {
+                        "kind": kind,
+                        "payload": {
+                            "sessionUpdate": kind,
+                            "toolCallId": source_id,
+                            **(
+                                {"title": str(turn), "kind": "execute", "status": "pending"}
+                                if kind == "tool_call"
+                                else {"status": "completed", "rawOutput": str(turn)}
+                            ),
+                        },
+                    }
+                    for source_id in ["terminal_0", "terminal_1"]
+                    for kind in ["tool_call", "tool_call_update"]
+                ],
+            }
+        history.append(
+            {"role": "assistant", "content": "", "metadata": metadata, "timestamp": f"2026-10-14T04:00:0{turn}"}
+        )
     original_history = deepcopy(history)
     engine_factory.instances[-1].refresh_history.return_value = history
     await agent.load_session(str(tmp_path), session_id)
@@ -501,19 +662,29 @@ async def test_replay_tool_ids_are_unique_stable_and_disjoint_from_new_work_afte
         if name == "state.acp_submit":
             source = {"type": "tool_start", "tool_id": "terminal_0", "tool_name": "terminal"}
             if wrapped:
-                source = {"type": "acp_update", "update": {"sessionUpdate": "tool_call", "toolCallId": "terminal_0",
-                    "title": "New backend tool", "kind": "execute", "status": "in_progress"}}
+                source = {
+                    "type": "acp_update",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "terminal_0",
+                        "title": "New backend tool",
+                        "kind": "execute",
+                        "status": "in_progress",
+                    },
+                }
             engine.events.put_nowait({"request_id": params["request_id"], **source})
-            engine.events.put_nowait({"request_id": params["request_id"], "type": "turn_complete",
-                                     "stop_reason": "end_turn"})
+            engine.events.put_nowait(
+                {"request_id": params["request_id"], "type": "turn_complete", "stop_reason": "end_turn"}
+            )
             return {"accepted": True}
         return {}
 
     engine.daemon.rpc.call.side_effect = rpc
     for _ in range(2):
         await restored.prompt(session_id, [TextContentBlock(type="text", text="new tool")])
-    new_ids = [row["toolCallId"] for row in restored.connection.updates[len(first):]
-               if row["sessionUpdate"] == "tool_call"]
+    new_ids = [
+        row["toolCallId"] for row in restored.connection.updates[len(first) :] if row["sessionUpdate"] == "tool_call"
+    ]
     assert len(set(new_ids)) == 2 and not set(new_ids).intersection(starts)
     assert history == original_history
     await restored.shutdown()

@@ -80,7 +80,9 @@ screenplay:
 
 identify target audience and genre expectations
 
-  <terminal>find . -name "*genre*" -o -name "*audience*" -o -name "*market*" 2>/dev/null | head -5</terminal>
+  <file-find><pattern>*genre*</pattern></file-find>
+  <file-find><pattern>*audience*</pattern></file-find>
+  <file-find><pattern>*market*</pattern></file-find>
 
 genre expectations shape structure:
 

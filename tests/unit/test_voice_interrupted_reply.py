@@ -357,6 +357,70 @@ async def test_the_cut_reaches_the_conversation_log(tmp_path, monkeypatch):
     assert thanks["parent_uuid"] == parent  # threads under the reply that stays
 
 
+async def test_talk_over_cut_updates_persisted_display_text_on_jsonl_resume(
+    tmp_path, monkeypatch
+):
+    from kollabor_ai.conversation_logger import KollaborConversationLogger
+    from kollabor_ai.conversation_manager import ConversationManager
+    from kollabor_ai.response_channels import turn_display_texts
+    from kollabor_events.data_models import ConversationMessage
+
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr("kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path / "data")
+    log = KollaborConversationLogger(tmp_path / "conversations")
+    llm = FakeLLM(logger=log)
+    parent = await log.log_user_message("Read this aloud", parent_uuid=None)
+
+    # This is the queue processor's projected form: the raw provider content
+    # keeps the XML and the separately persisted display text is what playback
+    # and the transcript show. Include a second XML-only reply to protect its
+    # intentional empty display text through the same rewrite.
+    first = await log.log_assistant_message(
+        "Hello there.\n<spoken_text>Hello there.</spoken_text>",
+        parent,
+        voice_turn_id="turn-xml",
+        display_content="Hello there.",
+    )
+    second = await log.log_assistant_message(
+        "<terminal>echo hidden</terminal>",
+        first,
+        voice_turn_id="turn-xml",
+        tool_calls=[{"id": "terminal-1", "name": "terminal", "input": {"command": "echo hidden"}}],
+        display_content="",
+    )
+    llm.conversation_history = [
+        ConversationMessage(
+            role="assistant",
+            content="Hello there.\n<spoken_text>Hello there.</spoken_text>",
+            metadata={"voice_turn_id": "turn-xml", "display_content": "Hello there."},
+        ),
+        ConversationMessage(
+            role="assistant",
+            content="<terminal>echo hidden</terminal>",
+            metadata={
+                "voice_turn_id": "turn-xml",
+                "display_content": "",
+                "xml_tool_calls": [{"id": "terminal-1"}],
+            },
+        ),
+    ]
+    llm.current_parent_uuid = second
+
+    assert (await service(llm).record_interrupted_voice_reply("turn-xml", "Hello"))["replaced"]
+
+    config = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: default,
+    )
+    loaded = ConversationManager(config, log)._load_from_jsonl(log.session_file)["messages"]
+    assistant = [message for message in loaded if message["role"] == "assistant"]
+    assert assistant[0]["metadata"]["display_content"] == "Hello"
+    assert assistant[1]["metadata"]["display_content"] == ""
+    visible = turn_display_texts(loaded)
+    assert visible[1] == "Hello"
+    assert visible[2] == ""
+
+
 async def test_a_cut_with_no_round_running_lands_right_after_it_answers():
     from kollabor_tui.display_tap import DisplayTap
 

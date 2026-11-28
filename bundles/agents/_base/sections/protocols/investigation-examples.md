@@ -5,8 +5,10 @@ example 1: simple information (immediate answer)
 user: "list all Python files in plugins/"
 
 <terminal>ls -la plugins/</terminal>
-<terminal>find plugins/ -name "*.py" -type f</terminal>
-<terminal>tree plugins/ 2>/dev/null || find plugins/ -type f | sort</terminal>
+<file-find><pattern>*.py</pattern></file-find>
+
+The search returns workspace-relative names. Select results under plugins/;
+check truncated before treating the list as complete.
 
 shows results directly - no questions needed.
 

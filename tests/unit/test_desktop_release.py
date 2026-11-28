@@ -302,6 +302,26 @@ def test_unpack_runtime_rejects_a_failing_pex_tools(source_root, monkeypatch):
         release.unpack_runtime(source, source_root / "app-runtime-aarch64-apple-darwin")
 
 
+def test_unpack_runtime_uses_retry_helper_for_the_pinned_pex_tools(source_root, monkeypatch):
+    source = source_root / "kollab-macos-aarch64"
+    fake_scie(source)
+    release.write_checksum(source)
+    calls = []
+
+    def retry(command, **_kwargs):
+        calls.append(command)
+        venv_dir = Path(command[command.index("--site-packages-copies") + 1])
+        (venv_dir / "lib" / release.RUNTIME_PYTHON / "site-packages").mkdir(parents=True)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(release, "run_with_retry", retry)
+
+    release.unpack_runtime(source, source_root / "app-runtime-aarch64-apple-darwin")
+
+    assert len(calls) == 1
+    assert calls[0][: len(release.PEX_TOOLS_CMD)] == list(release.PEX_TOOLS_CMD)
+
+
 def test_unpack_runtime_rejects_a_venv_without_site_packages(source_root, monkeypatch):
     source = source_root / "kollab-macos-aarch64"
     fake_scie(source)

@@ -103,8 +103,16 @@ async def test_two_separate_turns_keep_stream_open_until_both_finish(monkeypatch
         session.session_id,
         messages.AssistantRequest(
             commands=[
-                {"type": "add-message", "rowId": "user-session-test-0", "message": {"id": "first", "parts": [{"type": "text", "text": "one"}]}},
-                {"type": "add-message", "rowId": "user-session-test-1", "message": {"id": "second", "parts": [{"type": "text", "text": "two"}]}},
+                {
+                    "type": "add-message",
+                    "rowId": "user-session-test-0",
+                    "message": {"id": "first", "parts": [{"type": "text", "text": "one"}]},
+                },
+                {
+                    "type": "add-message",
+                    "rowId": "user-session-test-1",
+                    "message": {"id": "second", "parts": [{"type": "text", "text": "two"}]},
+                },
             ],
             state={"messages": []},
         ),
@@ -1329,7 +1337,12 @@ async def test_single_send_permission_handover_uses_capacity_until_terminal(monk
             "request_id": "single",
             "permission_id": permission_id,
         },
-        {"type": "permission_granted", "tool_id": "shell-single", "request_id": "single", "permission_id": permission_id},
+        {
+            "type": "permission_granted",
+            "tool_id": "shell-single",
+            "request_id": "single",
+            "permission_id": permission_id,
+        },
         {"type": "turn_complete", "request_id": "single"},
     ])
     session.send_message = AsyncMock(return_value={"accepted": True, "request_id": "single"})
@@ -1379,6 +1392,33 @@ async def test_single_send_permission_handover_uses_capacity_until_terminal(monk
 async def test_long_pending_permission_expires_to_bounded_accepted_id_tombstone(monkeypatch):
     monkeypatch.setattr(messages, "_ASSISTANT_HANDOVER_TTL_SECONDS", 0.01)
     monkeypatch.setattr(messages, "_ASSISTANT_HANDOVER_TOMBSTONE_TTL_SECONDS", 0.05)
+    clock = _FakeCorrelationClock()
+    monkeypatch.setattr(messages, "_assistant_correlation_monotonic", clock.monotonic)
+    loop = asyncio.get_running_loop()
+    call_later = loop.call_later
+    timers = []
+
+    class _ManualTimer:
+        def __init__(self, callback, args):
+            self.callback = callback
+            self.args = args
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+        def fire(self):
+            if not self.cancelled:
+                self.callback(*self.args)
+
+    def controlled_call_later(delay, callback, *args, context=None):
+        if getattr(callback, "__name__", None) == "expire":
+            timer = _ManualTimer(callback, args)
+            timers.append(timer)
+            return timer
+        return call_later(delay, callback, *args, context=context)
+
+    monkeypatch.setattr(loop, "call_later", controlled_call_later)
     session = _FakeSession([{
         "type": "permission_request",
         "tool_id": "shell-first",
@@ -1404,7 +1444,8 @@ async def test_long_pending_permission_expires_to_bounded_accepted_id_tombstone(
     queue = session.subscriptions[-1]
     assert token in messages._assistant_handover_ledger(session)
 
-    await asyncio.sleep(0.03)
+    clock.advance(0.02)
+    timers[0].fire()
     entry = messages._assistant_handover_ledger(session)[token]
     assert entry["status"] == "expired"
     assert entry["queue"] is None
@@ -1431,7 +1472,8 @@ async def test_long_pending_permission_expires_to_bounded_accepted_id_tombstone(
     assert "may still be running" in error
     assert "No messages were resubmitted" in error
 
-    await asyncio.sleep(0.06)
+    clock.advance(0.06)
+    timers[1].fire()
     assert token not in messages._assistant_handover_ledger(session)
 
 

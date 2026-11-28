@@ -40,6 +40,26 @@ gracefully signal and verify a whole process tree with its current Node-only
 mechanism. It reports cleanup as unverified and does not count that suite as
 passed.
 
+The `scrollbar-chrome` suite launches headed Chromium on Linux to measure
+classic scrollbars. The CI core lane installs `xvfb` and `xauth` and runs the
+suite under `xvfb-run`. The runner forwards `DISPLAY` and `XAUTHORITY` only to
+suites marked `requiresXvfb`, and only when CI opts in with
+`KOLLAB_BROWSER_XVFB=1`. Keep that opt-in on the `xvfb-run` invocation; do not
+point it at a desktop X session. For local interactive checks, run the single
+`npm run test:e2e:scrollbar-chrome` script directly.
+
+The global stylesheet owns the scrollbar hiding policy, including the known
+Radix, Monaco (normal/diff and minimap) and xterm custom chrome. The fixture
+mounts production `EditorPane` and `TerminalViewer` components. After checking
+hidden chrome and retained scrolling, it removes only the stylesheet's
+scrollbar rules and requires those same implementations to render visible
+chrome. This positive control also requires measurable classic native
+scrollbars on an overflowing document and both native container axes; missing
+elements cannot substitute for coverage. Browser readiness probes await their
+conditions, including asynchronous results. The fixture's dialog is nonmodal so
+its body scroll lock cannot mask the document scrollbar. The suite captures no
+screenshots and does not exercise a live engine, touch input or assistive technology.
+
 The sidebar footer proof opens the mocked shell at 390px and 820px, checks all
 eight controls are at least 44x44 CSS pixels, and checks that the footer and
 page fit without horizontal overflow. At 1280px it checks that all eight
@@ -62,8 +82,11 @@ test a real remote agent or provider.
 The suites above play fixtures. `scripts/chat-recorder.mjs` drives the real
 page against a running engine and a real agent, and records what the chat
 shows on every animation frame. Use it before calling a change to the chat's
-history sync, live turn or runtime done, and to compare a pull request's build
-with `main`. It is not part of CI: each flow is a real model turn.
+history sync, live turn or runtime done. The recorder requires the single-stream
+engine routes `GET /sessions/{id}/stream` and `POST /sessions/{id}/inputs` from
+the stream/API lanes. Run it against a combined stack that serves those routes;
+compare a pull request's build with a baseline only when both stacks have them.
+It is not part of CI: each flow is a real model turn.
 
 From `packages/kollabor-webui/frontend`, with a web UI and engine running and
 a throwaway agent in a scratch folder (Trust All, so it can run `sleep`):
@@ -95,6 +118,28 @@ counted exactly:
 | `read` | Scrolls up while its own turn runs and ends |
 | `three` | Three sends, each after the last settles |
 | `reload` | Reloads in the middle of its own turn |
+| `prompt-other` | Opens a permission prompt in the page, then approves it through a separate engine client |
+| `compact` | Seeds enough short turns, compacts the conversation, then sends again |
+| `goal-reload` | Reloads while a native `/goal` runs. It needs `GET /sessions/{id}/goal`, `turn.state.origin` and the `data-chat-*` tool-card attributes; ACP reports unsupported because persisted goals are unavailable |
+| `hub-note` | Sends a hub note to the selected agent while the page's turn is running |
+
+Run one flow or `all` against a runtime matrix by naming one sidebar identity
+for each runtime:
+
+```sh
+npm run record:chat -- all --runtime-matrix "native=native-recorder,codex-cli=codex-recorder,claude-code=claude-recorder" --web http://127.0.0.1:8080 --engine http://127.0.0.1:7433 --token-file /path/to/engine.token
+```
+
+Matrix runs resolve each identity to one engine session, check the session's
+configured runtime, and execute runtimes in native, codex-cli, claude-code
+order. The console prints one result for each
+runtime and flow. Recordings go under `--out/<runtime>/<flow>-<label>`; each
+`summary.json` includes the runtime and agent identity as well as every defect
+counter. `--agent <identity>` keeps the single-agent mode. Matrix agents need
+their own active sessions; `hub-note` also needs each selected agent to be
+reachable through the local Hub.
+Because ACP does not expose persisted goals, `all --runtime-matrix` reports
+`goal-reload` as unsupported for both `codex-cli` and `claude-code`.
 
 Per flow it writes, under `--out` (default `./chat-recordings`):
 
@@ -109,9 +154,10 @@ rebuilt), `MASS-FADE` (three or more rows fading in at once), `DUP-USER`,
 `DUP-REPLY` and `DUP-TOOLS` (a message, a reply or a turn's tool calls shown
 twice), `REPLY-GONE` (a reply left the screen), `PICKER` (an "N / M" switcher),
 `ANCHOR-MOVED` and `ANCHOR-LOST` (the row a reader scrolled to moved or was
-rebuilt), and an error box still showing at the end. An error box that shows
-and goes is logged, not counted: the cut flows drop a stream on purpose. The
-command exits 1 when any flow shows a defect.
+rebuilt), and `ERROR-BOX` (an error box still showing at the end). An error box
+that shows and goes is logged, not counted: the cut flows drop a stream on
+purpose. Each counter is reported for each flow and runtime; the command exits
+1 when any recorded run shows a defect.
 
 ## Current evidence and gaps
 
