@@ -2,7 +2,7 @@
 // Run from the frontend folder: npm run test:e2e:plugins
 // Browser: CHROME_PATH if set, else playwright-core's chromium.
 // PLUGIN_BUILD_OUT keeps the build folder; without it a temp folder is built and removed after the run.
-// PLUGIN_SCREENSHOTS writes hello-<width>.png into that folder.
+// PLUGIN_SCREENSHOTS writes hello-<width>.png into that folder. PLUGIN_DESKTOP_ONLY=1 runs only the 1440px desktop flow.
 // The app is the production build (scripts/build.mjs), served by a local Node server that sends the production
 // CSP for its import map. /api and /engine are fakes. Hello's manifest and bundle are read from bundles/plugins/hello.
 import assert from "node:assert/strict";
@@ -492,11 +492,13 @@ try {
   await assertMalformedPathIsGeneric(server.address().port);
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH ?? chromium.executablePath() });
   await desktopFlow();
-  await tabletFlow();
-  await phoneFlow();
-  await livePluginRemovalFlow();
-  await throwingBundleFlow();
-  await pluginsOffFlow();
+  if (process.env.PLUGIN_DESKTOP_ONLY !== "1") {
+    await tabletFlow();
+    await phoneFlow();
+    await livePluginRemovalFlow();
+    await throwingBundleFlow();
+    await pluginsOffFlow();
+  }
   assert.ok(chatStreamRequests > 0, "the open chat reads its stream from the fixture");
   assert.deepEqual(problems, [], "no page errors or CSP violations");
   console.log("plugins acceptance: Hello view, page and dialog pass at 1440, 820 and 390 px; live removal, throwing bundle and plugins=off pass");
