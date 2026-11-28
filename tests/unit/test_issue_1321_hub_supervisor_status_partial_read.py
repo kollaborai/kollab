@@ -3,8 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from plugins.hub.plugin import HubPlugin
-from plugins.hub.task_ledger import TaskLedger
 from plugins.hub.supervisor import SupervisorState
+from plugins.hub.task_ledger import TaskLedger
 
 
 def test_supervisor_status_warns_when_task_ledger_is_partial(tmp_path):
