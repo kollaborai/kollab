@@ -165,7 +165,7 @@ test("shouldAutoOpenGuide: valid malformed storage opens its normalized welcome 
   );
   assert.equal(
     guideModel.shouldAutoOpenGuide('{"step":"unknown-step","dismissed":true}'),
-    true,
+    false,
   );
 });
 

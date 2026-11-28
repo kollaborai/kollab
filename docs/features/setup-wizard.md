@@ -27,6 +27,9 @@ provider (a fresh install runs the built-in `default` profile, whose provider is
 **Get Started** moves on to the network and agent cards, and a card whose goal is
 already done (a live network, a running agent) is skipped.
 
+If saved progress names a step that is no longer available, the guide resumes at
+Welcome and keeps any saved dismissal, so it does not reopen on its own.
+
 While the guide is still loading provider facts, **Open provider setup** remains
 available as a direct recovery action. It stays available if `/profiles` fails
 or never responds; **Get Started** does not open Setup until the provider lookup
