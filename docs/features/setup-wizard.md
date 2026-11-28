@@ -26,6 +26,9 @@ provider (a fresh install runs the built-in `default` profile, whose provider is
 `auto`, and that does not count as a choice). Once a provider is chosen,
 **Get Started** moves on to the network and agent cards, and a card whose goal is
 already done (a live network, a running agent) is skipped.
+The guide saves dismissal separately from its current card. If a saved card is
+unknown, it resumes at Welcome while keeping a prior dismissal, so it does not
+auto-open again at startup.
 
 While the guide is still loading provider facts, **Open provider setup** remains
 available as a direct recovery action. It stays available if `/profiles` fails

@@ -73,7 +73,9 @@ export function loadGuideState(raw: string | null): GuideState {
     const validStep =
       typeof step === "string" &&
       Object.prototype.hasOwnProperty.call(STEP_INDEX, step);
-    if (!validStep) return initialGuideState();
+    if (!validStep) {
+      return { step: "welcome", dismissed: parsed.dismissed === true };
+    }
     return {
       step: step as SetupStepId,
       dismissed: parsed.dismissed === true,
