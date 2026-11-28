@@ -723,7 +723,7 @@ _terminal = ToolDefinition(
     notes=(
         "Background sessions run via tmux and persist across turns. "
         "Use terminal-status/terminal-output/terminal-kill to manage "
-        "them. Foreground terminal has a default timeout of 60 seconds."
+        "them. Foreground terminal has a default timeout of 120 seconds."
     ),
 )
 
