@@ -2,7 +2,7 @@
 title: "Unified Tool Loading"
 doc_type: architecture-rfc
 created: 2026-04-11
-modified: 2026-04-13
+modified: 2026-11-28
 status: shipped
 status: phases A-D implemented — registry + definitions + scope + grants
 owner: kollabor-agent
@@ -723,7 +723,7 @@ _terminal = ToolDefinition(
     notes=(
         "Background sessions run via tmux and persist across turns. "
         "Use terminal-status/terminal-output/terminal-kill to manage "
-        "them. Foreground terminal has a default timeout of 60 seconds."
+        "them. Foreground terminal has a default timeout of 120 seconds."
     ),
 )
 
