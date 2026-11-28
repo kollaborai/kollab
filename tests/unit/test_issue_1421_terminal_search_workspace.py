@@ -162,3 +162,39 @@ async def test_terminal_find_refuses_symlink_follow_and_allows_workspace_search(
         assert "symbolic links" in followed.error.lower()
         assert inside.success
         assert "workspace-marker.txt" in inside.output
+
+
+@pytest.mark.asyncio
+async def test_terminal_find_after_background_operator_cannot_search_outside():
+    with TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        workspace = root / "workspace"
+        outside = root / "outside"
+        workspace.mkdir()
+        outside.mkdir()
+        marker = outside / "protected-marker.txt"
+        marker.write_text("outside\n")
+
+        event_bus = MagicMock()
+        event_bus.emit_with_hooks = AsyncMock(return_value={})
+        executor = ToolExecutor(
+            mcp_integration=MagicMock(),
+            event_bus=event_bus,
+            terminal_timeout=10,
+            workspace=workspace,
+        )
+
+        result = await executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-find-background-operator",
+                "command": (
+                    "find . -maxdepth 1 -name missing-marker -print & "
+                    f"find {outside} -maxdepth 1 -name protected-marker.txt -print"
+                ),
+                "cwd": str(workspace),
+            }
+        )
+
+        assert not result.success
+        assert str(marker) not in result.output
