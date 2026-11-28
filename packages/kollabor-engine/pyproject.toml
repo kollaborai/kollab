@@ -23,7 +23,7 @@ dependencies = [
     # The assistant transport adapter targets the 0.0.34 chunk/serializer
     # contract. Later releases canonicalize the stream a second time and
     # reject the protocol-shaped chunks emitted by routes.messages.
-    "assistant-stream==0.0.34",
+    "assistant-stream==0.0.38",
 ]
 
 [project.optional-dependencies]
