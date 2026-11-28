@@ -58,7 +58,7 @@ jobs:
           cache-suffix: ${{ github.job }}-${{ matrix.shard.gem }}
 
       # Wheel/editable builds fail instead of substituting an older WebUI.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
@@ -182,7 +182,7 @@ jobs:
         with:
           cache-suffix: ${{ github.job }}-${{ matrix.lane }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
@@ -270,7 +270,7 @@ jobs:
           cache-suffix: ${{ github.job }}
 
       # Wheel/editable builds fail instead of substituting an older WebUI.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
@@ -357,7 +357,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
@@ -436,7 +436,7 @@ jobs:
         with:
           cache-suffix: ${{ github.job }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
@@ -484,7 +484,7 @@ jobs:
         with:
           cache-suffix: ${{ github.job }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
@@ -579,7 +579,7 @@ jobs:
         with:
           cache-suffix: ${{ github.job }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
@@ -660,7 +660,7 @@ jobs:
 
       # build_binary.py verifies its own output before exiting: it runs the
       # binary with --version, kollab's imports and an HTTPS request.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
