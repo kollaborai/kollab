@@ -61,8 +61,10 @@ async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
     except ProcessLookupError:
         pass
     await proc.wait()
-    # The owner is the sole holder of its stdout/stderr pipes. Its children use
-    # private regular files, so reaping it also guarantees pipe EOF.
+    # A detached descendant can inherit the owner's pipes and keep communicate()
+    # pending after the owner exits. Its private artifacts are owned and removed
+    # by the reaped process, so do not make cancellation wait for pipe EOF.
+    communication_task.cancel()
     await asyncio.gather(communication_task, return_exceptions=True)
 
 
