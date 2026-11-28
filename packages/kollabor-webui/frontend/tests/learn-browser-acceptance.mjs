@@ -360,6 +360,7 @@ async function json(route, body, status = 200) {
 }
 
 export async function openVite() {
+  // Keep helper-only subprocesses light; browser suites load Vite on demand.
   const { createServer } = await import("vite");
   const server = await createServer({
     configFile: path.join(frontendRoot, "vite.config.ts"),
@@ -604,6 +605,7 @@ async function verifyMobileLearnLayout(browser, baseUrl) {
 // set, selects the binary; otherwise playwright's own registry install is used
 // (the CI install step populates it). Linux runners need --no-sandbox.
 export async function launchAcceptanceBrowser() {
+  // Most helper consumers do not launch a browser.
   const { chromium } = await import("playwright-core");
   const executablePath = process.env.CHROME_PATH;
   return chromium.launch({

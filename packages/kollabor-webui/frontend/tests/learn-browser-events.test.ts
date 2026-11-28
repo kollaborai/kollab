@@ -4,6 +4,20 @@ import { test } from "node:test";
 
 import { makeFixtures } from "./learn-browser-acceptance.mjs";
 
+test("browser acceptance helper imports within the test subprocess deadline", () => {
+  const helperUrl = new URL("./learn-browser-acceptance.mjs", import.meta.url).href;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    await import(${JSON.stringify(helperUrl)});
+    console.log("browser acceptance helper imported");
+  `], {
+    encoding: "utf8",
+    timeout: 1_500,
+  });
+
+  assert.equal(child.status, 0, child.stderr || child.stdout);
+  assert.match(child.stdout, /browser acceptance helper imported/);
+});
+
 test("staged session events are not replayed after the event stream reconnects", async () => {
   const fixtures = makeFixtures({ events: [{ type: "notice", message: "save failed" }] });
   const request = {
