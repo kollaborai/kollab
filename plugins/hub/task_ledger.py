@@ -1092,15 +1092,25 @@ class TaskLedger:
                 return claimed
         return None
 
-    def get_open(self, project: str = "") -> List[TaskCard]:
-        """Get open (unassigned) cards, highest priority first."""
-        result = [c for c in self.get_all(status="open") if not c.assignee]
+    def get_open(
+        self, project: str = "", *, read_errors: Optional[List[str]] = None
+    ) -> List[TaskCard]:
+        """Get open cards; append unreadable card IDs to ``read_errors``."""
+        result = [
+            c
+            for c in self.get_all(status="open", read_errors=read_errors)
+            if not c.assignee
+        ]
         if project:
             result = [c for c in result if not c.project or c.project == project]
         return sorted(result, key=lambda c: (-c.priority, c.created_at))
 
     def get_stalled(
-        self, threshold_seconds: float, now: Optional[float] = None
+        self,
+        threshold_seconds: float,
+        now: Optional[float] = None,
+        *,
+        read_errors: Optional[List[str]] = None,
     ) -> List[TaskCard]:
         """Get active cards with no worker activity past the threshold.
 
@@ -1109,7 +1119,7 @@ class TaskLedger:
         """
         now = time.time() if now is None else now
         stalled = []
-        for card in self.get_all(status="active"):
+        for card in self.get_all(status="active", read_errors=read_errors):
             # Snoozed cards explicitly opt out of reminder and stall handling
             # until the caller's clock reaches their expiry.
             if card.snoozed_until > now:
