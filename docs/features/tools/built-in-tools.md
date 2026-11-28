@@ -101,7 +101,8 @@ shorten but cannot exceed the configured terminal timeout; excessive and invalid
 values are rejected before execution. Voice-origin commands may have a stricter
 policy limit. Durations use seconds, minutes, or hours (`30s`, `5m`, `1h`). For a
 background session, `timeout` schedules an auto-kill. Without it, the session has
-no automatic timeout.
+no automatic timeout. When a foreground command times out, its process group is
+terminated, including background children that the shell started.
 
 Agent bundles that need terminal inspection without shell writes can grant the
 `terminal-read` tool alongside `file-read` and `file-grep`:
