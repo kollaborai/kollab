@@ -4,7 +4,7 @@ import type { LiveAgent } from "@/api";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import { cn } from "@/lib/utils";
 
-function VersionDetails({ detail }: { detail: string }) {
+function VersionDetails({ detail, label = "Version details" }: { detail: string; label?: string }) {
   const [expanded, setExpanded] = useState(false);
   const contentId = useId();
 
@@ -12,8 +12,8 @@ function VersionDetails({ detail }: { detail: string }) {
     <>
       {/* Collapsed, the disclosure is one icon inline with the actions; it never takes its own row. */}
       <details className="min-w-0" onToggle={(event) => setExpanded(event.currentTarget.open)}>
-        <summary aria-label="Version details" aria-expanded={expanded} aria-controls={contentId} title={detail} className="group/version relative min-h-7 list-none cursor-pointer px-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 [&::-webkit-details-marker]:hidden">
-          <Info aria-hidden="true" className="size-3" />
+        <summary aria-label={label} aria-expanded={expanded} aria-controls={contentId} title={detail} className="group/version relative inline-flex min-h-7 list-none cursor-pointer items-center justify-center px-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 pointer-coarse:size-11 [&::-webkit-details-marker]:hidden">
+          <Info aria-hidden="true" className="block size-3" />
         </summary>
       </details>
       {/* Expanded, the detail text is the strip's last row: full width, below the Dismiss. */}
@@ -28,13 +28,13 @@ function VersionDetails({ detail }: { detail: string }) {
 export type AgentVersionNoticeState = {
   /**
    * `too-old`: the agent publishes no version, so it started before Restart Agent existed and cannot
-   * restart itself. `button`: Restart Agent is on. `command`: it is off, so the line names /restart.
-   * `unknown`: the daemon is outdated, but the page has no agent version to choose a more specific action.
+   * restart itself. `button`: the user can restart it in the page. `unknown`: the daemon is outdated,
+   * but the page has no agent version to choose a more specific action.
    */
-  kind: "too-old" | "button" | "command" | "unknown";
+  kind: "too-old" | "button" | "unknown";
   /** Version details for the disclosure; never included in the notice line. */
   detail: string;
-  /** The agent's name, for the stop-and-start line. */
+  /** The agent's name from the live row; recovery copy does not expose it. */
   name: string;
 };
 
@@ -48,29 +48,11 @@ export function versionNoticeKey(sessionId: string | undefined, agentId: string 
   return chatOutdated ? `${base}|outdated` : base;
 }
 
-/** The stop-and-start action shared by too-old and unknown-version notices. */
-function stopAndStartLine(name: string) {
-  return (
-    <>
-      Run{" "}
-      <span className="[&_code]:break-words">
-        <code className="whitespace-normal">
-          kollab{" "}<span className="whitespace-nowrap">--hub</span>{" "}stop {name}
-        </code>
-      </span>{" "}
-      in a terminal, then select its Offline row in the sidebar to start it again.
-    </>
-  );
-}
-
-function tooOldLine(name: string) {
-  return <>This agent started before Restart Agent existed. {stopAndStartLine(name)}</>;
-}
-
 /**
  * The notice for one chat, or null while its agent runs the engine's version. An agent that publishes
  * no version started before agents did, so it counts as older even while the engine version loads.
- * A versioned agent waits for the engine version; with no agent row there is no identity to guide.
+ * A versioned agent waits for the engine version; every mismatch then offers an in-page restart.
+ * With no agent row there is no identity to guide.
  */
 export function agentVersionNotice({
   engineVersion,
@@ -81,6 +63,7 @@ export function agentVersionNotice({
 }: {
   engineVersion: string;
   agent: LiveAgent | undefined;
+  /** This setting does not disable a user-requested restart through the engine route. */
   restartAgents: boolean;
   /**
    * The chat stream answered 426: the agent predates it, so a typed /restart can never reach it (#1451).
@@ -105,15 +88,14 @@ export function agentVersionNotice({
   if (running === engineVersion) return null;
   const detail = `Agent ${running || "(version unknown)"} · engine ${engineVersion}`;
   // No version means a build from before /restart restarted in place. There /restart is an alias of /new,
-  // which wipes the conversation, so that agent gets the stop-and-start line and no button or /restart.
+  // which wipes the conversation, so that agent must use the engine's restart action.
   if (!running) return { kind: "too-old", detail, name: agent.name };
-  return { kind: restartAgents ? "button" : "command", detail, name: agent.name };
+  return { kind: "button", detail, name: agent.name };
 }
 
 /**
- * One quiet line above the chat: this agent runs an older version of Kollab. With Restart Agent on,
- * the button restarts it where it stands (same chat, same history); off, the line names /restart. An
- * agent that cannot restart itself gets its stop-and-start command instead, with no button.
+ * One quiet line above the chat: this agent runs an older version of Kollab. Restart Agent restarts
+ * it where it stands (same chat, same history), including when its agent process is too old to do so.
  */
 export type AgentVersionNoticeProps = {
   notice: AgentVersionNoticeState;
@@ -140,8 +122,14 @@ export function AgentVersionNotice({
 }: AgentVersionNoticeProps) {
   if (failure && tooOld) {
     return (
-      <NoticeBar urgent detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
-        {tooOldLine(notice.name)}
+      <NoticeBar
+        urgent
+        detail={notice.detail}
+        details={<VersionDetails detail={notice.detail} />}
+        actions={<NoticeAction onClick={onRestart}>Try Again</NoticeAction>}
+        onDismiss={onDismiss}
+      >
+        This agent could not be restarted.
       </NoticeBar>
     );
   }
@@ -150,39 +138,30 @@ export function AgentVersionNotice({
       <NoticeBar
         urgent
         detail={notice.detail}
-        details={<VersionDetails detail={notice.detail} />}
+        details={<VersionDetails detail={`${notice.detail} · ${failure}`} label="Restart details" />}
         actions={<NoticeAction onClick={onRestart}>Try Again</NoticeAction>}
         onDismiss={onDismiss}
       >
-        {`Couldn't restart this agent. ${failure}`}
+        Couldn't restart this agent.
       </NoticeBar>
     );
   }
   if (busy) {
     return (
-      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />}>
-        {waiting ? "This agent restarts when its turn ends." : "Restarting this agent…"}
-      </NoticeBar>
-    );
-  }
-  if (notice.kind === "too-old") {
-    return (
       <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
-        {tooOldLine(notice.name)}
+        {waiting ? "This agent will restart after its current work finishes." : "Restarting this agent…"}
       </NoticeBar>
     );
   }
-  if (notice.kind === "unknown") {
+  if (notice.kind === "too-old" || notice.kind === "unknown") {
     return (
-      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />}>
-        <>This agent runs older code. {stopAndStartLine(notice.name)}</>
-      </NoticeBar>
-    );
-  }
-  if (notice.kind === "command") {
-    return (
-      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
-        Run /restart to update the agent version running.
+      <NoticeBar
+        detail={notice.detail}
+        details={<VersionDetails detail={notice.detail} />}
+        actions={<NoticeAction onClick={onRestart}>Restart Agent</NoticeAction>}
+        onDismiss={onDismiss}
+      >
+        This agent runs an older version of Kollab.
       </NoticeBar>
     );
   }

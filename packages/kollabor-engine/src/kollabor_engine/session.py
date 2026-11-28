@@ -37,6 +37,7 @@ from .daemon_pool import DaemonHandle, get_daemon_pool
 from .history_provenance import mark_system_initialization
 from .history_store import anchor_digest, read_history_from_disk_async
 from .history_xml_tools import web_history
+from .hub_bridge import HubBridge
 from .session_context import SessionReadContext
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,8 @@ HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS = 30.0
 # after these pauses: the relay can outlast that RPC timeout (~19 s seen live),
 # and the page waits for history_updated rather than asking again.
 HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+OUTDATED_AGENT_IDLE_POLL_SECONDS = 0.5
+OUTDATED_AGENT_IDLE_TIMEOUT_SECONDS = 3600.0
 
 
 class HistoryRefreshUnavailable(Exception):
@@ -233,6 +236,8 @@ class EngineSession:
         self._history_lock = asyncio.Lock()
         # Serializes same-session MCP attach snapshot/apply/rollback transactions.
         self._mcp_lock = asyncio.Lock()
+        self._restart_guard = asyncio.Lock()
+        self._restart_task: Optional[asyncio.Task[Dict[str, bool]]] = None
         # The mirror holds a disk seed the daemon has not replaced yet. A seed
         # is no prefix of the daemon's history (hub messages are logged apart),
         # so a page showing it replaces its thread whole when the daemon answers.
@@ -276,6 +281,8 @@ class EngineSession:
         self._acp_usage_display_turn: tuple[str, int] | None = None
 
         self._pending_permissions: Dict[tuple[str, str], Dict[str, Any]] = {}
+        # None until an event or status request establishes the current turn state.
+        self._turn_in_progress: Optional[bool] = None
         self._active_turn_task: Optional[asyncio.Task] = None
         self._event_task: Optional[asyncio.Task] = None
         self._facts_task: Optional[asyncio.Task] = None
@@ -318,6 +325,7 @@ class EngineSession:
     async def initialize(
         self,
         on_spawned: Optional[Callable[["EngineSession"], Awaitable[None]]] = None,
+        resume_conversation_id: Optional[str] = None,
     ) -> None:
         """Spawn the daemon, persist its owner record, then initialize it.
 
@@ -350,6 +358,7 @@ class EngineSession:
             profile_env=inline_profile_env(self.profile),
             stop_on_owner_exit=self.stop_on_owner_exit,
             webui_owned=self.webui_owned,
+            resume_conversation_id=resume_conversation_id,
         )
         if on_spawned is not None:
             await on_spawned(self)
@@ -399,6 +408,145 @@ class EngineSession:
             self._track_events(), name=f"session-track-{self.session_id}"
         )
         await self.refresh_history()
+
+    async def restart_outdated_agent(self) -> Dict[str, bool]:
+        """Coalesce concurrent restart requests for this session."""
+        async with self._restart_guard:
+            task = self._restart_task
+            if task is None or task.done():
+                task = asyncio.create_task(
+                    self._restart_outdated_agent_once(),
+                    name=f"restart-{self.session_id}",
+                )
+                self._restart_task = task
+        return await asyncio.shield(task)
+
+    async def _restart_outdated_agent_once(self) -> Dict[str, bool]:
+        """Stop a pre-restart-RPC agent through Hub and start this session again."""
+        if self.device:
+            raise ValueError(
+                "This agent is on another computer and cannot be restarted by this engine."
+            )
+        daemon = self.daemon
+        if daemon is None or not daemon.identity or not daemon.socket_path:
+            raise ValueError("This agent is not connected to this engine.")
+
+        bridge = HubBridge()
+        presence = bridge.get_agent_by_identity(
+            daemon.identity, use_cache=False, project=daemon.project or self.workspace
+        )
+        if not presence:
+            raise ValueError("This agent could not be found in the hub.")
+
+        agent_id = presence.get("agent_id")
+        pid = presence.get("pid")
+        started_at = presence.get("started_at")
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or agent_id != daemon._daemon_image
+            or type(pid) is not int
+            or pid <= 0
+            or pid != daemon.pid
+        ):
+            raise ValueError("This agent's identity changed before it could be restarted.")
+
+        from plugins.hub.messenger import AgentMessenger
+
+        waiting_for_turn = await self._wait_for_outdated_agent_idle(
+            daemon, AgentMessenger
+        )
+        generation = AgentMessenger.shutdown_generation(agent_id, pid, started_at)
+        if not generation:
+            raise ValueError("This agent's identity could not be confirmed.")
+        current = bridge.get_agent_by_identity(
+            daemon.identity, use_cache=False, project=daemon.project or self.workspace
+        )
+        if not current or (
+            current.get("agent_id") != agent_id
+            or current.get("pid") != pid
+            or current.get("started_at") != started_at
+        ):
+            raise ValueError("This agent's identity changed before shutdown.")
+        accepted = await AgentMessenger.signal_shutdown(
+            daemon.socket_path,
+            reason="Restart Agent requested by the web UI",
+            timeout=3.0,
+            generation_check=False,
+            **generation,
+        )
+        if not accepted:
+            raise ValueError("This agent did not accept the restart request.")
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10.0
+        while daemon.alive and loop.time() < deadline:
+            await asyncio.sleep(0.1)
+        if daemon.alive:
+            raise ValueError("This agent did not shut down. Try again.")
+
+        current = bridge.get_agent_by_identity(
+            daemon.identity, use_cache=False, project=daemon.project or self.workspace
+        )
+        if current and (
+            current.get("agent_id") != agent_id
+            or current.get("pid") != pid
+            or current.get("started_at") != started_at
+        ):
+            raise ValueError("Another agent with this identity is already running.")
+
+        await self.shutdown()
+        self._borrowed_daemon = False
+        self.external = False
+        try:
+            # initialize() uses DaemonPool.spawn(), the same kollab_argv()-based
+            # launcher used for an Offline row in the sidebar.
+            async def persist_spawned(candidate: "EngineSession") -> None:
+                candidate._notify_persistence_changed()
+
+            await self.initialize(
+                on_spawned=persist_spawned,
+                resume_conversation_id=self.conversation_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "session %s stopped its old agent but could not restart it (%s)",
+                self.session_id,
+                type(exc).__name__,
+            )
+            raise ValueError(
+                "The agent stopped, but the engine could not start it again."
+            ) from exc
+        return {"restarting": True, "waiting_for_turn": waiting_for_turn}
+
+    async def _wait_for_outdated_agent_idle(self, daemon, messenger) -> bool:
+        """Wait for the old daemon's published turn state to settle before shutdown."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + OUTDATED_AGENT_IDLE_TIMEOUT_SECONDS
+        waiting_for_turn = False
+
+        while True:
+            if not daemon.alive:
+                raise ValueError("This agent stopped before its turn could finish.")
+            status = await messenger.request_status(daemon.socket_path, timeout=3.0)
+            state = status.get("state") if isinstance(status, dict) else None
+            state = state.lower() if isinstance(state, str) else None
+
+            if state in {"working", "active"}:
+                busy = True
+            elif state in {"idle", "waiting", "registered"}:
+                busy = self._turn_in_progress is True
+            elif self._turn_in_progress is not None:
+                busy = self._turn_in_progress
+            else:
+                raise ValueError("This agent's turn state could not be confirmed.")
+
+            if not busy:
+                return waiting_for_turn
+            waiting_for_turn = True
+            if loop.time() >= deadline:
+                raise ValueError("This agent's turn did not finish. Try again.")
+            await asyncio.sleep(OUTDATED_AGENT_IDLE_POLL_SECONDS)
 
     async def _await_acp_startup(self) -> None:
         """A connected daemon is usable only after its adapter has started."""
@@ -1014,6 +1162,7 @@ class EngineSession:
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: Dict[str, Any] | None = None,
+        input_source: str | None = None,
         private_goal_reply: bool = False,
         private_goal_reply_id: str | None = None,
         goal_conversation_uid: str | None = None,
@@ -1043,7 +1192,13 @@ class EngineSession:
             if admitted.get("admitted") is not True:
                 return {"accepted": False, "reason": "invalid voice admission capability"}
         try:
-            kwargs = {"request_id": request_id, "thread_id": thread_id, "origin_context": origin_context}
+            kwargs = {
+                "request_id": request_id,
+                "thread_id": thread_id,
+                "origin_context": origin_context,
+            }
+            if input_source is not None:
+                kwargs["input_source"] = input_source
             if private_goal_reply:
                 kwargs["private_goal_reply"] = True
                 kwargs["private_goal_reply_id"] = private_goal_reply_id
@@ -1130,6 +1285,7 @@ class EngineSession:
         messages: list[Dict[str, Any]],
         *,
         expected_active_request_ids: tuple[str, ...],
+        input_source: str | None = None,
         on_attempt: Any = None,
         on_admission: Any = None,
     ) -> Dict[str, Any]:
@@ -1151,12 +1307,14 @@ class EngineSession:
                 "reason": "force_send_unavailable",
                 "results": [],
             }
-        result = await submit(
-            messages,
-            expected_active_request_ids=expected_active_request_ids,
-            on_attempt=on_attempt,
-            on_admission=on_admission,
-        )
+        batch_kwargs = {
+            "expected_active_request_ids": expected_active_request_ids,
+            "on_attempt": on_attempt,
+            "on_admission": on_admission,
+        }
+        if input_source is not None:
+            batch_kwargs["input_source"] = input_source
+        result = await submit(messages, **batch_kwargs)
         if not isinstance(result, dict):
             raise TypeError("state.send_message_batch expected a result dict")
         return result
@@ -1277,7 +1435,10 @@ class EngineSession:
                         if event.get(key) is not None
                     }
 
-                elif etype == "turn_start" and event.get("generation") is not None:
+                elif etype == "turn_start":
+                    self._turn_in_progress = True
+                    if event.get("generation") is None:
+                        continue
                     # ACP can start another prompt while the prior completion
                     # is still persisting. Never display that prior turn as the
                     # new turn's usage if its completion arrives late.
@@ -1291,6 +1452,7 @@ class EngineSession:
                         # This admitted request was cancelled before a native
                         # turn started; it has no history or usage to count.
                         continue
+                    self._turn_in_progress = False
                     self.total_turns += 1
                     self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
                     self.total_output_tokens += int(event.get("output_tokens", 0) or 0)

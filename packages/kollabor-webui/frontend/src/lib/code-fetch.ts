@@ -16,7 +16,7 @@ import { EngineApi } from "@/api";
 const api = new EngineApi();
 
 /** Shown in place of the error when a session's daemon predates Code, Git and Terminal. No version or code in it. */
-export const OUTDATED_NOTICE = "This agent runs older code. Restart it to use Code, Git and Terminal.";
+export const OUTDATED_NOTICE = "This agent uses older code. Code, Git and Terminal are unavailable in this session.";
 export const DAEMON_OUTDATED_EVENT = "kollab:daemon-outdated";
 export const CODE_REQUEST_SUCCEEDED_EVENT = "kollab:code-request-succeeded";
 

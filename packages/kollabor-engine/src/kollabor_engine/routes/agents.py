@@ -295,7 +295,7 @@ async def list_agent_pool(
         "active": [agent["name"] for agent in agents if agent["active"]],
         "count": len(agents),
         "live": running,
-        # Whether a chat whose agent runs an older version offers Restart Agent (else it points at /restart).
+        # The configured preference; the user-requested restart route accepts clicks either way.
         "restart_agents": restart_agents_enabled(),
     }
 

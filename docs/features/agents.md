@@ -379,10 +379,11 @@ agent that publishes no version started before agents did and counts as older.
 
 | `kollabor.updates.restart_agents` | The line says | You do |
 |---|---|---|
-| on | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
-| off (default) | "Run /restart to update the agent version running." | Type `/restart` in the chat |
-| either, when the agent publishes no version (it started before Restart Agent existed) | "This agent started before Restart Agent existed. Run kollab --hub stop <name> in a terminal, then select its Offline row in the sidebar to start it again." No button | Stop it in a terminal, then select its Offline row in the sidebar |
+| on or off (default) | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
+| either, when the agent publishes no version | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
 
+The `POST /sessions/{id}/restart-agent` route accepts a user-requested restart
+when the setting is off, so the notice offers the same in-page action either way.
 Both versions are in the line's hover text, never in the line. The setting is in
 `/config` under Updates as "Restart Agent Button".
 
@@ -399,12 +400,18 @@ the state RPC `state.restart_agent`) restarts the agent in place:
    socket path is named by the identity, so the web UI reattaches to the same
    path on its own and the open chat needs no reload.
 
+If an older agent does not implement `state.restart_agent`, the engine asks it
+to shut down through the hub and starts the same web session through the normal
+agent launcher. The page keeps the existing session open while the agent
+reconnects.
+
 `/restart` no longer clears the conversation. `/new` (alias `/clear`) does that.
 A window started with `--no-daemon` has no daemon to replace: `/restart` there
 says so and changes nothing; quit and start Kollab again. An agent started
-before `/restart` existed answers that it is too old to restart itself. The web chat
-shows that agent the stop-and-start line above, with no button. A failed ask gets
-Try Again, except the engine's too-old answer, which gets the same line with Dismiss only.
+before `/restart` existed answers that it is too old to restart itself. The web
+chat's Restart Agent button asks the engine to stop that agent through the hub
+and start the same session with the normal launcher. A failed restart shows the
+error in the notice with a Try Again button.
 
 A terminal window attached to the agent stays open through the restart. Just
 before it shuts down, the agent publishes `daemon_restarting` to its attached

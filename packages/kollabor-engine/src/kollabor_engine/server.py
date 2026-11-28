@@ -42,6 +42,22 @@ def get_session_registry() -> Dict[str, EngineSession]:
     return _sessions
 
 
+def _webui_halted_detail(detail: str) -> str:
+    """Remove terminal repair commands from halt errors returned to the page."""
+    lowered = detail.casefold()
+    if "halt.json is unreadable" in lowered:
+        return (
+            "This workspace is held because its network halt record is unreadable. "
+            "The page will keep it closed until the record is repaired."
+        )
+    if "kollab --" in lowered or "in a terminal" in lowered:
+        return (
+            "This workspace is held by a network halt. Open Settings → Network "
+            "to review the available resume controls."
+        )
+    return detail
+
+
 # Opens in flight, so concurrent requests for one agent share a single attach.
 _adopting: Dict[str, "asyncio.Future[Any]"] = {}
 
@@ -106,7 +122,9 @@ async def open_named_session(
         )
         if found is not None and found.get("halted"):
             # A halt waiter runs no turn: nothing to attach, the web shows its line.
-            raise HTTPException(status_code=409, detail=found["halted"])
+            raise HTTPException(
+                status_code=409, detail=_webui_halted_detail(found["halted"])
+            )
         if found is not None:
             try:
                 store = getattr(request.app.state, "handover_store", None)

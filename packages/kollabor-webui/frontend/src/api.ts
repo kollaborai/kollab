@@ -486,7 +486,7 @@ export type AgentPoolResponse = {
   active?: string[];
   /** Every running agent in that scope, one per process (`agents` has one per name). */
   live?: LiveAgent[];
-  /** kollabor.updates.restart_agents: a chat whose agent is older offers Restart Agent (else it points at /restart). */
+  /** The configured kollabor.updates.restart_agents value; user-requested restart is allowed either way. */
   restart_agents?: boolean;
 };
 

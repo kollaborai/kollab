@@ -78,6 +78,18 @@ CONFIRMED_ACTIONS = frozenset({
 })
 CONFIRM_REFUSAL = "A person has to confirm this first: use the Halt and Resume view, or kollab --hub halt."
 
+WEBUI_PANEL_REFUSALS = {
+    ONE_MACHINE_REFUSAL: "A second device on this network must confirm the resume. Add one before trying again here.",
+    CONFIRM_REFUSAL: "Confirm this action in the page before continuing.",
+}
+
+
+def panel_error_message(message: str, *, input_source: str | None = None) -> str:
+    """Use page guidance for WebUI requests and keep terminal refusals intact."""
+    if input_source != "webui":
+        return message
+    return WEBUI_PANEL_REFUSALS.get(message, message)
+
 
 def require_confirmed(action: str, payload: Any) -> None:
     """Refuse a halt, resume or revoke act whose payload lacks ``confirmed: true``."""

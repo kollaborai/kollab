@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const engine = vi.hoisted(() => ({
   calls: [] as string[],
   folders: "outdated" as "outdated" | "ok" | "broken",
+  tree: "outdated" as "outdated" | "ok",
 }));
 
 vi.mock("@/lib/code-fetch", async (importOriginal) => {
@@ -24,6 +25,9 @@ vi.mock("@/lib/code-fetch", async (importOriginal) => {
       }
       if (url.startsWith("/code/folders") && engine.folders === "broken") {
         return json(500, { success: false, error: { code: "boom", message: "boom" } });
+      }
+      if (url.startsWith("/api/fs/tree") && engine.tree === "ok") {
+        return json(200, { success: true, data: { tree: [] } });
       }
       return json(502, { success: false, error: { code: "daemon_outdated", message: actual.OUTDATED_NOTICE } });
     },
@@ -49,8 +53,14 @@ const daemonNotice = {
   busy: false,
   onRestart: () => {},
 };
-const stopAndStart = "This agent started before Restart Agent existed. Run kollab --hub stop lapis in a terminal, then select its Offline row in the sidebar to start it again.";
+const restartNotice = "This agent runs an older version of Kollab.";
 const oldSentence = "Could not load folders from this agent. Restart it and try again.";
+
+function expectInPageRestart(text: string) {
+  expect(text).toContain(restartNotice);
+  expect(text).toContain("Restart Agent");
+  expect(text).not.toMatch(/kollab --|in a terminal/i);
+}
 
 let host: HTMLDivElement;
 let root: Root;
@@ -70,6 +80,7 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   engine.calls = [];
   engine.folders = "outdated";
+  engine.tree = "outdated";
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -81,15 +92,14 @@ afterEach(() => {
 });
 
 describe("Code and Git panels against a daemon_outdated engine", () => {
-  it.each(["code", "git"] as const)("%s view: the folder list itself fails, and the stop-and-start notice shows", async (mode) => {
+  it.each(["code", "git"] as const)("%s view: the folder list itself fails, and the in-page restart notice shows", async (mode) => {
     const text = await mount(
       <CodeEditorView sessionId="s1" workspace="/w" mode={mode} daemonNotice={daemonNotice} />,
     );
     expect(engine.calls[0]).toBe("/code/folders");
-    expect(text).toContain(stopAndStart);
+    expectInPageRestart(text);
     expect(text).not.toContain(oldSentence);
     expect(host.querySelector('[role="alert"]')).toBeNull();
-    expect(text).not.toContain("Retry");
   });
 
   it("retries the folder list after the agent reaches the engine version", async () => {
@@ -102,9 +112,10 @@ describe("Code and Git panels against a daemon_outdated engine", () => {
         daemonNotice={daemonNotice}
       />,
     );
-    expect(previous).toContain(stopAndStart);
+    expectInPageRestart(previous);
 
     engine.folders = "ok";
+    engine.tree = "ok";
     const current = await mount(
       <CodeEditorView
         sessionId="s1"
@@ -115,35 +126,32 @@ describe("Code and Git panels against a daemon_outdated engine", () => {
       />,
     );
     expect(engine.calls.filter((url) => url.startsWith("/code/folders"))).toHaveLength(2);
-    expect(current).not.toContain(stopAndStart);
+    expect(current).not.toContain(restartNotice);
   });
 
   it("keeps the generic message for a folder-list failure that is not daemon_outdated", async () => {
     engine.folders = "broken";
     const text = await mount(<CodeEditorView sessionId="s1" workspace="/w" mode="code" daemonNotice={daemonNotice} />);
     expect(text).toContain(oldSentence);
-    expect(text).not.toContain(stopAndStart);
+    expect(text).not.toContain(restartNotice);
   });
 
   it("Code: the file tree shows the notice when only the tree call is outdated", async () => {
     engine.folders = "ok";
     const text = await mount(<CodeEditorView sessionId="s1" workspace="/w" mode="code" daemonNotice={daemonNotice} />);
-    expect(text).toContain(stopAndStart);
+    expectInPageRestart(text);
     expect(text).not.toContain("Failed to load");
-    expect(text).not.toContain("Retry");
   });
 
   it("Code: the real FileTree shows the notice", async () => {
     const text = await mount(<FileTree sessionId="s1" workspace="/w" daemonNotice={daemonNotice} />);
-    expect(text).toContain(stopAndStart);
-    expect(text).not.toContain("Retry");
+    expectInPageRestart(text);
   });
 
   it("Git: the real GitPanel shows the notice", async () => {
     const text = await mount(
       <GitPanel sessionId="s1" workspace="/w" daemonNotice={daemonNotice} onOpenFile={() => {}} onOpenDiff={() => {}} />,
     );
-    expect(text).toContain(stopAndStart);
-    expect(text).not.toContain("Retry");
+    expectInPageRestart(text);
   });
 });

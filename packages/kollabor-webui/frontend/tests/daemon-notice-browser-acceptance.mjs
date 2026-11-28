@@ -71,12 +71,44 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8"><style>${css}</style></head><body>${markup}</body></html>`);
 
-  const instruction = "This agent started before Restart Agent existed. Run kollab --hub stop lapis in a terminal, then select its Offline row in the sidebar to start it again.";
   for (const name of ["Terminal", "Code", "Git"]) {
     const panel = page.getByRole("region", { name });
-    assert.equal(await panel.getByText(instruction).count(), 1, `${name} is missing the named stop-and-start action`);
-    assert.equal(await panel.getByText("Retry").count(), 0, `${name} offers Retry for daemon_outdated`);
+    assert.equal(
+      await panel.getByRole("button", { name: "Restart Agent" }).count(),
+      1,
+      `${name} is missing the in-place restart action`,
+    );
+    assert.equal(
+      await panel.getByText("This agent runs an older version of Kollab.", { exact: true }).count(),
+      1,
+      `${name} is missing the older-agent notice`,
+    );
+    assert.equal(await panel.getByRole("button", { name: "Try Again" }).count(), 0);
   }
+
+  for (const [props, expectedText, expectedAction] of [
+    [{ busy: true }, "Restarting this agent…", null],
+    [{ busy: true, waiting: true }, "This agent will restart after its current work finishes.", null],
+    [{ failure: "restart unavailable" }, "Couldn't restart this agent.", "Try Again"],
+    [{ failure: "agent cannot restart itself", tooOld: true }, "This agent could not be restarted.", "Try Again"],
+  ]) {
+    const stateMarkup = renderToStaticMarkup(
+      createElement(
+        "main",
+        { className: "bg-background p-4 text-foreground" },
+        createElement(DaemonNotice, { ...recoveryProps, ...props }),
+      ),
+    );
+    await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8"><style>${css}</style></head><body>${stateMarkup}</body></html>`);
+    assert.equal(await page.getByText(expectedText, { exact: true }).count(), 1, expectedText);
+    if (expectedAction) {
+      assert.equal(await page.getByRole("button", { name: expectedAction }).count(), 1);
+    } else {
+      assert.equal(await page.getByRole("button").count(), 0);
+    }
+  }
+
+  await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8"><style>${css}</style></head><body>${markup}</body></html>`);
 
   for (const [width, height, filename] of [
     [1280, 800, "daemon-notice-1280x800.png"],

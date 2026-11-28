@@ -9,6 +9,7 @@ from kollabor.panels.connect import ONE_MACHINE_NOTE, PROPOSED_LINE
 from plugins.altview.connect_altview import ConnectScreenState, connect_screen_lines
 from plugins.altview.connect_halt_altview import HaltScreen, halt_view_lines
 from plugins.hub import halt_context
+from plugins.hub.network_halt import CONFIRM_REFUSAL, ONE_MACHINE_REFUSAL
 from plugins.hub.relay_commands import ConnectSnapshot
 
 ME, MAC, PROD = "a" * 64, "b" * 64, "c" * 64
@@ -138,6 +139,38 @@ async def test_halt_new_form_sends_reason_and_revoke_then_opens_the_halt_screen(
     assert out["open"]["panel"] == "connect-halt"
     bad = await NEWP.act(Ctx(snap(), fail="a halt needs two machines"), "halt", {"confirmed": True})
     assert not bad["ok"] and bad["message"] == "A halt needs two machines."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("panel", "action"), [(HALTP, "propose_resume"), (NEWP, "halt")])
+async def test_webui_confirmation_refusal_uses_page_copy_without_changing_cli(monkeypatch, panel, action):
+    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
+    cli = await panel.act(Ctx(snap()), action, {})
+    assert cli["message"] == CONFIRM_REFUSAL
+
+    monkeypatch.delenv("KOLLAB_WEBUI_SESSION")
+    web = await panel.act(
+        Ctx(snap()), action, {"_kollab_input_source": "webui"}
+    )
+    assert web["message"] == "Confirm this action in the page before continuing."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("panel", "action"), [(HALTP, "propose_resume"), (NEWP, "halt")])
+async def test_webui_one_machine_refusal_uses_page_copy_without_changing_cli(monkeypatch, panel, action):
+    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
+    cli = await panel.act(Ctx(snap(), fail=ONE_MACHINE_REFUSAL), action, {"confirmed": True})
+    assert cli["message"] == ONE_MACHINE_REFUSAL
+
+    monkeypatch.delenv("KOLLAB_WEBUI_SESSION")
+    web = await panel.act(
+        Ctx(snap(), fail=ONE_MACHINE_REFUSAL), action,
+        {"confirmed": True, "_kollab_input_source": "webui"},
+    )
+    assert web["message"] == (
+        "A second device on this network must confirm the resume. Add one before trying again here."
+    )
+    assert "kollab --" not in web["message"]
 
 
 @pytest.mark.asyncio

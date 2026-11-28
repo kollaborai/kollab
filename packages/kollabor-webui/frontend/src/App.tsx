@@ -1356,7 +1356,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         setHub: async (enabled) => {
           const result = await api.setSessionHub(sessionId, enabled);
           // An engine that predates the switch answers ok and ignores it.
-          if (result.hub !== enabled) throw new Error("Restart kollab --web-ui to use this switch.");
+          if (result.hub !== enabled) throw new Error("This engine version does not support changing hub membership. The setting was not changed.");
           await refreshAgentPool();
         },
       },

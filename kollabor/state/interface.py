@@ -759,7 +759,9 @@ class StateService(Protocol):
         """Run beacon commands on the daemon that owns workspace identity."""
         ...
 
-    async def hub_send_msg(self, target: str, content: str) -> str:
+    async def hub_send_msg(
+        self, target: str, content: str, *, input_source: str | None = None
+    ) -> str:
         """Send a hub message to a specific agent via the daemon.
 
         Delegates to HubPlugin._handle_msg_command on the daemon side.
@@ -860,6 +862,7 @@ class StateService(Protocol):
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: dict[str, Any] | None = None,
+        input_source: str | None = None,
         private_goal_reply: bool = False,
         private_goal_reply_id: str | None = None,
         goal_conversation_uid: str | None = None,

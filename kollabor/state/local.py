@@ -27,7 +27,10 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any, Callable, List
 
-from kollabor.user_input_source import UserInputSource
+from kollabor.user_input_source import (
+    HUMAN_USER_INPUT_SOURCES,
+    UserInputSource,
+)
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_agent.yes_approval import YesApprovals
@@ -3612,7 +3615,9 @@ class LocalStateService(StateService):
             return "beacon: update the daemon to use /connect"
         return str(await handler(command))
 
-    async def hub_send_msg(self, target: str, content: str) -> str:
+    async def hub_send_msg(
+        self, target: str, content: str, *, input_source: str | None = None
+    ) -> str:
         """Delegate to HubPlugin._handle_msg_command."""
         hub = self._resolve_hub_plugin()
         if hub is None:
@@ -3621,7 +3626,12 @@ class LocalStateService(StateService):
         if fn is None:
             return "hub: msg handler not available"
         try:
-            return str(await fn(f"{target} {content}"))
+            kwargs = (
+                {"input_source": input_source}
+                if input_source is not None
+                else {}
+            )
+            return str(await fn(f"{target} {content}", **kwargs))
         except Exception as e:
             logger.debug(f"hub _handle_msg_command error: {e}")
             return f"hub msg error: {e}"
@@ -3792,6 +3802,7 @@ class LocalStateService(StateService):
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: dict[str, Any] | None = None,
+        input_source: str | None = None,
         private_goal_reply: bool = False,
         private_goal_reply_id: str | None = None,
         goal_conversation_uid: str | None = None,
@@ -3807,6 +3818,9 @@ class LocalStateService(StateService):
         DisplayTap. Awaiting admission lets the RPC report rejected input
         instead of acknowledging a turn that never entered the pipeline.
         """
+        input_source = str(input_source or UserInputSource.STATE_RPC.value)
+        if input_source not in HUMAN_USER_INPUT_SOURCES:
+            return {"accepted": False, "reason": "invalid_input_source"}
         metadata = message if isinstance(message, dict) else {}
         input_context = origin_context or metadata.get("origin_context")
         claims_voice_origin = (
@@ -3924,7 +3938,9 @@ class LocalStateService(StateService):
             and parser.is_slash_command(text)
         ):
             create_task = getattr(llm, "create_background_task", None)
-            command_coro = self._execute_slash_command(text, parser, executor)
+            command_coro = self._execute_slash_command(
+                text, parser, executor, input_source=input_source
+            )
             if callable(create_task):
                 create_task(command_coro, name="rpc_slash_command")
             else:
@@ -3932,7 +3948,7 @@ class LocalStateService(StateService):
             return {"accepted": True, "reason": "slash command"}
 
         try:
-            submit_kwargs = {"source": UserInputSource.STATE_RPC}
+            submit_kwargs = {"source": UserInputSource(input_source)}
             if request_id is not None or metadata.get("request_id") is not None:
                 submit_kwargs["request_id"] = request_id or metadata["request_id"]
             if thread_id is not None or metadata.get("thread_id") is not None:
@@ -3978,6 +3994,7 @@ class LocalStateService(StateService):
         messages: list[dict[str, Any]],
         *,
         expected_active_request_ids: tuple[str, ...],
+        input_source: str | None = None,
         on_attempt: Callable[[int], None] | None = None,
         on_admission: Callable[[int, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
@@ -4003,6 +4020,7 @@ class LocalStateService(StateService):
                 item.get("content"),
                 request_id=item.get("request_id"),
                 thread_id=item.get("thread_id"),
+                input_source=input_source,
                 force_next_turn=True,
                 _force_gate_held=True,
                 _force_reservation=reservation,
@@ -4526,6 +4544,7 @@ class LocalStateService(StateService):
         private_goal_reply: bool = False, request_id: str | None = None,
         turn_id: str | None = None,
         expected_conversation_uid: str | None = None,
+        input_source: str | None = None,
     ) -> dict[str, Any] | None:
         """Run a parsed slash command and publish its result as a web turn."""
         from kollabor_tui.display_tap import publish_semantic
@@ -4542,6 +4561,8 @@ class LocalStateService(StateService):
             command = parser.parse_command(text)
             if command is None:
                 raise ValueError(f"Could not parse slash command: {text}")
+            if input_source is not None:
+                command._input_source = input_source
             if goal_origin_uid is None:
                 result, output = await self._run_web_slash_command(command, executor)
                 if (

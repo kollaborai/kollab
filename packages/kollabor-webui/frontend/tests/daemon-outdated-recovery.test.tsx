@@ -35,7 +35,7 @@ vi.mock("@/api", async (importOriginal) => {
           if (engine.succeedTree) {
             return new Response(JSON.stringify({ success: true, data: { entries: [] } }), { status: 200, headers: { "Content-Type": "application/json" } });
           }
-          const body = { success: false, error: { code: "daemon_outdated", message: "This agent runs older code. Restart it to use Code, Git and Terminal." } };
+          const body = { success: false, error: { code: "daemon_outdated", message: actual.OUTDATED_NOTICE } };
           const error = new Error(body.error.message);
           Object.assign(error, { status: 502, body });
           throw error;
@@ -57,15 +57,15 @@ vi.mock("@/components/code/floating-sidebar", () => ({
 
 import { CodeEditorView } from "@/components/code/CodeEditorView";
 import { agentVersionNotice } from "@/components/shell/AgentVersionNotice";
-import { codeFetch } from "@/lib/code-fetch";
+import { codeFetch, OUTDATED_NOTICE } from "@/lib/code-fetch";
 
 const agent = { name: "lapis", agent_id: "a1", state: "idle", current_task: "", solo: false, project: "/w", version: "" };
 const notice = agentVersionNotice({ engineVersion: "0.22.0+aaaa1111", agent, restartAgents: false });
 const daemonNotice = { notice, fallbackName: "lapis", busy: false, onRestart: () => {} };
-const stopAndStart = "This agent started before Restart Agent existed. Run kollab --hub stop lapis in a terminal, then select its Offline row in the sidebar to start it again.";
+const outdatedCopy = "This agent runs an older version of Kollab.";
 
 function daemonOutdatedError() {
-  const error = new Error("This agent runs older code. Restart it to use Code, Git and Terminal.");
+  const error = new Error(OUTDATED_NOTICE);
   Object.assign(error, {
     status: 502,
     body: {
@@ -111,9 +111,11 @@ describe("daemon_outdated from a Code descendant", () => {
 
     expect(engine.calls).toContain("/sessions/s1/code/folders");
     expect(engine.calls.some((url) => url.includes("/sessions/s1/code/fs/tree"))).toBe(true);
-    expect(host.textContent).toContain(stopAndStart);
-    expect(host.textContent).not.toContain("This agent runs older code. Restart it to use Code, Git and Terminal.");
-    expect(host.textContent).not.toContain("Retry");
+    expect(host.textContent).toContain(outdatedCopy);
+    expect(host.textContent).not.toContain("kollab --");
+    expect(host.textContent).not.toContain("in a terminal");
+    expect(host.textContent).toContain("Restart Agent");
+    expect(host.textContent).not.toContain("Try Again");
   });
 
   it("ignores a late daemon_outdated response from before the agent reaches the engine version", async () => {
@@ -139,7 +141,7 @@ describe("daemon_outdated from a Code descendant", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
 
-    const error = new Error("This agent runs older code. Restart it to use Code, Git and Terminal.");
+    const error = new Error(OUTDATED_NOTICE);
     Object.assign(error, {
       status: 502,
       body: {
@@ -150,7 +152,7 @@ describe("daemon_outdated from a Code descendant", () => {
     engine.rejectTree?.(error);
     await act(async () => { await staleRequest; });
 
-    expect(host.textContent).not.toContain("This agent runs older code. Restart it to use Code, Git and Terminal.");
+    expect(host.textContent).not.toContain(outdatedCopy);
   });
 
   it("ignores a late daemon_outdated response after a newer same-session request succeeds", async () => {
@@ -167,7 +169,7 @@ describe("daemon_outdated from a Code descendant", () => {
     const successfulRequest = codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
     await successfulRequest;
 
-    const error = new Error("This agent runs older code. Restart it to use Code, Git and Terminal.");
+    const error = new Error(OUTDATED_NOTICE);
     Object.assign(error, {
       status: 502,
       body: {
@@ -178,7 +180,7 @@ describe("daemon_outdated from a Code descendant", () => {
     engine.rejectTree?.(error);
     await act(async () => { await staleRequest; });
 
-    expect(host.textContent).not.toContain(stopAndStart);
+    expect(host.textContent).not.toContain(outdatedCopy);
   });
 
   it("ignores a late folder-list refusal after a newer same-session code request succeeds", async () => {
@@ -193,7 +195,7 @@ describe("daemon_outdated from a Code descendant", () => {
     engine.rejectFolders?.(daemonOutdatedError());
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 
-    expect(host.textContent).not.toContain(stopAndStart);
+    expect(host.textContent).not.toContain(outdatedCopy);
   });
 
   it("clears the recovery notice when a later same-session code request succeeds", async () => {
@@ -206,7 +208,7 @@ describe("daemon_outdated from a Code descendant", () => {
     const outdatedRequest = codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
     engine.rejectTree?.(daemonOutdatedError());
     await act(async () => { await outdatedRequest; });
-    expect(host.textContent).toContain(stopAndStart);
+    expect(host.textContent).toContain(outdatedCopy);
 
     engine.deferTree = false;
     engine.succeedTree = true;
@@ -214,6 +216,6 @@ describe("daemon_outdated from a Code descendant", () => {
       await codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
     });
 
-    expect(host.textContent).not.toContain(stopAndStart);
+    expect(host.textContent).not.toContain(outdatedCopy);
   });
 });

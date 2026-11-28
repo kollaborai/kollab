@@ -87,6 +87,7 @@ SPAWN_TIMEOUT_SECONDS = 45.0
 # behind the attach stream's frame budget: give its state calls longer (#880).
 REMOTE_STATE_TIMEOUT_SECONDS = 60.0
 
+
 # Events the daemon publishes for terminal windows only. Most are rendered ANSI
 # rather than structured data: web clients cannot use them, and forwarding them
 # would double every message. ``daemon_restarting`` tells a window a restart in
@@ -956,6 +957,7 @@ class DaemonPool:
         profile_env: Optional[Dict[str, str]] = None,
         stop_on_owner_exit: bool = False,
         webui_owned: bool = False,
+        resume_conversation_id: Optional[str] = None,
     ) -> DaemonHandle:
         """Start a daemon for `session_id` and attach to it.
 
@@ -1005,6 +1007,10 @@ class DaemonPool:
                 env.pop("KOLLAB_HUB_SOLO", None)
             # An inline profile (request credentials) exists only in these vars.
             env.update(profile_env or {})
+            if resume_conversation_id:
+                from kollabor.daemon import restart_env
+
+                env = restart_env(resume_conversation_id, environ=env)
             if stop_on_owner_exit:
                 import psutil
 

@@ -246,7 +246,8 @@ async def test_missing_livekit_server_fails_before_any_setup(rig, tmp_path, monk
     monkeypatch.setattr(VoiceClient, "ensure", lambda *a: called.append(a))
     with pytest.raises(RuntimeHostError) as err:
         await rig.runtime.ensure_runtime(lambda detail: None)
-    assert "brew install livekit" in err.value.detail and not called
+    # The page shows this detail: it names the problem, never a shell command (#1459).
+    assert "voice server" in err.value.detail and "brew" not in err.value.detail and not called
 
 
 class _Service:

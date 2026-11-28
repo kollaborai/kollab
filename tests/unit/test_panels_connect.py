@@ -254,6 +254,35 @@ async def test_join_finish_polls_and_the_code_stays_in_the_request():
     assert refused["ok"] is False and CODE not in json.dumps(refused)
 
 
+def test_join_failure_copy_uses_request_source_not_daemon_environment(monkeypatch):
+    outcome = {"status": "failed", "reason": "update_required"}
+    cli_text = JOIN._outcome(outcome, "relay")
+    assert cli_text["message"] == connect_panel.JOIN_FAILURE_REASONS["update_required"]
+
+    monkeypatch.setenv("KOLLAB_WEBUI_SESSION", "1")
+    assert JOIN._outcome(outcome, "relay")["message"] == cli_text["message"]
+
+    web_text = JOIN._outcome(outcome, "relay", input_source="webui")
+    assert web_text["message"] == (
+        "This engine version is too old for this relay. Update the engine, then retry the join here."
+    )
+    assert "kollab --" not in web_text["message"]
+
+
+@pytest.mark.asyncio
+async def test_join_action_uses_webui_source_from_request_payload(monkeypatch):
+    monkeypatch.delenv("KOLLAB_WEBUI_SESSION", raising=False)
+    result = await JOIN.act(
+        Hub(enroll={"status": "failed", "reason": "update_required"}),
+        "finish",
+        {"code": CODE, "_kollab_input_source": "webui"},
+    )
+
+    assert result["message"] == (
+        "This engine version is too old for this relay. Update the engine, then retry the join here."
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status,ok,poll,text",

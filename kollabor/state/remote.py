@@ -1080,12 +1080,18 @@ class RemoteStateService(StateService):
             raise ValueError(detail)
         return str(result.get("text", ""))
 
-    async def hub_send_msg(self, target: str, content: str) -> str:
+    async def hub_send_msg(
+        self, target: str, content: str, *, input_source: str | None = None
+    ) -> str:
         """Ask the daemon to send a hub message to a specific agent."""
         logger.debug("state rpc: hub_send_msg target=%r", target)
         result = await self._rpc.call(
             "state.hub_send_msg",
-            {"target": target, "content": content},
+            {
+                "target": target,
+                "content": content,
+                **({"input_source": input_source} if input_source is not None else {}),
+            },
             timeout=self._timeout,
         )
         if not isinstance(result, dict):
@@ -1152,6 +1158,7 @@ class RemoteStateService(StateService):
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: dict[str, Any] | None = None,
+        input_source: str | None = None,
         private_goal_reply: bool = False,
         private_goal_reply_id: str | None = None,
         goal_conversation_uid: str | None = None,
@@ -1170,6 +1177,7 @@ class RemoteStateService(StateService):
                 "origin_context": origin_context,
                 **({"private_goal_reply": True, "private_goal_reply_id": private_goal_reply_id,
                     "goal_conversation_uid": goal_conversation_uid} if private_goal_reply else {}),
+                **({"input_source": input_source} if input_source is not None else {}),
             },
             timeout=self._timeout,
         )

@@ -336,8 +336,8 @@ class ConfigWidgetDefinitions:
                             "label": "Restart Agent Button",
                             "config_path": "kollabor.updates.restart_agents",
                             "help": (
-                                "Offer a Restart Agent button in the web chat of an agent that runs an older "
-                                "version than the engine; with it off the chat points at /restart"
+                                "The outdated-agent notice offers Restart Agent even when this setting is off; "
+                                "the setting does not restrict a user-requested restart"
                             ),
                         },
                     ],

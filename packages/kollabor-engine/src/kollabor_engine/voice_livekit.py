@@ -56,7 +56,8 @@ USER_PREFIX = (
     "user-"  # the browser's identity in a room (sign); the worker's is "worker-"
 )
 LIVEKIT_MISSING = (
-    "livekit-server is not installed. Install it with brew install livekit."
+    "Voice is unavailable because this engine is missing its voice server. "
+    "The page cannot start a voice room."
 )
 
 # Runs the server and a watchdog in one process group: if the engine dies

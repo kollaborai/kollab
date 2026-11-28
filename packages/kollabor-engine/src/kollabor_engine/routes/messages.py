@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, StrictBool, StrictStr
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import-not-found]
 
 from kollabor.state.remote import ReloadNeededError
+from kollabor.user_input_source import UserInputSource
 from kollabor_ai.message_content import (
     MessageContent,
     contains_image_content,
@@ -499,7 +500,13 @@ async def send_message(
 
     try:
         private_goal = _is_goal_message(body.content)
-        kwargs = {"request_id": request_id, "thread_id": body.thread_id, "origin_context": body.origin_context}
+        kwargs = {
+            "request_id": request_id,
+            "thread_id": body.thread_id,
+            "origin_context": body.origin_context,
+        }
+        if request is not None:
+            kwargs["input_source"] = UserInputSource.WEBUI.value
         if private_goal:
             kwargs["private_goal_reply"] = True
             kwargs["goal_conversation_uid"] = body.conversation_uid
@@ -1726,6 +1733,7 @@ async def assistant_transport(
     if not session.alive:
         raise HTTPException(status_code=409, detail="Session daemon is not running")
 
+    input_source = UserInputSource.WEBUI.value if request is not None else None
     read_context = _request_read_context(request)
 
     try:
@@ -3115,6 +3123,15 @@ async def assistant_transport(
                 return
             if body.force_next_turn:
                 try:
+                    batch_kwargs = {
+                        "expected_active_request_ids": tuple(
+                            body.force_after_request_ids
+                        ),
+                        "on_attempt": record_forced_attempt,
+                        "on_admission": record_forced_admission,
+                    }
+                    if input_source is not None:
+                        batch_kwargs["input_source"] = input_source
                     batch_result = await session.send_message_batch(
                         [
                             {
@@ -3123,11 +3140,7 @@ async def assistant_transport(
                             }
                             for item in force_batch_items
                         ],
-                        expected_active_request_ids=tuple(
-                            body.force_after_request_ids
-                        ),
-                        on_attempt=record_forced_attempt,
-                        on_admission=record_forced_admission,
+                        **batch_kwargs,
                     )
                 except asyncio.CancelledError:
                     if (read_context and read_context.revoked) or getattr(
@@ -3230,6 +3243,8 @@ async def assistant_transport(
                     )
                     private_goal = _is_goal_message(message_content)
                     kwargs = {"request_id": request_id}
+                    if input_source is not None:
+                        kwargs["input_source"] = input_source
                     if private_goal:
                         uid = body.state.get("conversationUid") if isinstance(body.state, dict) else None
                         kwargs.update(private_goal_reply=True, goal_conversation_uid=uid)
