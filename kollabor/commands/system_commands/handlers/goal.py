@@ -708,22 +708,35 @@ class GoalCommandHandler(BaseCommandHandler):
             pending = "\npause requested — applies at next boundary"
         elif record.clear_requested:
             pending = "\nclear requested — applies at next boundary"
-        budget_resume_flag = "--budget"
+        budget_resume_flags = ["--budget"]
         if record.blocked_reason and record.blocked_reason.startswith(
             "auto_time_limit"
         ):
-            budget_resume_flag = "--time"
+            budget_resume_flags = ["--time"]
         elif record.blocked_reason and record.blocked_reason.startswith(
             "auto_turn_limit"
         ):
-            budget_resume_flag = "--turns"
+            budget_resume_flags = ["--turns"]
+        if record.blocked_reason and record.blocked_reason.startswith(
+            ("auto_time_limit", "auto_turn_limit")
+        ):
+            if (
+                record.time_used_seconds >= record.auto_time_limit_s
+                and "--time" not in budget_resume_flags
+            ):
+                budget_resume_flags.append("--time")
+            if (
+                record.turn_count >= record.auto_turn_limit
+                and "--turns" not in budget_resume_flags
+            ):
+                budget_resume_flags.append("--turns")
         nxt = {
             "active": "continue",
             "paused": "/goal resume",
             "blocked": f"resolve blocker and /goal resume — {record.blocked_reason}",
             "usage_limited": "resolve provider quota and /goal resume",
             "budget_limited": (
-                f"/goal resume {budget_resume_flag} N — "
+                f"/goal resume {' '.join(f'{flag} N' for flag in budget_resume_flags)} — "
                 f"{record.blocked_reason or 'budget reached'}"
             ),
             "complete": "done",
