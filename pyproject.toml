@@ -103,6 +103,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-xdist>=3.8.0",
+    "hatchling>=1.27",
 ]
 # Compatibility extra. /voicemode installs audio support in its own runtime;
 # the main application and command client need no audio dependencies.
@@ -116,6 +117,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-xdist>=3.8.0",
+    "hatchling>=1.27",
 ]
 
 [project.urls]
