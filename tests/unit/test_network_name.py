@@ -36,8 +36,6 @@ async def _connect(client, monkeypatch):
         client._first_attempt.set()
 
     monkeypatch.setattr(client, "_run", idle)
-    # The relay task is replaced, so no host is resolved: keep connect()'s resolver check off the system DNS config.
-    monkeypatch.setattr("plugins.hub.relay_client.dns.asyncresolver.Resolver", lambda: None)
     await client.connect(DIRECTORY, ws_url=WS_URL)
 
 
