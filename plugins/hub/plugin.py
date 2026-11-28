@@ -5526,13 +5526,15 @@ class HubPlugin(BasePlugin):
         """Execute a hub_work tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        result, ledger_available = self._format_work_report()
+        result, ledger_complete = self._format_work_report()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_work",
-            success=ledger_available,
+            success=ledger_complete,
             output=result,
-            error="" if ledger_available else "TaskLedger unavailable",
+            error=(
+                "" if ledger_complete else "TaskLedger unavailable or partially unreadable"
+            ),
         )
 
     async def _handle_hub_vault_tool(self, tool_data: dict):
@@ -17650,9 +17652,9 @@ class HubPlugin(BasePlugin):
         lines: List[str] = []
         slots = self._work_queue.get_all() if self._work_queue else []
         ledger_available = self._task_ledger is not None
+        read_errors: List[str] = []
 
         if self._task_ledger is not None:
-            read_errors: List[str] = []
             try:
                 open_cards = self._task_ledger.get_open(read_errors=read_errors)
                 if read_errors:
@@ -17675,10 +17677,24 @@ class HubPlugin(BasePlugin):
         elif not ledger_available:
             lines.append("in-memory queue: empty (partial; TaskLedger unavailable)")
 
+        unreadable_count = len(set(read_errors))
+        partial = unreadable_count > 0
         if open_cards:
-            lines.append(f"open ledger cards: {len(open_cards)}")
+            suffix = (
+                f" (partial; {unreadable_count} unreadable "
+                f"{'card' if unreadable_count == 1 else 'cards'})"
+                if partial
+                else ""
+            )
+            lines.append(f"open ledger cards: {len(open_cards)}{suffix}")
             for c in open_cards:
                 lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
+
+        if partial and not open_cards:
+            lines.append(
+                f"TaskLedger: partial ({unreadable_count} unreadable "
+                f"{'card' if unreadable_count == 1 else 'cards'}; counts may be incomplete)"
+            )
 
         if not ledger_available:
             reason = "read failed" if self._task_ledger is not None else "not configured"
@@ -17689,7 +17705,7 @@ class HubPlugin(BasePlugin):
 
         if not lines:
             return "work queue: empty", True
-        return "\n".join(lines), True
+        return "\n".join(lines), not partial
 
     def _handle_queue_command(
         self, task: str, upstream_refs: Optional[List[str]] = None
