@@ -28,7 +28,7 @@ async function main() {
       colorScheme: "light",
     });
     const page = await context.newPage();
-    await page.setContent(`<!doctype html><html><head><style>${css}</style></head><body class="bg-background text-foreground">
+    await page.setContent(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body class="bg-background text-foreground">
       <main class="mx-auto flex min-h-screen max-w-md items-start p-4">
         <div data-slot="history-status" role="alert" class="bg-destructive/10 text-destructive flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-sm">
           <span>Couldn't load conversation history. Check the connection and retry.</span>
