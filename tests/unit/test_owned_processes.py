@@ -17,13 +17,15 @@ from tests.unit import _owned_processes as owned
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="requires POSIX process groups")
 
 
-def _wait_for(predicate, timeout=8):
-    deadline = time.monotonic() + timeout
+def _wait_for(predicate, timeout=8, describe=None):
+    started = time.monotonic()
+    deadline = started + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(0.05)
-    raise AssertionError("timed out waiting for subprocess state")
+    seen = f": {describe()}" if describe else ""
+    raise AssertionError(f"timed out after {time.monotonic() - started:.1f} s waiting for subprocess state{seen}")
 
 
 def _alive(process):
@@ -267,7 +269,13 @@ except psutil.Error:
     )
     child = None
     try:
-        _wait_for(lambda: child_file.exists() or driver.poll() is not None)
+        # Two fresh interpreters start before the child file appears, which can take over 8 s on a
+        # loaded machine (#1511). The driver's own alarm(45) bounds this wait; 50 s is only a backstop.
+        _wait_for(
+            lambda: child_file.exists() or driver.poll() is not None,
+            timeout=50,
+            describe=lambda: f"driver returncode={driver.poll()}, child file exists={child_file.exists()}",
+        )
         if driver.poll() is not None:
             raise AssertionError(f"driver exited: {driver.stderr.read().decode(errors='replace')}")
         identity = json.loads(child_file.read_text())
