@@ -94,11 +94,12 @@ files. On timeout or cancellation it kills and reaps those processes before
 cleanup. Diagnostics do not contain transcript text or credentials.
 
 On macOS and Windows the bridge runs `whisper` directly in a private temporary
-directory. While Whisper runs, it samples that process's descendants and stops
-observed descendants before removing the directory. These systems have no child
-subreaper, so a descendant that detaches and exits between samples may not be
-observed. On timeout or cancellation, the bridge kills Whisper and any observed
-descendants before cleanup.
+directory. Those systems have no child subreaper, so a detached writer cannot be
+tracked after Whisper exits. To avoid deleting files while such a writer may
+still be active, the bridge retains the private run directory after starting
+Whisper. On timeout or cancellation the bridge kills Whisper and any descendants
+still attached to it; a descendant that has already left Whisper's process tree
+is not stopped.
 
 Install the Whisper CLI in the environment that runs Kollab. On Linux, `/proc`
 must be mounted and `python3` must be on `PATH`:
@@ -185,18 +186,19 @@ missing. Install `openai-whisper` in the environment used by Kollab. On Linux,
 subreaper owns each private transcription directory; it waits for all CLI
 descendants, including detached writers, before reading the transcript. On
 cancellation or the 60-second deadline, it kills and reaps those processes before
-removing audio and partial output. macOS and Windows sample the direct Whisper
-process's descendants and stop those observed before directory cleanup. A child
-that detaches and exits between samples can escape tracking on those platforms.
+removing audio and partial output. macOS and Windows keep the private directory
+once Whisper starts, because a detached writer cannot be tracked there. On timeout
+or cancellation they kill Whisper and the descendants still attached to it.
 Concurrent runs have separate directories. The bridge forwards a safe failure
 notice when transcription fails and continues processing text messages.
 
 On Linux, if an operating-system error prevents the owner from proving all children
 have exited, it reports failure and retains the private run directory. Remove that
 directory only after verifying the run's processes have exited; the Linux owner
-never deletes files while a writer may remain. macOS and Windows stop descendants
-observed while Whisper runs, then remove the directory after Whisper exits. They
-cannot prove that an unobserved detached writer has exited.
+never deletes files while a writer may remain. macOS and Windows cannot make that
+proof, so private `kollab-telegram-voice-*` directories are retained after
+Whisper starts. Remove one only after verifying its transcription processes have
+exited.
 
 ### Bridge Stops Working After Restart
 

@@ -81,6 +81,8 @@ async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
     import psutil
 
     run_dir = tempfile.mkdtemp(prefix="kollab-telegram-voice-")
+    transcript_path = None
+    proc_started = False
     try:
         audio_path = Path(run_dir) / f"voice{suffix}"
         audio_path.write_bytes(audio)
@@ -99,6 +101,8 @@ async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        proc_started = True
+        transcript_path = audio_path.with_suffix(".txt")
         try:
             whisper_process = psutil.Process(proc.pid)
         except psutil.Error:
@@ -149,7 +153,6 @@ async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
         if proc.returncode != 0:
             logger.error("Voice transcription whisper failed (exit %s)", proc.returncode)
             return "[voice message - transcription failed]"
-        transcript_path = audio_path.with_suffix(".txt")
         transcription = ""
         if transcript_path.exists():
             transcript = transcript_path.read_text(encoding="utf-8", errors="replace")
@@ -164,7 +167,14 @@ async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
         logger.info("Telegram voice transcription completed")
         return f"[voice] {transcription or '[voice message - whisper returned empty]'}"
     finally:
-        shutil.rmtree(run_dir)
+        if proc_started:
+            # This platform has no subreaper to prove that the private directory
+            # is no longer in use, even when a transcript already exists.
+            logger.warning(
+                "Retaining private voice transcription files because detached writers cannot be tracked"
+            )
+        else:
+            shutil.rmtree(run_dir)
 
 
 # Seconds to back off after an inbound poll conflict (e.g. Telegram HTTP 409).
