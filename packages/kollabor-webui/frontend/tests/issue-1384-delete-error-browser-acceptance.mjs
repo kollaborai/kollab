@@ -43,6 +43,7 @@ async function main() {
     const view = await openPage(browser, baseUrl, fixtures, { viewport: { width: 1280, height: 900 } });
     try {
       await view.page.goto(`${baseUrl}/`, { waitUntil: "domcontentloaded" });
+      await view.page.getByRole("button", { name: /^Local Coder/ }).first().click();
       await view.page.getByRole("textbox", { name: "Message input" }).waitFor();
       const row = view.page.locator("[data-sidebar-agent-row]").filter({ hasText: "Local Coder" }).first();
       await row.hover();
@@ -54,7 +55,7 @@ async function main() {
         (route) => route.fulfill({
           status: 500,
           contentType: "application/json",
-          body: JSON.stringify({ message: "Stored delete failure" }),
+          body: JSON.stringify({ detail: "Stored delete failure" }),
         }),
       );
       const deleting = view.page.waitForResponse((response) =>
