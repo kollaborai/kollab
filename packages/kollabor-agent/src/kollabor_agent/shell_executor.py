@@ -504,13 +504,27 @@ class ShellExecutor:
             pgid = self._current_process.pid
             os.killpg(pgid, signal.SIGTERM)
 
-            # Wait briefly for graceful shutdown
+            # The shell can exit before its children. Wait for the whole group,
+            # not only the session leader, before deciding graceful shutdown worked.
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while True:
+                try:
+                    os.killpg(pgid, 0)
+                except ProcessLookupError:
+                    break
+
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    # Force kill any descendants that ignored SIGTERM.
+                    os.killpg(pgid, signal.SIGKILL)
+                    break
+                await asyncio.sleep(min(0.05, remaining))
+
+            # Reap the session leader when it has not already exited.
             try:
-                await asyncio.wait_for(self._current_process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                # Force kill if still running
-                os.killpg(pgid, signal.SIGKILL)
                 await self._current_process.wait()
+            except ProcessLookupError:
+                pass
         except (ProcessLookupError, PermissionError) as exc:
             # Process already dead or inaccessible; debug keeps kill-path
             # noise down while the failure stays traceable.
