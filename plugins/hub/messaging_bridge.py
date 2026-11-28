@@ -68,17 +68,39 @@ async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
     await asyncio.gather(communication_task, return_exceptions=True)
 
 
+def _stop_whisper_tree(proc) -> None:
+    """Kill Whisper and the descendants still attached to it.
+
+    The descendants are listed before Whisper is killed, because a child that
+    outlives its parent is reparented and can no longer be found through it. A
+    writer that already left the tree is not stopped; that is a platform limit.
+    """
+    import psutil
+
+    try:
+        descendants = psutil.Process(proc.pid).children(recursive=True)
+    except psutil.Error:
+        descendants = []
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    for child in descendants:
+        try:
+            child.kill()
+        except psutil.Error:
+            pass
+
+
 async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
     """Transcribe with a direct whisper run where no child subreaper exists.
 
-    macOS and Windows cannot adopt detached descendants, so this path samples
-    Whisper's process tree while it runs and stops observed descendants before
-    removing the private directory.
+    macOS and Windows cannot adopt detached descendants, so the private directory
+    is kept once Whisper starts: a detached writer may still be active. On timeout
+    or cancellation, Whisper and the descendants still attached to it are stopped.
     """
     import shutil
     import tempfile
-
-    import psutil
 
     run_dir = tempfile.mkdtemp(prefix="kollab-telegram-voice-")
     transcript_path = None
@@ -104,48 +126,9 @@ async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
         proc_started = True
         transcript_path = audio_path.with_suffix(".txt")
         try:
-            whisper_process = psutil.Process(proc.pid)
-        except psutil.Error:
-            whisper_process = None
-        descendants = {}
-
-        def remember_descendants() -> None:
-            if whisper_process is None:
-                return
-            try:
-                children = whisper_process.children(recursive=True)
-            except psutil.Error:
-                return
-            for child in children:
-                descendants[child.pid] = child
-
-        async def stop_descendants() -> None:
-            remember_descendants()
-            for child in descendants.values():
-                try:
-                    child.kill()
-                except psutil.Error:
-                    pass
-            if descendants:
-                await asyncio.to_thread(psutil.wait_procs, list(descendants.values()), 1)
-
-        communication_task = asyncio.create_task(proc.communicate())
-        try:
-            async with asyncio.timeout(60):
-                while not communication_task.done():
-                    remember_descendants()
-                    await asyncio.wait({communication_task}, timeout=0.01)
-                stdout_bytes, _ = await communication_task
-            await stop_descendants()
+            stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
         except BaseException:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            remember_descendants()
-            await stop_descendants()
-            communication_task.cancel()
-            await asyncio.gather(communication_task, return_exceptions=True)
+            _stop_whisper_tree(proc)
             _, interrupted = await _await_shielded_task(asyncio.create_task(proc.wait()))
             if interrupted:
                 raise asyncio.CancelledError
