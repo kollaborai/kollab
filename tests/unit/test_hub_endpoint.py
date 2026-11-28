@@ -1337,6 +1337,7 @@ def test_output_diagnostics_distinguish_empty_output_from_transport_failure():
         {"action": "subscribe"},
         {"action": "shutdown"},
         {"action": "status"},
+        {"action": "cron_jobs"},
     ],
 )
 def test_authenticated_offbox_cannot_invoke_operator_dispatch(tmp_path, frame):

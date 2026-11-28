@@ -10,8 +10,12 @@ export type SettingsTab =
   | "phonelink"
   | "voice"
   | "plugins"
-  | "prompts";
-export type PanelTab = Exclude<SettingsTab, "session" | "phonelink" | "plugins">;
+  | "prompts"
+  | "cron";
+export type PanelTab = Exclude<
+  SettingsTab,
+  "session" | "phonelink" | "plugins" | "cron"
+>;
 
 /** A step to run once the tab is ready: `/connect code`, `/connect knocks`. */
 export type PanelIntent = "new_code" | "knocks" | "halt";
@@ -53,6 +57,11 @@ export const SETTINGS_TABS: readonly {
     id: "prompts",
     label: "Prompts",
     scope: "Shared libraries and each role's picks, saved in ~/.kollab",
+  },
+  {
+    id: "cron",
+    label: "Schedules",
+    scope: "Scheduled prompts on every live agent",
   },
 ];
 

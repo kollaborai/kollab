@@ -1,0 +1,1787 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mockup: Schedules, web and TUI (#612)</title>
+<style>
+  /* Tokens and type scale copied from packages/kollabor-webui/frontend/src/styles.css:
+     .dark tokens, the pointer-fine 90% root size, border = transparent, input = 18% white.
+     Sample data only. Nothing here is built. No scripts: every state is its own frame. */
+  :root {
+    color-scheme: dark;
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --input: oklch(1 0 0 / 18%);
+    --highlight: #78be21;
+    --radius: 0.625rem;
+  }
+  @media (pointer: fine) {
+    :root { font-size: 90%; }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    padding: 1rem;
+    background: oklch(0.1 0 0);
+    color: var(--foreground);
+    font-family: -apple-system, "system-ui", "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif;
+    font-size: 1rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .wrap { max-width: 72rem; margin: 0 auto; }
+  .note { font-size: 0.75rem; color: var(--muted-foreground); margin-bottom: 0.25rem; }
+  .index { font-size: 0.75rem; color: var(--muted-foreground); margin-bottom: 0.25rem; }
+  .index a { color: var(--foreground); margin-right: 0.5rem; }
+  .section { margin: 2.25rem 0 0; font-size: 0.875rem; font-weight: 600; color: var(--foreground); }
+  .caption { margin: 1.5rem 0 0.5rem; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.025em; color: var(--muted-foreground); }
+
+  /* Web frame: the Settings dialog. One frame per state. */
+  .dialog {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: var(--background);
+    border-radius: var(--radius);
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    overflow: hidden;
+  }
+  .inset { padding-left: 1rem; padding-right: 1rem; }
+  .dlg-head { padding: 1rem 3rem 0 1rem; }
+  .dlg-title { font-size: 1.125rem; line-height: 1; font-weight: 600; }
+  .dlg-desc { margin-top: 0.375rem; font-size: 0.875rem; color: var(--muted-foreground); }
+  .close {
+    position: absolute; top: 1rem; right: 1rem; width: 2rem; height: 2rem;
+    display: grid; place-items: center; border: 0; background: none; cursor: pointer;
+    color: var(--muted-foreground); border-radius: calc(var(--radius) - 2px);
+  }
+  .tabs { display: flex; flex-wrap: wrap; margin-top: 0.75rem; }
+  .tab {
+    position: relative; display: inline-flex; align-items: center; height: 2.25rem;
+    padding: 0 0.625rem; font-size: 0.875rem; font-weight: 500; white-space: nowrap;
+    color: var(--muted-foreground);
+  }
+  .tab.on { color: var(--foreground); }
+  .tab.on::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: var(--highlight);
+  }
+
+  /* Shared bits */
+  .panel { padding-top: 0.75rem; padding-bottom: 1rem; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .bar-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .summary { font-size: 0.875rem; color: var(--muted-foreground); }
+  .id { font-size: 0.75rem; color: var(--muted-foreground); }
+  .new { font-weight: 400; color: var(--muted-foreground); }
+  .btn, .btn-primary, .btn-danger {
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem;
+    height: 2rem; padding: 0 0.75rem; border-radius: calc(var(--radius) - 2px);
+    font: inherit; font-size: 0.875rem; font-weight: 500; white-space: nowrap; cursor: pointer;
+  }
+  .btn { border: 0; background: oklch(1 0 0 / 5.4%); color: var(--foreground); }
+  .btn-primary { border: 0; background: var(--primary); color: var(--primary-foreground); }
+  .btn-danger { border: 0; background: oklch(0.704 0.191 22.216 / 0.6); color: #fff; }
+  .btn-text {
+    border: 0; background: none; padding: 0 0.25rem; height: auto;
+    font: inherit; font-size: 0.875rem; color: var(--muted-foreground); cursor: pointer;
+  }
+  .btn-text.danger:hover { color: var(--destructive); }
+  .err { color: var(--destructive); }
+  .msg { max-width: 16rem; overflow-wrap: anywhere; }
+  .nw { white-space: nowrap; }
+  .muted { color: var(--muted-foreground); }
+  .hint { margin-top: 0.75rem; font-size: 0.75rem; color: var(--muted-foreground); }
+
+  /* Schedules, v11: no borders anywhere, shade shows depth, everything rounded.
+     Settings sections sit in a sidebar. Left: the schedules as shaded cards. Right: the picked schedule or its form. */
+  table { border-collapse: collapse; font-size: 0.875rem; line-height: 1.25rem; text-align: left; }
+  th { padding: 0.5rem 0.75rem 0.5rem 0; font-weight: 500; color: var(--muted-foreground); white-space: nowrap; }
+  td { padding: 0.5rem 0.75rem 0.5rem 0; vertical-align: top; }
+  th:last-child, td:last-child { padding-right: 0; }
+  .empty {
+    padding: 1rem 0.75rem; border-radius: calc(var(--radius) - 2px);
+    background: oklch(1 0 0 / 4%); text-align: center; font-size: 0.875rem; color: var(--muted-foreground);
+  }
+  .empty strong { display: block; margin-bottom: 0.25rem; font-weight: 500; color: var(--foreground); }
+  .dlg-body { display: grid; gap: 0.75rem; margin-top: 0.75rem; }
+  .side { display: flex; gap: 0.25rem; overflow-x: auto; padding: 0 1rem; scrollbar-width: none; }
+  .side span {
+    flex: none; padding: 0.375rem 0.625rem; border-radius: calc(var(--radius) - 2px);
+    font-size: 0.875rem; color: var(--muted-foreground); white-space: nowrap;
+  }
+  .side span[aria-current="page"] { background: oklch(1 0 0 / 8%); color: var(--foreground); font-weight: 500; }
+  .dlg-main { min-width: 0; }
+  .dlg-main .panel { padding-top: 0; }
+  .split { display: grid; gap: 0.75rem; margin-top: 0.75rem; }
+  .split-list {
+    display: grid; align-content: start; gap: 0.5rem; min-width: 0;
+  }
+  .bar { margin-top: 0.75rem; }
+  .sched-list { list-style: none; display: grid; gap: 0.375rem; }
+  .sched-card {
+    position: relative; padding: 0.625rem 0.75rem;
+    border-radius: calc(var(--radius) - 2px); background: oklch(1 0 0 / 4%);
+  }
+  .sched-card .state { position: absolute; top: 0.5rem; right: 0.5rem; }
+  .sched-card.paused .sched-open { opacity: 0.7; }
+  .sched-card.on { background: oklch(1 0 0 / 7%); }
+  .sched-open {
+    width: 100%; min-width: 0; display: grid; gap: 0.125rem; padding: 0; border: 0; background: none; cursor: pointer;
+    color: var(--muted-foreground); font: inherit; font-size: 0.75rem; line-height: 1.125rem; text-align: left;
+  }
+  .sched-agent { padding-right: 5rem; color: var(--foreground); font-size: 0.875rem; font-weight: 500; overflow-wrap: anywhere; }
+  .sched-prompt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sched-note { margin-top: 0.125rem; overflow-wrap: anywhere; }
+  .sched-note.wait { color: var(--muted-foreground); }
+  .state {
+    flex: none; display: inline-flex; align-items: center; gap: 0.375rem; min-height: 1.625rem; padding: 0 0.125rem;
+    border: 0; background: none; cursor: pointer;
+    font: inherit; font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.01em;
+  }
+  .state.on { color: var(--highlight); }
+  .state.hover, .state:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.25rem; }
+  .state-label { font-size: 0.75rem; color: var(--muted-foreground); }
+  @media (max-width: 639px) {
+    .bar-actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+    .bar-actions > * { width: 100%; }
+  }
+  .state.off { color: var(--muted-foreground); }
+  .ideas { padding: 1rem 1.25rem; border-radius: var(--radius); background: var(--background); font-size: 0.875rem; }
+  .ideas summary { cursor: pointer; font-weight: 600; }
+  .ideas h4 { margin-top: 0.75rem; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.025em; color: var(--muted-foreground); }
+  .ideas ol { margin-top: 0.375rem; padding-left: 1.5rem; display: grid; gap: 0.25rem; }
+  .ideas li::marker { color: var(--muted-foreground); }
+  @media (min-width: 1024px) { .ideas ol { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 2rem; } }
+  .split-detail { display: grid; align-content: start; gap: 1rem; min-width: 0; padding: 0.375rem 0 0; }
+  .split-detail > .footer { margin-top: 0.25rem; padding: 0; background: none; }
+  .detail-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 0.5rem 1rem; }
+  .detail-title { font-size: 1rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+  .detail-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem 0.75rem; }
+  .detail-actions .btn-text { padding: 0; }
+  .detail-confirm { padding: 0.75rem; border-radius: var(--radius); background: oklch(1 0 0 / 4%); font-size: 0.875rem; }
+  .detail-confirm h3 { font-size: 0.875rem; font-weight: 600; }
+  .detail-confirm p { margin-top: 0.25rem; color: var(--muted-foreground); }
+  .detail-confirm .actions { margin-top: 0.75rem; display: flex; justify-content: flex-end; gap: 0.5rem; }
+  .facts {
+    display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem 1.5rem; font-size: 0.875rem;
+  }
+  .facts > div { display: grid; gap: 0.125rem; min-width: 0; }
+  .facts dt { font-size: 0.75rem; color: var(--muted-foreground); }
+  .facts dd { overflow-wrap: anywhere; }
+  .form-grid { display: grid; gap: 1.25rem 1rem; }
+  .form-part { display: grid; align-content: start; gap: 0.75rem; min-width: 0; }
+  .form-part > .group, .form-part > .field { margin-top: 0; }
+  .title-row { position: relative; }
+  .info-btn[aria-expanded="true"] { background: oklch(1 0 0 / 10%); color: var(--foreground); }
+  .pop {
+    position: absolute; left: 0; top: calc(100% + 0.375rem); z-index: 2; width: min(26rem, calc(100vw - 5rem)); padding: 0.75rem;
+    border-radius: var(--radius); background: oklch(0.205 0 0); font-size: 0.875rem;
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.45), 0 4px 6px -4px rgb(0 0 0 / 0.45);
+  }
+  .pop > * + * { margin-top: 0.5rem; }
+  .pop-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; font-weight: 600; }
+  .pop p { font-size: 0.75rem; color: var(--muted-foreground); }
+  .pop dl { display: grid; grid-template-columns: auto 1fr; column-gap: 0.75rem; row-gap: 0.25rem; }
+  .pop dt { font: 0.75rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--foreground); }
+  .pop dd { font-size: 0.75rem; color: var(--muted-foreground); }
+  .pop pre {
+    padding: 0.5rem; border-radius: calc(var(--radius) - 2px); background: oklch(0.1 0 0 / 0.6);
+    font: 0.75rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .btn.btn-sm { height: 1.75rem; padding: 0 0.625rem; font-size: 0.75rem; }
+  .agent-ctx { padding: 1rem; border-radius: var(--radius); background: var(--background); }
+  .agent-ctx pre { font: 0.8125rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .agent-ctx .mute { color: var(--muted-foreground); }
+  /* v15: direction A. Quiet rows in one shaded group, the prompt in a block, stat widgets, plain buttons. */
+  .sx-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1rem; margin-top: 0.75rem; }
+  .sx-head h3 { font-size: 1.125rem; font-weight: 600; }
+  .sx-head h3 span { margin-left: 0.5rem; font-size: 0.875rem; font-weight: 400; color: var(--muted-foreground); }
+  .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; }
+  .tool {
+    height: 2rem; padding: 0 0.75rem; border: 0; border-radius: calc(var(--radius) - 2px); background: none; cursor: pointer;
+    color: var(--muted-foreground); font: inherit; font-size: 0.875rem;
+  }
+  .tool:hover { background: oklch(1 0 0 / 6%); color: var(--foreground); }
+  .tool.primary { margin-left: 0.25rem; background: var(--primary); color: var(--primary-foreground); font-weight: 500; }
+  .a-group { list-style: none; display: grid; align-content: start; gap: 0.125rem; padding: 0.375rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); }
+  .a-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.125rem 0.75rem; padding: 0.625rem 0.75rem; border-radius: calc(var(--radius) - 3px); cursor: pointer; }
+  .a-row.on { background: oklch(1 0 0 / 8%); }
+  .a-name { font-size: 0.9375rem; font-weight: 500; overflow-wrap: anywhere; }
+  .a-every { font-size: 0.875rem; font-variant-numeric: tabular-nums; text-align: right; }
+  .a-prompt { font-size: 0.8125rem; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .a-row .state { justify-self: end; min-height: 0; font-size: 0.75rem; }
+  .a-row.paused .a-name, .a-row.paused .a-every { color: var(--muted-foreground); }
+  .a-flag { grid-column: 1 / -1; font-size: 0.75rem; }
+  .a-flag.err { color: var(--destructive); }
+  .a-flag.wait { color: var(--muted-foreground); }
+  .a-dhead { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 0.75rem 1rem; }
+  .a-dhead h4 { font-size: 1.375rem; font-weight: 600; line-height: 1.2; overflow-wrap: anywhere; }
+  .a-dhead p { margin-top: 0.25rem; font-size: 0.8125rem; color: var(--muted-foreground); }
+  .a-dhead p .go { color: var(--highlight); font-weight: 600; }
+  .a-btns { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .b-btn {
+    height: 2rem; padding: 0 0.875rem; border: 0; border-radius: calc(var(--radius) - 2px); cursor: pointer;
+    background: oklch(1 0 0 / 7%); color: var(--foreground); font: inherit; font-size: 0.875rem; font-weight: 500;
+  }
+  .b-btn.danger { color: var(--destructive); }
+  .a-quote { padding: 0.875rem 1rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); font-size: 1rem; overflow-wrap: anywhere; }
+  .a-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
+  .a-stat { min-width: 0; padding: 0.75rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); }
+  .a-stat dt { font-size: 0.75rem; color: var(--muted-foreground); }
+  .a-stat dd { margin-top: 0.125rem; font-size: 1rem; font-weight: 500; overflow-wrap: anywhere; }
+  .a-msg { font-size: 0.875rem; }
+  .a-msg.err { color: var(--destructive); }
+  .a-msg.wait { color: var(--muted-foreground); }
+  @media (min-width: 640px) { .a-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 639px) {
+    .tools { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+    .tool { width: 100%; background: oklch(1 0 0 / 6%); color: var(--foreground); }
+    .tool.primary { margin-left: 0; }
+  }
+  .seg { display: inline-grid; grid-auto-flow: column; justify-self: start; padding: 0.1875rem; border-radius: calc(var(--radius) - 1px); background: oklch(1 0 0 / 6%); }
+  .seg button {
+    height: 1.875rem; padding: 0 0.875rem; border: 0; border-radius: calc(var(--radius) - 4px); background: none; cursor: pointer;
+    color: var(--muted-foreground); font: inherit; font-size: 0.875rem; font-weight: 500;
+  }
+  .seg button[aria-checked="true"] { background: oklch(1 0 0 / 12%); color: var(--foreground); }
+  .plan { display: grid; gap: 0.75rem; }
+  .plan section { padding: 1rem 1.25rem; border-radius: var(--radius); background: var(--background); font-size: 0.875rem; }
+  .plan h4 { font-size: 0.875rem; font-weight: 600; }
+  .plan h4 span { font-weight: 400; color: var(--muted-foreground); }
+  .plan ul, .plan ol { margin-top: 0.5rem; padding-left: 1.25rem; display: grid; gap: 0.375rem; }
+  .plan li::marker { color: var(--muted-foreground); }
+  .plan .today li { color: var(--muted-foreground); }
+  @media (min-width: 1024px) { .plan { grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); } }
+  @media (min-width: 768px) {
+    .dlg-body { grid-template-columns: 10rem minmax(0, 1fr); gap: 0; }
+    .side { flex-direction: column; padding: 0 0 1rem 1rem; overflow: visible; }
+    .split { grid-template-columns: 19rem minmax(0, 1fr); }
+  }
+  @media (min-width: 1024px) {
+    .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .facts > .wide { grid-column: 1 / -1; }
+  }
+  @media (min-width: 1200px) {
+    .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: dense; }
+    .form-part.span-2 { grid-column: 1 / -1; }
+  }
+
+  /* Add, edit and generate forms */
+  .form-title { font-size: 0.875rem; font-weight: 600; }
+  .form-sub { margin-top: 0.25rem; font-size: 0.75rem; color: var(--muted-foreground); }
+  .group { margin-top: 1.25rem; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.025em; color: var(--muted-foreground); }
+  .field { display: grid; gap: 0.375rem; margin-top: 0.75rem; }
+  .label { font-size: 0.875rem; font-weight: 500; }
+  .help { font-size: 0.75rem; color: var(--muted-foreground); }
+  .env { font-size: 0.75rem; color: var(--muted-foreground); }
+  .input {
+    width: 100%; min-height: 2.25rem; padding: 0.5rem 0.75rem; border: 0;
+    border-radius: calc(var(--radius) - 2px); background: oklch(1 0 0 / 5.4%);
+    color: var(--foreground); font: inherit; font-size: 0.875rem;
+  }
+  .input::placeholder { color: var(--muted-foreground); }
+  textarea.input { min-height: 4.5rem; resize: vertical; }
+  .select-wrap { position: relative; }
+  .select-wrap .input { appearance: none; -webkit-appearance: none; padding-right: 2.25rem; }
+  .select-wrap svg {
+    position: absolute; right: 0.75rem; top: 50%; transform: translateY(-50%);
+    width: 1rem; height: 1rem; color: var(--muted-foreground); pointer-events: none;
+  }
+  .check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; font-weight: 500; }
+  .check input { width: 1rem; height: 1rem; accent-color: var(--primary); }
+  .footer {
+    margin-top: auto; display: flex; justify-content: flex-end; gap: 0.5rem;
+    padding: 0.75rem 1rem; background: oklch(0.269 0 0 / 0.3);
+  }
+
+  /* Import */
+  .file-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 0.5rem; font-size: 0.875rem; }
+  .file-name { color: var(--foreground); }
+  .preview { overflow-x: auto; margin-top: 0.5rem; }
+  .preview table { width: 100%; }
+
+  /* Generate: the draft */
+  .draft { margin-top: 0.5rem; padding: 0.75rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); font-size: 0.875rem; }
+  .draft dl { display: grid; grid-template-columns: auto 1fr; column-gap: 0.75rem; row-gap: 0.25rem; }
+  .draft dt { color: var(--muted-foreground); }
+
+  /* Schedules, v8: file path, info button, agent list, import format, Learn topic */
+  .where { margin-top: 0.75rem; font-size: 0.75rem; color: var(--muted-foreground); overflow-wrap: anywhere; }
+  .where .mono { color: var(--foreground); }
+  .title-row { display: flex; align-items: center; gap: 0.25rem; }
+  .info-btn {
+    flex: none; width: 1.75rem; height: 1.75rem; display: grid; place-items: center;
+    border: 0; background: none; cursor: pointer; color: var(--muted-foreground);
+    border-radius: calc(var(--radius) - 2px);
+  }
+  .info-btn svg { width: 1rem; height: 1rem; }
+  .format { margin-top: 0.5rem; padding: 0.75rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); font-size: 0.875rem; }
+  .format > * + * { margin-top: 0.5rem; }
+  .format p { font-size: 0.75rem; color: var(--muted-foreground); }
+  .format dl { display: grid; grid-template-columns: auto 1fr; column-gap: 0.75rem; row-gap: 0.25rem; }
+  .format dt { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; color: var(--foreground); }
+  .format dd { font-size: 0.75rem; color: var(--muted-foreground); }
+  .format pre {
+    padding: 0.5rem; border-radius: calc(var(--radius) - 2px); background: oklch(0.1 0 0 / 0.6);
+    font: 0.75rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  /* Runs in: a trigger that opens the agent list. Each agent is a gray button; white means selected. */
+  .runs-trigger {
+    width: 100%; min-height: 2.25rem; padding: 0.5rem 0.75rem; border: 0;
+    border-radius: calc(var(--radius) - 2px); background: oklch(1 0 0 / 5.4%);
+    color: var(--foreground); font: inherit; font-size: 0.875rem; text-align: left;
+    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; cursor: pointer;
+  }
+  .runs-trigger svg { width: 1rem; height: 1rem; flex: none; color: var(--muted-foreground); }
+  .agent-panel { margin-top: 0.5rem; padding: 0 0 0.5rem; border-radius: calc(var(--radius) - 2px); background: oklch(1 0 0 / 3%); overflow: hidden; }
+  .agent-panel-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.25rem 0.75rem; padding: 0.375rem 0.75rem; font-size: 0.75rem; }
+  .agent-panel-actions { display: flex; gap: 0.75rem; }
+  .agent-split { display: grid; }
+  .agent-env { display: flex; gap: 0.25rem; padding: 0.5rem 0.5rem 0; overflow-x: auto; background: oklch(0.269 0 0 / 0.2); }
+  .agent-env button {
+    flex: none; display: grid; gap: 0.125rem; padding: 0.375rem 0.625rem; border: 0; background: none; cursor: pointer;
+    color: var(--muted-foreground); font: inherit; font-size: 0.8125rem; text-align: left; white-space: nowrap;
+  }
+  .agent-env .muted { font-size: 0.6875rem; }
+  .agent-env button[aria-current="true"] .env-name {
+    color: var(--foreground); font-weight: 500;
+    text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 0.375rem;
+  }
+  .agent-env-pane { display: grid; align-content: start; gap: 0.75rem; min-width: 0; padding: 0.5rem 0.75rem 0.25rem; }
+  .agent-dir { display: grid; gap: 0.375rem; }
+  .agent-path { font-size: 0.75rem; color: var(--muted-foreground); overflow-wrap: anywhere; }
+  .agent-buttons { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+  .agent-btn {
+    min-height: 2rem; padding: 0.375rem 0.625rem; border: 0; cursor: pointer;
+    border-radius: calc(var(--radius) - 4px); background: var(--muted); color: var(--foreground);
+    font: inherit; font-size: 0.8125rem; line-height: 1.25; text-align: left;
+  }
+  .agent-btn:hover { box-shadow: inset 0 0 0 999px oklch(1 0 0 / 6%); }
+  .agent-btn[aria-pressed="true"] { background: var(--primary); color: var(--primary-foreground); }
+  .agent-btn:focus-visible { outline: 2px solid var(--ring, var(--foreground)); outline-offset: 2px; }
+  .agent-btn .muted { font-size: 0.6875rem; color: inherit; opacity: 0.7; margin-left: 0.25rem; }
+  .agent-note { padding: 0.5rem 0.75rem 0; font-size: 0.75rem; color: var(--muted-foreground); }
+  .agent-panel-foot { display: flex; justify-content: flex-end; padding: 0.5rem 0.75rem 0; }
+  @media (min-width: 30rem) {
+    .agent-split { grid-template-columns: 10.5rem minmax(0, 1fr); }
+    .agent-env { flex-direction: column; padding: 0.5rem; overflow: visible; }
+  }
+  /* Learn topic: the same split as the web Learn page, topics on the left, the topic on the right */
+  .learn { position: relative; display: grid; background: var(--background); border-radius: var(--radius); overflow: hidden; font-size: 0.875rem; }
+  .learn-close {
+    position: absolute; top: 0.5rem; right: 0.5rem; z-index: 1; width: 2rem; height: 2rem;
+    display: grid; place-items: center; border: 0; background: none; cursor: pointer;
+    color: var(--muted-foreground); border-radius: calc(var(--radius) - 2px);
+  }
+  .learn-nav { display: flex; gap: 0.25rem; padding: 2.25rem 0.5rem 0.5rem; overflow-x: auto; background: oklch(0.269 0 0 / 0.2); }
+  .learn-nav a {
+    flex: none; padding: 0.5rem 0.75rem; border-radius: calc(var(--radius) - 2px);
+    color: var(--muted-foreground); white-space: nowrap;
+  }
+  .learn-nav a[aria-current="page"] {
+    color: var(--foreground); font-weight: 500;
+    text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 0.5rem;
+  }
+  .learn-main { display: grid; gap: 1rem; min-width: 0; padding: 1rem; }
+  .learn-card { padding: 1.25rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); }
+  .learn-title { font-size: 1.125rem; font-weight: 600; line-height: 1.25; padding-right: 2rem; }
+  .learn-summary { margin-top: 0.75rem; color: var(--muted-foreground); }
+  .learn-cols { display: grid; gap: 1rem; }
+  .learn-h { font-size: 0.875rem; font-weight: 600; }
+  .learn-steps { margin-top: 1rem; list-style: none; display: grid; gap: 0.75rem; }
+  .learn-steps li { display: flex; align-items: flex-start; gap: 0.75rem; }
+  .learn-steps .num {
+    flex: none; width: 1.5rem; height: 1.5rem; display: grid; place-items: center;
+    border-radius: 999px; background: oklch(0.922 0 0 / 0.1); font-size: 0.75rem; font-weight: 600;
+  }
+  .learn-example {
+    margin-top: 0.75rem; padding: 0.875rem; border-radius: var(--radius);
+    background: oklch(0.1 0 0 / 0.6); white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .learn-note {
+    margin-top: 0.75rem; padding: 0.5rem 0.75rem; border-radius: calc(var(--radius) - 2px);
+    background: oklch(0.8 0.15 80 / 0.05); font-size: 0.75rem; color: var(--muted-foreground);
+  }
+  .learn-note strong { color: var(--foreground); font-weight: 600; }
+  @media (min-width: 768px) {
+    .learn { grid-template-columns: 15rem minmax(0, 1fr); }
+    .learn-nav { flex-direction: column; padding: 0.75rem; overflow: visible; }
+  }
+  @media (min-width: 1024px) {
+    .learn-cols { grid-template-columns: minmax(0, 1.2fr) minmax(15rem, 0.8fr); }
+  }
+
+  /* TUI: the fullscreen /schedules view. Monospace, solid-block bands, no box-drawing. */
+  .term { margin-top: 0.25rem; border-radius: var(--radius); background: oklch(0.1 0 0); overflow-x: auto; }
+  .term pre {
+    font: 0.8125rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--foreground); white-space: pre; min-width: max-content;
+    padding: 0.5rem 0.75rem 0.75rem;
+  }
+  .term .band { color: var(--muted); }
+  .term .mute { color: var(--muted-foreground); }
+  .term .err { color: var(--destructive); }
+  .term .sel { display: inline-block; width: 100%; background: oklch(1 0 0 / 9%); }
+
+  @media (min-width: 640px) {
+    .dlg-head { padding: 1.25rem 3rem 0 1.5rem; }
+    .inset { padding-left: 1.5rem; padding-right: 1.5rem; }
+    .tab { padding: 0 0.75rem; }
+    .footer { padding: 0.75rem 1.5rem; }
+  }
+  @media (min-width: 768px) {
+    .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="note">Mockup for #612 · v16 · sample data · nothing here is built. Planned, not built: the Schedules tab, Enable and Disable, Import file, Generate with agent, /schedules in the TUI, the Skill field, the per-agent folder and loadout, one schedule for many agents, the Learn topic, the schedules file at ~/.kollab/schedules.json, and pausing while a device is off the network.</p>
+  <p class="note">v16: B1 states how schedules run (saved, synced, one device fires, wake or queue, no drift, one catch-up), next to what main does today. The form adds If the agent is busy. The file, hint, Learn and TUI lines no longer say in memory. v15: direction A look: quiet rows, the prompt in a block, four stat widgets, Pause, Edit and Delete as plain buttons. v14: black surfaces, no boxes or tints behind words, errors are red text only, the detail actions line up under the button row, and the four buttons stack 2 by 2 on a phone. v13: no switches. The status word is the button: green Active, gray Paused, press to flip. Cards use their full width. I1 lists 40 ideas and which ones v13 uses. v12: no dropdown for actions; all four buttons are visible. v11: no borders anywhere; shade shows depth, and everything is rounded. Each schedule is a card with the agent as its title, how often, the network, and any error. Add schedule, Import file, Generate with agent and Refresh sit in one row above the list, all visible. The import file format moved into the info popover, with Copy example (7b). Settings sections are drawn as a sidebar to fit the planned Settings change; that sidebar is its own change. A1 is the planned agent prompt section. The TUI frames (T1 to T7) only change their file line.</p>
+  <p class="note">Renamed: Cron Jobs is now Schedules in every UI label. Code names (hub cron, hub_cron_* tools, /hub cron) stay until you say otherwise.</p>
+  <p class="index">Web: <a href="#f1">1 list</a> <a href="#f1b">1b status</a> <a href="#f2">2 add</a> <a href="#f2b">2b runs in</a> <a href="#f2c">2c devbox</a> <a href="#f3">3 edit</a> <a href="#f4">4 delete</a> <a href="#f5">5 after delete</a> <a href="#f6">6 empty</a> <a href="#f7">7 import</a> <a href="#f7b">7b file format</a> <a href="#f8">8 generate</a> <a href="#b1">B1 how it runs</a> <a href="#a1">A1 agent context</a> <a href="#i1">I1 ideas</a> <a href="#l1">L1 learn</a></p>
+  <p class="index">TUI, /schedules: <a href="#t1">T1 list</a> <a href="#t2">T2 delete</a> <a href="#t3">T3 edit</a> <a href="#t4">T4 import</a> <a href="#t5">T5 generate</a> <a href="#t6">T6 agents</a> <a href="#t7">T7 choose file</a></p>
+
+  <p class="section">Web: Settings, Schedules tab</p>
+
+  <!-- 1. LIST -->
+  <p class="caption" id="f1">1 · List and detail. Left: quiet rows in one shaded group. Each row: the agent it runs in, how often on the right, the prompt, and Active (green) or Paused (gray) under how often. Pressing that word flips it (1b). An error is one red line. The picked row is a shade lighter; a paused row is dimmed. Right: the agent, its status and who scheduled it; Pause, Edit and Delete at the top right, in line with Add schedule; the prompt in a block; four stat widgets; then any error in red text. No lines anywhere; shade shows depth.</p>
+  <section class="dialog" aria-label="Settings, schedules list">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row on"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+          <div class="a-dhead">
+            <div><h4>lapis</h4><p><span class="go">Active</span> · Scheduled by moonstone ab12cd34 · this machine</p></div>
+            <div class="a-btns"><button class="b-btn" type="button">Pause</button><button class="b-btn" type="button">Edit</button><button class="b-btn danger" type="button">Delete</button></div>
+          </div>
+          <p class="a-quote">report the pulse</p>
+          <dl class="a-stats"><div class="a-stat"><dt>Every</dt><dd>1 hour</dd></div><div class="a-stat"><dt>Next</dt><dd>10:30</dd></div><div class="a-stat"><dt>Last run</dt><dd>9:30 <span class="new">(planned)</span></dd></div><div class="a-stat"><dt>Skill</dt><dd><span class="muted">none</span></dd></div></dl>
+          <p class="a-msg err">The 9:30 run failed: peer has no conversation grant for this agent.</p>
+        </div>
+      </div>
+          <p class="hint">Each schedule fires on the device its agent runs on. If that device is off the network the schedule shows Waiting and runs once when it is back. How it works: B1.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 1b. STATUS, POINTER ON IT -->
+  <p class="caption" id="f1b">1b · Pointer on Active in a row: the word gets an underline, and the tooltip says Press to pause this schedule. Press it and it says Paused in gray. Pause in the detail does the same. Press Paused to turn it back on. Same button in the card, the detail and the form.</p>
+  <section class="dialog" aria-label="Settings, schedules, status button under the pointer">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row on"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on hover" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+          <div class="a-dhead">
+            <div><h4>lapis</h4><p><span class="go">Active</span> · Scheduled by moonstone ab12cd34 · this machine</p></div>
+            <div class="a-btns"><button class="b-btn" type="button">Pause</button><button class="b-btn" type="button">Edit</button><button class="b-btn danger" type="button">Delete</button></div>
+          </div>
+          <p class="a-quote">report the pulse</p>
+          <dl class="a-stats"><div class="a-stat"><dt>Every</dt><dd>1 hour</dd></div><div class="a-stat"><dt>Next</dt><dd>10:30</dd></div><div class="a-stat"><dt>Last run</dt><dd>9:30 <span class="new">(planned)</span></dd></div><div class="a-stat"><dt>Skill</dt><dd><span class="muted">none</span></dd></div></dl>
+          <p class="a-msg err">The 9:30 run failed: peer has no conversation grant for this agent.</p>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. ADD -->
+  <p class="caption" id="f2">2 · Add schedule: the form opens on the right and the list stays on the left. Status starts as Active, because you typed it yourself. Runs in starts on koordinator, the agent in this chat. If the agent is busy picks queue or a new instance. Click it to open the agent list (2b).</p>
+  <section class="dialog" aria-label="Settings, add schedule">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">New schedule</h3>
+        <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">What to send</p>
+            <div class="field">
+              <label class="label" for="a-prompt">Prompt</label>
+              <textarea class="input" id="a-prompt" rows="3" placeholder="What should the agent do?"></textarea>
+              <p class="help">Sent as a message to the agent that runs it.</p>
+            </div>
+            <div class="field">
+              <label class="label" for="a-skill">Skill <span class="new">(planned)</span></label>
+              <div class="select-wrap">
+                <select class="input" id="a-skill">
+                  <option selected>No skill</option>
+                  <option>pulse-report</option>
+                  <option>tunnel-check</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+              <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+            </div>
+          </div>
+          <div class="form-part span-2">
+            <p class="group">Where it runs</p>
+            <div class="field">
+              <label class="label" for="a-runs">Runs in</label>
+              <button class="runs-trigger" id="a-runs" type="button" aria-expanded="false"><span>koordinator</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+              <p class="help">Each selected agent gets the prompt when the schedule fires. An agent that is not running is started.</p>
+              <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+            </div>
+            <div class="field">
+              <span class="label">If the agent is busy</span>
+              <div class="seg" role="radiogroup" aria-label="If the agent is busy"><button type="button" role="radio" aria-checked="true">Add to its queue</button><button type="button" role="radio" aria-checked="false">Open a new instance</button></div>
+              <p class="help">Add to its queue: the prompt runs right after its current turn, in the same chat. A new instance runs it now, beside the busy one, as the same agent.</p>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">When</p>
+            <div class="field">
+              <label class="label" for="a-every">Every</label>
+              <input class="input mono" id="a-every" type="text" placeholder="e.g. 1h">
+              <p class="help">30s, 5m, 1h or 2h30m. Repeats until you pause it or delete it.</p>
+            </div>
+            <div class="field">
+              <div><button class="state on" type="button" title="Press to pause this schedule">Active</button></div>
+              <p class="help">Press Active to pause. Paused keeps the schedule without running it.</p>
+            </div>
+          </div>
+        </div>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Save schedule</button>
+        </div>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2b. ADD, RUNS IN OPEN -->
+  <p class="caption" id="f2b">2b · Add schedule with Runs in open: the agent list opens inside the form. Left of it: the machines, each with how many agents are selected. Right of that: the folders on that machine and their agents. Gray is off, white is selected. Done closes the list.</p>
+  <section class="dialog" aria-label="Settings, add schedule, Runs in open">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">New schedule</h3>
+        <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">What to send</p>
+            <div class="field">
+              <label class="label" for="b-prompt">Prompt</label>
+              <textarea class="input" id="b-prompt" rows="3" placeholder="What should the agent do?"></textarea>
+              <p class="help">Sent as a message to the agent that runs it.</p>
+            </div>
+            <div class="field">
+              <label class="label" for="b-skill">Skill <span class="new">(planned)</span></label>
+              <div class="select-wrap">
+                <select class="input" id="b-skill">
+                  <option selected>No skill</option>
+                  <option>pulse-report</option>
+                  <option>tunnel-check</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+              <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+            </div>
+          </div>
+          <div class="form-part span-2">
+            <p class="group">Where it runs</p>
+            <div class="field">
+              <label class="label" for="b-runs">Runs in</label>
+              <button class="runs-trigger" id="b-runs" type="button" aria-expanded="true"><span>lapis, infra@devbox</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg></button>
+              <div class="agent-panel">
+                <div class="agent-panel-head">
+                  <span class="muted">2 of 6 selected</span>
+                  <span class="agent-panel-actions"><button class="btn-text" type="button">Select all</button><button class="btn-text" type="button">Clear</button></span>
+                </div>
+                <div class="agent-split">
+                  <div class="agent-env">
+                    <button type="button" aria-current="true"><span class="env-name">On this machine</span><span class="muted">1 of 4 selected</span></button>
+                    <button type="button"><span class="env-name">On devbox</span><span class="muted">1 of 2 selected</span></button>
+                  </div>
+                  <div class="agent-env-pane">
+                    <div class="agent-dir">
+                      <span class="agent-path mono">~/dev/kollab</span>
+                      <div class="agent-buttons">
+                        <button class="agent-btn" type="button" aria-pressed="false">koordinator <span class="muted">this chat</span></button>
+                        <button class="agent-btn" type="button" aria-pressed="true">lapis</button>
+                      </div>
+                    </div>
+                    <div class="agent-dir">
+                      <span class="agent-path mono">~/dev/mentiko</span>
+                      <div class="agent-buttons">
+                        <button class="agent-btn" type="button" aria-pressed="false">moonstone</button>
+                        <button class="agent-btn" type="button" aria-pressed="false">peridot <span class="muted">offline</span></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <p class="agent-note">An offline agent can stay selected. Its runs wait until it is back.</p>
+                <div class="agent-panel-foot"><button class="btn" type="button">Done</button></div>
+              </div>
+              <p class="help">Each selected agent gets the prompt when the schedule fires. An agent that is not running is started.</p>
+              <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+            </div>
+            <div class="field">
+              <span class="label">If the agent is busy</span>
+              <div class="seg" role="radiogroup" aria-label="If the agent is busy"><button type="button" role="radio" aria-checked="true">Add to its queue</button><button type="button" role="radio" aria-checked="false">Open a new instance</button></div>
+              <p class="help">Add to its queue: the prompt runs right after its current turn, in the same chat. A new instance runs it now, beside the busy one, as the same agent.</p>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">When</p>
+            <div class="field">
+              <label class="label" for="b-every">Every</label>
+              <input class="input mono" id="b-every" type="text" placeholder="e.g. 1h">
+              <p class="help">30s, 5m, 1h or 2h30m. Repeats until you pause it or delete it.</p>
+            </div>
+            <div class="field">
+              <div><button class="state on" type="button" title="Press to pause this schedule">Active</button></div>
+              <p class="help">Press Active to pause. Paused keeps the schedule without running it.</p>
+            </div>
+          </div>
+        </div>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Save schedule</button>
+        </div>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2c. SAME PANEL, ON DEVBOX OPEN -->
+  <p class="caption" id="f2c">2c · Same panel with On devbox picked: its folder and agents show on the right. Selections stay across machines, so the counts still add up to 2 of 6.</p>
+  <section class="dialog" aria-label="Settings, add schedule, Runs in open on devbox">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">New schedule</h3>
+        <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">What to send</p>
+            <div class="field">
+              <label class="label" for="c-prompt">Prompt</label>
+              <textarea class="input" id="c-prompt" rows="3" placeholder="What should the agent do?"></textarea>
+              <p class="help">Sent as a message to the agent that runs it.</p>
+            </div>
+            <div class="field">
+              <label class="label" for="c-skill">Skill <span class="new">(planned)</span></label>
+              <div class="select-wrap">
+                <select class="input" id="c-skill">
+                  <option selected>No skill</option>
+                  <option>pulse-report</option>
+                  <option>tunnel-check</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+              <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+            </div>
+          </div>
+          <div class="form-part span-2">
+            <p class="group">Where it runs</p>
+            <div class="field">
+              <label class="label" for="c-runs">Runs in</label>
+              <button class="runs-trigger" id="c-runs" type="button" aria-expanded="true"><span>lapis, infra@devbox</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg></button>
+              <div class="agent-panel">
+                <div class="agent-panel-head">
+                  <span class="muted">2 of 6 selected</span>
+                  <span class="agent-panel-actions"><button class="btn-text" type="button">Select all</button><button class="btn-text" type="button">Clear</button></span>
+                </div>
+                <div class="agent-split">
+                  <div class="agent-env">
+                    <button type="button"><span class="env-name">On this machine</span><span class="muted">1 of 4 selected</span></button>
+                    <button type="button" aria-current="true"><span class="env-name">On devbox</span><span class="muted">1 of 2 selected</span></button>
+                  </div>
+                  <div class="agent-env-pane">
+                    <div class="agent-dir">
+                      <span class="agent-path mono">~/dev/infra</span>
+                      <div class="agent-buttons">
+                        <button class="agent-btn" type="button" aria-pressed="true">infra</button>
+                        <button class="agent-btn" type="button" aria-pressed="false">ops</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <p class="agent-note">An offline agent can stay selected. Its runs wait until it is back.</p>
+                <div class="agent-panel-foot"><button class="btn" type="button">Done</button></div>
+              </div>
+              <p class="help">Each selected agent gets the prompt when the schedule fires. An agent that is not running is started.</p>
+              <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+            </div>
+            <div class="field">
+              <span class="label">If the agent is busy</span>
+              <div class="seg" role="radiogroup" aria-label="If the agent is busy"><button type="button" role="radio" aria-checked="true">Add to its queue</button><button type="button" role="radio" aria-checked="false">Open a new instance</button></div>
+              <p class="help">Add to its queue: the prompt runs right after its current turn, in the same chat. A new instance runs it now, beside the busy one, as the same agent.</p>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">When</p>
+            <div class="field">
+              <label class="label" for="c-every">Every</label>
+              <input class="input mono" id="c-every" type="text" placeholder="e.g. 1h">
+              <p class="help">30s, 5m, 1h or 2h30m. Repeats until you pause it or delete it.</p>
+            </div>
+            <div class="field">
+              <div><button class="state on" type="button" title="Press to pause this schedule">Active</button></div>
+              <p class="help">Press Active to pause. Paused keeps the schedule without running it.</p>
+            </div>
+          </div>
+        </div>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Save schedule</button>
+        </div>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. EDIT -->
+  <p class="caption" id="f3">3 · Edit schedule: the form on the right is filled from Edit. Edit goes to moonstone, the agent that scheduled it. Runs in opens the same list as 2b.</p>
+  <section class="dialog" aria-label="Settings, edit schedule">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row on"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">Edit schedule</h3>
+        <p class="form-sub">Scheduled by moonstone. To move it, delete it and add it again.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">What to send</p>
+            <div class="field">
+              <label class="label" for="e-prompt">Prompt</label>
+              <textarea class="input" id="e-prompt" rows="3">report the pulse</textarea>
+              <p class="help">Sent as a message to the agent that runs it.</p>
+            </div>
+            <div class="field">
+              <label class="label" for="e-skill">Skill <span class="new">(planned)</span></label>
+              <div class="select-wrap">
+                <select class="input" id="e-skill">
+                  <option selected>No skill</option>
+                  <option>pulse-report</option>
+                  <option>tunnel-check</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+              <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+            </div>
+          </div>
+          <div class="form-part span-2">
+            <p class="group">Where it runs</p>
+            <div class="field">
+              <label class="label" for="e-runs">Runs in</label>
+              <button class="runs-trigger" id="e-runs" type="button" aria-expanded="false"><span>lapis</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+              <p class="help">Each selected agent gets the prompt when the schedule fires. An agent that is not running is started.</p>
+              <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+            </div>
+            <div class="field">
+              <span class="label">If the agent is busy</span>
+              <div class="seg" role="radiogroup" aria-label="If the agent is busy"><button type="button" role="radio" aria-checked="true">Add to its queue</button><button type="button" role="radio" aria-checked="false">Open a new instance</button></div>
+              <p class="help">Add to its queue: the prompt runs right after its current turn, in the same chat. A new instance runs it now, beside the busy one, as the same agent.</p>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">When</p>
+            <div class="field">
+              <label class="label" for="e-every">Every</label>
+              <input class="input mono" id="e-every" type="text" value="1h">
+              <p class="help">30s, 5m, 1h or 2h30m. Repeats until you pause it or delete it.</p>
+            </div>
+            <div class="field">
+              <div><button class="state on" type="button" title="Press to pause this schedule">Active</button></div>
+              <p class="help">Press Active to pause. Paused keeps the schedule without running it.</p>
+            </div>
+          </div>
+        </div>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Save schedule</button>
+        </div>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. DELETE CONFIRM -->
+  <p class="caption" id="f4">4 · Delete: the confirm opens above the details of the picked schedule. Cancel closes it. Delete removes the schedule (frame 5).</p>
+  <section class="dialog" aria-label="Settings, delete schedule">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row on"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+          <div class="a-dhead">
+            <div><h4>lapis</h4><p><span class="go">Active</span> · Scheduled by moonstone ab12cd34 · this machine</p></div>
+            <div class="a-btns"><button class="b-btn" type="button">Pause</button><button class="b-btn" type="button">Edit</button><button class="b-btn danger" type="button">Delete</button></div>
+          </div>
+          <div class="detail-confirm" role="alertdialog" aria-labelledby="confirm-title-4">
+            <h3 id="confirm-title-4">Delete this schedule?</h3>
+            <p>moonstone ab12cd34 runs every 1h and sends to lapis. Its timer stops on moonstone and it won't fire again. This can't be undone.</p>
+            <div class="actions"><button class="btn" type="button">Cancel</button><button class="btn-danger" type="button">Delete</button></div>
+          </div>
+          <p class="a-quote">report the pulse</p>
+          <dl class="a-stats"><div class="a-stat"><dt>Every</dt><dd>1 hour</dd></div><div class="a-stat"><dt>Next</dt><dd>10:30</dd></div><div class="a-stat"><dt>Last run</dt><dd>9:30 <span class="new">(planned)</span></dd></div><div class="a-stat"><dt>Skill</dt><dd><span class="muted">none</span></dd></div></dl>
+          <p class="a-msg err">The 9:30 run failed: peer has no conversation grant for this agent.</p>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. AFTER DELETE -->
+  <p class="caption" id="f5">5 · After Delete: the lapis schedule is gone, the list has 2, and the next one is picked on the right.</p>
+  <section class="dialog" aria-label="Settings, schedules list after delete">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>2 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row on"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+          <div class="a-dhead">
+            <div><h4>infra@devbox</h4><p><span class="go">Active</span> · Scheduled by moonstone 9876fedc · Studio network</p></div>
+            <div class="a-btns"><button class="b-btn" type="button">Pause</button><button class="b-btn" type="button">Edit</button><button class="b-btn danger" type="button">Delete</button></div>
+          </div>
+          <p class="a-quote">check the tunnel</p>
+          <dl class="a-stats"><div class="a-stat"><dt>Every</dt><dd>5 minutes</dd></div><div class="a-stat"><dt>Next</dt><dd><span class="muted">when back</span></dd></div><div class="a-stat"><dt>Last run</dt><dd>9:41 <span class="new">(planned)</span></dd></div><div class="a-stat"><dt>Skill</dt><dd>tunnel-check</dd></div></dl>
+          <p class="a-msg wait">Waiting: devbox is off the network. Runs resume when it is back.</p>
+        </div>
+      </div>
+          <p class="hint">Each schedule fires on the device its agent runs on. If that device is off the network the schedule shows Waiting and runs once when it is back. How it works: B1.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. EMPTY -->
+  <p class="caption" id="f6">6 · Empty: no schedule on any live agent. The list says so, and the right side points to the buttons at the top.</p>
+  <section class="dialog" aria-label="Settings, schedules empty">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>none yet</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="empty" style="background: oklch(0.269 0 0 / 0.3)"><strong>No schedules</strong>No live agent on this machine has a schedule.</div>
+        </aside>
+        <div class="split-detail">
+          <div class="empty"><strong>No schedule selected</strong>Use Add schedule, Import file or Generate with agent at the top.</div>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7. IMPORT -->
+  <p class="caption" id="f7">7 · Import file: pick a file and check the preview, then press Import. Imported schedules start paused. The file format is not on the page; it is behind the info button (7b).</p>
+  <section class="dialog" aria-label="Settings, import schedules">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+        <div class="title-row">
+          <h3 class="form-title">Import schedules</h3>
+          <button class="info-btn" type="button" aria-expanded="false" aria-label="File format" title="File format">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          </button>
+        </div>
+        <p class="form-sub">Load a schedules file from another machine. Nothing is added until you press Import. The info button next to the title shows the file format.</p>
+        <p class="group">File</p>
+        <div class="file-row">
+          <button class="btn" type="button">Choose file</button>
+          <span class="file-name mono">schedules-devbox.json</span>
+          <span class="muted">3 schedules</span>
+        </div>
+        <p class="group">Preview</p>
+        <div class="preview">
+          <table>
+            <thead>
+              <tr><th>Prompt</th><th>Every</th><th>Runs in</th><th>Result</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><div class="msg">summarize the day</div></td>
+                <td class="nw">2h</td>
+                <td class="nw">koordinator</td>
+                <td class="nw muted">ready, starts paused</td>
+              </tr>
+              <tr>
+                <td><div class="msg">check the tunnel</div></td>
+                <td class="nw">5m</td>
+                <td class="nw">infra@devbox</td>
+                <td class="muted msg">skipped, same as 9876fedc</td>
+              </tr>
+              <tr>
+                <td><div class="msg">rebuild the index</div></td>
+                <td class="nw">12h</td>
+                <td class="nw">lapis, koordinator</td>
+                <td class="nw muted">ready, starts paused</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="help">Imported schedules start paused. Turn each one on after you check its prompt. They are scheduled by koordinator, the agent in this chat.</p>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Import 2 schedules</button>
+        </div>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7b. IMPORT, FILE FORMAT -->
+  <p class="caption" id="f7b">7b · Pointer on the info button, or a tap: the file format shows in a popover, with Copy example to put the sample JSON on the clipboard. It closes when the pointer leaves, or on a second tap.</p>
+  <section class="dialog" aria-label="Settings, import schedules, file format open">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+        <div class="title-row">
+          <h3 class="form-title">Import schedules</h3>
+          <button class="info-btn" type="button" aria-expanded="true" aria-label="File format" title="File format">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          </button>
+          <div class="pop" role="dialog" aria-label="Schedules file format">
+            <div class="pop-head"><span>File format</span><button class="btn btn-sm" type="button">Copy example</button></div>
+            <p>A JSON list. Each schedule needs three fields:</p>
+            <dl>
+              <dt>prompt</dt><dd>the message the agent gets</dd>
+              <dt>every</dt><dd>30s, 5m, 1h or 2h30m</dd>
+              <dt>runs_in</dt><dd>one or more agents, as a list</dd>
+            </dl>
+            <pre>[
+  {"prompt": "summarize the day", "every": "2h", "runs_in": ["koordinator", "lapis"]}
+]</pre>
+            <p>Skill, folder and loadout are not in the file yet (planned).</p>
+          </div>
+        </div>
+        <p class="form-sub">Load a schedules file from another machine. Nothing is added until you press Import. The info button next to the title shows the file format.</p>
+        <p class="group">File</p>
+        <div class="file-row">
+          <button class="btn" type="button">Choose file</button>
+          <span class="file-name mono">schedules-devbox.json</span>
+          <span class="muted">3 schedules</span>
+        </div>
+        <p class="group">Preview</p>
+        <div class="preview">
+          <table>
+            <thead>
+              <tr><th>Prompt</th><th>Every</th><th>Runs in</th><th>Result</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><div class="msg">summarize the day</div></td>
+                <td class="nw">2h</td>
+                <td class="nw">koordinator</td>
+                <td class="nw muted">ready, starts paused</td>
+              </tr>
+              <tr>
+                <td><div class="msg">check the tunnel</div></td>
+                <td class="nw">5m</td>
+                <td class="nw">infra@devbox</td>
+                <td class="muted msg">skipped, same as 9876fedc</td>
+              </tr>
+              <tr>
+                <td><div class="msg">rebuild the index</div></td>
+                <td class="nw">12h</td>
+                <td class="nw">lapis, koordinator</td>
+                <td class="nw muted">ready, starts paused</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="help">Imported schedules start paused. Turn each one on after you check its prompt. They are scheduled by koordinator, the agent in this chat.</p>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Import 2 schedules</button>
+        </div>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8. GENERATE -->
+  <p class="caption" id="f8">8 · Generate with agent: describe the schedule on the left, review the draft on the right. A draft starts paused and saves nothing until you press Save schedule in the form.</p>
+  <section class="dialog" aria-label="Settings, generate schedule with agent">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <div class="dlg-body">
+      <nav class="side" aria-label="Settings sections">
+        <span>Session</span>
+        <span>Configuration</span>
+        <span>Loadouts</span>
+        <span>Model</span>
+        <span>Setup</span>
+        <span>Network</span>
+        <span>PhoneLink</span>
+        <span>Voice</span>
+        <span>Prompts</span>
+        <span aria-current="page">Schedules</span>
+      </nav>
+      <div class="dlg-main">
+        <div class="panel inset">
+          <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span>, synced to every device on the network <span class="new">(planned)</span></p>
+          <div class="sx-head">
+            <h3>Schedules<span>3 · 1 paused · 1 waiting</span></h3>
+            <div class="tools">
+              <button class="tool" type="button">Refresh</button>
+              <button class="tool" type="button">Import file</button>
+              <button class="tool" type="button">Generate with agent</button>
+              <button class="tool primary" type="button">Add schedule</button>
+            </div>
+          </div>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <ul class="a-group">
+            <li class="a-row"><span class="a-name">lapis</span><span class="a-every">every 1h</span><span class="a-prompt">report the pulse</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag err">No conversation grant for lapis</span></li>
+            <li class="a-row"><span class="a-name">infra@devbox</span><span class="a-every">every 5m</span><span class="a-prompt">check the tunnel</span><button class="state on" type="button" title="Press to pause this schedule">Active</button><span class="a-flag wait">Waiting for devbox to come back online</span></li>
+            <li class="a-row paused"><span class="a-name">6 agents</span><span class="a-every">every 6h</span><span class="a-prompt">standup: one-line status</span><button class="state off" type="button" title="Press to turn this schedule on">Paused</button></li>
+          </ul>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">Generate with agent</h3>
+        <p class="form-sub">An agent drafts the schedule from your words. You review it before anything is saved.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">Describe it</p>
+            <div class="field">
+              <label class="label" for="g-describe">Describe the schedule</label>
+              <textarea class="input" id="g-describe" rows="2">every 2 hours, ask lapis for a one-line status</textarea>
+              <p class="help">Repeats on an interval only: 30s, 5m, 1h or 2h30m. Clock times like 9am aren't supported.</p>
+            </div>
+            <div class="field">
+              <label class="label" for="g-agent">Ask agent</label>
+              <div class="select-wrap">
+                <select class="input" id="g-agent">
+                  <option selected>koordinator</option>
+                  <option>lapis</option>
+                  <option>infra@devbox</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+            </div>
+            <div class="field">
+              <div><button class="btn" type="button">Draft schedule</button></div>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">Draft from koordinator</p>
+            <dl class="facts">
+              <div class="wide"><dt>Prompt</dt><dd>Give me a one-line status.</dd></div>
+              <div><dt>Runs in</dt><dd>lapis</dd></div>
+              <div><dt>Every</dt><dd>2h</dd></div>
+              <div><dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd></div>
+              <div><dt>Active</dt><dd class="muted">no, starts paused</dd></div>
+            </dl>
+            <p class="help">Nothing is saved yet. Review in form opens the new schedule form with these values, and Save schedule saves it.</p>
+          </div>
+        </div>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Review in form</button>
+        </div>
+        </div>
+      </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- B1. HOW A SCHEDULE RUNS -->
+  <p class="caption" id="b1">B1 · How a schedule runs. Left: what the code on main does today. Right: the plan this tab is designed for. Nothing on the right is built.</p>
+  <div class="plan">
+    <section class="today">
+      <h4>Today <span>(code on main)</span></h4>
+      <ul>
+        <li>A schedule is held in memory by the agent that made it, and is gone when that agent stops.</li>
+        <li>Schedules are not shared between machines.</li>
+        <li>The agent checks every 10 seconds whether one is due.</li>
+        <li>A fire that fails is skipped; the next one comes one interval later.</li>
+        <li>If the target device leaves the network, the schedule is deleted.</li>
+        <li>Times drift: the next fire counts from when the check ran.</li>
+      </ul>
+    </section>
+    <section>
+      <h4>Plan</h4>
+      <ol>
+        <li>Saved: schedules live in ~/.kollab/schedules.json and survive restarts.</li>
+        <li>Synced: the file rides the existing config sync, which already sends config, agents and skills from the network's primary device to every joined device, on every change and on reconnect. An edit made on another device goes to the primary first, then out to all.</li>
+        <li>One device fires each schedule: the device its agent runs on. No double fires.</li>
+        <li>Fire: if lapis is not running, it is started. If lapis is idle, the prompt goes in and it starts a turn. If lapis is busy, the prompt waits in its queue and runs after the current turn, or a new lapis instance opens for this run if the schedule says so.</li>
+        <li>Lapis stays one agent: same name and memory. A new instance exists only for that run.</li>
+        <li>No drift: fire times sit on a fixed grid from the start time. The timer sleeps until the next due time and wakes early when a schedule changes, instead of checking every 10 seconds.</li>
+        <li>Missed fires (laptop asleep, device off the network): when it is back, the schedule runs once, not once per missed hour, then continues on its grid.</li>
+        <li>A failed fire is retried with backoff until the next one is due, and the error stays on the card. A device going away never deletes a schedule; it shows Waiting.</li>
+        <li>Every fire writes a run record (time and result). That feeds Last run.</li>
+        <li>Proof: a Docker network of three devices. Take one off the network for two intervals, bring it back, and check exactly one catch-up fire and no duplicates on the others.</li>
+      </ol>
+    </section>
+  </div>
+
+  <!-- A1. AGENT CONTEXT -->
+  <p class="caption" id="a1">A1 · Agent context, planned: a new section in the shared agent prompt (bundles/agents/_base/sections/), so every agent knows the new name. Today no prompt section mentions schedules or cron jobs; agents only get the hub_cron_* tags.</p>
+  <div class="agent-ctx"><pre>## Schedules
+Schedules are prompts sent to one or more agents on a timer.
+They used to be called cron jobs. "Schedule", "cron job" and "cron" all mean the same thing.
+The user sees them in Settings, Schedules (web) and in /schedules (terminal).
+The tags keep their old names: hub_cron_add, hub_cron_list and the other hub_cron_* tags.
+When you talk to the user, say schedule, not cron job.
+<span class="mute">(planned text, not written yet)</span></pre></div>
+
+  <!-- I1. IDEAS -->
+  <p class="caption" id="i1">I1 · 40 ideas for the Schedules tab. Ideas 1 to 12 are in this version. Ideas 13 to 40 are not, each with the reason.</p>
+  <details class="ideas" open><summary>40 ideas</summary>
+    <h4>In v13</h4>
+    <ol>
+      <li>The status word replaces the switch: green Active, gray Paused.</li>
+      <li>The status word is the button. Under the pointer it gets an underline (1b).</li>
+      <li>Card text uses the full width; only the title line leaves room for the status.</li>
+      <li>How often, in plain words: Every hour, Every 5 minutes.</li>
+      <li>The next fire time on the card.</li>
+      <li>Errors are red text only, no strip behind them.</li>
+      <li>Waiting (device off the network) is gray text.</li>
+      <li>The detail shows the next three fire times.</li>
+      <li>The detail shows the last run and how it went (planned).</li>
+      <li>The same status button in the card, the detail header and the form.</li>
+      <li>A shorter summary line: 3 schedules · 1 paused · 1 waiting.</li>
+      <li>A paused card is dimmed.</li>
+    </ol>
+    <h4>Not in v13, and why</h4>
+    <ol start="13">
+      <li>A Sunday to Saturday strip: schedules repeat on an interval and have no clock times yet. It fits once clock-time schedules exist.</li>
+      <li>Clock-time schedules (9am on weekdays): a new backend feature, its own issue.</li>
+      <li>Run history as 12 small blocks (green ok, red failed): needs a run log first.</li>
+      <li>Run now in the detail: needs a hub call that fires a schedule once.</li>
+      <li>A fix button in the error strip (Grant lapis access): needs the grant flow to exist on the web.</li>
+      <li>Search above the list: worth it at 10 or more schedules.</li>
+      <li>Filter Active, Paused, Errors: same, at 10 or more.</li>
+      <li>Sort by next fire: the default order may already be this; decide in code.</li>
+      <li>Group cards by network: only helps with several networks.</li>
+      <li>An error count on the Schedules item in the Settings sidebar.</li>
+      <li>The agent's gem color beside its name, matching the chat sidebar.</li>
+      <li>Hover on a time shows the other form (in 30m and 10:30).</li>
+      <li>Pause all and resume all.</li>
+      <li>Duplicate a schedule.</li>
+      <li>Copy one schedule as JSON, in the import format.</li>
+      <li>Export all schedules to a file.</li>
+      <li>Undo after Delete instead of a confirm.</li>
+      <li>Starter schedules in the empty state (daily standup, tunnel check), added in one press.</li>
+      <li>Templates in Add schedule.</li>
+      <li>Keyboard: up and down move through cards, space flips the status.</li>
+      <li>Phone: list and detail as two screens with Back, instead of stacked.</li>
+      <li>Edit Every in place by pressing it.</li>
+      <li>The prompt expands on the card under the pointer.</li>
+      <li>Show who scheduled it on the card (it is in the detail now).</li>
+      <li>A time zone label next to clock times.</li>
+      <li>Last edited time in the detail.</li>
+      <li>A countdown ring to the next fire: decoration, skipped.</li>
+      <li>Drag to reorder: order means nothing for schedules, skipped.</li>
+    </ol>
+  </details>
+
+  <!-- L1. LEARN, SCHEDULES TOPIC -->
+  <p class="caption" id="l1">L1 · Learn, Schedules topic. The info button on Import schedules (7) opens it. It is a new topic in the Learn catalog, placed after Hub messaging, with the same layout as the other topics. Nothing is built.</p>
+  <section class="learn" aria-label="Learn, Schedules">
+    <button class="learn-close" type="button" aria-label="Close Learn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    <nav class="learn-nav" aria-label="Learn topics">
+      <a href="#l1">Kollab networks</a>
+      <a href="#l1">Devices</a>
+      <a href="#l1">Workspaces</a>
+      <a href="#l1">Agents</a>
+      <a href="#l1">Provider profiles</a>
+      <a href="#l1">Context compaction</a>
+      <a href="#l1">Koordinator</a>
+      <a href="#l1">Hub messaging</a>
+      <a href="#l1" aria-current="page">Schedules</a>
+      <a href="#l1">Voice mode</a>
+      <a href="#l1">System prompts</a>
+      <a href="#l1">PhoneLink</a>
+    </nav>
+    <div class="learn-main">
+      <section class="learn-card">
+        <h2 class="learn-title">Schedules</h2>
+        <p class="learn-summary">A schedule sends one prompt to one or more agents on a timer.</p>
+      </section>
+      <div class="learn-cols">
+        <section class="learn-card">
+          <h3 class="learn-h">How to get started</h3>
+          <ol class="learn-steps">
+            <li><span class="num">1</span><span>Open Settings, then Schedules, and press Add schedule.</span></li>
+            <li><span class="num">2</span><span>Type the prompt, set Every to 30s, 5m, 1h or 2h30m, and select the agents under Runs in.</span></li>
+            <li><span class="num">3</span><span>Keep Active on and press Save schedule. For many at once, press Import file.</span></li>
+          </ol>
+        </section>
+        <section class="learn-card">
+          <h3 class="learn-h">Try an example</h3>
+          <p class="learn-example">Settings, Schedules, Generate with agent. Type: every 2 hours, ask lapis for a one-line status</p>
+          <p class="learn-note"><strong>Good to know: </strong>Schedules are saved in ~/.kollab/schedules.json and synced to every device on your network. Each one runs on the device its agent lives on, and waits while that device is off the network (planned).</p>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <p class="section">TUI: /schedules, full alt screen (same options and keys as the web tab)</p>
+
+  <!-- T1. TUI LIST -->
+  <p class="caption" id="t1">T1 · List, full alt screen. Same rows as the web tab. Keys are in the footer.</p>
+  <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
+ Schedules   3 across 2 live agents, 1 off, 1 paused
+ Scheduled prompts on every live agent
+ Schedules file: ~/.kollab/schedules.json, synced to every device on the network (planned).
+
+   Scheduled by            Every  Runs in        Prompt                   Next fire
+<span class="sel">▌  moonstone ab12cd34      1h     lapis          report the pulse         in 30m</span>
+   <span class="err">error: peer has no conversation grant for this agent</span>
+   moonstone 9876fedc      5m     infra@devbox   check the tunnel         paused
+   <span class="mute">paused: infra@devbox not on this network</span>
+   koordinator 5a5b5c5d    6h     6 agents       standup: one-line status off
+
+ a add   g generate   i import file   e edit   t enable/disable   d delete   r refresh   esc close
+<span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
+
+  <!-- T2. TUI DELETE -->
+  <p class="caption" id="t2">T2 · Press d: the footer asks y or n. Nothing is deleted until y.</p>
+  <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
+ Schedules   3 across 2 live agents, 1 off, 1 paused
+ Scheduled prompts on every live agent
+ Schedules file: ~/.kollab/schedules.json, synced to every device on the network (planned).
+
+   Scheduled by            Every  Runs in        Prompt                   Next fire
+<span class="sel">▌  moonstone ab12cd34      1h     lapis          report the pulse         in 30m</span>
+   <span class="err">error: peer has no conversation grant for this agent</span>
+   moonstone 9876fedc      5m     infra@devbox   check the tunnel         paused
+   <span class="mute">paused: infra@devbox not on this network</span>
+   koordinator 5a5b5c5d    6h     6 agents       standup: one-line status off
+
+ Delete moonstone ab12cd34? It won't fire again.   y delete   n keep
+<span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
+
+  <!-- T3. TUI EDIT -->
+  <p class="caption" id="t3">T3 · Press e to edit, or a to add: the form, full screen. Same fields as the web form. Enter on Runs in opens the agent list (T6).</p>
+  <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
+ Edit schedule
+ Scheduled by moonstone. To move it, delete it and add it again.
+
+   What to send
+     Prompt        report the pulse
+     Skill         none  (planned)
+
+   Where it runs
+     Runs in       lapis   <span class="mute">(enter opens the agent list, T6)</span>
+     Folder        each agent's own folder  (planned)
+     Loadout       each agent's own loadout  (planned)
+
+   When
+<span class="sel">▌    Every         1h</span>
+     Enabled       yes
+
+ tab next field   shift tab previous field   enter save   esc cancel
+<span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
+
+  <!-- T4. TUI IMPORT -->
+  <p class="caption" id="t4">T4 · Shows after a file is picked in T7. Enter imports. Imported schedules start off. ? opens Learn, Schedules, in the web UI.</p>
+  <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
+ Import schedules   <span class="mute">? learn</span>
+ Load a schedules file from another machine. Nothing is added until you press enter.
+
+   File          ~/Downloads/schedules-devbox.json  (3 schedules)
+
+   Prompt                    Every  Runs in              Result
+   summarize the day         2h     koordinator          ready, starts off
+   check the tunnel          5m     infra@devbox         <span class="mute">skipped, same as 9876fedc</span>
+   rebuild the index         12h    lapis, koordinator   ready, starts off
+
+   Imported schedules start off. Turn each one on after you check its prompt.
+
+   File format: a JSON list. Each item has prompt, every and runs_in (a list of agents).
+   Example:  [{"prompt": "summarize the day", "every": "2h", "runs_in": ["koordinator", "lapis"]}]
+   Skill, folder and loadout are not in the file yet (planned).
+
+ enter import 2   p change file   ? learn   esc cancel
+<span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
+
+  <!-- T5. TUI GENERATE -->
+  <p class="caption" id="t5">T5 · Press g: generate with agent. Enter drafts. r opens the draft in the form, where it still saves nothing until you save.</p>
+  <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
+ Generate with agent
+ An agent drafts the schedule from your words. Nothing is saved until you review it.
+
+   Describe it
+     every 2 hours, ask lapis for a one-line status
+
+   Ask agent     koordinator
+   Repeats on an interval only: 30s, 5m, 1h or 2h30m. Clock times like 9am aren't supported.
+
+   Draft from koordinator
+     Prompt        Give me a one-line status.
+     Runs in       lapis
+     Every         2h
+     Enabled       <span class="mute">no, starts off</span>
+
+ enter draft   r review in form   d discard   esc cancel
+<span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
+
+  <!-- T6. TUI AGENTS -->
+  <p class="caption" id="t6">T6 · Enter on Runs in (T3): the full-screen agent list, all six agents. Space toggles one agent. Enter done keeps the picks. Esc drops them.</p>
+  <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
+ Runs in                                                                            2 of 6 selected
+ Each selected agent gets the prompt. An offline agent pauses the schedule until it is back.
+
+   On this machine
+     ~/dev/kollab
+       [ ] koordinator  <span class="mute">(this chat)</span>
+<span class="sel">▌      [x] lapis</span>
+     ~/dev/mentiko
+       [ ] moonstone
+       [ ] peridot      <span class="mute">offline</span>
+
+   On devbox
+     ~/dev/infra
+       [x] infra
+       [ ] ops
+
+ space toggle   a select all   c clear   enter done   esc cancel
+<span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
+
+  <!-- T7. TUI FILE PICKER -->
+  <p class="caption" id="t7">T7 · Press i in the list (or p on T4): the file selector. Only .json files are listed. Enter on a file opens the preview (T4).</p>
+  <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
+ Import schedules: choose a file                                                        <span class="mute">? learn</span>
+ Only .json files are listed. Enter opens a folder or picks a file.
+
+   Folder  ~/Downloads
+
+   Name                                Size      Modified
+   ../
+<span class="sel">▌  schedules-devbox.json               1.2 KB    today 09:14</span>
+   schedules-old.json                  0.4 KB    Nov 2
+   notes/
+
+ arrows move   enter open or pick   / type a path   esc back to schedules
+<span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
+</div>
+</body>
+</html>

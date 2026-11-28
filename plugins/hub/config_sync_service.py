@@ -48,6 +48,7 @@ from .config_sync import (
     kollab_root,
     pack_files,
     pack_json,
+    schedules_blob,
     seal,
     sync_body,
 )
@@ -116,6 +117,7 @@ class ConfigSyncService:
         # peer key -> (relay session, digest) the device last acknowledged
         self._delivered: dict[str, tuple[str, str]] = {}
         self._files_delivered: dict[str, tuple[str, str]] = {}
+        self._schedules_delivered: dict[str, tuple[str, str]] = {}
         self._failures: dict[str, int] = {}
         self._retry_at: dict[str, float] = {}
         self._pushes: dict[str, asyncio.Task] = {}
@@ -234,6 +236,26 @@ class ConfigSyncService:
                 if self._files_delivered.get(key) != (session, snapshot.files_digest):
                     await self._push_files(key, snapshot, revision)
                     self._files_delivered[key] = (session, snapshot.files_digest)
+                if self._schedules_delivered.get(key) != (
+                    session,
+                    snapshot.schedules_digest,
+                ):
+                    # No `exactly`: the reply carries "skipped" when the
+                    # secondary had to drop broken rows.
+                    self._expect(
+                        await self._call(
+                            key,
+                            "schedules",
+                            {"digest": snapshot.digest},
+                            schedules_blob(snapshot.schedules),
+                            revision,
+                            30,
+                        )
+                    )
+                    self._schedules_delivered[key] = (
+                        session,
+                        snapshot.schedules_digest,
+                    )
             self._delivered[key] = (session, snapshot.digest)
             self._failures.pop(key, None)
             logger.info(
@@ -323,15 +345,24 @@ class ConfigSyncService:
     # ---- secondary ----
 
     async def receive(self, peer: str, payload: dict) -> dict:
-        """One call from the device that issued this device's join code."""
+        """One call from a device this one syncs with.
+
+        The primary here hears only its own secondaries: a ``schedule_edit``
+        change request (#612) is accepted from a device this primary pushes
+        to, and every other op still comes only from the primary above.
+        """
         primary = self._primary()
-        if not primary or peer != primary:
+        op = payload.get("op") if isinstance(payload, dict) else None
+        if op == "schedule_edit":
+            if primary or peer not in self._recipients():
+                return {"error": "not_primary"}
+        elif not primary or peer != primary:
             return {"error": "not_primary"}
         if (
             not isinstance(payload, dict)
             or not payload.keys() >= {"v", "op", "bundle"}
             or payload["v"] != 1
-            or payload["op"] not in ("core", "sync", "put")
+            or payload["op"] not in ("core", "sync", "put", "schedules", "schedule_edit")
             or not isinstance(payload["bundle"], str)
             or len(payload["bundle"]) > MAX_BUNDLE_CHARS
         ):
@@ -354,6 +385,14 @@ class ConfigSyncService:
                     reply = await asyncio.to_thread(
                         self._receiver.sync, sealed, primary_key=peer
                     )
+                elif payload["op"] == "schedules":
+                    reply, applied = await asyncio.to_thread(
+                        self._receiver.schedules, sealed, primary_key=peer
+                    )
+                elif payload["op"] == "schedule_edit":
+                    reply, applied = await asyncio.to_thread(
+                        self._receiver.schedule_edit, sealed, issuer_key=peer
+                    )
                 else:
                     reply = await asyncio.to_thread(
                         self._receiver.put, sealed, primary_key=peer
@@ -367,7 +406,11 @@ class ConfigSyncService:
         if (
             applied is not None
             and self._after_apply is not None
-            and (applied.config_changed or applied.mcp_changed)
+            and (
+                applied.config_changed
+                or applied.mcp_changed
+                or applied.schedules_changed
+            )
         ):
             try:
                 await self._after_apply(applied)
@@ -376,6 +419,38 @@ class ConfigSyncService:
                     "config sync: refresh after apply failed (%s)", type(error).__name__
                 )
         return reply
+
+    async def send_schedule_edit(self, rows: list) -> dict:
+        """Send this secondary's schedule rows to the primary (#612, stage 3).
+
+        The whole list travels signed by this device; the primary applies it
+        (last write wins) and its normal push carries it to every device.
+        """
+        primary = self._primary()
+        if not primary:
+            return {"error": "is_primary"}
+        from .config_sync import seal
+
+        sealed = seal(
+            "schedule_edit",
+            {},
+            pack_json({"schedules": list(rows)}),
+            issuer_key=self._key,
+            recipient_public_key=bytes.fromhex(primary),
+            revision=self._revision,
+        )
+        payload = {
+            "v": 1,
+            "op": "schedule_edit",
+            "bundle": base64.b64encode(sealed).decode("ascii"),
+        }
+        try:
+            return await self._transport.request(primary, METHOD, payload, timeout=30)
+        except Exception as error:
+            logger.warning(
+                "config sync: schedule edit not delivered (%s)", type(error).__name__
+            )
+            return {"error": "failed"}
 
     def _tell(self, reply: dict, applied: Applied | None) -> None:
         """Tell the human once per cause, never once per bundle or per launch."""
@@ -394,7 +469,11 @@ class ConfigSyncService:
                 )
         elif "error" not in reply:
             self._told_refused = False  # sync works again; a later refusal speaks anew
-        if applied is not None and _digest(applied.skipped_mcp) != self._told_skipped:
+        if (
+            applied is not None
+            and applied.mcp_touched
+            and _digest(applied.skipped_mcp) != self._told_skipped
+        ):
             self._told_skipped = _digest(applied.skipped_mcp)
             if applied.skipped_mcp:
                 names = ", ".join(applied.skipped_mcp)

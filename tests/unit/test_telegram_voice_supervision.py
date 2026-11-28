@@ -57,9 +57,25 @@ def _install(tmp_path, monkeypatch, source):
 
 
 async def _ready(path):
+    # Existence is not readiness: a writer creates the marker before its content lands.
     async with asyncio.timeout(5):
-        while not path.exists():
+        while not (path.is_file() and path.stat().st_size):
             await asyncio.sleep(0.01)
+
+
+async def test_ready_waits_for_marker_content(tmp_path):
+    # A writer creates its marker before the PID lands in it, so existence is not readiness.
+    marker = tmp_path / "marker"
+    marker.touch()
+    waiter = asyncio.create_task(_ready(marker))
+    try:
+        await asyncio.sleep(0.1)
+        assert not waiter.done(), "an empty marker must not count as ready"
+        marker.write_text("12345")
+        await asyncio.wait_for(waiter, 2)
+    finally:
+        waiter.cancel()
+    assert marker.read_text() == "12345"
 
 
 @pytest.mark.parametrize("generations", [1, 2])

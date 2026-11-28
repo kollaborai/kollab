@@ -39,6 +39,7 @@ import {
   sessionlessTabs,
 } from "./panel-model";
 import { PhoneLinkPanel } from "./PhoneLinkPanel";
+import { CronJobsPanel } from "./CronJobsPanel";
 import { WizardSteps, wizardValues } from "./WizardSteps";
 import {
   PANEL_NAME,
@@ -291,6 +292,7 @@ export function PanelHost({
       tab !== "session" &&
       tab !== "prompts" &&
       tab !== "phonelink" &&
+      tab !== "cron" &&
       tab !== "plugins" &&
       tabs[tab].status === "idle"
     ) {
@@ -530,14 +532,27 @@ export function PanelHost({
     onTabChange(next as SettingsTab);
   };
 
-  const state = tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins" ? null : tabs[tab];
+  const state =
+    tab === "session" ||
+    tab === "prompts" ||
+    tab === "phonelink" ||
+    tab === "plugins" ||
+    tab === "cron"
+      ? null
+      : tabs[tab];
   const top = state?.views[state.views.length - 1];
   const activeTab =
     SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0];
   const message = top?.message ?? null;
 
   const refresh = async () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return;
+    if (
+      tab === "session" ||
+      tab === "prompts" ||
+      tab === "phonelink" ||
+      tab === "plugins" ||
+      tab === "cron"
+    ) return;
     if (tab === "network" && top?.panel.panel === "connect-knocks") {
       const mine = epoch.current;
       setBusy(true);
@@ -570,7 +585,13 @@ export function PanelHost({
     patchTab(tab, () => IDLE);
   };
   const back = () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return;
+    if (
+      tab === "session" ||
+      tab === "prompts" ||
+      tab === "phonelink" ||
+      tab === "plugins" ||
+      tab === "cron"
+    ) return;
     setReveal(null);
     patchTab(tab, (current) => ({
       ...current,
@@ -599,7 +620,14 @@ export function PanelHost({
   };
 
   const panelBody = () => {
-    if (!state || tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return null;
+    if (
+      !state ||
+      tab === "session" ||
+      tab === "prompts" ||
+      tab === "phonelink" ||
+      tab === "plugins" ||
+      tab === "cron"
+    ) return null;
     if (state.status === "error") {
       return (
         <div className="flex flex-col items-start gap-3 px-4 py-4 sm:px-6">
@@ -902,7 +930,12 @@ export function PanelHost({
               <PhoneLinkPanel api={api} onOpenNetwork={() => changeTab("network")} />
             </div>
           ) : null}
-          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" && tab !== "plugins" ? (
+          {tab === "cron" && open ? (
+            <div role="tabpanel" aria-label="Schedules" className="flex min-h-0 w-full flex-1 flex-col">
+              <CronJobsPanel api={api} />
+            </div>
+          ) : null}
+          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" && tab !== "plugins" && tab !== "cron" ? (
             <div
               role="tabpanel"
               aria-label={activeTab.label}

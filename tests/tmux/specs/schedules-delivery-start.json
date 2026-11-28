@@ -1,0 +1,47 @@
+{
+  "name": "schedules-delivery-start",
+  "description": "Stage 2 of #612: a schedule whose agent is not running starts it. The coordinator boots, its timer fires the overdue schedule, a second kollab process comes online as the target agent (launched through kollab_argv, --detached --as), and the fire is recorded ok in schedules-runs.jsonl. Scratch HOME, --no-daemon, no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); cd \"$KOLLAB_PROJECT_ROOT\" && exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 5,
+    "show_captures": false
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "seed an overdue schedule for an agent that is not running",
+      "command": "A=$(date +%s); A=$((A - 120)); printf '[{\"id\":\"s1\",\"agents\":[\"probe-agent\"],\"prompt\":\"stage2 delivery probe\",\"interval_seconds\":60,\"anchor\":%s}]' \"$A\" > \"$HOME/.kollab/schedules.json\"; cat \"$HOME/.kollab/schedules.json\"",
+      "assert_contains": "stage2 delivery probe"
+    }
+  ],
+  "steps": [
+    { "action": "start_app" },
+    {
+      "action": "wait_for",
+      "pattern": "❯",
+      "timeout": 30,
+      "description": "the prompt is up"
+    },
+    {
+      "action": "shell",
+      "description": "the coordinator started the stopped agent for the fire",
+      "command": "for i in $(seq 1 50); do grep -rq \"schedules: s1 started probe-agent for the fire\" \"$HOME/.kollab/projects\" 2>/dev/null && exit 0; sleep 1; done; echo 'no start line in the logs'; exit 1"
+    },
+    {
+      "action": "shell",
+      "description": "the started agent runs as its own process (--as probe-agent)",
+      "command": "for i in $(seq 1 20); do /bin/ps axeww -o command= | grep -v grep | grep -- \"--as probe-agent\" >/dev/null 2>&1 && exit 0; sleep 1; done; echo 'no probe-agent process'; exit 1"
+    },
+    {
+      "action": "shell",
+      "description": "the fire is recorded ok (the start itself delivered the prompt)",
+      "command": "for i in $(seq 1 55); do [ -s \"$HOME/.kollab/schedules-runs.jsonl\" ] && exit 0; sleep 1; done; echo 'no run recorded'; exit 1"
+    },
+    {
+      "action": "shell",
+      "description": "the run record names the schedule and result ok",
+      "command": "cat \"$HOME/.kollab/schedules-runs.jsonl\"",
+      "assert_contains": "\"result\":\"ok\""
+    }
+  ]
+}

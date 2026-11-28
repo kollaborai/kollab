@@ -1,0 +1,227 @@
+import { renderToStaticMarkup } from "react-dom/server";
+import { expect, test } from "vitest";
+import { SETTINGS_TABS, PANEL_NAME } from "../src/components/panels/panel-model";
+import { CronJobsBody, CronJobsPanel, inSeconds, shortId, summaryLine } from "../src/components/panels/CronJobsPanel";
+import type { EngineApi, HubCronJobsView } from "../src/api";
+
+const view: HubCronJobsView = {
+  count: 3,
+  jobs: [
+    {
+      agent: "moonstone",
+      id: "ab12cd34ef90",
+      target: "lapis",
+      message: "report the pulse",
+      interval_seconds: 3600,
+      interval: "every 1h",
+      next_fire: 1793900000,
+      next_in_seconds: 1800,
+      recurring: true,
+      mode: "recurring",
+      created_at: 1793896400,
+      last_error: null,
+    },
+    {
+      agent: "moonstone",
+      id: "9876fedcba12",
+      target: "infra@home-server",
+      message: "check the tunnel",
+      interval_seconds: 90,
+      interval: "every 1m 30s",
+      next_fire: 1793898210,
+      next_in_seconds: 70,
+      recurring: false,
+      mode: "one-shot",
+      created_at: 1793898140,
+      last_error: "peer has no conversation grant for this agent",
+    },
+    {
+      agent: "koordinator",
+      id: "5a5b5c5d",
+      target: "all",
+      message: "standup: one-line status",
+      interval_seconds: 21600,
+      interval: "every 6h",
+      next_fire: 1793996160,
+      next_in_seconds: 8040,
+      recurring: true,
+      mode: "recurring",
+      created_at: 1793974560,
+      last_error: null,
+    },
+  ],
+  agents_responded: ["moonstone", "koordinator"],
+  agents_unavailable: ["garnet"],
+  agents_errors: { garnet: "operator gate refused the cron_jobs question" },
+};
+
+test("the cron tab is registered as a bespoke settings tab with no daemon panel", () => {
+  const tab = SETTINGS_TABS.find((item) => item.id === "cron");
+  expect(tab?.label).toBe("Schedules");
+  expect(tab?.scope).toContain("Scheduled prompts");
+  expect("cron" in PANEL_NAME).toBe(false);
+});
+
+test("interval and countdown strings match the terminal style", () => {
+  expect(inSeconds(1800)).toBe("in 30m");
+  expect(inSeconds(70)).toBe("in 1m 10s");
+  expect(inSeconds(8040)).toBe("in 2h 14m");
+  expect(inSeconds(45)).toBe("in 45s");
+  expect(inSeconds(0)).toBe("in 0s");
+  expect(shortId("ab12cd34ef90")).toBe("ab12cd34");
+  expect(shortId("5a5b5c5d")).toBe("5a5b5c5d");
+});
+
+test("the desktop table renders every job tagged with its agent and short id", () => {
+  const html = renderToStaticMarkup(<CronJobsBody view={view} />);
+  expect(html).toContain("<table");
+  expect(html).toContain("moonstone");
+  expect(html).toContain("ab12cd34");
+  expect(html).toContain("recurring");
+  expect(html).toContain("one-shot");
+  expect(html).toContain("every 1m 30s");
+  expect(html).toContain("infra@home-server");
+  expect(html).toContain("report the pulse");
+  expect(html).toContain("in 2h 14m");
+  expect(html).toContain("peer has no conversation grant for this agent");
+});
+
+test("per-agent refusals surface as alerts even when rows are present", () => {
+  const html = renderToStaticMarkup(<CronJobsBody view={view} />);
+  expect(html).toContain('role="alert"');
+  expect(html).toContain("garnet: operator gate refused the cron_jobs question");
+});
+
+test("a per-agent refusal still shows the refusal text when no jobs exist", () => {
+  const refused: HubCronJobsView = {
+    count: 0,
+    jobs: [],
+    agents_responded: [],
+    agents_unavailable: ["garnet"],
+    agents_errors: { garnet: "operator gate refused the cron_jobs question" },
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={refused} />);
+  expect(html).toContain("operator gate refused the cron_jobs question");
+  expect(html).toContain("No jobs reported by responding agents");
+  expect(html).toContain("their scheduled jobs are unknown");
+});
+
+test("the summary line counts jobs, live agents, and unavailable agents", () => {
+  expect(summaryLine(view)).toBe("3 jobs across 2 live agents · 1 unavailable");
+  const solo: HubCronJobsView = {
+    count: 1,
+    jobs: view.jobs.slice(0, 1),
+    agents_responded: ["moonstone"],
+    agents_unavailable: [],
+    agents_errors: {},
+  };
+  expect(summaryLine(solo)).toBe("1 job across 1 live agent");
+});
+
+test("the panel renders the refresh control and loading state before data arrives", () => {
+  const html = renderToStaticMarkup(<CronJobsPanel api={{} as EngineApi} />);
+  expect(html).toContain('aria-label="Refresh cron jobs"');
+  expect(html).toContain("Refresh");
+  expect(html).toContain("Loading scheduled jobs");
+  expect(html).toContain("run /hub cron delete in the terminal of");
+});
+
+test("a partial empty roster says unavailable agents have unknown jobs", () => {
+  const empty: HubCronJobsView = {
+    count: 0,
+    jobs: [],
+    agents_responded: ["moonstone"],
+    agents_unavailable: ["zircon"],
+    agents_errors: {},
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={empty} />);
+  expect(html).not.toContain("<table");
+  expect(html).toContain("No jobs reported by responding agents");
+  expect(html).toContain("their scheduled jobs are unknown");
+  expect(html).toContain("Not answering: zircon");
+});
+
+test("a fully queried empty roster confirms there are no scheduled jobs", () => {
+  const empty: HubCronJobsView = {
+    count: 0,
+    jobs: [],
+    agents_responded: ["moonstone"],
+    agents_unavailable: [],
+    agents_errors: {},
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={empty} />);
+  expect(html).toContain("No scheduled jobs");
+  expect(html).not.toContain("jobs are unknown");
+});
+
+test("the panel shell loads on mount, refreshes read-only, and keeps the hint visible", () => {
+  const calls: string[] = [];
+  const api = {
+    listHubCronJobs: (refresh = false) => {
+      calls.push(refresh ? "refresh" : "initial");
+      return Promise.resolve(view);
+    },
+  } as never;
+  const html = renderToStaticMarkup(<CronJobsPanel api={api} />);
+  expect(calls).toEqual([]); // effects do not run in static markup; the shell still renders
+  expect(html).toContain("Loading scheduled jobs…");
+  expect(html).toContain('aria-label="Refresh cron jobs"');
+  expect(html).toContain("Read-only");
+  expect(html).toContain("/hub cron delete");
+});
+
+/** The opening tag that directly wraps the first occurrence of `text`. */
+function openingTagBefore(html: string, text: string) {
+  const at = html.indexOf(text);
+  expect(at).toBeGreaterThan(-1);
+  return html.slice(html.lastIndexOf("<", at), at);
+}
+
+test("long agent names, targets, messages and errors wrap inside the phone card", () => {
+  const agent = "a".repeat(63);
+  const target = `/work/project/${"nested/output/".repeat(6)}report`;
+  const message = "m".repeat(120);
+  const error = "e".repeat(90);
+  const long: HubCronJobsView = {
+    count: 1,
+    jobs: [{ ...view.jobs[0], agent, target, message, last_error: error }],
+    agents_responded: [agent],
+    agents_unavailable: [],
+    agents_errors: {},
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={long} />);
+  const card = html.slice(html.indexOf("md:hidden"));
+  expect(card).toContain("grid-cols-[auto_minmax(0,1fr)]");
+  expect(openingTagBefore(card, agent)).toContain("wrap-anywhere");
+  expect(openingTagBefore(card, target)).toContain("wrap-anywhere");
+  expect(openingTagBefore(card, message)).toContain("wrap-anywhere");
+  expect(openingTagBefore(card, error)).toContain("wrap-anywhere");
+});
+
+test("warning alerts and unavailable agent names wrap inside the panel", () => {
+  const agent = "u".repeat(63);
+  const refused: HubCronJobsView = {
+    count: 0,
+    jobs: [],
+    agents_responded: [],
+    agents_unavailable: [agent],
+    agents_errors: { [agent]: "operator gate refused the cron_jobs question" },
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={refused} />);
+  const alert = /<p role="alert" class="([^"]*)"/.exec(html)?.[1] ?? "";
+  expect(alert).toContain("wrap-anywhere");
+  expect(openingTagBefore(html, `Not answering: ${agent}`)).toContain("wrap-anywhere");
+});
+
+test("warning alerts use a light-theme amber shade that clears contrast on white", () => {
+  const refused: HubCronJobsView = {
+    count: 0,
+    jobs: [],
+    agents_responded: [],
+    agents_unavailable: ["garnet"],
+    agents_errors: { garnet: "operator gate refused the cron_jobs question" },
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={refused} />);
+  const alert = /<p role="alert" class="([^"]*)"/.exec(html)?.[1] ?? "";
+  expect(alert).toContain("text-amber-700");
+});
