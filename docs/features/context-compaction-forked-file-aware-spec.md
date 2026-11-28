@@ -23,6 +23,7 @@ This can reduce precision in long coding sessions and can lose useful project me
 - Improve compaction quality by running summarization in a dedicated forked turn.
 - Make file relevance explicit (`keep` vs `drop`) during compaction.
 - Preserve critical context: unresolved tasks, active files, current objective, decisions.
+- Preserve conversation messages whose task card is unreadable when the card ID can still be recovered from the ledger filename.
 - Keep compaction safe and reversible.
 
 ## Non-Goals

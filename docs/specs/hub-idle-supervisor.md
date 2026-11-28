@@ -46,6 +46,10 @@ Decisions:
 
 - `retry_handoff` / `alert_handoff_unacked` — see handoff reliability.
 
+When a task card cannot be read, the supervisor reports that its handoff
+status is unknown through the same alert surfaces. This prevents an unreadable
+card from appearing to be an empty handoff queue.
+
 Turn evidence comes from the display tap: `turn_complete` stamps
 `last_turn_end` and resets the wake counter; `error` records the error
 text. The loop stamps `last_turn_end` at boot so a fresh start needs
