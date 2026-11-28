@@ -26,7 +26,7 @@ async def test_nonlinux_detached_writer_can_finish_before_private_dir_cleanup(
     writer = tmp_path / "writer.py"
     writer.write_text(
         textwrap.dedent(
-            f"""\
+            """\
             import pathlib, sys, time
             started, outcome, target = map(pathlib.Path, sys.argv[1:])
             started.write_text("ready")
