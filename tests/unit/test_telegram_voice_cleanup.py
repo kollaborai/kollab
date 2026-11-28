@@ -429,4 +429,6 @@ async def test_non_linux_successful_transcription_is_preserved(tmp_path, monkeyp
     assert result == "[voice] synthetic transcript"
     create_process.assert_awaited_once()
     assert create_process.await_args.args[0] == "whisper"
-    assert list(tmp_path.iterdir()) == []
+    run_dirs = list(tmp_path.iterdir())
+    assert len(run_dirs) == 1
+    assert (run_dirs[0] / "voice.ogg").exists()

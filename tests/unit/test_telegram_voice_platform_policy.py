@@ -82,4 +82,6 @@ async def test_non_linux_cancellation_kills_and_reaps_whisper(tmp_path, monkeypa
 
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
-    assert list(private.iterdir()) == []
+    run_dirs = list(private.iterdir())
+    assert len(run_dirs) == 1
+    assert (run_dirs[0] / "voice.ogg").exists()
