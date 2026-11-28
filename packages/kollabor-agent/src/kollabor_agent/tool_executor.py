@@ -112,6 +112,84 @@ def _terminal_find_workspace_error(
             argv = argv[1:]
         if not argv:
             return None
+
+        # These shell command prefixes still invoke the following executable.
+        # Peel them before deciding whether this segment runs find.
+        while argv:
+            prefix = Path(argv[0]).name.lower()
+            if prefix == "command":
+                argv = argv[1:]
+                while argv and argv[0] in {"-p", "--"}:
+                    argv = argv[1:]
+                continue
+            if prefix == "env":
+                index = 1
+                while index < len(argv):
+                    argument = argv[index]
+                    if argument in {"--", "-"}:
+                        index += 1
+                        break
+                    if argument in {
+                        "-i",
+                        "--ignore-environment",
+                        "-0",
+                        "--null",
+                        "-v",
+                        "--debug",
+                    }:
+                        index += 1
+                        continue
+                    if argument in {"-u", "--unset"}:
+                        index += 2
+                        continue
+                    if argument in {"-C", "--chdir"}:
+                        if index + 1 >= len(argv):
+                            return None
+                        target = argv[index + 1]
+                        if "$" in target or "`" in target or current_cwd is None:
+                            current_cwd = None
+                        else:
+                            path = Path(target).expanduser()
+                            if not path.is_absolute():
+                                path = current_cwd / path
+                            current_cwd = path.resolve()
+                        index += 2
+                        continue
+                    if argument.startswith("--unset="):
+                        index += 1
+                        continue
+                    if argument.startswith("--chdir="):
+                        target = argument.partition("=")[2]
+                        if "$" in target or "`" in target or current_cwd is None:
+                            current_cwd = None
+                        else:
+                            path = Path(target).expanduser()
+                            if not path.is_absolute():
+                                path = current_cwd / path
+                            current_cwd = path.resolve()
+                        index += 1
+                        continue
+                    if argument in {"-S", "--split-string"} or argument.startswith(
+                        "--split-string="
+                    ):
+                        remainder = " ".join(argv[index + 1 :])
+                        if re.search(r"\bfind\b", remainder, re.IGNORECASE):
+                            return "Terminal find cannot run through env split-string."
+                        return None
+                    if argument.startswith("-"):
+                        remainder = " ".join(argv[index + 1 :])
+                        if re.search(r"\bfind\b", remainder, re.IGNORECASE):
+                            return "Terminal find command prefix could not be resolved safely."
+                        return None
+                    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argument):
+                        index += 1
+                        continue
+                    break
+                argv = argv[index:]
+                continue
+            break
+        if not argv:
+            return None
         if Path(argv[0]).name.lower() == "cd":
             target_index = 1
             while target_index < len(argv) and argv[target_index] in {
