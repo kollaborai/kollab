@@ -171,7 +171,6 @@ def test_process_iter_generated_pid_reuse_and_owner_filtering(monkeypatch) -> No
             row.info["pid"]: (row.info["ppid"], row.info["create_time"], row.info["name"])
             for row in rows
             if row.info["username"] == owner and row.info["create_time"]
-            and row.info["pid"] != __import__("os").getpid()
         }
         for pid, (ppid, started, name) in list(expected.items()):
             parent = expected.get(ppid)
