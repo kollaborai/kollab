@@ -1,7 +1,6 @@
 """Regression coverage for partial TaskLedger reads in /hub work (#1320)."""
 
 import asyncio
-from pathlib import Path
 
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.task_ledger import TaskLedger
