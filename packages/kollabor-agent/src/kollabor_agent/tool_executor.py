@@ -133,7 +133,7 @@ def _terminal_find_workspace_error(
         return None
 
     for token in tokens:
-        if token in {";", "&&", "||", "|", "\n"}:
+        if token in {";", "&", "&&", "||", "|", "|&", "\n"}:
             error = inspect_segment(command_tokens)
             if error:
                 return error
