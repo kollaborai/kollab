@@ -43,6 +43,53 @@ from .yes_approval import NEEDS_YES, NOT_IN_HIDDEN_TURN, YesApprovals, call_appr
 logger = logging.getLogger(__name__)
 
 
+def _terminal_find_workspace_error(
+    command: str, *, cwd: Path, workspace: Path
+) -> Optional[str]:
+    """Reject direct ``find`` searches rooted outside the active workspace."""
+    try:
+        argv = shlex.split(command, posix=os.name != "nt")
+    except ValueError:
+        return None
+    if not argv or Path(argv[0]).name.lower() != "find":
+        return None
+
+    if any(argument in {"-L", "-follow"} for argument in argv[1:]):
+        return "Terminal find cannot follow symbolic links outside the workspace."
+    if "-files0-from" in argv[1:]:
+        return "Terminal find cannot load search roots from a file."
+
+    roots: list[str] = []
+    arguments = iter(argv[1:])
+    for argument in arguments:
+        if argument in {"-P", "-H"}:
+            continue
+        if argument == "-D":
+            next(arguments, None)
+            continue
+        if argument.startswith("-O"):
+            continue
+        if argument == "--":
+            roots.extend(arguments)
+            break
+        if argument in {"!", "(", ")"} or argument.startswith("-"):
+            break
+        roots.append(argument)
+    if not roots:
+        roots = ["."]
+
+    workspace_root = workspace.resolve()
+    for root in roots:
+        search_root = Path(root).expanduser()
+        if not search_root.is_absolute():
+            search_root = cwd / search_root
+        try:
+            search_root.resolve().relative_to(workspace_root)
+        except (OSError, RuntimeError, ValueError):
+            return "Terminal find searches must stay inside the active workspace."
+    return None
+
+
 class ToolExecutionResult:
     """Result of tool execution."""
 
@@ -2515,6 +2562,19 @@ class ToolExecutor:
             )
 
         cwd = self._resolve_terminal_cwd(tool_data.get("cwd"))
+        workspace = Path(self.workspace or Path.cwd()).expanduser().resolve()
+        search_error = _terminal_find_workspace_error(
+            command,
+            cwd=(cwd or workspace).resolve(),
+            workspace=workspace,
+        )
+        if search_error:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=search_error,
+            )
         logger.debug(
             f"Executing terminal command: {command[:100]}... (background={background})"
         )

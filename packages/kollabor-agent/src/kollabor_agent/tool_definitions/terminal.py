@@ -85,8 +85,9 @@ terminal_tool = ToolDefinition(
         "foreground values may shorten but not exceed it; voice calls may use "
         "a stricter limit. Background sessions have no automatic timeout "
         "unless one is set. Use file-find for workspace filename discovery. "
-        "General terminal commands and session input run with the user's filesystem access; "
-        "they do not enforce a workspace sandbox."
+        "Direct find searches must stay inside the active workspace and cannot follow "
+        "symbolic links. Other terminal commands and session input run with the user's "
+        "filesystem access; they do not enforce a workspace sandbox."
     ),
     safety_features=[
         "background sessions run as subprocesses with auto-kill timeouts",

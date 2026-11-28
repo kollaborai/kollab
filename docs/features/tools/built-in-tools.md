@@ -55,9 +55,12 @@ without safe directory descriptor traversal refuse the search.
 
 Ask the user before searching another folder and switch workspaces only after
 they grant that folder. Do not start exploratory terminal searches at home,
-`/Users`, `/`, or a parent directory. General `terminal` commands and
+`/Users`, `/`, or a parent directory. Direct `find` commands are restricted to
+the active workspace; searches rooted outside it, symlink-following searches,
+and roots loaded from a file are refused. Other `terminal` commands and
 `terminal-send` input run with the user's filesystem access and do not enforce
-a workspace sandbox. This includes commands wrapped in interpreters or scripts.
+a workspace sandbox. Commands wrapped in interpreters or scripts are not
+restricted by the `find` check.
 
 With working directory:
 ```
