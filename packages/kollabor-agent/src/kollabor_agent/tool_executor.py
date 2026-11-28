@@ -46,7 +46,12 @@ logger = logging.getLogger(__name__)
 def _terminal_find_workspace_error(
     command: str, *, cwd: Path, workspace: Path
 ) -> Optional[str]:
-    """Reject direct ``find`` searches rooted outside the active workspace."""
+    """Reject ``find`` searches that cannot be safely checked against workspace."""
+    if re.search(r"\bfind\b", command, re.IGNORECASE) and re.search(
+        r"\$\(|`|[<>]\(|(?:^|[;&|]\s*)\(", command
+    ):
+        return "Terminal find cannot run inside shell substitutions."
+
     try:
         lexer = shlex.shlex(
             command, posix=os.name != "nt", punctuation_chars=";&|\n"
