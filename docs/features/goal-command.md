@@ -95,6 +95,8 @@ again once storage is available.
 Time ceilings are total active seconds. If a goal has used its current time
 ceiling, `/goal resume` requires `--time N` with a value greater than the time
 already used; the new value replaces the total ceiling.
+When an automatic time or turn cap stops a goal, `/goal` status names the
+matching `--time N` or `--turns N` option in its next-action line.
 Attach clients execute `/goal` daemon-side through the `state.goal_command`
 RPC — the daemon owns the conversation identity, store, and driver, and
 `goal.state_changed` events stream back over the attach socket.
