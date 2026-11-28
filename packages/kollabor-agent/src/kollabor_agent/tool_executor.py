@@ -1379,6 +1379,7 @@ class ToolExecutor:
 
         # Track active shell executor so ESC can cancel running subprocesses
         self._active_shell_executor: Optional[ShellExecutor] = None
+        self._tool_cancellation_generation = 0
         # Serialize only calls that share mutable subprocess state; independent
         # session-management operations must remain available while they run.
         self._terminal_execution_lock = asyncio.Lock()
@@ -1695,6 +1696,7 @@ class ToolExecutor:
         Called by the ESC/cancel handler to interrupt long-running terminal
         commands and MCP requests that are waiting on a stdio server.
         """
+        self._tool_cancellation_generation += 1
         if self._active_shell_executor is not None:
             logger.info("Cancelling active shell executor subprocess")
             await self._active_shell_executor.cancel()
@@ -2312,10 +2314,14 @@ class ToolExecutor:
 
         logger.info(f"Executing {len(tools)} tools in sequence")
         results = []
+        cancellation_generation = self._tool_cancellation_generation
 
         for i, tool_data in enumerate(tools):
             # Check for cancellation between tools
-            if self.is_cancelled():
+            if (
+                self.is_cancelled()
+                or cancellation_generation != self._tool_cancellation_generation
+            ):
                 logger.info(f"Tool batch cancelled at {i+1}/{len(tools)}")
                 # Add cancelled results for remaining tools
                 for remaining in tools[i:]:
