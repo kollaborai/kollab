@@ -60,6 +60,7 @@ conversation at a specific message.
 ### Reading History in the Web UI
 
 While reading a long conversation, loading older pages and reconciling compacted history preserves the visible messages and their scroll position.
+If a history refresh fails while saved messages remain visible, the status explains that the saved conversation is shown and offers Retry.
 
 In the Web UI, long assistant and user messages are restored in full when the
 chat reloads. Long tool results keep a preview and load the full result when

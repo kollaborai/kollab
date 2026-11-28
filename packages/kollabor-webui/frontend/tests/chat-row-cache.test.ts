@@ -125,6 +125,9 @@ describe("the saved conversation", () => {
   });
 
   it("says the saved conversation is on screen once the stream has failed, with a reconnect", () => {
+    expect(initialHistoryBanner("failed", 2, true)?.message).toBe(
+      "Couldn't refresh history; showing the saved conversation.",
+    );
     expect(initialHistoryBanner("failed", 2, true)).toEqual({
       kind: "error",
       message: SAVED_CONVERSATION_SHOWN,
