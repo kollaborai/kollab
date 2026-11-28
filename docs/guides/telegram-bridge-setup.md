@@ -94,9 +94,11 @@ files. On timeout or cancellation it kills and reaps those processes before
 cleanup. Diagnostics do not contain transcript text or credentials.
 
 On macOS and Windows the bridge runs `whisper` directly in a private temporary
-directory and removes that directory after the process exits. Those systems have
-no child subreaper, so processes that Whisper detaches cannot be tracked there; on
-timeout or cancellation only the Whisper process itself is killed and reaped.
+directory. Those systems have no child subreaper, so detached writers cannot be
+tracked after Whisper exits. To avoid deleting files while such a writer may
+still be active, the bridge retains the private run directory after starting
+Whisper. On timeout or cancellation only the Whisper process itself is killed
+and reaped.
 
 Install the Whisper CLI in the environment that runs Kollab. On Linux, `/proc`
 must be mounted and `python3` must be on `PATH`:
@@ -191,7 +193,9 @@ On Linux, if an operating-system error prevents the owner from proving all child
 have exited, it reports failure and retains the private run directory. Remove that
 directory only after verifying the run's processes have exited; the Linux owner
 never deletes files while a writer may remain. macOS and Windows cannot make that
-proof, so they remove the directory once the Whisper process has exited.
+proof, so private `kollab-telegram-voice-*` directories are retained after
+Whisper starts. Remove one only after verifying its transcription processes have
+exited.
 
 ### Bridge Stops Working After Restart
 

@@ -368,14 +368,14 @@ def test_live_task_ids_include_assigned_paused_and_targeted_open_cards() -> None
     completed = SimpleNamespace(id="done", assignee="sapphire", status="done")
 
     class Ledger:
-        def get_active_for(self, identity):
+        def get_active_for(self, identity, *, read_errors=None):
             assert identity == "sapphire"
             return [active, qa_review]
 
-        def get_all(self, status=None):
+        def get_all(self, status=None, *, read_errors=None):
             return [paused, completed]
 
-        def get_open(self):
+        def get_open(self, *, read_errors=None):
             return [queued_for_sapphire, queued_for_other]
 
     class HubPlugin:
@@ -650,14 +650,14 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
     ]
 
     class Ledger:
-        def get_active_for(self, identity):
+        def get_active_for(self, identity, *, read_errors=None):
             assert identity == "peridot"
             return cards
 
-        def get_all(self, status=None):
+        def get_all(self, status=None, *, read_errors=None):
             return []
 
-        def get_open(self):
+        def get_open(self, *, read_errors=None):
             return []
 
     hub_plugin = SimpleNamespace(
