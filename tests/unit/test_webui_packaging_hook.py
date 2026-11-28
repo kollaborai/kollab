@@ -144,6 +144,8 @@ def test_real_source_archive_excludes_frontend_build_metadata(tmp_path):
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv is required for the source-archive build check")
+    if importlib.util.find_spec("hatchling") is None:
+        pytest.skip("hatchling (dev extra) is required to build the source archive without the network")
     source = ROOT / "packages/kollabor-webui"
     package = tmp_path / "kollabor-webui"
     package.mkdir()
@@ -167,7 +169,9 @@ def test_real_source_archive_excludes_frontend_build_metadata(tmp_path):
         path.write_text("local generated state")
     output = tmp_path / "artifacts"
     result = subprocess.run(
-        [uv, "build", "--sdist", "--no-sources", "--out-dir", str(output), str(package)],
+        # The build backend comes from this environment, so the build never downloads it.
+        [uv, "build", "--sdist", "--no-sources", "--no-build-isolation", "--python", sys.executable,
+         "--out-dir", str(output), str(package)],
         cwd=tmp_path,
         capture_output=True,
         text=True,
