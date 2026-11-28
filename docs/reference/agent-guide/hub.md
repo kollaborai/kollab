@@ -166,6 +166,8 @@ that do not wake the receiving agent.
 - `state_update` preserves malformed or unreadable saved state and reports
   persistence failures. Back up and explicitly repair or remove invalid state
   before retrying.
+- Saved session state is restored into the first model request after a Hub
+  session restart, including for solo agents.
 - A native call the model writes into its reply as text (`<functions.NAME>{json}</functions.NAME>`, `<tool_call>{"name": ...}</tool_call>`) parses as an MCP call by name; `resolve_text_tool_call` (`kollabor_agent/tool_call_contract.py`) sends it to the built-in or plugin tool it names before scope and permission checks, as `normalize_native_tool_call` does for real native calls. Its result returns in the XML batch, never as a provider tool result (the provider never issued that call id). Beside real native calls such a block only echoes them and never runs (`is_text_written_call`); a `<tool_call>` with no name is a `malformed_tool`, never a tool named "unknown"
 - See `docs/specs/unified-tool-pipeline.md` for full design
 
