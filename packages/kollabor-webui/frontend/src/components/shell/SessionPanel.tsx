@@ -39,6 +39,7 @@ import type {
   Session,
   SessionMcp,
 } from "@/api";
+import { errorText } from "@/api";
 import { applyModelChoice, PickError } from "@/components/shell/model-choice";
 import { ModelPicker } from "@/components/shell/ModelPicker";
 import {
@@ -51,7 +52,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -197,6 +197,14 @@ export function SessionPanel({
   const [mcpDefinitions, setMcpDefinitions] = useState<
     Record<string, McpServerConfig>
   >({});
+  const [mcpLoadSessionId, setMcpLoadSessionId] = useState(session.session_id);
+  const [sessionMcpLoad, setSessionMcpLoad] = useState<"loading" | "error" | "success">("loading");
+  const [sessionMcpError, setSessionMcpError] = useState("");
+  const [definitionsLoad, setDefinitionsLoad] = useState<"loading" | "error" | "success">("loading");
+  const [definitionsError, setDefinitionsError] = useState("");
+  const latestMcpLoad = useRef(0);
+  const activeSessionId = useRef(session.session_id);
+  activeSessionId.current = session.session_id;
   const [agents, setAgents] = useState<HubAgent[] | null>(null);
   const [agentsLoading, setAgentsLoading] = useState(true);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
@@ -218,19 +226,46 @@ export function SessionPanel({
     [onStatus],
   );
 
-  const loadMcp = useCallback(async () => {
-    try {
-      const [sessionMcp, configured] = await Promise.all([
-        api.getSessionMcp(session.session_id),
-        api.listMcpServers().catch(() => ({ servers: {} })),
-      ]);
-      setMcp(sessionMcp);
-      setMcpDefinitions(configured.servers || {});
-    } catch (error) {
-      fail(error);
-      setMcp(null);
-    }
-  }, [api, fail, session.session_id]);
+  const loadMcp = useCallback(async (sessionId = activeSessionId.current) => {
+    if (sessionId !== activeSessionId.current) return;
+    const loadId = ++latestMcpLoad.current;
+    const currentLoad = () => loadId === latestMcpLoad.current;
+    setMcpLoadSessionId(sessionId);
+    setMcp(null);
+    setMcpDefinitions({});
+    setSessionMcpLoad("loading");
+    setDefinitionsLoad("loading");
+    setSessionMcpError("");
+    setDefinitionsError("");
+
+    const loadSession = api.getSessionMcp(sessionId).then(
+      (value) => {
+        if (!currentLoad()) return;
+        setMcp(value);
+        setSessionMcpLoad("success");
+      },
+      (error: unknown) => {
+        if (!currentLoad()) return;
+        setMcp(null);
+        setSessionMcpError(errorText(error));
+        setSessionMcpLoad("error");
+      },
+    );
+    const loadDefinitions = api.listMcpServers().then(
+      (value) => {
+        if (!currentLoad()) return;
+        setMcpDefinitions(value.servers || {});
+        setDefinitionsLoad("success");
+      },
+      (error: unknown) => {
+        if (!currentLoad()) return;
+        setMcpDefinitions({});
+        setDefinitionsError(errorText(error));
+        setDefinitionsLoad("error");
+      },
+    );
+    await Promise.all([loadSession, loadDefinitions]);
+  }, [api]);
 
   const loadAgents = useCallback(async () => {
     setAgentsLoading(true);
@@ -246,8 +281,8 @@ export function SessionPanel({
 
   useEffect(() => {
     setMode(normalizeApprovalMode(session.approval_mode));
-    void loadMcp();
-  }, [loadMcp, session.approval_mode]);
+    void loadMcp(session.session_id);
+  }, [loadMcp, session.approval_mode, session.session_id]);
 
   useEffect(() => {
     void loadAgents();
@@ -298,7 +333,7 @@ export function SessionPanel({
   };
 
   const saveServer = async () => {
-    if (!mcpDraft) return;
+    if (!mcpDraft || !activeMcpLoad || definitionsLoad !== "success") return;
     const env: Record<string, string> = {};
     for (const line of mcpDraft.env.split("\n")) {
       const trimmed = line.trim();
@@ -332,6 +367,7 @@ export function SessionPanel({
   };
 
   const deleteServer = async (serverName: string) => {
+    if (!activeMcpLoad || definitionsLoad !== "success") return;
     setMcpBusy(serverName);
     try {
       await api.deleteMcpServer(serverName);
@@ -365,8 +401,16 @@ export function SessionPanel({
     }
   };
 
-  const servers = Object.entries(mcp?.servers || {});
-  const configuredServerNames = Object.keys(mcpDefinitions);
+  const activeMcpLoad = mcpLoadSessionId === session.session_id;
+  const visibleSessionMcp = activeMcpLoad ? mcp : null;
+  const visibleMcpDefinitions = activeMcpLoad ? mcpDefinitions : {};
+  const visibleSessionMcpLoad = activeMcpLoad ? sessionMcpLoad : "loading";
+  const visibleDefinitionsLoad = activeMcpLoad ? definitionsLoad : "loading";
+  const servers = Object.entries(visibleSessionMcp?.servers || {});
+  const configuredServerNames = Object.keys(visibleMcpDefinitions);
+  const sessionOnlyServerNames = servers
+    .map(([name]) => name)
+    .filter((name) => visibleDefinitionsLoad === "success" && !configuredServerNames.includes(name));
   const allServerNames = Array.from(
     new Set([...configuredServerNames, ...servers.map(([name]) => name)]),
   );
@@ -374,9 +418,17 @@ export function SessionPanel({
     session,
     pool.find((agent) => agent.name === session.identity)?.display_name,
   );
-  const connectedCount = servers.filter(
+  const connectedCount = visibleSessionMcpLoad === "success" ? servers.filter(
     ([, info]) => info.status === "connected",
-  ).length;
+  ).length : null;
+  const mcpSummary = [
+    visibleDefinitionsLoad === "success"
+      ? `${configuredServerNames.length} global`
+      : "global unavailable",
+    visibleSessionMcpLoad === "success" && visibleDefinitionsLoad === "success"
+      ? `${sessionOnlyServerNames.length} session-only`
+      : "session-only unknown",
+  ].join(" · ");
 
   const toggle = (next: boolean) => {
     setOpen(next);
@@ -496,7 +548,9 @@ export function SessionPanel({
       <div className="flex flex-col gap-0.5">
         <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(() => { setMcpOpen(true); void loadMcp(); })}>
           <Plug className="size-3.5" /><span>MCP Servers</span>
-          <span className="text-muted-foreground ml-auto tabular-nums">{connectedCount}/{allServerNames.length}</span>
+          <span className="text-muted-foreground ml-auto tabular-nums" title={mcpSummary}>
+            {connectedCount === null ? "?" : connectedCount} connected
+          </span>
         </Button>
         <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(() => { setHubOpen(true); void loadAgents(); })}>
           <Users className="size-3.5" /><span>Who Is Online</span>
@@ -574,23 +628,67 @@ export function SessionPanel({
           <DialogHeader>
             <DialogTitle>MCP Servers</DialogTitle>
             <DialogDescription>
-              {connectedCount} connected · {allServerNames.length} configured.
+              {connectedCount === null ? "Connection status unavailable" : `${connectedCount} connected`} · {mcpSummary}.
               Tool access is scoped to this session.
             </DialogDescription>
           </DialogHeader>
-          <ScrollArea className="max-h-[50vh]">
+          <div className="flex flex-col gap-2" aria-live="polite">
+            {visibleSessionMcpLoad === "loading" ? (
+              <p className="text-muted-foreground text-sm">Loading session MCP status…</p>
+            ) : visibleSessionMcpLoad === "error" ? (
+              <p className="text-destructive text-sm">Session MCP status unavailable: {sessionMcpError}</p>
+            ) : null}
+            {visibleDefinitionsLoad === "loading" ? (
+              <p className="text-muted-foreground text-sm">Loading global MCP definitions…</p>
+            ) : visibleDefinitionsLoad === "error" ? (
+              <p className="text-destructive text-sm">Global MCP definitions unavailable: {definitionsError}</p>
+            ) : null}
+            {visibleSessionMcpLoad === "error" || visibleDefinitionsLoad === "error" ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                aria-label="Retry MCP data"
+                onClick={() => void loadMcp()}
+              >
+                <RefreshCw className="size-4" />
+                Retry MCP data
+              </Button>
+            ) : null}
+          </div>
+          {/* The scrollbar sits in the dialog padding, so the rows end where
+              the buttons under them end. */}
+          <ScrollArea className="-mr-3 max-h-[50vh]">
             <div className="flex flex-col gap-2 pr-3">
               {allServerNames.length ? (
                 allServerNames.map((name) => {
-                  const info = mcp?.servers?.[name] || {
-                    status: "disconnected",
-                  };
-                  const definition = mcpDefinitions[name] || {};
+                  const info = visibleSessionMcp?.servers?.[name];
+                  const definition = visibleMcpDefinitions[name] || {};
                   // The engine only edits and removes servers in the global MCP
                   // config; a server an agent brought along is not listed there.
                   const editable = configuredServerNames.includes(name);
-                  const connected = info.status === "connected";
-                  const tools = Array.isArray(info.tools) ? info.tools : [];
+                  const canEstablishOwnership = visibleDefinitionsLoad === "success";
+                  const connected = visibleSessionMcpLoad === "success" && info?.status === "connected";
+                  const tools = Array.isArray(info?.tools) ? info.tools : [];
+                  const toolCount = info?.tool_count || tools.length || 0;
+                  const toolNames = tools.map((tool) =>
+                    typeof tool === "string"
+                      ? tool
+                      : String((tool as Record<string, unknown>).name || "tool"),
+                  );
+                  const toolNameList = [
+                    toolNames.slice(0, 8).join(", "),
+                    toolNames.length > 8 ? `+${toolNames.length - 8} more` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(", ");
+                  const toolSummary = [
+                    `${toolCount} ${toolCount === 1 ? "tool" : "tools"}`,
+                    toolNameList,
+                    info?.error,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ");
                   return (
                     <div
                       key={name}
@@ -606,87 +704,89 @@ export function SessionPanel({
                               {definition.description}
                             </span>
                           ) : null}
+                          <span className="text-muted-foreground text-xs">
+                            {editable
+                              ? "Global configuration"
+                              : canEstablishOwnership
+                                ? "Session only · no global definition"
+                                : visibleDefinitionsLoad === "error"
+                                  ? "Global configuration unavailable · ownership unknown"
+                                  : "Checking global configuration…"}
+                          </span>
                           {/* A long command path must wrap anywhere, or its
                               width pushes the dialog past a phone screen. */}
-                          <span className="text-muted-foreground flex items-start gap-1 text-[0.6875rem] break-all">
-                            <Terminal className="mt-0.5 size-3 shrink-0" />
-                            {definition.command || "configured by agent"}
-                          </span>
+                          {definition.command ? (
+                            <span className="text-muted-foreground flex items-start gap-1 text-[0.6875rem] break-all">
+                              <Terminal className="mt-0.5 size-3 shrink-0" />
+                              {definition.command}
+                            </span>
+                          ) : null}
                         </div>
-                        <Badge
-                          className="shrink-0"
-                          variant={connected ? "default" : "outline"}
+                        <span
+                          className={cn(
+                            "shrink-0 text-xs",
+                            connected ? "text-foreground font-medium" : "text-muted-foreground",
+                          )}
                         >
-                          {connected ? "Connected" : "Offline"}
-                        </Badge>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-muted-foreground text-xs">
-                          {info.tool_count || tools.length || 0} tools
-                          {info.error ? ` · ${info.error}` : ""}
+                          {visibleSessionMcpLoad !== "success"
+                            ? "Unknown"
+                            : connected
+                              ? "Connected"
+                              : "Offline"}
                         </span>
-                        <div className="flex items-center gap-1">
-                          {editable ? (
-                            <>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="ghost"
-                                aria-label={`Edit ${name}`}
-                                onClick={() => startEditServer(name, definition)}
-                              >
-                                <Pencil className="size-4" />
-                              </Button>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="ghost"
-                                aria-label={`Delete ${name}`}
-                                disabled={mcpBusy === name}
-                                onClick={() => setPendingMcpDelete(name)}
-                              >
-                                <Trash2 className="size-4" />
-                              </Button>
-                            </>
-                          ) : null}
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant={connected ? "outline" : "default"}
-                            disabled={mcpBusy === name}
-                            onClick={() => void toggleMcp(name, connected)}
-                          >
-                            {mcpBusy === name
-                              ? "…"
-                              : connected
-                                ? "Disconnect"
-                                : "Connect"}
-                          </Button>
-                        </div>
                       </div>
-                      {tools.length ? (
-                        <div className="flex flex-wrap gap-1">
-                          {tools.slice(0, 8).map((tool, index) => (
-                            <Badge key={`${name}-${index}`} variant="secondary">
-                              {typeof tool === "string"
-                                ? tool
-                                : String(
-                                    (tool as Record<string, unknown>).name ||
-                                      "tool",
-                                  )}
-                            </Badge>
-                          ))}
-                          {tools.length > 8 ? (
-                            <Badge variant="secondary">+{tools.length - 8}</Badge>
-                          ) : null}
-                        </div>
-                      ) : null}
+                      <p className="text-muted-foreground text-xs">
+                        {visibleSessionMcpLoad !== "success"
+                          ? "Session tools unavailable"
+                          : toolSummary}
+                      </p>
+                      <div className="flex items-center justify-end gap-1">
+                        {editable || !canEstablishOwnership ? (
+                          <>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              aria-label={`Edit ${name}`}
+                              disabled={!canEstablishOwnership || !editable || mcpBusy === name}
+                              onClick={() => startEditServer(name, definition)}
+                            >
+                              <Pencil className="size-4" />
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              aria-label={`Delete ${name}`}
+                              disabled={!canEstablishOwnership || !editable || mcpBusy === name}
+                              onClick={() => setPendingMcpDelete(name)}
+                            >
+                              <Trash2 className="size-4" />
+                            </Button>
+                          </>
+                        ) : null}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={connected ? "outline" : "default"}
+                          disabled={mcpBusy === name || visibleSessionMcpLoad !== "success"}
+                          onClick={() => void toggleMcp(name, connected)}
+                        >
+                          {mcpBusy === name
+                            ? "…"
+                            : connected
+                              ? "Disconnect"
+                              : "Connect"}
+                        </Button>
+                      </div>
                     </div>
                   );
                 })
               ) : (
                 <p className="text-muted-foreground text-sm">
-                  No MCP servers configured.
+                  {visibleSessionMcpLoad === "success" && visibleDefinitionsLoad === "success"
+                    ? "No MCP servers configured."
+                    : "No MCP servers are currently available to display."}
                 </p>
               )}
             </div>
@@ -753,7 +853,7 @@ export function SessionPanel({
               <Button
                 type="button"
                 size="sm"
-                disabled={!mcpDraft.command.trim() || (!mcpDraft.original && !mcpDraft.name.trim())}
+                disabled={visibleDefinitionsLoad !== "success" || !mcpDraft.command.trim() || (!mcpDraft.original && !mcpDraft.name.trim())}
                 onClick={() => void saveServer()}
               >
                 Save Server
@@ -774,6 +874,7 @@ export function SessionPanel({
               type="button"
               variant="outline"
               size="sm"
+              disabled={visibleDefinitionsLoad !== "success"}
               onClick={() =>
                 setMcpDraft({
                   original: null,
@@ -809,6 +910,7 @@ export function SessionPanel({
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
+              disabled={definitionsLoad !== "success" || !activeMcpLoad}
               onClick={() => {
                 // Read the name before clearing state; the dialog unmounts its
                 // content on close.

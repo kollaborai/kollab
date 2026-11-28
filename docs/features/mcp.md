@@ -1,7 +1,7 @@
 ---
 title: "MCP (Model Context Protocol)"
 created: 2026-02-24
-modified: 2026-11-15
+modified: 2026-11-16
 status: active
 ---
 # MCP (Model Context Protocol)
@@ -228,6 +228,13 @@ An engine session can request configured MCP servers for its daemon. Those
 servers are enabled in that daemon's memory and reloaded for the session;
 their saved `enabled` settings do not change. Use `/mcp enable` or the Settings
 panel to change a saved preference for later sessions.
+
+The Web UI's session panel shows session connection state separately from global
+server definitions. If either request fails, it keeps the other source's results,
+names the unavailable source, and offers a retry. A missing global definition is
+not evidence that an agent supplied the server; edit and delete controls stay
+disabled until global configuration is known. Connection controls stay available
+when session state is known.
 
 ## Tool Execution
 
