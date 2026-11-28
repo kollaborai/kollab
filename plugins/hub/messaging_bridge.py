@@ -71,12 +71,14 @@ async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
 async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
     """Transcribe with a direct whisper run where no child subreaper exists.
 
-    macOS and Windows cannot enumerate detached descendants, so this path kills
-    and reaps only the whisper process it starts. Audio and transcript live in a
-    private directory that is removed after that process has exited.
+    macOS and Windows cannot adopt detached descendants, so this path samples
+    Whisper's process tree while it runs and stops observed descendants before
+    removing the private directory.
     """
     import shutil
     import tempfile
+
+    import psutil
 
     run_dir = tempfile.mkdtemp(prefix="kollab-telegram-voice-")
     try:
@@ -97,13 +99,44 @@ async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        whisper_process = psutil.Process(proc.pid)
+        descendants = {}
+
+        def remember_descendants() -> None:
+            try:
+                children = whisper_process.children(recursive=True)
+            except psutil.Error:
+                return
+            for child in children:
+                descendants[child.pid] = child
+
+        async def stop_descendants() -> None:
+            remember_descendants()
+            for child in descendants.values():
+                try:
+                    child.kill()
+                except psutil.Error:
+                    pass
+            if descendants:
+                await asyncio.to_thread(psutil.wait_procs, list(descendants.values()), 1)
+
+        communication_task = asyncio.create_task(proc.communicate())
         try:
-            stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+            async with asyncio.timeout(60):
+                while not communication_task.done():
+                    remember_descendants()
+                    await asyncio.wait({communication_task}, timeout=0.01)
+                stdout_bytes, _ = await communication_task
+            await stop_descendants()
         except BaseException:
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
+            remember_descendants()
+            await stop_descendants()
+            communication_task.cancel()
+            await asyncio.gather(communication_task, return_exceptions=True)
             _, interrupted = await _await_shielded_task(asyncio.create_task(proc.wait()))
             if interrupted:
                 raise asyncio.CancelledError

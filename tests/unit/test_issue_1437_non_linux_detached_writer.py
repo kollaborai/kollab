@@ -1,8 +1,6 @@
 """Non-Linux Telegram transcription must stop detached Whisper writers."""
 
-import asyncio
 import os
-from pathlib import Path
 import sys
 import tempfile
 import textwrap
@@ -70,10 +68,14 @@ async def test_non_linux_stops_detached_writer_before_removing_run_directory(
 
     pid = int(writer_pid.read_text())
     try:
-        with pytest.raises(psutil.NoSuchProcess):
-            psutil.Process(pid)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
     finally:
-        if psutil.pid_exists(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
             psutil.Process(pid).kill()
             psutil.wait_procs([psutil.Process(pid)], timeout=2)
     assert result == "[voice] [voice message - whisper returned empty]"

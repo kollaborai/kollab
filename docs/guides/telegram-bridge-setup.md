@@ -94,9 +94,11 @@ files. On timeout or cancellation it kills and reaps those processes before
 cleanup. Diagnostics do not contain transcript text or credentials.
 
 On macOS and Windows the bridge runs `whisper` directly in a private temporary
-directory and removes that directory after the process exits. Those systems have
-no child subreaper, so processes that Whisper detaches cannot be tracked there; on
-timeout or cancellation only the Whisper process itself is killed and reaped.
+directory. While Whisper runs, it samples that process's descendants and stops
+observed descendants before removing the directory. These systems have no child
+subreaper, so a descendant that detaches and exits between samples may not be
+observed. On timeout or cancellation, the bridge kills Whisper and any observed
+descendants before cleanup.
 
 Install the Whisper CLI in the environment that runs Kollab. On Linux, `/proc`
 must be mounted and `python3` must be on `PATH`:
@@ -183,15 +185,18 @@ missing. Install `openai-whisper` in the environment used by Kollab. On Linux,
 subreaper owns each private transcription directory; it waits for all CLI
 descendants, including detached writers, before reading the transcript. On
 cancellation or the 60-second deadline, it kills and reaps those processes before
-removing audio and partial output. Concurrent runs have separate directories. The
-bridge forwards a safe failure notice when transcription fails and continues
-processing text messages.
+removing audio and partial output. macOS and Windows sample the direct Whisper
+process's descendants and stop those observed before directory cleanup. A child
+that detaches and exits between samples can escape tracking on those platforms.
+Concurrent runs have separate directories. The bridge forwards a safe failure
+notice when transcription fails and continues processing text messages.
 
 On Linux, if an operating-system error prevents the owner from proving all children
 have exited, it reports failure and retains the private run directory. Remove that
 directory only after verifying the run's processes have exited; the Linux owner
-never deletes files while a writer may remain. macOS and Windows cannot make that
-proof, so they remove the directory once the Whisper process has exited.
+never deletes files while a writer may remain. macOS and Windows stop descendants
+observed while Whisper runs, then remove the directory after Whisper exits. They
+cannot prove that an unobserved detached writer has exited.
 
 ### Bridge Stops Working After Restart
 
