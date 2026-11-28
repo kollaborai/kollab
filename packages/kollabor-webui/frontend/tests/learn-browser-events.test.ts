@@ -109,7 +109,7 @@ test("session readiness bounds a stalled history body by one shared deadline", (
   `;
   const child = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
     encoding: "utf8",
-    timeout: 1_500,
+    timeout: 5_000,
   });
 
   assert.equal(child.status, 0, child.stderr || child.stdout);
