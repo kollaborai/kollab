@@ -48,45 +48,101 @@ def _terminal_find_workspace_error(
 ) -> Optional[str]:
     """Reject direct ``find`` searches rooted outside the active workspace."""
     try:
-        argv = shlex.split(command, posix=os.name != "nt")
+        lexer = shlex.shlex(
+            command, posix=os.name != "nt", punctuation_chars=";&|\n"
+        )
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
     except ValueError:
         return None
-    if not argv or Path(argv[0]).name.lower() != "find":
+    workspace_root = workspace.resolve()
+    current_cwd: Optional[Path] = cwd
+    command_tokens: list[str] = []
+
+    def validate_find(argv: list[str], search_cwd: Optional[Path]) -> Optional[str]:
+        if any(argument in {"-L", "-follow"} for argument in argv[1:]):
+            return "Terminal find cannot follow symbolic links outside the workspace."
+        if "-files0-from" in argv[1:]:
+            return "Terminal find cannot load search roots from a file."
+
+        roots: list[str] = []
+        arguments = iter(argv[1:])
+        for argument in arguments:
+            if argument in {"-P", "-H"}:
+                continue
+            if argument == "-D":
+                next(arguments, None)
+                continue
+            if argument.startswith("-O"):
+                continue
+            if argument == "--":
+                roots.extend(arguments)
+                break
+            if argument in {"!", "(", ")"} or argument.startswith("-"):
+                break
+            roots.append(argument)
+        if not roots:
+            roots = ["."]
+
+        if search_cwd is None:
+            return "Terminal find search directory could not be resolved safely."
+        for root in roots:
+            search_root = Path(root).expanduser()
+            if not search_root.is_absolute():
+                search_root = search_cwd / search_root
+            try:
+                search_root.resolve().relative_to(workspace_root)
+            except (OSError, RuntimeError, ValueError):
+                return "Terminal find searches must stay inside the active workspace."
         return None
 
-    if any(argument in {"-L", "-follow"} for argument in argv[1:]):
-        return "Terminal find cannot follow symbolic links outside the workspace."
-    if "-files0-from" in argv[1:]:
-        return "Terminal find cannot load search roots from a file."
+    def inspect_segment(argv: list[str]) -> Optional[str]:
+        nonlocal current_cwd
+        if not argv:
+            return None
+        if Path(argv[0]).name.lower() == "cd":
+            target_index = 1
+            while target_index < len(argv) and argv[target_index] in {
+                "--",
+                "-L",
+                "-P",
+            }:
+                target_index += 1
+            if (
+                os.name == "nt"
+                and target_index < len(argv)
+                and argv[target_index].lower() == "/d"
+            ):
+                target_index += 1
+            target = (
+                argv[target_index]
+                if target_index < len(argv)
+                else str(Path.home())
+            )
+            if target == "-" or "$" in target or current_cwd is None:
+                current_cwd = None
+            else:
+                path = Path(target).expanduser()
+                if not path.is_absolute():
+                    path = current_cwd / path
+                current_cwd = path.resolve()
+            return None
+        if Path(argv[0]).name.lower() == "find":
+            return validate_find(argv, current_cwd)
+        return None
 
-    roots: list[str] = []
-    arguments = iter(argv[1:])
-    for argument in arguments:
-        if argument in {"-P", "-H"}:
-            continue
-        if argument == "-D":
-            next(arguments, None)
-            continue
-        if argument.startswith("-O"):
-            continue
-        if argument == "--":
-            roots.extend(arguments)
-            break
-        if argument in {"!", "(", ")"} or argument.startswith("-"):
-            break
-        roots.append(argument)
-    if not roots:
-        roots = ["."]
-
-    workspace_root = workspace.resolve()
-    for root in roots:
-        search_root = Path(root).expanduser()
-        if not search_root.is_absolute():
-            search_root = cwd / search_root
-        try:
-            search_root.resolve().relative_to(workspace_root)
-        except (OSError, RuntimeError, ValueError):
-            return "Terminal find searches must stay inside the active workspace."
+    for token in tokens:
+        if token in {";", "&&", "||", "|", "\n"}:
+            error = inspect_segment(command_tokens)
+            if error:
+                return error
+            command_tokens = []
+        else:
+            command_tokens.append(token)
+    error = inspect_segment(command_tokens)
+    if error:
+        return error
     return None
 
 
