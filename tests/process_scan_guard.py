@@ -26,7 +26,7 @@ HOST_PROCESS_SCAN_SKIP_REASON = "host-wide process scans run only in a sanctione
 # Keep them visible so collection can fail closed if a test loses its marker.
 HOST_PROCESS_SCAN_TESTS = {
     "unit/test_issue_1437_non_linux_detached_writer.py": frozenset(
-        {"test_non_linux_stops_detached_writer_before_removing_run_directory"}
+        {"test_non_linux_cancellation_stops_writer_still_attached_to_whisper"}
     ),
     "unit/test_telegram_voice_platform_policy.py": frozenset(
         {"test_non_linux_cancellation_kills_and_reaps_whisper"}
