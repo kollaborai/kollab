@@ -10,6 +10,7 @@ def _plugin(tmp_path):
     plugin = object.__new__(HubPlugin)
     plugin._identity = SimpleNamespace(is_coordinator=True)
     plugin._task_ledger = TaskLedger(tasks_dir=str(tmp_path / "tasks"))
+    plugin._work_queue = None
     plugin._supervisor_task = MagicMock()
     plugin._supervisor_state = SupervisorState()
     plugin._supervisor_alerts = []
