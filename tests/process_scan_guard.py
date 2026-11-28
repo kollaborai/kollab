@@ -83,6 +83,9 @@ HOST_PROCESS_SCAN_TESTS = {
         }
     ),
     "unit/test_acp_npm_shims.py": frozenset({"test_generated_shim_old_binding_resume_or_preservation"}),
+    "integration/test_acp_application_deferred_e2e.py": frozenset(
+        {"test_real_terminal_deferred_acp_hub_lifecycle"}
+    ),
     "unit/test_cli_web_ui_engine_port.py": frozenset(
         {
             "test_an_engine_on_this_interpreter_is_ours",
