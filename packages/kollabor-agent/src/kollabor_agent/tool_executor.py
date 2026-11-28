@@ -43,6 +43,202 @@ from .yes_approval import NEEDS_YES, NOT_IN_HIDDEN_TURN, YesApprovals, call_appr
 logger = logging.getLogger(__name__)
 
 
+def _terminal_find_workspace_error(
+    command: str, *, cwd: Path, workspace: Path
+) -> Optional[str]:
+    """Reject ``find`` searches that cannot be safely checked against workspace."""
+    if re.search(r"\bfind\b", command, re.IGNORECASE) and re.search(
+        r"\$\(|`|[<>]\(|(?:^|[;&|]\s*)\(", command
+    ):
+        return "Terminal find cannot run inside shell substitutions."
+
+    try:
+        lexer = shlex.shlex(
+            command, posix=os.name != "nt", punctuation_chars=";&|\n"
+        )
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    workspace_root = workspace.resolve()
+    current_cwd: Optional[Path] = cwd
+    command_tokens: list[str] = []
+
+    def validate_find(argv: list[str], search_cwd: Optional[Path]) -> Optional[str]:
+        if any(argument in {"-L", "-follow"} for argument in argv[1:]):
+            return "Terminal find cannot follow symbolic links outside the workspace."
+        if "-files0-from" in argv[1:]:
+            return "Terminal find cannot load search roots from a file."
+
+        roots: list[str] = []
+        arguments = iter(argv[1:])
+        for argument in arguments:
+            if argument in {"-P", "-H"}:
+                continue
+            if argument == "-D":
+                next(arguments, None)
+                continue
+            if argument.startswith("-O"):
+                continue
+            if argument == "--":
+                roots.extend(arguments)
+                break
+            if argument in {"!", "(", ")"} or argument.startswith("-"):
+                break
+            roots.append(argument)
+        if not roots:
+            roots = ["."]
+
+        if search_cwd is None:
+            return "Terminal find search directory could not be resolved safely."
+        for root in roots:
+            if "$" in root or "`" in root or (os.name == "nt" and "%" in root):
+                return "Terminal find search roots cannot use shell expansion."
+            search_root = Path(root).expanduser()
+            if not search_root.is_absolute():
+                search_root = search_cwd / search_root
+            try:
+                search_root.resolve().relative_to(workspace_root)
+            except (OSError, RuntimeError, ValueError):
+                return "Terminal find searches must stay inside the active workspace."
+        return None
+
+    def inspect_segment(argv: list[str]) -> Optional[str]:
+        nonlocal current_cwd
+        while argv and argv[0] in {"then", "else", "do", "!", "{"}:
+            argv = argv[1:]
+        while argv and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]):
+            if re.search(r"\bfind\b", argv[0], re.IGNORECASE):
+                return "Terminal find command prefix could not be resolved safely."
+            argv = argv[1:]
+        if not argv:
+            return None
+
+        # These shell command prefixes still invoke the following executable.
+        # Peel them before deciding whether this segment runs find.
+        while argv:
+            prefix = Path(argv[0]).name.lower()
+            if prefix == "command":
+                argv = argv[1:]
+                while argv and argv[0] in {"-p", "--"}:
+                    argv = argv[1:]
+                continue
+            if prefix == "env":
+                index = 1
+                while index < len(argv):
+                    argument = argv[index]
+                    if argument in {"--", "-"}:
+                        index += 1
+                        break
+                    if argument in {
+                        "-i",
+                        "--ignore-environment",
+                        "-0",
+                        "--null",
+                        "-v",
+                        "--debug",
+                    }:
+                        index += 1
+                        continue
+                    if argument in {"-u", "--unset"}:
+                        index += 2
+                        continue
+                    if argument in {"-C", "--chdir"}:
+                        if index + 1 >= len(argv):
+                            return None
+                        target = argv[index + 1]
+                        if "$" in target or "`" in target or current_cwd is None:
+                            current_cwd = None
+                        else:
+                            path = Path(target).expanduser()
+                            if not path.is_absolute():
+                                path = current_cwd / path
+                            current_cwd = path.resolve()
+                        index += 2
+                        continue
+                    if argument.startswith("--unset="):
+                        index += 1
+                        continue
+                    if argument.startswith("--chdir="):
+                        target = argument.partition("=")[2]
+                        if "$" in target or "`" in target or current_cwd is None:
+                            current_cwd = None
+                        else:
+                            path = Path(target).expanduser()
+                            if not path.is_absolute():
+                                path = current_cwd / path
+                            current_cwd = path.resolve()
+                        index += 1
+                        continue
+                    if argument in {"-S", "--split-string"} or argument.startswith(
+                        "--split-string="
+                    ):
+                        remainder = " ".join(argv[index + 1 :])
+                        if re.search(r"\bfind\b", remainder, re.IGNORECASE):
+                            return "Terminal find cannot run through env split-string."
+                        return None
+                    if argument.startswith("-"):
+                        remainder = " ".join(argv[index + 1 :])
+                        if re.search(r"\bfind\b", remainder, re.IGNORECASE):
+                            return "Terminal find command prefix could not be resolved safely."
+                        return None
+                    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argument):
+                        index += 1
+                        continue
+                    break
+                argv = argv[index:]
+                continue
+            break
+        if not argv:
+            return None
+        if Path(argv[0]).name.lower() == "cd":
+            target_index = 1
+            while target_index < len(argv) and argv[target_index] in {
+                "--",
+                "-L",
+                "-P",
+            }:
+                target_index += 1
+            if (
+                os.name == "nt"
+                and target_index < len(argv)
+                and argv[target_index].lower() == "/d"
+            ):
+                target_index += 1
+            target = (
+                argv[target_index]
+                if target_index < len(argv)
+                else str(Path.home())
+            )
+            if target == "-" or "$" in target or current_cwd is None:
+                current_cwd = None
+            else:
+                path = Path(target).expanduser()
+                if not path.is_absolute():
+                    path = current_cwd / path
+                current_cwd = path.resolve()
+            return None
+        if Path(argv[0]).name.lower() == "find":
+            return validate_find(argv, current_cwd)
+        if re.search(r"\bfind\b", " ".join(argv), re.IGNORECASE):
+            return "Terminal find command could not be resolved safely."
+        return None
+
+    for token in tokens:
+        if token in {";", "&", "&&", "||", "|", "|&", "\n"}:
+            error = inspect_segment(command_tokens)
+            if error:
+                return error
+            command_tokens = []
+        else:
+            command_tokens.append(token)
+    error = inspect_segment(command_tokens)
+    if error:
+        return error
+    return None
+
+
 class ToolExecutionResult:
     """Result of tool execution."""
 
@@ -2521,6 +2717,19 @@ class ToolExecutor:
             )
 
         cwd = self._resolve_terminal_cwd(tool_data.get("cwd"))
+        workspace = Path(self.workspace or Path.cwd()).expanduser().resolve()
+        search_error = _terminal_find_workspace_error(
+            command,
+            cwd=(cwd or workspace).resolve(),
+            workspace=workspace,
+        )
+        if search_error:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=search_error,
+            )
         logger.debug(
             f"Executing terminal command: {command[:100]}... (background={background})"
         )
