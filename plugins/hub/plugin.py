@@ -5526,13 +5526,15 @@ class HubPlugin(BasePlugin):
         """Execute a hub_work tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        result, ledger_available = self._format_work_report()
+        result, ledger_complete = self._format_work_report()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_work",
-            success=ledger_available,
+            success=ledger_complete,
             output=result,
-            error="" if ledger_available else "TaskLedger unavailable",
+            error=(
+                "" if ledger_complete else "TaskLedger unavailable or partially unreadable"
+            ),
         )
 
     async def _handle_hub_vault_tool(self, tool_data: dict):
@@ -12180,17 +12182,26 @@ class HubPlugin(BasePlugin):
         ):
             return []
         state = self._supervisor_state
-        open_cards = self._task_ledger.get_open()
+        read_errors: List[str] = []
+        open_cards = self._task_ledger.get_open(read_errors=read_errors)
         stalled = self._task_ledger.get_stalled(
             self.config.get(
                 "plugins.hub.supervisor_stall_threshold", DEFAULT_STALL_THRESHOLD
             )
             if self.config
-            else DEFAULT_STALL_THRESHOLD
+            else DEFAULT_STALL_THRESHOLD,
+            read_errors=read_errors,
+        )
+        unreadable_count = len(set(read_errors))
+        partial = (
+            f" (partial; {unreadable_count} unreadable "
+            f"{'card' if unreadable_count == 1 else 'cards'})"
+            if unreadable_count
+            else ""
         )
         lines = [
             f"supervisor: {len(open_cards)} open, {len(stalled)} stalled,"
-            f" {len(self._supervisor_alerts)} alert(s)"
+            f" {len(self._supervisor_alerts)} alert(s){partial}"
         ]
         if state.wakes_since_turn and state.last_turn_end:
             idle = max(0, int((time.time() - state.last_turn_end) // 60))
@@ -17641,10 +17652,11 @@ class HubPlugin(BasePlugin):
         lines: List[str] = []
         slots = self._work_queue.get_all() if self._work_queue else []
         ledger_available = self._task_ledger is not None
+        read_errors: List[str] = []
 
         if self._task_ledger is not None:
             try:
-                open_cards = self._task_ledger.get_open()
+                open_cards = self._task_ledger.get_open(read_errors=read_errors)
             except Exception:
                 logger.warning("TaskLedger read failed while formatting hub work")
                 open_cards = None
@@ -17663,10 +17675,24 @@ class HubPlugin(BasePlugin):
         elif not ledger_available:
             lines.append("in-memory queue: empty (partial; TaskLedger unavailable)")
 
+        unreadable_count = len(set(read_errors))
+        partial = unreadable_count > 0
         if ledger_available and open_cards:
-            lines.append(f"open ledger cards: {len(open_cards)}")
+            suffix = (
+                f" (partial; {unreadable_count} unreadable "
+                f"{'card' if unreadable_count == 1 else 'cards'})"
+                if partial
+                else ""
+            )
+            lines.append(f"open ledger cards: {len(open_cards)}{suffix}")
             for c in open_cards:
                 lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
+
+        if partial and not open_cards:
+            lines.append(
+                f"TaskLedger: partial ({unreadable_count} unreadable "
+                f"{'card' if unreadable_count == 1 else 'cards'}; counts may be incomplete)"
+            )
 
         if not ledger_available:
             reason = "read failed" if self._task_ledger is not None else "not configured"
@@ -17677,7 +17703,7 @@ class HubPlugin(BasePlugin):
 
         if not lines:
             return "work queue: empty", True
-        return "\n".join(lines), True
+        return "\n".join(lines), not partial
 
     def _handle_queue_command(
         self, task: str, upstream_refs: Optional[List[str]] = None

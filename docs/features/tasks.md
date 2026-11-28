@@ -21,6 +21,9 @@ skips cards, so a partial view is not presented as complete. The cron scanner
 continues processing readable due cards and logs unreadable cards at warning
 level.
 
+`/hub status` and `/hub work` also mark their ledger counts partial when a card
+cannot be read. The displayed counts include readable cards only.
+
 Tools (registered in plugins/hub/plugin.py):
 
 - task_checkpoint — report progress on a task
