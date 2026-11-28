@@ -1092,9 +1092,17 @@ class TaskLedger:
                 return claimed
         return None
 
-    def get_open(self, project: str = "") -> List[TaskCard]:
-        """Get open (unassigned) cards, highest priority first."""
-        result = [c for c in self.get_all(status="open") if not c.assignee]
+    def get_open(
+        self, project: str = "", *, read_errors: Optional[List[str]] = None
+    ) -> List[TaskCard]:
+        """Get open (unassigned) cards, highest priority first.
+
+        When supplied, ``read_errors`` receives IDs of unreadable cards.
+        """
+        result = [
+            c for c in self.get_all(status="open", read_errors=read_errors)
+            if not c.assignee
+        ]
         if project:
             result = [c for c in result if not c.project or c.project == project]
         return sorted(result, key=lambda c: (-c.priority, c.created_at))
