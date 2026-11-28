@@ -3,7 +3,7 @@
 // stream (#1451). Uses the real App and a synthetic engine API; it never
 // contacts a real relay.
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright-core";
@@ -224,6 +224,17 @@ async function main() {
     await shell.page.getByText(reply, { exact: true }).first().waitFor({ timeout });
     await shell.page.getByText(prompt, { exact: true }).first().waitFor({ timeout });
     assert.equal(snapshotsServed, servedBeforeOutage, "the reply shown during the outage must come from the saved rows");
+    const historyAlert = shell.page.locator('[data-slot="history-status"][role="alert"]');
+    await shell.page.getByText("Couldn't refresh history; showing the saved conversation.", { exact: true }).waitFor({ timeout });
+    assert.equal(await historyAlert.getByRole("button", { name: "Retry", exact: true }).count(), 1);
+    await shell.page.setViewportSize({ width: 390, height: 844 });
+    const screenshotDir = process.env.KOLLAB_BROWSER_ARTIFACT_DIR || os.tmpdir();
+    await mkdir(screenshotDir, { recursive: true });
+    await shell.page.screenshot({
+      path: path.join(screenshotDir, "history-error-copy-1326.png"),
+      animations: "disabled",
+    });
+    await shell.page.setViewportSize({ width: 1280, height: 900 });
     assert.ok(streamReads.length >= 3, `expected open/switch/reopen stream reads, got ${streamReads.length}`);
     const cachedRows = await cachedRemoteRows(shell.page);
     assert.deepEqual(cachedRows && rowTexts(cachedRows), [prompt, reply], "IndexedDB must retain the verified remote conversation");

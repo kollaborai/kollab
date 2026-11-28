@@ -21,7 +21,7 @@ export const OLDER_LOAD_FAILED = "Couldn't load older messages. Scroll up or ret
 export const INITIAL_LOADING = "Loading conversation history…";
 export const CONVERSATION_LOAD_FAILED = "Couldn't load conversation history. Check the connection and retry.";
 
-export const SAVED_CONVERSATION_SHOWN = "Couldn't refresh history; showing the saved conversation. Retry to update.";
+export const SAVED_CONVERSATION_SHOWN = "Couldn't refresh history; showing the saved conversation.";
 export const CONNECTION_LOST = "Connection lost. Showing the last messages; retry to reconnect now.";
 
 // Module-level, so a banner that is already shown keeps its identity.
