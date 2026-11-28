@@ -61,6 +61,8 @@ conversation at a specific message.
 
 While reading a long conversation, loading older pages and reconciling compacted history preserves the visible messages and their scroll position.
 
+When history cannot load, the error banner's Retry action has a 44px-high hit area on touch screens.
+
 In the Web UI, long assistant and user messages are restored in full when the
 chat reloads. Long tool results keep a preview and load the full result when
 expanded.

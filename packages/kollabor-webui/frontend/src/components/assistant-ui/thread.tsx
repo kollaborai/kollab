@@ -446,7 +446,7 @@ const ThreadRoot: FC<{
               >
                 <span>{banner.message}</span>
                 {banner.kind === "error" ? (
-                  <Button type="button" size="sm" variant="outline" onClick={retryBanner}>
+                  <Button type="button" size="sm" variant="outline" onClick={retryBanner} className="any-pointer-coarse:min-h-11">
                     Retry
                   </Button>
                 ) : null}
