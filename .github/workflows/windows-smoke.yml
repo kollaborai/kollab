@@ -50,7 +50,7 @@ jobs:
           node-version: "24.18.0"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           cache-suffix: ${{ github.job }}
 
@@ -179,7 +179,7 @@ jobs:
           python-version: "3.14"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           cache-suffix: ${{ github.job }}
 
