@@ -25,6 +25,9 @@ HOST_PROCESS_SCAN_SKIP_REASON = "host-wide process scans run only in a sanctione
 # These exact tests exercise real ACP lifecycles or host-wide process-table scans.
 # Keep them visible so collection can fail closed if a test loses its marker.
 HOST_PROCESS_SCAN_TESTS = {
+    "integration/test_acp_application_deferred_e2e.py": frozenset(
+        {"test_real_terminal_deferred_acp_hub_lifecycle"}
+    ),
     "unit/code_service/test_terminal.py": frozenset(
         {
             "test_teardown_ends_background_job_after_shell_exits",
