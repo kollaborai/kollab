@@ -261,10 +261,38 @@ export function AppSidebar({
     [agents],
   );
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [prChainRootFound, setPrChainRootFound] = useState(false);
 
   useEffect(() => {
     if (learnActive || whatsNewActive) setOptionsOpen(false);
   }, [learnActive, whatsNewActive]);
+  // PR Chain is a maintainer tool; show it only when its runner folder exists.
+  useEffect(() => {
+    let request: AbortController | undefined;
+    const refresh = () => {
+      request?.abort();
+      const controller = new AbortController();
+      request = controller;
+      void api.getPrChain(controller.signal)
+        .then(({ root_found }) => {
+          if (!controller.signal.aborted) setPrChainRootFound(root_found);
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setPrChainRootFound(false);
+        });
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    const timer = window.setInterval(refreshWhenVisible, 30_000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    refresh();
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      request?.abort();
+    };
+  }, [api]);
   // A lifted row's clone replaces the element a touch started on; keep that touch reaching the drag.
   useEffect(() => relayDetachedTouches(window), []);
   // The model picker's list is asked for as the shell loads, and again when the profiles change, so the Model
@@ -948,21 +976,23 @@ export function AppSidebar({
           >
             <BookOpen className="size-4" />
           </TooltipIconButton>
-          <TooltipIconButton
-            tooltip="PR Chain"
-            side="top"
-            className={FOOTER_BUTTON}
-            onClick={() => {
-              setOpenMobile(false);
-              onPrChain();
-            }}
-          >
-            <GitPullRequest className="size-4" />
-          </TooltipIconButton>
+          {prChainRootFound ? (
+            <TooltipIconButton
+              tooltip="PR Chain"
+              side="top"
+              className={FOOTER_BUTTON}
+              onClick={() => {
+                setOpenMobile(false);
+                onPrChain();
+              }}
+            >
+              <GitPullRequest className="size-4" />
+            </TooltipIconButton>
+          ) : null}
           <TooltipIconButton
             tooltip="What’s New"
             side="top"
-            className={`${FOOTER_BUTTON} ${whatsNewActive ? "bg-sidebar-accent text-sidebar-accent-foreground" : ""}`}
+            className={`${FOOTER_BUTTON} ${whatsNewActive ? "bg-sidebar-accent text-sidebar-accent-foreground" : ""} ${!prChainRootFound ? "!col-start-2" : ""}`}
             aria-current={whatsNewActive ? "page" : undefined}
             onClick={() => {
               setOpenMobile(false);
