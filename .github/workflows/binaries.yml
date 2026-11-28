@@ -51,7 +51,7 @@ jobs:
         with:
           python-version: "3.14"
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           package-manager-cache: false
@@ -192,7 +192,7 @@ jobs:
           name: kollab-${{ matrix.binary_platform }}
           path: dist/bin
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           package-manager-cache: false
@@ -366,7 +366,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: python scripts/desktop_release.py --version "$VERSION" stage --platform linux-x86_64 --source dist/bin/kollab-linux-x86_64
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           package-manager-cache: false
@@ -471,7 +471,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: python scripts/desktop_release.py --version "$VERSION" stage --platform windows-x86_64 --source dist/bin/kollab-windows-x86_64.exe
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           package-manager-cache: false
