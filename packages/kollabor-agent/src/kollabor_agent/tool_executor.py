@@ -88,6 +88,8 @@ def _terminal_find_workspace_error(
         if search_cwd is None:
             return "Terminal find search directory could not be resolved safely."
         for root in roots:
+            if "$" in root or "`" in root or (os.name == "nt" and "%" in root):
+                return "Terminal find search roots cannot use shell expansion."
             search_root = Path(root).expanduser()
             if not search_root.is_absolute():
                 search_root = search_cwd / search_root
@@ -100,6 +102,8 @@ def _terminal_find_workspace_error(
     def inspect_segment(argv: list[str]) -> Optional[str]:
         nonlocal current_cwd
         while argv and argv[0] in {"then", "else", "do", "!", "{"}:
+            argv = argv[1:]
+        while argv and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]):
             argv = argv[1:]
         if not argv:
             return None
