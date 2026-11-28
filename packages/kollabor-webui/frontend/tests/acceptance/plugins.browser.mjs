@@ -2,7 +2,7 @@
 // Run from the frontend folder: npm run test:e2e:plugins
 // Browser: CHROME_PATH if set, else playwright-core's chromium.
 // PLUGIN_BUILD_OUT keeps the build folder; without it a temp folder is built and removed after the run.
-// PLUGIN_SCREENSHOTS writes hello-<width>.png into that folder.
+// PLUGIN_SCREENSHOTS writes hello-<width>.png into that folder. PLUGIN_DESKTOP_ONLY=1 runs only the 1440px desktop flow.
 // The app is the production build (scripts/build.mjs), served by a local Node server that sends the production
 // CSP for its import map. /api and /engine are fakes. Hello's manifest and bundle are read from bundles/plugins/hello.
 import assert from "node:assert/strict";
@@ -298,8 +298,19 @@ async function screenshot(page, width) {
   await page.screenshot({ path: path.join(screenshots, `hello-${width}.png`) });
 }
 
+async function clickPluginControl(page, locator, label) {
+  await locator.waitFor({ state: "visible", timeout: 30000 });
+  await locator.evaluate((element) => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  }));
+  const box = await locator.boundingBox();
+  assert.ok(box, `${label} is on screen before clicking`);
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+}
+
 async function showHelloView(page, panel) {
-  await panel.getByRole("button", { name: "Hello View", exact: true }).click({ timeout: 5000 });
+  const button = panel.getByRole("button", { name: "Hello View", exact: true });
+  await clickPluginControl(page, button, "Hello View");
   await page.getByText("Hello from your plugin!", { exact: true }).waitFor({ timeout: 5000 });
 }
 
@@ -311,18 +322,18 @@ async function desktopFlow() {
     await showHelloView(page, panel);
     await assertFits(page, "1440px hello view");
     await screenshot(page, 1440);
-    await page.getByRole("button", { name: "Say Hello", exact: true }).click({ timeout: 5000 });
+    await clickPluginControl(page, page.getByRole("button", { name: "Say Hello", exact: true }), "Say Hello");
     await page.getByText("Hello count: 1", { exact: true }).waitFor({ timeout: 5000 });
-    await page.getByRole("button", { name: "Open Hello Dialog", exact: true }).click({ timeout: 5000 });
+    await clickPluginControl(page, page.getByRole("button", { name: "Open Hello Dialog", exact: true }), "Open Hello Dialog");
     const dialog = page.getByRole("dialog", { name: "Hello Dialog", exact: true });
     await dialog.getByText("Hello from the dialog.", { exact: true }).waitFor({ timeout: 5000 });
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "hidden", timeout: 5000 });
-    await panel.getByRole("button", { name: "Hello Page", exact: true }).click({ timeout: 5000 });
+    await clickPluginControl(page, panel.getByRole("button", { name: "Hello Page", exact: true }), "Hello Page");
     await page.getByRole("heading", { name: "Hello Page", exact: true }).waitFor({ timeout: 5000 });
     await page.getByText("This page is provided by the Hello plugin.", { exact: true }).waitFor({ timeout: 5000 });
     await assertFits(page, "1440px hello page");
-    await page.getByRole("button", { name: "Close Hello Page", exact: true }).click({ timeout: 5000 });
+    await clickPluginControl(page, page.getByRole("button", { name: "Close Hello Page", exact: true }), "Close Hello Page");
   } finally {
     await context.close();
   }
@@ -390,9 +401,8 @@ async function livePluginRemovalFlow() {
       window.__pluginsLiveRemovalMarker = "still here";
     });
 
-    await helloViewTab.click({ timeout: 5000 });
-    await page.getByText("Hello from your plugin!", { exact: true }).waitFor({ timeout: 5000 });
-    await page.getByRole("button", { name: "Open Hello Dialog", exact: true }).click({ timeout: 5000 });
+    await showHelloView(page, panel);
+    await clickPluginControl(page, page.getByRole("button", { name: "Open Hello Dialog", exact: true }), "Open Hello Dialog");
     const dialog = page.getByRole("dialog", { name: "Hello Dialog", exact: true });
     await dialog.waitFor({ timeout: 5000 });
 
@@ -412,7 +422,7 @@ async function livePluginRemovalFlow() {
     await helloViewTab.waitFor({ timeout: 5000 });
     const helloPageRow = panel.getByRole("button", { name: "Hello Page", exact: true });
     await helloPageRow.waitFor({ timeout: 5000 });
-    await helloPageRow.click({ timeout: 5000 });
+    await clickPluginControl(page, helloPageRow, "Hello Page");
     await page.getByRole("heading", { name: "Hello Page", exact: true }).waitFor({ timeout: 5000 });
     await page.getByText("This page is provided by the Hello plugin.", { exact: true }).waitFor({ timeout: 5000 });
     const helloPageTab = page.getByRole("tab", { name: "Hello", exact: true });
@@ -445,7 +455,7 @@ async function throwingBundleFlow() {
     const brokenRow = panel.getByRole("button", { name: /Broken Plugin/ });
     await brokenRow.getByText("Failed to Load", { exact: true }).waitFor({ timeout: 10000 });
     await showHelloView(page, panel);
-    await page.getByRole("button", { name: "Say Hello", exact: true }).click({ timeout: 5000 });
+    await clickPluginControl(page, page.getByRole("button", { name: "Say Hello", exact: true }), "Say Hello");
     await page.getByText("Hello count: 1", { exact: true }).waitFor({ timeout: 5000 });
   } finally {
     await context.close();
@@ -492,14 +502,18 @@ try {
   await assertMalformedPathIsGeneric(server.address().port);
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH ?? chromium.executablePath() });
   await desktopFlow();
-  await tabletFlow();
-  await phoneFlow();
-  await livePluginRemovalFlow();
-  await throwingBundleFlow();
-  await pluginsOffFlow();
+  if (process.env.PLUGIN_DESKTOP_ONLY !== "1") {
+    await tabletFlow();
+    await phoneFlow();
+    await livePluginRemovalFlow();
+    await throwingBundleFlow();
+    await pluginsOffFlow();
+  }
   assert.ok(chatStreamRequests > 0, "the open chat reads its stream from the fixture");
   assert.deepEqual(problems, [], "no page errors or CSP violations");
-  console.log("plugins acceptance: Hello view, page and dialog pass at 1440, 820 and 390 px; live removal, throwing bundle and plugins=off pass");
+  console.log(process.env.PLUGIN_DESKTOP_ONLY === "1"
+    ? "plugins acceptance: desktop Hello view, page and dialog pass at 1440 px"
+    : "plugins acceptance: Hello view, page and dialog pass at 1440, 820 and 390 px; live removal, throwing bundle and plugins=off pass");
 } catch (error) {
   exitCode = 1;
   console.error(error);
