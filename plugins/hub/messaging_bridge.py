@@ -68,12 +68,36 @@ async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
     await asyncio.gather(communication_task, return_exceptions=True)
 
 
+def _stop_whisper_tree(proc) -> None:
+    """Kill Whisper and the descendants still attached to it.
+
+    The descendants are listed before Whisper is killed, because a child that
+    outlives its parent is reparented and can no longer be found through it. A
+    writer that already left the tree is not stopped; that is a platform limit.
+    """
+    import psutil
+
+    try:
+        descendants = psutil.Process(proc.pid).children(recursive=True)
+    except psutil.Error:
+        descendants = []
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    for child in descendants:
+        try:
+            child.kill()
+        except psutil.Error:
+            pass
+
+
 async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
     """Transcribe with a direct whisper run where no child subreaper exists.
 
-    macOS and Windows cannot enumerate detached descendants, so this path kills
-    and reaps only the whisper process it starts. Audio and transcript live in a
-    private directory that is removed after that process has exited.
+    macOS and Windows cannot adopt detached descendants, so the private directory
+    is kept once Whisper starts: a detached writer may still be active. On timeout
+    or cancellation, Whisper and the descendants still attached to it are stopped.
     """
     import shutil
     import tempfile
@@ -104,10 +128,7 @@ async def _transcribe_unsupervised(audio: bytes, suffix: str) -> str:
         try:
             stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
         except BaseException:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+            _stop_whisper_tree(proc)
             _, interrupted = await _await_shielded_task(asyncio.create_task(proc.wait()))
             if interrupted:
                 raise asyncio.CancelledError

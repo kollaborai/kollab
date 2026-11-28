@@ -94,11 +94,12 @@ files. On timeout or cancellation it kills and reaps those processes before
 cleanup. Diagnostics do not contain transcript text or credentials.
 
 On macOS and Windows the bridge runs `whisper` directly in a private temporary
-directory. Those systems have no child subreaper, so detached writers cannot be
+directory. Those systems have no child subreaper, so a detached writer cannot be
 tracked after Whisper exits. To avoid deleting files while such a writer may
 still be active, the bridge retains the private run directory after starting
-Whisper. On timeout or cancellation only the Whisper process itself is killed
-and reaped.
+Whisper. On timeout or cancellation the bridge kills Whisper and any descendants
+still attached to it; a descendant that has already left Whisper's process tree
+is not stopped.
 
 Install the Whisper CLI in the environment that runs Kollab. On Linux, `/proc`
 must be mounted and `python3` must be on `PATH`:
@@ -185,9 +186,11 @@ missing. Install `openai-whisper` in the environment used by Kollab. On Linux,
 subreaper owns each private transcription directory; it waits for all CLI
 descendants, including detached writers, before reading the transcript. On
 cancellation or the 60-second deadline, it kills and reaps those processes before
-removing audio and partial output. Concurrent runs have separate directories. The
-bridge forwards a safe failure notice when transcription fails and continues
-processing text messages.
+removing audio and partial output. macOS and Windows keep the private directory
+once Whisper starts, because a detached writer cannot be tracked there. On timeout
+or cancellation they kill Whisper and the descendants still attached to it.
+Concurrent runs have separate directories. The bridge forwards a safe failure
+notice when transcription fails and continues processing text messages.
 
 On Linux, if an operating-system error prevents the owner from proving all children
 have exited, it reports failure and retains the private run directory. Remove that
