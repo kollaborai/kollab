@@ -30,3 +30,6 @@ LLM Request
     [Return Result] -------------> [Feed Back to LLM] <---------------+
 ```
 
+When a user cancels a running terminal call, the remaining calls in that
+sequential tool batch are marked cancelled and are not started.
+
