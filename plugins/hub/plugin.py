@@ -12192,17 +12192,17 @@ class HubPlugin(BasePlugin):
             else DEFAULT_STALL_THRESHOLD,
             read_errors=read_errors,
         )
-        unreadable_count = len(set(read_errors))
-        partial = (
-            f" (partial; {unreadable_count} unreadable "
-            f"{'card' if unreadable_count == 1 else 'cards'})"
-            if unreadable_count
-            else ""
-        )
         lines = [
             f"supervisor: {len(open_cards)} open, {len(stalled)} stalled,"
-            f" {len(self._supervisor_alerts)} alert(s){partial}"
+            f" {len(self._supervisor_alerts)} alert(s)"
         ]
+        if read_errors:
+            unreadable_count = len(set(read_errors))
+            card_label = "card" if unreadable_count == 1 else "cards"
+            lines.append(
+                "  WARNING: Task ledger is incomplete; "
+                f"{unreadable_count} task {card_label} could not be read."
+            )
         if state.wakes_since_turn and state.last_turn_end:
             idle = max(0, int((time.time() - state.last_turn_end) // 60))
             lines.append(

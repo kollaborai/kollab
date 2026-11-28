@@ -23,8 +23,9 @@ level. `/hub work` also lists readable open cards and marks the TaskLedger
 result unavailable when any card cannot be read, so a partial list is not
 reported as complete or empty.
 
-`/hub status` and `/hub work` also mark their ledger counts partial when a card
-cannot be read. The displayed counts include readable cards only.
+`/hub work` also marks its open-card count partial when a card cannot be read.
+The displayed count includes readable cards only. `/hub status` counts readable
+cards too and adds a warning that the task ledger is incomplete.
 
 Tools (registered in plugins/hub/plugin.py):
 

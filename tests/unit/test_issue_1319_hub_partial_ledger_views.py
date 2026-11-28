@@ -23,13 +23,15 @@ def _add_malformed_sibling(ledger):
     ledger._task_path("malformed").write_text("{not json", encoding="utf-8")
 
 
-def test_status_marks_counts_partial_when_sibling_card_is_unreadable(tmp_path):
+def test_status_warns_incomplete_when_sibling_card_is_unreadable(tmp_path):
     plugin = _plugin(tmp_path)
     _add_malformed_sibling(plugin._task_ledger)
 
     lines = plugin._supervisor_status_lines()
 
-    assert lines[0] == "supervisor: 1 open, 0 stalled, 0 alert(s) (partial; 1 unreadable card)"
+    assert lines[0] == "supervisor: 1 open, 0 stalled, 0 alert(s)"
+    assert any("Task ledger is incomplete" in line for line in lines)
+    assert any("1 task card could not be read" in line for line in lines)
 
 
 def test_work_marks_count_partial_when_sibling_card_is_unreadable(tmp_path):
