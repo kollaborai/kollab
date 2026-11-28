@@ -109,6 +109,8 @@ def _terminal_find_workspace_error(
         while argv and argv[0] in {"then", "else", "do", "!", "{"}:
             argv = argv[1:]
         while argv and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]):
+            if re.search(r"\bfind\b", argv[0], re.IGNORECASE):
+                return "Terminal find command prefix could not be resolved safely."
             argv = argv[1:]
         if not argv:
             return None
@@ -219,6 +221,8 @@ def _terminal_find_workspace_error(
             return None
         if Path(argv[0]).name.lower() == "find":
             return validate_find(argv, current_cwd)
+        if re.search(r"\bfind\b", " ".join(argv), re.IGNORECASE):
+            return "Terminal find command could not be resolved safely."
         return None
 
     for token in tokens:

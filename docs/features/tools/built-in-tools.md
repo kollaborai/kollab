@@ -61,7 +61,8 @@ rooted outside it, symlink-following searches, and roots loaded from a file are
 refused. Other `terminal` commands and
 `terminal-send` input run with the user's filesystem access and do not enforce
 a workspace sandbox. Commands wrapped in interpreters or scripts are not
-restricted by the `find` check.
+restricted by the `find` check when the search is hidden in a script file or
+constructed dynamically.
 
 With working directory:
 ```
