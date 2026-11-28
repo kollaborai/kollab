@@ -2,7 +2,7 @@
 
 One place to give your agents more tools: MCP servers, CLI tools and skills.
 
-- **Web UI**: the **Apps** button in the sidebar (above Settings).
+- **Web UI**: the **Apps** button in the sidebar (above Settings). Session Controls → **MCP Servers** shows each configured server and its connection status; long names truncate before the status on phone screens.
 - **Terminal**: `/mcp`. The manager screen lists the catalog's MCP servers (`a` adds one); `/mcp browse` lists every kind as text.
 
 ## what you can add
