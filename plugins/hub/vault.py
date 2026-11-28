@@ -748,8 +748,9 @@ class AgentVault:
         "unavailable" -- never a silent gap the agent has to ask peers about.
         """
         lines.append("")
+        read_errors: List[str] = []
         try:
-            cards = ledger.get_active_for(self.identity)
+            cards = ledger.get_active_for(self.identity, read_errors=read_errors)
         except Exception as e:
             logger.warning(f"Rebirth ledger read failed for {self.identity}: {e}")
             lines.append(
@@ -759,6 +760,12 @@ class AgentVault:
             return
 
         if not cards:
+            if read_errors:
+                lines.append(
+                    "active TaskLedger cards: unavailable (some cards could not "
+                    "be read; do not assume none)"
+                )
+                return
             lines.append("active TaskLedger cards: none (no card is assigned to you)")
             return
 
@@ -769,6 +776,10 @@ class AgentVault:
             lines.append(f"  {card.summary_line()}")
         if len(cards) > self._REBIRTH_MAX_CARDS:
             lines.append(f"  +{len(cards) - self._REBIRTH_MAX_CARDS} more")
+        if read_errors:
+            lines.append(
+                "active TaskLedger cards: incomplete (some cards could not be read)"
+            )
 
     _REBIRTH_MAX_DISPATCHES = 10
 
