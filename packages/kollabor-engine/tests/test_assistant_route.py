@@ -8,14 +8,16 @@ network or a running daemon.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import copy
+import inspect
 import json
 import re
 import sys
 import types
 from collections.abc import Iterable, Iterator
-from typing import Any
+from typing import Any, Dict, List, Optional, Union, get_type_hints
 from unittest.mock import ANY, AsyncMock
 
 import pytest
@@ -48,10 +50,26 @@ def test_close_current_event_loop_releases_policy_resource() -> None:
     policy.set_event_loop(loop)
 
     _close_current_event_loop()
-
     assert loop.is_closed()
     with pytest.raises(RuntimeError, match="no current event loop"):
         policy.get_event_loop()
+
+
+def test_sent_media_annotations_allow_only_string_fields_and_boolean_failure():
+    slot_type = Dict[str, Union[str, bool]]
+    helper_hints = get_type_hints(messages._assistant_update_message_state)
+    assert helper_hints["submitted_media"] == Optional[List[List[slot_type]]]
+    assert get_type_hints(messages._save_sent_media)["return"] == List[slot_type]
+
+    transport = ast.parse(inspect.getsource(messages.assistant_transport))
+    local_annotations = [
+        ast.unparse(node.annotation)
+        for node in ast.walk(transport)
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "submitted_media"
+    ]
+    assert local_annotations == ["List[List[_SentMediaSlot]]"]
 
 
 class _FakeCancellationSignal:
@@ -314,6 +332,53 @@ async def test_assistant_transport_preserves_image_part_in_submitted_message(
     assert captured["controller"].state["messages"][0]["content"] == (
         "inspect this\n[image1]"
     )
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_keeps_failed_image_slot_in_live_bubble_state(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path
+    )
+    session = _FakeSession([{"type": "turn_complete"}])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "parts": [
+                            {"type": "text", "text": "inspect these"},
+                            {
+                                "type": "image",
+                                "image": "data:image/png;base64,not-base64!",
+                            },
+                            {
+                                "type": "image",
+                                "image": "data:image/png;base64,iVBORw0KGgo=",
+                            },
+                        ]
+                    },
+                }
+            ],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    user_message = captured["controller"].state["messages"][0]
+    assert user_message["content"] == "inspect these\n[image1]\n[image2]"
+    assert user_message["media"][0] == {"ref": "", "mime": "", "failed": True}
+    assert user_message["media"][1]["ref"]
+    assert user_message["media"][1]["mime"] == "image/png"
 
 
 @pytest.mark.asyncio

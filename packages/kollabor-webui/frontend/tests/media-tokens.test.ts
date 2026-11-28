@@ -104,6 +104,29 @@ describe("#1140 R3/R4 grammar + exact spelling", () => {
   });
 });
 
+describe("#1148 image-slot grammar parity", () => {
+  it("counts escaped, valid, zero, and malformed bracket runs like the engine", () => {
+    const cases: Array<[string, number]> = [
+      ["[image1]", 1],
+      ["[[image1]]", 0],
+      ["[image01]", 1],
+      ["[image0]", 0],
+      ["[image00]", 0],
+      ["[[image1]", 1],
+      ["[image1]]", 1],
+      ["[[image1] then [image2]", 2],
+      ["[image1١]", 0],
+    ];
+
+    for (const [text, count] of cases) {
+      expect(
+        splitMediaSegments(text).filter((segment) => segment.kind === "token"),
+        text,
+      ).toHaveLength(count);
+    }
+  });
+});
+
 describe("resolveMediaSegment", () => {
   const stored = { ref: "r-2", mime: "image/png" };
 

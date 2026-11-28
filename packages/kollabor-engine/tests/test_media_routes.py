@@ -296,5 +296,6 @@ class TestSentMediaWiring:
             {"type": "image", "image": PNG},
         ]
         saved = _save_sent_media(content, "acp-s3")
-        assert len(saved) == 1
-        assert saved[0]["mime"] == "image/png"
+        assert saved[0] == {"ref": "", "mime": "", "failed": True}
+        assert saved[1]["ref"]
+        assert saved[1]["mime"] == "image/png"

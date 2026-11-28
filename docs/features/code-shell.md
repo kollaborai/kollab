@@ -26,6 +26,10 @@ clicking it opens that exact image, even while the session image list is loading
 keeps a copy of each sent image (up to 10 MB, common web formats) under the session's `media/` folder, so
 thumbnails survive restarts and reloads.
 
+To show a literal image token in chat text, write `[[imageN]]`; it displays as `[imageN]` and consumes
+no image slot. Real tokens use positive ASCII digits (leading zeroes are accepted). If an extra bracket
+is unmatched, a valid token inside it still counts and the stray bracket stays text.
+
 ## Settings
 
 The views have on and off switches and limits. Defaults are safe and nothing is locked. Full rules:

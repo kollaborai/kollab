@@ -363,7 +363,7 @@ def test_attach_binds_mirror_part_rows(tmp_path: Path) -> None:
 def test_mixed_row_counts_once(tmp_path: Path) -> None:
     """A row with a [imageN] token in text AND an image part is one image.
 
-    _save_sent_media stores one ref per image part; the token text is the
+    _save_sent_media stores one slot per image part; the token text is the
     same image's rendering. Counting both made the row slice two refs,
     starving the row after it (#1124 clean-room review P2).
     """
@@ -385,8 +385,22 @@ def test_mixed_row_counts_once(tmp_path: Path) -> None:
 
 
 def test_page_after_mixed_row_skips_once(tmp_path: Path) -> None:
-    """The older-page offset must count a mixed row once too."""
+    """The older-page offset must count a mixed row once too.
+
+    The F841 finding exposed that the older-row fixture was assigned but
+    never checked; this assertion ties the F841 finding to the pagination case.
+    """
     refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG)]
+    earlier = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look [image1]"},
+                {"type": "image", "image": None},
+            ],
+        },
+    ]
+    assert count_image_tokens(earlier[0]["content"]) == 1
     page = [{"role": "user", "content": "second [image1]"}]
     attach_media_to_rows(tmp_path, "s1", page, skip=1)
     assert [m["ref"] for m in page[0]["media"]] == [refs[1]]
@@ -415,7 +429,9 @@ def test_failed_part_does_not_starve_later_rows(tmp_path: Path, monkeypatch) -> 
         [{"type": "text", "text": "and"}, {"type": "image", "image": JPEG}],
         "s1",
     )
-    assert len(saved1) == 1
+    assert len(saved1) == 2
+    assert saved1[0] == {"ref": "", "mime": "", "failed": True}
+    assert saved1[1]["ref"]
     rows = [
         {
             "role": "user",
@@ -438,7 +454,7 @@ def test_failed_part_does_not_starve_later_rows(tmp_path: Path, monkeypatch) -> 
     # placeholder at ordinal 0; its surviving ref stays at ordinal 1 and
     # row2 still binds its own later ref.
     assert rows[0]["media"][0] == {"ref": "", "mime": "", "failed": True}
-    assert [m["ref"] for m in rows[0]["media"][1:]] == [saved1[0]["ref"]]
+    assert [m["ref"] for m in rows[0]["media"][1:]] == [saved1[1]["ref"]]
     assert [m["ref"] for m in rows[1]["media"]] == [saved2[0]["ref"]]
 
 
@@ -538,7 +554,13 @@ def test_failure_matrix_binds_exactly_stored_refs(tmp_path: Path, monkeypatch) -
             assert len(bound) == len(row_pattern), (
                 f"{name} row{j}: {len(bound)} entries for {len(row_pattern)} slots"
             )
-            stored = iter([entry["ref"] for entry in stored_per_row[j]])
+            assert len(stored_per_row[j]) == len(row_pattern), (
+                f"{name} row{j}: sent state omitted an attempted slot"
+            )
+            assert bound == stored_per_row[j], f"{name} row{j}: live/history slots differ"
+            stored = iter(
+                [entry["ref"] for entry in stored_per_row[j] if entry.get("ref")]
+            )
             for ok_flag, entry in zip(row_pattern, bound):
                 if ok_flag:
                     assert entry["ref"] == next(stored), f"{name} row{j} valid slot"
