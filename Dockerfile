@@ -5,7 +5,7 @@ ARG PYTHON_IMAGE=python:3.14-slim
 
 # BuildKit can replace this stage with an asset-only named context containing
 # frontend-dist/ when reusing the same selected UI as native/service artifacts.
-FROM node:24-slim AS frontend
+FROM node:25-slim AS frontend
 
 WORKDIR /src/packages/kollabor-webui/frontend
 COPY packages/kollabor-webui/frontend/package.json packages/kollabor-webui/frontend/package-lock.json ./
