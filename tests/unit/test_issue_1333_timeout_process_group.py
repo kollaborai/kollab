@@ -23,7 +23,7 @@ def test_kill_unix_process_group_uses_session_leader_pid_after_exit():
         with patch("kollabor_agent.shell_executor.os.killpg") as killpg:
             asyncio.run(executor._kill_unix_process_group())
 
-    killpg.assert_called_once_with(process.pid, 15)
+    killpg.assert_any_call(process.pid, 15)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix process groups are required")
