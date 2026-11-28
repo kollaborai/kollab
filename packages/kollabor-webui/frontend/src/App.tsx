@@ -1663,6 +1663,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             </NoticeBar>
           ) : null}
           <PluginNotices />
+          {activeSession && error ? (
+            <NoticeBar urgent onDismiss={() => setError(null)}>
+              {error}
+            </NoticeBar>
+          ) : null}
           {activeSession?.halted ? (
             <>
               <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 lg:hidden">
